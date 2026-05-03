@@ -1,3 +1,12 @@
 {
-   "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "jhste102lab",
+      "id": 252555245,
+      "comment_id": 4366595217,
+      "created_at": "2026-05-03T16:10:38Z",
+      "repoId": 1167791343,
+      "pullRequestNo": 32
+    }
+  ]
 }
