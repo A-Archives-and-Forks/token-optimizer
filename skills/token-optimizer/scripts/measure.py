@@ -9866,6 +9866,12 @@ def _resolve_hook_command(template_cmd, plugin_root):
 # These are stripped when computing hook identity for dedup.
 _COSMETIC_FLAGS = frozenset({"--quiet", "-q", "--warn", "--verbose", "-v"})
 
+# Shell noise tokens stripped during subshell identity extraction.
+_SHELL_NOISE = frozenset({
+    "2>/dev/null", "||", "true", "&&", "|", "sort",
+    "tail", "-V", "-1", "-n", "head",
+})
+
 
 def _hook_command_identity(cmd):
     """Extract a stable functional identity from a hook command for dedup.
@@ -9884,6 +9890,45 @@ def _hook_command_identity(cmd):
     """
     if not cmd:
         return ""
+
+    # Subshell fallback: commands with $(...) or backticks confuse shlex —
+    # shell noise (2>/dev/null, |, sort, -V) leaks into identity tokens.
+    # Extract .py name via regex and find subcommand/flags after the closing ).
+    # Uses re.search (first match) unlike the shlex path (last .py token);
+    # known malformed patterns have only one .py token so this is equivalent.
+    if "$(" in cmd or "`" in cmd:
+        py_match = re.search(r'([\w.-]+\.py)', cmd)
+        if py_match:
+            script_name = py_match.group(1)
+            # Find tokens after the subshell close (after last ) or `)
+            after = ""
+            last_paren = cmd.rfind(")")
+            last_bt = cmd.rfind("`")
+            cut = max(last_paren, last_bt)
+            if cut >= 0 and cut + 1 < len(cmd):
+                after = cmd[cut + 1:]
+            after_tokens = after.split()
+            clean = [t for t in after_tokens
+                     if t not in _COSMETIC_FLAGS and t not in _SHELL_NOISE
+                     and not t.startswith("2>")]
+            subcmd = ""
+            mode_flag = ""
+            for t in clean:
+                if not t.startswith("-"):
+                    subcmd = t
+                    break
+            for t in clean:
+                if t.startswith("-") and t not in _COSMETIC_FLAGS:
+                    mode_flag = t
+                    break
+            if subcmd and mode_flag:
+                return f"{script_name}:{subcmd}:{mode_flag}"
+            elif subcmd:
+                return f"{script_name}:{subcmd}"
+            elif mode_flag:
+                return f"{script_name}:{mode_flag}"
+            return script_name
+
     try:
         tokens = shlex.split(cmd, posix=True)
     except ValueError:
@@ -16866,6 +16911,126 @@ def _fix_stale_settings_paths():
     return len(stale_roots)
 
 
+# Known TO script names used to identify token-optimizer hooks.
+_TO_SCRIPT_NAMES = frozenset({
+    "measure.py", "read_cache.py", "bash_hook.py",
+    "archive_result.py", "context_intel.py",
+})
+
+
+def _fix_malformed_hook_commands():
+    """Detect and remove malformed hook commands from settings.json.
+
+    Targets two patterns that break hooks silently:
+    1. Subshell commands ($(...) or backticks) referencing TO scripts —
+       written by Claude during interactive sessions, not by our installers.
+    2. Double-$HOME paths ($HOME/Users/X/... or ${HOME}/Users/X/...) —
+       expand to /Users/X/Users/X/... which doesn't exist.
+
+    Only removes hooks that reference known TO script names, so other
+    plugins' hooks are never touched. After removal, calls setup_all_hooks
+    for script-install users (plugin users get hooks from hooks.json
+    automatically). Resets last_hook_heal_check so the next session's
+    24h gate runs the full heal cycle.
+
+    Returns the number of removed hook entries.
+    """
+    try:
+        current, _ = _read_settings_json()
+    except Exception:
+        return 0
+
+    current_hooks = current.get("hooks") if current else None
+    if not current_hooks or not isinstance(current_hooks, dict):
+        return 0
+
+    removed = 0
+    new_hooks = {}
+
+    for event, handler_groups in current_hooks.items():
+        if not isinstance(handler_groups, list):
+            new_hooks[event] = handler_groups
+            continue
+        new_groups = []
+        for group in handler_groups:
+            if not isinstance(group, dict):
+                new_groups.append(group)
+                continue
+            original_hook_list = group.get("hooks", [])
+            if not isinstance(original_hook_list, list):
+                new_groups.append(group)
+                continue
+            kept_hooks = []
+            for h in original_hook_list:
+                if not isinstance(h, dict):
+                    kept_hooks.append(h)
+                    continue
+                cmd = h.get("command", "")
+                if _is_malformed_to_hook(cmd):
+                    removed += 1
+                    continue
+                kept_hooks.append(h)
+            if kept_hooks:
+                new_group = dict(group)
+                new_group["hooks"] = kept_hooks
+                new_groups.append(new_group)
+        if new_groups:
+            new_hooks[event] = new_groups
+
+    if removed == 0:
+        return 0
+
+    new_settings = dict(current)
+    new_settings["hooks"] = new_hooks
+
+    try:
+        _write_settings_atomic(new_settings)
+    except (PermissionError, OSError):
+        return 0
+
+    # Reset 24h throttle so next session re-runs the full hook heal cycle.
+    try:
+        _write_config_flag("last_hook_heal_check", 0)
+    except Exception:
+        pass
+
+    # Script-install users need immediate reprovisioning (plugin users
+    # get hooks from hooks.json automatically, no gap).
+    if not _is_plugin_installed():
+        try:
+            heal_result = setup_all_hooks(dry_run=False, verbose=False)
+            if heal_result.get("error"):
+                print(f"  [Token Optimizer] Warning: hook re-provisioning failed after cleanup: {heal_result['error']}", file=sys.stderr)
+        except Exception as _e:
+            print(f"  [Token Optimizer] Warning: hook re-provisioning failed after cleanup: {_e}", file=sys.stderr)
+
+    return removed
+
+
+def _is_malformed_to_hook(cmd):
+    """Check if a hook command is a malformed token-optimizer entry.
+
+    Returns True if the command references a known TO script AND contains
+    either a subshell pattern or a double-$HOME expansion.
+    """
+    if not cmd:
+        return False
+    has_to_script = any(
+        re.search(r'(?:^|[/\s])' + re.escape(name) + r'(?:$|[\s])', cmd)
+        for name in _TO_SCRIPT_NAMES
+    )
+    if not has_to_script:
+        return False
+    has_subshell = "$(" in cmd or "`" in cmd
+    has_double_home = False
+    if platform.system() == "Darwin":
+        has_double_home = (
+            "$HOME/Users/" in cmd or "$HOME/home/" in cmd
+            or "${HOME}/Users/" in cmd or "${HOME}/home/" in cmd
+        )
+    return has_subshell or has_double_home
+
+
 def _is_quality_bar_installed(settings=None):
     """Check which quality bar components are installed.
 
@@ -18307,6 +18472,15 @@ def run_ensure_health():
                 print(f"  [Token Optimizer] Fixed {_stale_fixed} stale plugin path(s) in settings.json")
         except Exception as _e:
             print(f"  [Token Optimizer] stale path fix failed: {_e}", file=sys.stderr)
+    # Remove malformed hook commands (subshell patterns, double-$HOME paths).
+    # Claude Code only: reads/writes ~/.claude/settings.json.
+    if not _is_codex:
+        try:
+            _malformed_fixed = _fix_malformed_hook_commands()
+            if _malformed_fixed:
+                print(f"  [Token Optimizer] Removed {_malformed_fixed} malformed hook(s) from settings.json. Restart Claude Code to fully apply.")
+        except Exception as _e:
+            print(f"  [Token Optimizer] malformed hook fix failed: {_e}", file=sys.stderr)
     # Plugin cleanup is available as `measure.py plugin-cleanup` but NOT auto-run.
     # Deleting cache dirs on SessionStart can break plugins that load hooks from
     # dogfood/development paths. Users should run it manually after review.
