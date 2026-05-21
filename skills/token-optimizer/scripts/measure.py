@@ -9366,7 +9366,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.6.12"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.6.13"  # Keep in sync with plugin.json + marketplace.json
 _DAEMON_RUNTIME = detect_runtime()
 _DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else "claude"
 DAEMON_LABEL = "com.token-optimizer.codex-dashboard" if _DAEMON_RUNTIME == "codex" else "com.token-optimizer.dashboard"
@@ -11484,15 +11484,23 @@ _FILL_WARN_THRESHOLDS = [
 # Tool call thresholds: instruction adherence degrades after ~15 tool calls on
 # 200K models (COLM 2025, codeongrass.com practitioner analysis). On 1M context
 # models the degradation is much later because tool results are a smaller fraction
-# of the window. Thresholds scale with detected context window: 1M gets 5x the
-# baseline; 200K gets 1x. Env var overrides still take precedence.
+# of the window. Thresholds scale superlinearly (x^1.3) with detected context
+# window: 1M gets ~8x the baseline; 200K gets 1x. Additionally, tool call
+# warnings are gated on fill_pct >= 50% in compute_quality_score() because at
+# low fill, tool calls don't cause instruction adherence issues regardless of
+# count. Env var overrides still take precedence.
 def _scaled_tool_call_thresholds():
-    """Compute tool call thresholds scaled by context window size."""
+    """Compute tool call thresholds scaled by context window size.
+
+    Uses superlinear scaling (x^1.3) because on 1M windows, tool results
+    are a much smaller fraction of the context. Linear 5x was too
+    conservative: it warned at 125 calls on 1M even at 15% fill.
+    """
     try:
         ctx_size, _ = detect_context_window()
     except Exception:
         ctx_size = 200_000
-    scale = max(1.0, ctx_size / 200_000)
+    scale = max(1.0, (ctx_size / 200_000) ** 1.3)
     base_warn = 25
     base_crit = 40
     warn = _int_env("TOKEN_OPTIMIZER_TOOL_CALL_WARN", int(base_warn * scale))
@@ -12170,13 +12178,17 @@ def compute_quality_score(quality_data):
             fill_warning = {"level": level, "fill_pct": round(fill_pct * 100, 1), "message": message}
             break
 
-    # Tool call fatigue warning (cumulative, not reset on compact)
+    # Tool call fatigue warning (cumulative, not reset on compact).
+    # Gated on fill_pct >= 50%: at low fill, tool calls aren't degrading
+    # instruction adherence regardless of count (the research was on
+    # 200K models where tool results quickly fill the window).
     tc = quality_data.get("tool_calls", 0)
     tool_call_warning = None
-    for threshold, level, message in _TOOL_CALL_WARN_THRESHOLDS:
-        if tc >= threshold:
-            tool_call_warning = {"level": level, "tool_calls": tc, "message": message}
-            break
+    if fill_pct >= 0.50:
+        for threshold, level, message in _TOOL_CALL_WARN_THRESHOLDS:
+            if tc >= threshold:
+                tool_call_warning = {"level": level, "tool_calls": tc, "message": message}
+                break
 
     # 50% fill regime change (COLM 2025: positional bias pattern shifts)
     regime_change = None
@@ -16712,7 +16724,8 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
     result = compute_quality_score(quality_data)
     for carry_key in ("_nudge_fill_pct_at_fire", "_nudge_count", "_nudge_last_epoch",
                        "_nudge_previous_score", "_loop_warning_count",
-                       "progressive_bands_captured", "_last_fill_warn_level"):
+                       "progressive_bands_captured", "_last_fill_warn_level",
+                       "_last_tool_call_warn_level"):
         if carry_key in prev_result and carry_key not in result:
             result[carry_key] = prev_result[carry_key]
     result["total_messages"] = len(quality_data["messages"])
@@ -16727,6 +16740,21 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
     cfd = result.get("breakdown", {}).get("context_fill_degradation", {})
     result["degradation_band"] = cfd.get("band", "")
     result["fill_pct"] = cfd.get("fill_pct", 0)
+
+    # Enforce ResourceHealth monotonicity within a session.
+    # ResourceHealth can only worsen (decrease) within a session. Fill_pct fluctuates
+    # between measurements due to context window adds/removes, causing 10-20 point
+    # score swings. Clamp to previous value unless a new compaction happened.
+    # Uses >= to handle corrupted caches where compactions regresses.
+    prev_rh = prev_result.get("resource_health")
+    prev_compactions = prev_result.get("compactions", 0)
+    if (prev_rh is not None
+            and result["compactions"] <= prev_compactions
+            and result["resource_health"] > prev_rh):
+        result["resource_health"] = prev_rh
+        result["score"] = prev_rh
+        result["grade"] = prev_result.get("grade", score_to_grade(round(prev_rh)))
+        result["resource_health_grade"] = prev_result.get("resource_health_grade", result["grade"])
 
     # Session duration + active agents for statusline (v2.6)
     result["session_start_ts"] = _extract_session_start_ts(filepath)

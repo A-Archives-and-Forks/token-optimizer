@@ -3,19 +3,29 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.6.6-green" alt="Version 5.6.6"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.6.13-green" alt="Version 5.6.13"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/github/release-date/alexgreensh/token-optimizer?label=last%20release&color=blue" alt="Last Release"></a>
   <a href="https://github.com/alexgreensh/token-optimizer"><img src="https://img.shields.io/badge/Claude_Code-Plugin-blueviolet" alt="Claude Code Plugin"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/tree/main/openclaw"><img src="https://img.shields.io/badge/OpenClaw-v2.4.1-brightgreen" alt="OpenClaw v2.4.1"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/blob/main/docs/codex-beta.md"><img src="https://img.shields.io/badge/Codex-v0.1.0--beta-orange" alt="Codex v0.1.0-beta"></a>
+</p>
+<p align="center">
+  <img src="https://img.shields.io/badge/quality%20signals-6-blue" alt="6 Quality Signals">
+  <img src="https://img.shields.io/badge/hooks-5%20lifecycle-purple" alt="5 Lifecycle Hooks">
+  <img src="https://img.shields.io/badge/tests-141-brightgreen" alt="141 Tests">
+  <img src="https://img.shields.io/badge/includes-dashboard-8B5CF6?logo=chartdotjs&logoColor=white" alt="Built-in Dashboard">
+  <img src="https://img.shields.io/badge/smart%20compaction-checkpoint%20%2B%20restore-blue" alt="Smart Compaction">
+</p>
+<p align="center">
+  <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Zero Dependencies">
+  <img src="https://img.shields.io/badge/telemetry-none-brightgreen" alt="Zero Telemetry">
+  <img src="https://img.shields.io/badge/python-3.8+-blue" alt="Python 3.8+">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" alt="Platform">
   <a href="https://github.com/alexgreensh/token-optimizer/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue.svg" alt="License: PolyForm Noncommercial"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/stargazers"><img src="https://img.shields.io/github/stars/alexgreensh/token-optimizer" alt="GitHub Stars"></a>
-  <a href="https://github.com/alexgreensh/token-optimizer/commits/main"><img src="https://img.shields.io/github/last-commit/alexgreensh/token-optimizer" alt="Last Commit"></a>
-  <img src="https://img.shields.io/badge/python-3.8+-blue" alt="Python 3.8+">
-  <img src="https://img.shields.io/badge/dependencies-zero-green" alt="Zero dependencies">
-  <img src="https://img.shields.io/badge/telemetry-none-green" alt="Zero telemetry">
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" alt="Platform">
+  <a href="https://github.com/alexgreensh/token-optimizer/commits/main"><img src="https://img.shields.io/github/commit-activity/m/alexgreensh/token-optimizer" alt="Commit Activity"></a>
   <a href="https://linkedin.com/in/alexgreensh"><img src="https://img.shields.io/badge/LinkedIn-Connect-0A66C2?logo=linkedin&logoColor=white" alt="Connect on LinkedIn"></a>
-  <a href="https://github.com/sponsors/alexgreensh"><img src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-ff69b4.svg?labelColor=262626" alt="Sponsor"></a>
+  <a href="https://github.com/sponsors/alexgreensh"><img src="https://img.shields.io/badge/sponsor-keep%20it%20free-%23ea4aaa?logo=githubsponsors" alt="Sponsor - Keep It Free"></a>
 </p>
 
 <h2 align="center">Your AI is getting dumber and you can't see it.</h2>

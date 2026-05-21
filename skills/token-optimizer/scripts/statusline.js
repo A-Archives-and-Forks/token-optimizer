@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-// Token Optimizer - Claude Code Status Line
-// Shows: model | effort | project | context bar used% | ContextQ:score (duration) | Compacts:N(loss) | Agents
+// Token Optimizer - Claude Code Status Line (two-row layout)
+//
+// Row 1: model | effort | project | context bar used% | ContextQ:grade(score)
+// Row 2: Eff:grade(score) | warnings | Compacts:N(loss) | duration | Agents
 //
 // Install: python3 measure.py setup-quality-bar
 // The quality score is updated by a UserPromptSubmit hook every ~2 minutes.
 // Reads from the most recent per-session quality-cache-*.json for accuracy.
-// Falls back to quality-cache.json (global) if no per-session cache found.
 // Reads effortLevel from settings.json (not available in stdin data).
 
 const fs = require('fs');
@@ -46,7 +47,7 @@ process.stdin.on('end', () => {
     const cacheDir = path.join(os.homedir(), '.claude', 'token-optimizer');
 
     // Context window bar with degradation-aware colors
-    // Context fill bands: <50% = green, 50-70% = yellow, 70-80% = orange, 80%+ = red
+    // Fill bands: <50% green, 50-70% yellow, 70-80% orange, 80%+ red (blinking)
     let ctx = '';
     const used = usedPct != null
       ? Math.round(usedPct)
@@ -58,7 +59,7 @@ process.stdin.on('end', () => {
     if (used != null) {
       const clamped = Math.max(0, Math.min(100, used));
       const filled = Math.floor(clamped / 10);
-      const bar = '\u2588'.repeat(filled) + '\u2591'.repeat(10 - filled);
+      const bar = '█'.repeat(filled) + '░'.repeat(10 - filled);
 
       if (clamped < 50) {
         ctx = `${SEP}\x1b[32m${bar} ${clamped}%${RESET}`;
@@ -83,108 +84,108 @@ process.stdin.on('end', () => {
       } catch (e) {}
     }
 
-    // v6 dual score: ResourceHealth (primary) + SessionEfficiency (secondary)
-    // ONLY show data from the current session's cache.
-    let qScore = '';
-    let effScore = '';
-    let fillWarn = '';
-    let sessionInfo = '';
-
+    // ---- Read quality cache ----
     let q = null;
     try {
-      // Try per-session cache by session_id (exact match only)
       if (safeSessionId) {
         const sessionCache = path.join(cacheDir, `quality-cache-${safeSessionId}.json`);
         if (fs.existsSync(sessionCache)) {
           q = JSON.parse(fs.readFileSync(sessionCache, 'utf8'));
         }
       }
-
-      if (q) {
-        // ResourceHealth (primary display) - fallback to score for older caches
-        const rh = q.resource_health != null ? q.resource_health : q.score;
-        if (rh != null) {
-          const score = Math.round(rh);
-          const grade = q.resource_health_grade || q.grade || (score >= 90 ? 'S' : score >= 80 ? 'A' : score >= 70 ? 'B' : score >= 55 ? 'C' : score >= 40 ? 'D' : 'F');
-          if (score >= 85) {
-            qScore = `${SEP}\x1b[32mContextQ:${grade}(${score})${RESET}`;
-          } else if (score >= 75) {
-            qScore = `${SEP}\x1b[33mContextQ:${grade}(${score})${RESET}`;
-          } else if (score >= 50) {
-            qScore = `${SEP}\x1b[38;5;208mContextQ:${grade}(${score})${RESET}`;
-          } else {
-            qScore = `${SEP}\x1b[31mContextQ:${grade}(${score})${RESET}`;
-          }
-        }
-
-        // SessionEfficiency (secondary, dim)
-        const se = q.session_efficiency;
-        if (se != null) {
-          const seScore = Math.round(se);
-          const seGrade = q.session_efficiency_grade || (seScore >= 90 ? 'S' : seScore >= 80 ? 'A' : seScore >= 70 ? 'B' : seScore >= 55 ? 'C' : seScore >= 40 ? 'D' : 'F');
-          effScore = `${SEP}${DIM}Eff:${seGrade}(${seScore})${RESET}`;
-        }
-
-        // Fill warning: independent of composite score, cannot be masked
-        const fw = q.fill_warning;
-        if (fw && fw.level) {
-          if (fw.level === 'CRITICAL') {
-            fillWarn = `${SEP}\x1b[5;31mFill:${Math.round(fw.fill_pct)}%!${RESET}`;
-          } else if (fw.level === 'WARNING') {
-            fillWarn = `${SEP}\x1b[33mFill:${Math.round(fw.fill_pct)}%${RESET}`;
-          }
-        }
-
-        // Regime change warning (50% fill threshold, COLM 2025)
-        if (q.regime_change && !fw) {
-          fillWarn = `${SEP}\x1b[33mRegime:${Math.round(q.regime_change.fill_pct)}%${RESET}`;
-        }
-
-        // Tool call fatigue warning
-        const tcw = q.tool_call_warning;
-        if (tcw && tcw.level === 'CRITICAL') {
-          fillWarn += `${SEP}\x1b[31mTools:${q.tool_calls}!${RESET}`;
-        } else if (tcw && tcw.level === 'WARNING') {
-          fillWarn += `${SEP}\x1b[33mTools:${q.tool_calls}${RESET}`;
-        }
-
-        // Compaction count with cumulative loss
-        const c = q.compactions;
-        if (c != null) {
-          if (c > 0) {
-            const lossPct = q.breakdown?.compaction_depth?.cumulative_loss_pct;
-            const loss = lossPct ? `~${Math.round(lossPct)}%` : (c >= 3 ? '~95%' : c >= 2 ? '~88%' : '~65%');
-            const color = c <= 2 ? '\x1b[33m' : '\x1b[31m';
-            sessionInfo = `${SEP}${color}Compacts:${c}(${loss} lost)${RESET}`;
-          } else {
-            sessionInfo = `${SEP}\x1b[32mCompacts:0${RESET}`;
-          }
-        }
-      } else {
-        // No cache for this session yet.
-        qScore = `${SEP}${DIM}ContextQ:--${RESET}`;
-        effScore = `${SEP}${DIM}Eff:--${RESET}`;
-      }
     } catch (e) {}
 
-    // Session duration - show only when quality < 75 AND cache matches current session
-    // Without the session match check, all terminals show the same stale duration
-    let duration = '';
     const cacheMatchesSession = q && q.session_file && safeSessionId && q.session_file.includes(safeSessionId);
-    if (cacheMatchesSession && q.session_start_ts && q.score != null && q.score < 75) {
-      const elapsed = Math.floor((Date.now() / 1000) - q.session_start_ts);
-      if (elapsed > 0) {
-        const h = Math.floor(elapsed / 3600);
-        const m = Math.floor((elapsed % 3600) / 60);
-        const dur = h > 0 ? `${h}h${m}m` : `${m}m`;
-        duration = ` ${DIM}(${dur})${RESET}`;
+
+    // ---- ROW 1: Core identity + context health ----
+    let qScore = '';
+    if (q) {
+      const rh = q.resource_health != null ? q.resource_health : q.score;
+      if (rh != null) {
+        const score = Math.round(rh);
+        const grade = q.resource_health_grade || q.grade || (score >= 90 ? 'S' : score >= 80 ? 'A' : score >= 70 ? 'B' : score >= 55 ? 'C' : score >= 40 ? 'D' : 'F');
+        if (score >= 85) {
+          qScore = `${SEP}\x1b[32mContextQ:${grade}(${score})${RESET}`;
+        } else if (score >= 75) {
+          qScore = `${SEP}\x1b[33mContextQ:${grade}(${score})${RESET}`;
+        } else if (score >= 50) {
+          qScore = `${SEP}\x1b[38;5;208mContextQ:${grade}(${score})${RESET}`;
+        } else {
+          qScore = `${SEP}\x1b[31mContextQ:${grade}(${score})${RESET}`;
+        }
+      }
+    } else {
+      qScore = `${SEP}${DIM}ContextQ:--${RESET}`;
+    }
+
+    const dirname = path.basename(dir);
+    const row1 = `${DIM}${model}${RESET}${effort}${SEP}${DIM}${dirname}${RESET}${ctx}${qScore}`;
+
+    // ---- ROW 2: Session details ----
+    const row2Parts = [];
+
+    // SessionEfficiency
+    if (q) {
+      const se = q.session_efficiency;
+      if (se != null) {
+        const seScore = Math.round(se);
+        const seGrade = q.session_efficiency_grade || (seScore >= 90 ? 'S' : seScore >= 80 ? 'A' : seScore >= 70 ? 'B' : seScore >= 55 ? 'C' : seScore >= 40 ? 'D' : 'F');
+        row2Parts.push(`${DIM}Eff:${seGrade}(${seScore})${RESET}`);
+      }
+    } else {
+      row2Parts.push(`${DIM}Eff:--${RESET}`);
+    }
+
+    // Fill warning
+    if (q) {
+      const fw = q.fill_warning;
+      if (fw && fw.level) {
+        if (fw.level === 'CRITICAL') {
+          row2Parts.push(`\x1b[5;31mFill:${Math.round(fw.fill_pct)}%!${RESET}`);
+        } else if (fw.level === 'WARNING') {
+          row2Parts.push(`\x1b[33mFill:${Math.round(fw.fill_pct)}%${RESET}`);
+        }
+      } else if (q.regime_change) {
+        row2Parts.push(`\x1b[33mRegime:${Math.round(q.regime_change.fill_pct)}%${RESET}`);
+      }
+
+      // Tool call fatigue warning
+      const tcw = q.tool_call_warning;
+      if (tcw && tcw.level === 'CRITICAL') {
+        row2Parts.push(`\x1b[31mTools:${q.tool_calls}!${RESET}`);
+      } else if (tcw && tcw.level === 'WARNING') {
+        row2Parts.push(`\x1b[33mTools:${q.tool_calls}${RESET}`);
       }
     }
 
-    // Active agents - show running agents with model
-    // Strip ANSI escape codes from agent data (defense-in-depth against JSONL injection)
+    // Compaction count
+    if (q) {
+      const c = q.compactions;
+      if (c != null) {
+        if (c > 0) {
+          const lossPct = q.breakdown?.compaction_depth?.cumulative_loss_pct;
+          const loss = lossPct ? `~${Math.round(lossPct)}%` : (c >= 3 ? '~95%' : c >= 2 ? '~88%' : '~65%');
+          const color = c <= 2 ? '\x1b[33m' : '\x1b[31m';
+          row2Parts.push(`${color}Compacts:${c}(${loss} lost)${RESET}`);
+        } else {
+          row2Parts.push(`\x1b[32mCompacts:0${RESET}`);
+        }
+      }
+    }
+
+    // Session duration - ALWAYS shown when cache matches session
+    if (cacheMatchesSession && q.session_start_ts > 0) {
+      const elapsed = Math.floor((Date.now() / 1000) - q.session_start_ts);
+      if (elapsed > 0 && elapsed < 604800) {
+        const h = Math.floor(elapsed / 3600);
+        const m = Math.floor((elapsed % 3600) / 60);
+        const dur = h > 0 ? `${h}h${m}m` : `${m}m`;
+        row2Parts.push(`${DIM}${dur}${RESET}`);
+      }
+    }
+
+    // Active agents
     const stripAnsi = s => String(s).replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/[\x00-\x1f]/g, '');
-    let agents = '';
     if (cacheMatchesSession && q.active_agents && q.active_agents.length > 0) {
       const running = q.active_agents.filter(a => a.status === 'running');
       if (running.length > 0) {
@@ -200,12 +201,12 @@ process.stdin.on('end', () => {
           }
           return `\x1b[33m${m}\x1b[0m:${desc}${elapsed ? '(' + elapsed + ')' : ''}`;
         });
-        agents = `${SEP}Agents: ${agentParts.join(' ')}`;
+        row2Parts.push(`Agents: ${agentParts.join(' ')}`);
       }
     }
 
-    const dirname = path.basename(dir);
-    process.stdout.write(`${DIM}${model}${RESET}${effort}${SEP}${DIM}${dirname}${RESET}${ctx}${qScore}${effScore}${fillWarn}${duration}${sessionInfo}${agents}`);
+    const row2 = row2Parts.join(SEP);
+    process.stdout.write(`${row1}\n${row2}`);
   } catch (e) {
     // Silent fail - never break the status line
   }
