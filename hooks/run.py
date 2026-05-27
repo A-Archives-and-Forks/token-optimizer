@@ -72,7 +72,10 @@ def main() -> int:
             # the child alive would leak a process holding the trends.db
             # SQLite lock, starving the next hook invocation.
             try:
-                proc.kill()
+                # Guard: check if process already exited between TimeoutExpired
+                # and this point — avoids killing a reused PID on some POSIX impl.
+                if proc.poll() is None:
+                    proc.kill()
                 proc.wait(timeout=5)
             except (subprocess.SubprocessError, OSError):
                 pass

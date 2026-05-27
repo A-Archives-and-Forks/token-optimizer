@@ -25,7 +25,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import hashlib
+import time
 
+from bash_compress import _TOKEN_PATTERNS
 from hook_io import read_stdin_hook_input
 from plugin_env import resolve_snapshot_dir
 from session_store import SessionStore, _sanitize_session_id as sanitize_sid
@@ -58,6 +60,45 @@ def _archive_dir_for_session(session_id: str) -> Path:
     """Return the archive directory for a given session."""
     sid = _sanitize_session_id(session_id)
     return SNAPSHOT_DIR / "tool-archive" / sid
+
+
+def _redact_credentials(text: str) -> str:
+    """Replace credential-matching substrings with [REDACTED] before archiving.
+
+    Uses _TOKEN_PATTERNS from bash_compress — the same patterns that guard
+    compression output — so both surfaces share one canonical allowlist.
+    """
+    for pattern in _TOKEN_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+    return text
+
+
+def cleanup_old_archives(max_age_hours: int = 48) -> int:
+    """Delete tool-archive session directories older than max_age_hours.
+
+    Best-effort: individual OSError is swallowed so a locked or missing
+    directory never aborts the hook. Returns the count of removed dirs.
+    """
+    archive_root = SNAPSHOT_DIR / "tool-archive"
+    if not archive_root.exists():
+        return 0
+    cutoff = time.time() - (max_age_hours * 3600)
+    removed = 0
+    for session_dir in archive_root.iterdir():
+        if not session_dir.is_dir():
+            continue
+        try:
+            if session_dir.stat().st_mtime < cutoff:
+                for entry in session_dir.iterdir():
+                    try:
+                        entry.unlink()
+                    except OSError:
+                        pass
+                session_dir.rmdir()
+                removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +217,13 @@ def archive_result(quiet: bool = False) -> None:
 
     NO _log_savings_event: SessionEnd `collect` derives savings from manifest.jsonl.
     """
+    # Best-effort TTL cleanup: run before any new write so the archive never
+    # grows without bound. Errors are swallowed — cleanup failure is not fatal.
+    try:
+        cleanup_old_archives(max_age_hours=48)
+    except Exception:
+        pass
+
     hook_input = read_stdin_hook_input(_STDIN_MAX_BYTES)
     if not hook_input:
         return
@@ -224,12 +272,17 @@ def archive_result(quiet: bool = False) -> None:
         "archived_from": "PostToolUse",
     }
 
+    # Redact credential patterns before writing to disk.
+    # Performed on the (possibly truncated) response so no plaintext secrets
+    # ever reach the archive file, even transiently.
+    safe_response = _redact_credentials(tool_response)
+
     try:
         archive_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         entry_path = archive_dir / f"{tool_use_id}.json"
         fd = os.open(str(entry_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({**meta, "response": tool_response}, f)
+            json.dump({**meta, "response": safe_response}, f)
 
         manifest_path = archive_dir / "manifest.jsonl"
         fd = os.open(str(manifest_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
