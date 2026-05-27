@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
 <title>Token Optimizer Dashboard</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1780,6 +1781,11 @@ function parsePlan(planMd) {
 
 function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
+function redactPaths(s) {
+  if (!s) return s;
+  return s.replace(/\/Users\/[^\s\/'"]+/g, '~').replace(/\/home\/[^\s\/'"]+/g, '~').replace(/C:\\Users\\[^\s\\'"]+/g, '~');
+}
+
 // ========== In-dashboard toasts (replaces alert() dialogs) ==========
 // Persistent cmd-toast: title, body, monospace command, copy + dismiss.
 // Per project rule: no alert() / confirm() / prompt() dialogs anywhere.
@@ -2046,7 +2052,7 @@ var DB = (function() {
             '<a href="https://github.com/alexgreensh/token-optimizer/issues" target="_blank" rel="noopener" style="color:var(--c-accent-cyan)">github.com/alexgreensh/token-optimizer/issues</a>. ' +
             'Other tabs still work; use the nav on the left.</p>' +
             '<pre id="' + errId + '" style="background:var(--c-bg);padding:1rem;overflow:auto;max-height:260px;font-size:12px;white-space:pre-wrap;border-radius:4px">' +
-            esc(stack) + '</pre>' +
+            esc(redactPaths(stack)) + '</pre>' +
             '<button data-copy-err="' + errId + '" data-tab-name="' + esc(name) + '" ' +
             'style="margin-top:.75rem;padding:.5rem 1rem;background:#ef4444;color:white;border:0;border-radius:4px;cursor:pointer;font-size:13px">' +
             'Copy diagnostic</button></div>';
@@ -2104,7 +2110,10 @@ var DB = (function() {
     // empty view.
     safeRender('Nav', null, renderNav);
     safeRender('Overview', 'overview', renderOverview);
-    safeRender('Quick/Medium/Deep/Habits', null, renderSectionViews);
+    safeRender('Quick Wins', 'quick', function() { renderSectionViews('quick'); });
+    safeRender('Medium Effort', 'medium', function() { renderSectionViews('medium'); });
+    safeRender('Deep Optimization', 'deep', function() { renderSectionViews('deep'); });
+    safeRender('Habits', 'habits', function() { renderSectionViews('habits'); });
     safeRender('Trends', 'trends', renderTrends);
     safeRender('Health', 'health', renderHealth);
     safeRender('Coach', 'coach', renderCoach);
@@ -2323,8 +2332,8 @@ var DB = (function() {
   }
 
   function renderOverview() {
-    var tot = data.snapshot.totals;
-    var total = tot.estimated_total, ctrl = tot.controllable_tokens;
+    var tot = data.snapshot.totals || {};
+    var total = tot.estimated_total || 0, ctrl = tot.controllable_tokens || 0;
     var ctxWindow = (data.snapshot.context_window) || 1000000;
     var ctxLabel = (ctxWindow >= 1000000) ? (ctxWindow / 1000000) + 'M' : (ctxWindow / 1000) + 'K';
     var pct = ((total / ctxWindow) * 100).toFixed(1);
@@ -2349,7 +2358,7 @@ var DB = (function() {
       var isUrl = (window.location.protocol || '').indexOf('http') === 0;
       var ctxSource = data.snapshot.context_source ? ' Context window source: ' + data.snapshot.context_source + '.' : '';
       viewSourceEl.textContent = (isUrl
-        ? 'Viewing live dashboard at ' + window.location.origin + '. Updates on every session end.'
+        ? 'Viewing live dashboard. Updates on every session end.'
         : 'Viewing a local file. For the bookmarkable URL run: python3 measure.py setup-daemon') + ctxSource;
     }
 
@@ -2657,8 +2666,8 @@ var DB = (function() {
     }
   }
 
-  function renderSectionViews() {
-    var sections = ['quick', 'medium', 'deep', 'habits'];
+  function renderSectionViews(singleSec) {
+    var sections = singleSec ? [singleSec] : ['quick', 'medium', 'deep', 'habits'];
     sections.forEach(function(sec) {
       var el = document.getElementById('view-' + sec);
       if (!el) return;
@@ -3036,8 +3045,10 @@ var DB = (function() {
       var picker = document.getElementById('daily-date-picker');
       if (picker) {
         picker.addEventListener('change', function() {
+          var activeBtn = document.querySelector('.date-nav-btn[data-range].active');
+          var range = activeBtn ? parseInt(activeBtn.getAttribute('data-range'), 10) || 7 : 7;
           rangeBtns.forEach(function(b) { b.classList.remove('active'); });
-          container.innerHTML = buildDailyTable(daily, 7, this.value);
+          container.innerHTML = buildDailyTable(daily, range, this.value);
         });
       }
     }
@@ -3680,11 +3691,23 @@ var DB = (function() {
       '<div class="card-header"><span>Start a Coaching Session</span></div>' +
       '<div style="padding:var(--s-3);">' +
       '<p style="color:var(--c-text-dim);font-size:14px;margin-bottom:var(--s-3);">Copy this prompt into ' + esc(runtimeLabel) + ' to start an interactive coaching session:</p>' +
-      '<div id="coach-prompt" style="background:var(--c-bg);padding:var(--s-3);border-radius:6px;font-family:var(--font-mono);font-size:13px;color:var(--c-accent-cyan);cursor:pointer;border:1px solid var(--c-border);" onclick="navigator.clipboard.writeText(this.textContent).then(function(){document.getElementById(\'coach-copy-msg\').style.opacity=1;setTimeout(function(){document.getElementById(\'coach-copy-msg\').style.opacity=0;},1500);})">/token-coach</div>' +
+      '<div id="coach-prompt" style="background:var(--c-bg);padding:var(--s-3);border-radius:6px;font-family:var(--font-mono);font-size:13px;color:var(--c-accent-cyan);cursor:pointer;border:1px solid var(--c-border);">/token-coach</div>' +
       '<div id="coach-copy-msg" style="color:var(--c-accent-cyan);font-size:13px;margin-top:var(--s-1);opacity:0;transition:opacity 0.3s;">Copied to clipboard!</div>' +
       '</div></div>';
 
     el.innerHTML = html;
+
+    var coachPromptEl = document.getElementById('coach-prompt');
+    if (coachPromptEl) {
+      coachPromptEl.addEventListener('click', function() {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(this.textContent).then(function() {
+            var msg = document.getElementById('coach-copy-msg');
+            if (msg) { msg.style.opacity = 1; setTimeout(function() { msg.style.opacity = 0; }, 1500); }
+          });
+        }
+      });
+    }
   }
 
   function timeAgo(date) {
@@ -4410,9 +4433,11 @@ var DB = (function() {
           if (!window._pendingManageCmds) window._pendingManageCmds = {};
           var alreadyPending = window._pendingManageCmds[mName];
           if (alreadyPending) {
-            // Reversal: remove from queue, restore visual state
+            // Reversal: remove from queue, restore to pre-toggle state.
+            // skill-off/mcp-off rows start checked (active), skill-on/mcp-on start unchecked.
             delete window._pendingManageCmds[mName];
-            e.target.checked = !e.target.checked; // restore original visual state
+            var originalChecked = (mType === 'skill-off' || mType === 'mcp-off');
+            e.target.checked = originalChecked;
             if (row) {
               row.style.opacity = '1';
               var existing = row.querySelector('.hook-pending');
