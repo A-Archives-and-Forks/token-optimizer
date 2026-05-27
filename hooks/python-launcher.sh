@@ -10,6 +10,35 @@
 
 set -eu
 
+# Known-safe prefixes for Python interpreter binaries.
+# Binaries outside these directories are rejected even if on PATH.
+# This prevents a compromised PATH entry from hijacking the interpreter.
+_SAFE_PREFIXES="/usr/bin /usr/local/bin /opt/homebrew/bin /opt/homebrew/opt"
+
+# Populate brew prefix once (non-fatal on Linux where brew is absent).
+_BREW_PREFIX=""
+if command -v brew >/dev/null 2>&1; then
+    _BREW_PREFIX="$(brew --prefix 2>/dev/null || true)"
+fi
+
+_is_safe_prefix() {
+    local binpath="$1"
+    # Check static safe prefixes first.
+    local prefix
+    for prefix in $_SAFE_PREFIXES; do
+        case "$binpath" in
+            "$prefix"/*) return 0 ;;
+        esac
+    done
+    # Also allow the brew prefix when available.
+    if [ -n "$_BREW_PREFIX" ]; then
+        case "$binpath" in
+            "$_BREW_PREFIX"/*) return 0 ;;
+        esac
+    fi
+    return 1
+}
+
 find_interpreter() {
     local name="$1"
     local IFS=:
@@ -20,6 +49,9 @@ find_interpreter() {
             binpath="${dir}/${name}${ext}"
             [ -x "$binpath" ] || continue
             [ -s "$binpath" ] || continue
+            # Reject interpreters outside known-safe prefix directories.
+            # Prevents PATH-order attacks where a malicious dir appears first.
+            _is_safe_prefix "$binpath" || continue
             case "$binpath" in
                 */WindowsApps/*|*/windowsapps/*)
                     # WindowsApps may contain real Store-installed Python OR
