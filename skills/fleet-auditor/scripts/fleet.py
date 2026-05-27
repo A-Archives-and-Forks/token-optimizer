@@ -69,8 +69,8 @@ except ModuleNotFoundError:  # pragma: no cover - Python <3.11
     tomllib = None
 
 
-# Claude Code adds ~35 tokens of boilerplate wrapper per skill entry
-SKILL_WRAPPER_OVERHEAD = 35
+# Measurements show wrapper overhead is negligible (synced with measure.py)
+SKILL_WRAPPER_OVERHEAD = 0
 
 def _estimate_skill_frontmatter_tokens(skill_md: Path) -> int:
     """Estimate tokens of a skill's YAML frontmatter only.

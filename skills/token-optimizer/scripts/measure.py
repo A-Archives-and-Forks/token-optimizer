@@ -348,6 +348,7 @@ def _resolve_session_model(session_id=None):
 
     # 1. Try session JSONL
     if session_id:
+        session_id = sanitize_session_id(session_id)
         try:
             projects_dir = find_projects_dir()
             if projects_dir:
@@ -1920,8 +1921,8 @@ def _auto_snapshot(components, totals, ctx_window):
             "fixed_tokens": totals["fixed_tokens"],
             "skill_count": components.get("skills", {}).get("count", 0),
             "skill_tokens": components.get("skills", {}).get("tokens", 0),
-            "mcp_server_count": components.get("mcp_servers", {}).get("count", 0),
-            "mcp_tokens": components.get("mcp_servers", {}).get("tokens", 0),
+            "mcp_server_count": components.get("mcp_tools", {}).get("count", 0),
+            "mcp_tokens": components.get("mcp_tools", {}).get("tokens", 0),
             "claude_md_tokens": sum(
                 components[k].get("tokens", 0)
                 for k in components if k.startswith("claude_md") and components[k].get("exists")
@@ -1968,10 +1969,9 @@ def quick_scan(as_json=False):
     if skills.get("count", 0) > 0:
         offenders.append(("skills", skills.get("count", 0), skills.get("tokens", 0),
                          f"{skills.get('count', 0)} skill metadata entries"))
-    mcp = components.get("mcp_servers", {})
+    mcp = components.get("mcp_tools", {})
     mcp_count = mcp.get("count", 0)
     if detect_runtime() == "codex":
-        mcp = components.get("mcp_tools", {})
         mcp_count = mcp.get("server_count", 0)
     if mcp_count > 0:
         eager = mcp.get("eager_tool_count", 0)
@@ -2224,6 +2224,7 @@ def doctor(as_json=False):
         try:
             import sqlite3
             conn = sqlite3.connect(str(TRENDS_DB))
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
             count = conn.execute("SELECT COUNT(*) FROM session_log").fetchone()[0]
             conn.close()
@@ -2547,8 +2548,8 @@ def drift_check(as_json=False):
         "total_overhead": totals["estimated_total"],
         "skill_count": components.get("skills", {}).get("count", 0),
         "skill_tokens": components.get("skills", {}).get("tokens", 0),
-        "mcp_server_count": components.get("mcp_servers", {}).get("count", 0),
-        "mcp_tokens": components.get("mcp_servers", {}).get("tokens", 0),
+        "mcp_server_count": components.get("mcp_tools", {}).get("count", 0),
+        "mcp_tokens": components.get("mcp_tools", {}).get("tokens", 0),
         "claude_md_tokens": sum(
             components[k].get("tokens", 0)
             for k in components if k.startswith("claude_md") and components[k].get("exists")
@@ -3239,6 +3240,9 @@ def _serve_dashboard(filepath, port=8080, host="127.0.0.1"):
             if self._redirect_root():
                 return
             if not self._check_allowed():
+                return
+            if not _is_localhost_host_header(self.headers.get("Host", "")):
+                self.send_error(421, "Misdirected Request")
                 return
             super().do_HEAD()
 
@@ -4358,7 +4362,7 @@ def _manage_skill(action, name):
         return False
     skills_dir = CLAUDE_DIR / "skills"
     resolved = (skills_dir / name).resolve()
-    if not str(resolved).startswith(str(skills_dir.resolve())):
+    if not resolved.is_relative_to(skills_dir.resolve()):
         print(f"  [!] Path traversal detected: {name}")
         return False
     backups_dir = CLAUDE_DIR / "_backups"
@@ -4717,7 +4721,10 @@ def _acquire_session_end_flush_lock(max_age_seconds=120):
             age = time.time() - lock_dir.stat().st_mtime
             if age > max_age_seconds:
                 lock_dir.rmdir()
-                lock_dir.mkdir(mode=0o700)
+                try:
+                    lock_dir.mkdir(mode=0o700)
+                except FileExistsError:
+                    return None
                 return lock_dir
         except OSError:
             pass
@@ -5627,6 +5634,7 @@ def generate_coach_data(focus=None, components=None, trends=None):
         score -= 3
 
     # Check model mix from trends
+    _opus_addiction_fired = False
     default_model = components.get("settings_local", {}).get("defaultModel")
     if trends:
         model_mix = trends.get("model_mix", {})
@@ -7509,6 +7517,7 @@ def conn_total_sessions():
     """Quick count of total sessions in the DB."""
     try:
         conn = sqlite3.connect(str(TRENDS_DB))
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         cur = conn.execute("SELECT COUNT(*) FROM session_log")
         count = cur.fetchone()[0]
@@ -7589,7 +7598,6 @@ def _query_trends_db(conn, days):
 
     session_count = row["cnt"]
     if session_count == 0:
-        conn.close()
         return None
 
     total_duration = row["total_dur"]
@@ -14706,12 +14714,10 @@ def compact_capture(transcript_path=None, session_id=None, trigger="auto", cwd=N
     ts = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     ts_file = now.strftime("%Y%m%d-%H%M%S")
 
-    if transcript_path and not codex_session.is_codex_session_path(transcript_path):
-        transcript_path = None
-    if not transcript_path:
-        filepath = _find_current_session_jsonl()
-    else:
+    if transcript_path:
         filepath = Path(transcript_path)
+    else:
+        filepath = _find_current_session_jsonl()
 
     # Build trigger suffix for filename so restore/list logic can rank all semantic checkpoints.
     trigger_suffix = f"-{trigger}" if trigger and trigger != "auto" else ""
@@ -18119,6 +18125,7 @@ def validate_impact(strategy="auto", days=30, as_json=False):
         if TRENDS_DB.exists():
             try:
                 conn = sqlite3.connect(str(TRENDS_DB))
+                conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA busy_timeout=5000")
                 row = conn.execute(
                     "SELECT MAX(timestamp) as latest FROM savings_events"

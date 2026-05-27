@@ -178,8 +178,11 @@ def main():
         return  # Feature disabled, exit silently
 
     try:
-        payload = json.loads(sys.stdin.read(1_000_000))
-    except (json.JSONDecodeError, OSError):
+        from hook_io import read_stdin_hook_input
+        payload = read_stdin_hook_input()
+        if not payload:
+            return
+    except (json.JSONDecodeError, OSError, ImportError):
         return  # Bad input, exit silently
 
     tool_name = payload.get("tool_name", "")
