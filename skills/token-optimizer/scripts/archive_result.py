@@ -308,7 +308,7 @@ def archive_result(quiet: bool = False) -> None:
             output_hash=output_hash,
             output_chars=char_count,
             output_tokens_est=token_est,
-            compressed_preview=tool_response[:1500],
+            compressed_preview=safe_response[:1500],
         )
     except Exception:
         pass

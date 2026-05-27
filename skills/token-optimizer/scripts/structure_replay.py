@@ -949,9 +949,17 @@ def _gather_input_paths(raw_paths: Sequence[str]) -> List[Path]:
         return expanded
 
     # Determine the safe root for glob expansion.
-    # TOKEN_OPTIMIZER_SAFE_ROOT overrides the default (~/.claude) for tests.
+    # TOKEN_OPTIMIZER_SAFE_ROOT overrides the default (~/.claude) for tests only.
+    _default_root = (Path.home() / ".claude").resolve()
     _safe_root_env = os.environ.get("TOKEN_OPTIMIZER_SAFE_ROOT", "").strip()
-    safe_root = Path(_safe_root_env).resolve() if _safe_root_env else (Path.home() / ".claude").resolve()
+    if _safe_root_env:
+        _candidate = Path(_safe_root_env).resolve()
+        try:
+            safe_root = _candidate if _candidate.is_relative_to(_default_root) else _default_root
+        except (OSError, ValueError):
+            safe_root = _default_root
+    else:
+        safe_root = _default_root
 
     for raw in raw_paths:
         if any(ch in raw for ch in "*?[]"):
