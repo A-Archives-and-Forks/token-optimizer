@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import glob
 import hashlib
+import os
 import json
 import re
 import sys
@@ -947,9 +948,21 @@ def _gather_input_paths(raw_paths: Sequence[str]) -> List[Path]:
                 expanded.append(root)
         return expanded
 
+    # Determine the safe root for glob expansion.
+    # TOKEN_OPTIMIZER_SAFE_ROOT overrides the default (~/.claude) for tests.
+    _safe_root_env = os.environ.get("TOKEN_OPTIMIZER_SAFE_ROOT", "").strip()
+    safe_root = Path(_safe_root_env).resolve() if _safe_root_env else (Path.home() / ".claude").resolve()
+
     for raw in raw_paths:
         if any(ch in raw for ch in "*?[]"):
             for match in sorted(glob.glob(raw)):
+                try:
+                    # Reject any expansion that escapes the safe root.
+                    # Prevents crafted globs from traversing into ~/.ssh/, /etc/, etc.
+                    if not Path(match).resolve().is_relative_to(safe_root):
+                        continue
+                except (OSError, ValueError):
+                    continue
                 expanded.append(Path(match))
             continue
         path = Path(raw).expanduser()
