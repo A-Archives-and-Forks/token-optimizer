@@ -76,12 +76,39 @@ def _check_cooldown(store: SessionStore) -> bool:
         return True
 
 
+# Sensitive path segments — paths containing any of these are excluded from
+# SQLite logging. Mirrors the exclusion set in delta_diff.py for consistency.
+_SENSITIVE_PATH_SEGMENTS = (
+    "/.ssh/",
+    "/.aws/",
+    "/.gnupg/",
+    "/etc/",
+    "/run/secrets",
+    "credentials",
+    "secrets",
+    ".env",
+    "id_rsa",
+    "id_ed25519",
+    ".pem",
+    ".key",
+)
+
+
+def _is_sensitive_path(path: str) -> bool:
+    """Return True if the path references a credential or secret location."""
+    lower = path.lower()
+    return any(seg in lower for seg in _SENSITIVE_PATH_SEGMENTS)
+
+
 def _extract_paths(text: str) -> list[str]:
     matches = _PATH_RE.findall(text[:50_000])
     seen: set[str] = set()
     paths: list[str] = []
     for m in matches:
         if m not in seen and not m.startswith("/dev/") and not m.startswith("/proc/"):
+            # Skip paths that reference credential stores or secret files.
+            if _is_sensitive_path(m):
+                continue
             seen.add(m)
             paths.append(m)
             if len(paths) >= 10:

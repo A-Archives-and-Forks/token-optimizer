@@ -199,7 +199,9 @@ def main():
     if not _is_whitelisted(command):
         return
 
-    # Resolve bash_compress.py path from __file__ (never from env vars)
+    # Resolve bash_compress.py path from __file__ (stable, not from env vars).
+    # CLAUDE_PLUGIN_ROOT is used for cross-checking only — we do not derive
+    # the primary path from it to avoid env var injection attacks.
     script_dir = Path(__file__).resolve().parent
     compress_path = script_dir / "bash_compress.py"
     if not compress_path.exists():
@@ -210,6 +212,21 @@ def main():
     launcher_path = plugin_root / "hooks" / "python-launcher.sh"
     if not launcher_path.exists():
         return  # Launcher missing, exit silently
+
+    # Cross-check: when CLAUDE_PLUGIN_ROOT is set by the dispatcher, verify that
+    # the __file__-derived paths land within the declared plugin root.  A mismatch
+    # means the hook is running from a symlinked or relocated path and we should
+    # fail closed rather than execute an unexpected binary.
+    _env_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "").strip()
+    if _env_root:
+        try:
+            _declared_root = Path(_env_root).resolve(strict=True)
+            if not compress_path.is_relative_to(_declared_root):
+                return  # compress_path outside declared root — refuse to run
+            if not launcher_path.is_relative_to(_declared_root):
+                return  # launcher_path outside declared root — refuse to run
+        except (OSError, ValueError):
+            return  # CLAUDE_PLUGIN_ROOT unresolvable — fail closed
 
     # Build rewritten command with proper quoting for each token
     try:
