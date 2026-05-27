@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.7.0-green" alt="Version 5.6.13"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.7.2-green" alt="Version 5.7.2"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/github/release-date/alexgreensh/token-optimizer?label=last%20release&color=blue" alt="Last Release"></a>
   <a href="https://github.com/alexgreensh/token-optimizer"><img src="https://img.shields.io/badge/Claude_Code-Plugin-blueviolet" alt="Claude Code Plugin"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/tree/main/openclaw"><img src="https://img.shields.io/badge/OpenClaw-v2.4.1-brightgreen" alt="OpenClaw v2.4.1"></a>
@@ -93,6 +93,8 @@ If you prefer a script-managed install on macOS or Linux, this works too and aut
 git clone https://github.com/alexgreensh/token-optimizer.git ~/.claude/token-optimizer
 bash ~/.claude/token-optimizer/install.sh
 ```
+
+The installer verifies file integrity against checksums from the latest GitHub release. If you're offline or behind a restrictive proxy, set `TOKEN_OPTIMIZER_SKIP_VERIFY=1` before running.
 
 Works on Claude Code, [OpenCode](#opencode), and [OpenClaw](#openclaw). Each platform has its own native plugin (Python for Claude Code, TypeScript for OpenCode and OpenClaw). No bridging, no shared runtime, zero cross-platform dependencies.
 
@@ -291,6 +293,20 @@ No. Pure Python stdlib on Claude Code and Codex. TypeScript with zero runtime de
 Claude Code and OpenClaw today, with native plugins for each. Codex support is in beta, with a Python adapter for chat-first status, coaching, dashboard refresh, and fleet scans.
 
 Windsurf and Cursor are next on the roadmap. Full Codex parity is waiting on upstream hook/cache surfaces for invisible read substitution, structure-map substitution, and compact lifecycle hooks.
+</details>
+
+<details>
+<summary>🔐 <strong>How does install.sh verify file integrity?</strong></summary>
+
+The installer fetches `CHECKSUMS.sha256` from the latest GitHub Release (not from the repo tree), then verifies every script file against those checksums. This out-of-band verification means a compromised commit cannot swap both the code and the checksums simultaneously. If the checksum fetch fails or any file fails verification, the installer exits with a non-zero status and does not continue. You can also verify manually:
+
+```bash
+# Download checksums from the latest release
+curl -sL $(gh release view --json assets -q '.assets[] | select(.name=="CHECKSUMS.sha256") | .url') -o /tmp/checksums.sha256
+
+# Verify your install
+cd ~/.claude/token-optimizer && shasum -a 256 -c /tmp/checksums.sha256
+```
 </details>
 
 ---
