@@ -26,7 +26,7 @@ from pathlib import Path
 # Defense in depth: the launcher script already filters interpreters, but
 # if a user's PATH has a stale Python 3.7 that slipped through, bail early
 # so later imports don't explode with confusing SyntaxError noise.
-if sys.version_info < (3, 8):
+if sys.version_info < (3, 9):
     sys.exit(0)
 
 

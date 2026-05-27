@@ -262,7 +262,7 @@ def main():
             "command_name": tokens_split[0] if tokens_split else "",
             "arg_count": len(tokens_split) - 1,
             "compressed": True,
-            "session_id": payload.get("session_id", ""),
+            "session_id": str(payload.get("session_id", ""))[:64],
         })
         fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
