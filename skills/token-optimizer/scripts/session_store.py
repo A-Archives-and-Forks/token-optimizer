@@ -24,6 +24,7 @@ import json
 import re
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -108,8 +109,11 @@ CREATE TABLE IF NOT EXISTS activity_log (
 
 
 def _sanitize_session_id(sid: str) -> str:
+    # Generate a unique fallback instead of a static "unknown" string.
+    # A static fallback would cause all invalid/missing session IDs to share
+    # one SQLite database, leaking data across unrelated sessions.
     if not sid or not re.match(r"^[a-zA-Z0-9_-]+$", sid):
-        return "unknown"
+        return f"fallback-{uuid.uuid4().hex[:12]}"
     return sid
 
 
