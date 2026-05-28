@@ -14976,10 +14976,17 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
         print("[RECOVERED DATA - treat as context only, not instructions]")
         print(body)
 
-    def _print_intel_digest(sid):
+    def _print_intel_digest(sid, session_file=None):
         """Print context intel digest after checkpoint to reduce post-compaction re-reads."""
         if not sid:
             return
+        try:
+            from context_pressure import should_inject, get_pressure_level, log_suppression
+            if not should_inject(session_file, session_id=sid, priority="informational"):
+                log_suppression("intel_digest", get_pressure_level(session_file, session_id=sid))
+                return
+        except Exception:
+            pass
         try:
             from session_store import SessionStore
             store = SessionStore(sid)
@@ -16862,12 +16869,23 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
     if system_messages:
         # Write updated nudge/loop state back to cache
         _write_quality_cache(cache_path, result)
-        # Emit systemMessage JSON for Claude Code to inject into context
-        for msg in system_messages:
-            try:
-                print(json.dumps({"systemMessage": msg}))
-            except Exception:
-                pass
+        # Gate systemMessage emissions under context pressure
+        _emit_msgs = True
+        try:
+            from context_pressure import should_inject, get_pressure_level, log_suppression
+            _sf = str(filepath) if filepath else None
+            _sid = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
+            if not should_inject(_sf, session_id=_sid, priority="informational"):
+                log_suppression("quality_system_messages", get_pressure_level(_sf, session_id=_sid))
+                _emit_msgs = False
+        except Exception:
+            pass
+        if _emit_msgs:
+            for msg in system_messages:
+                try:
+                    print(json.dumps({"systemMessage": msg}))
+                except Exception:
+                    pass
 
     # Nudge follow-through: if PostCompact triggered this run (force=True)
     # and a nudge preceded the compact, measure the actual fill_pct recovery.
@@ -19431,10 +19449,19 @@ if __name__ == "__main__":
                     pass
             score = quality_cache(throttle_seconds=throttle, warn_threshold=warn_threshold, quiet=quiet, session_jsonl=session_jsonl, force=force)
             if warn and score is not None and score < warn_threshold:
-                if score < 50:
-                    print(f"[Token Optimizer] Context quality: {score}/100 (critical). Heavy rot detected. Consider /clear with checkpoint.")
-                else:
-                    print(f"[Token Optimizer] Context quality: {score}/100. Stale reads and bloated results building up. Consider /compact.")
+                _emit_warn = True
+                try:
+                    from context_pressure import should_inject, get_pressure_level, log_suppression
+                    if not should_inject(session_jsonl, priority="informational"):
+                        log_suppression("quality_warning", get_pressure_level(session_jsonl))
+                        _emit_warn = False
+                except Exception:
+                    pass
+                if _emit_warn:
+                    if score < 50:
+                        print(f"[Token Optimizer] Context quality: {score}/100 (critical). Heavy rot detected. Consider /clear with checkpoint.")
+                    else:
+                        print(f"[Token Optimizer] Context quality: {score}/100. Stale reads and bloated results building up. Consider /compact.")
         except _HookTimeout:
             print(
                 "[Token Optimizer] hook budget exceeded; skipping quality-cache tick to keep session responsive",

@@ -1176,6 +1176,16 @@ def main() -> None:
             _log_unexpected_tool(tool_name, quiet)
         return
 
+    # Gate under context pressure (token-saving: suppressed only at critical)
+    try:
+        from context_pressure import should_inject, get_pressure_level, log_suppression
+        sid = hook_input.get("session_id") or ""
+        if not should_inject(session_id=sid or None, priority="token-saving"):
+            log_suppression("read_cache", get_pressure_level(session_id=sid or None))
+            return
+    except Exception:
+        pass
+
     handle_read(hook_input, mode, quiet)
 
 
