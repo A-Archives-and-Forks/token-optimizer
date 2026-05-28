@@ -60,6 +60,7 @@ Snapshots are saved to SNAPSHOT_DIR under the active runtime home.
 Copyright (C) 2026 Alex Greenshpun
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """
+from __future__ import annotations
 
 import hashlib
 import heapq
