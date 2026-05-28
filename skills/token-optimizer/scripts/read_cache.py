@@ -30,6 +30,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Optional
 
+from hook_io import read_stdin_hook_input
 from plugin_env import is_v5_flag_enabled, resolve_snapshot_dir
 from runtime_env import runtime_home
 
@@ -1151,9 +1152,8 @@ def main() -> None:
         return
 
     if "--invalidate" in args:
-        try:
-            hook_input = json.loads(sys.stdin.read(1_000_000))
-        except (json.JSONDecodeError, OSError):
+        hook_input = read_stdin_hook_input(1_000_000)
+        if not hook_input:
             return
         handle_invalidate(hook_input, quiet)
         return
@@ -1165,9 +1165,8 @@ def main() -> None:
     if mode not in READ_CACHE_MODES:
         mode = DEFAULT_MODE
 
-    try:
-        hook_input = json.loads(sys.stdin.read(1_000_000))
-    except (json.JSONDecodeError, OSError):
+    hook_input = read_stdin_hook_input(1_000_000)
+    if not hook_input:
         return
 
     tool_name = hook_input.get("tool_name", "")
