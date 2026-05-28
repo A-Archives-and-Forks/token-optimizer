@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,22 +81,18 @@ def cleanup_old_archives(max_age_hours: int = 48) -> int:
     directory never aborts the hook. Returns the count of removed dirs.
     """
     archive_root = SNAPSHOT_DIR / "tool-archive"
-    if not archive_root.exists():
+    if not archive_root.exists() or archive_root.is_symlink():
         return 0
     cutoff = time.time() - (max_age_hours * 3600)
     removed = 0
     for session_dir in archive_root.iterdir():
-        if not session_dir.is_dir():
+        if session_dir.is_symlink() or not session_dir.is_dir():
             continue
         try:
-            if session_dir.stat().st_mtime < cutoff:
-                for entry in session_dir.iterdir():
-                    try:
-                        entry.unlink()
-                    except OSError:
-                        pass
-                session_dir.rmdir()
-                removed += 1
+            if os.lstat(session_dir).st_mtime < cutoff:
+                shutil.rmtree(session_dir, ignore_errors=True)
+                if not session_dir.exists():
+                    removed += 1
         except OSError:
             pass
     return removed

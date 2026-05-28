@@ -9414,7 +9414,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.7.8"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.7.9"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DAEMON_RUNTIME = detect_runtime()
 _DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else "claude"
@@ -14325,7 +14325,7 @@ def expand_archived(tool_use_id=None, session_id=None, list_all=False):
             session_dirs = [d for d in session_dirs if d.name == sid]
 
         for sd in session_dirs:
-            if not sd.is_dir():
+            if sd.is_symlink() or not sd.is_dir():
                 continue
             manifest_path = sd / "manifest.jsonl"
             if not manifest_path.exists():
@@ -14407,7 +14407,7 @@ def archive_cleanup(session_id=None):
     import shutil
 
     archive_root = SNAPSHOT_DIR / "tool-archive"
-    if not archive_root.is_dir():
+    if not archive_root.is_dir() or archive_root.is_symlink():
         print("[Tool Archive] No archive directory found. Nothing to clean.")
         return
 
@@ -14417,6 +14417,9 @@ def archive_cleanup(session_id=None):
     if session_id:
         sid = sanitize_session_id(session_id)
         target = archive_root / sid
+        if target.is_symlink():
+            print(f"[Tool Archive] Skipping symlink: {sid}")
+            return
         if target.is_dir():
             # Count before removing
             manifest_path = target / "manifest.jsonl"
@@ -14443,7 +14446,7 @@ def archive_cleanup(session_id=None):
     # Clean up archives older than 24 hours
     cutoff = time.time() - 86400
     for sd in list(archive_root.iterdir()):
-        if not sd.is_dir():
+        if sd.is_symlink() or not sd.is_dir():
             continue
         # Check manifest timestamp or directory mtime
         try:
