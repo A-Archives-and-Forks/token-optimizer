@@ -145,6 +145,24 @@ if [ -d "${INSTALL_DIR}/.git" ]; then
         warn "git pull failed. Try: cd ${INSTALL_DIR} && git pull"
         warn "Continuing with existing version."
     }
+
+    # Self-heal: v5.7.5-5.7.9 had a sparse-checkout bug that pruned skills/ and hooks/.
+    # If they're missing after update, fix the sparse checkout config.
+    if [ ! -d "${INSTALL_DIR}/skills" ] || [ ! -d "${INSTALL_DIR}/hooks" ]; then
+        warn "Broken sparse checkout detected (skills/ or hooks/ missing). Repairing..."
+        git -C "$INSTALL_DIR" sparse-checkout set \
+            skills/ hooks/ .claude-plugin/ .codex-plugin/ .codex/ \
+            2>/dev/null || git -C "$INSTALL_DIR" sparse-checkout disable 2>/dev/null || true
+        if [ ! -d "${INSTALL_DIR}/skills" ]; then
+            warn "Sparse checkout repair failed. Disabling sparse checkout..."
+            git -C "$INSTALL_DIR" sparse-checkout disable 2>/dev/null || true
+        fi
+        if [ -d "${INSTALL_DIR}/skills" ]; then
+            info "Sparse checkout repaired"
+        else
+            fail "Could not restore skills/ directory. Try: cd ${INSTALL_DIR} && git sparse-checkout disable"
+        fi
+    fi
 elif [ -d "$INSTALL_DIR" ]; then
     BACKUP="${INSTALL_DIR}.backup.$(date +%Y%m%d_%H%M%S)"
     warn "Non-git install found at ${INSTALL_DIR}"
@@ -193,30 +211,18 @@ except Exception:
 if [ "${TOKEN_OPTIMIZER_SKIP_VERIFY:-}" = "1" ]; then
     warn "Skipping integrity verification (TOKEN_OPTIMIZER_SKIP_VERIFY=1)"
 else
-    CHECKSUMS_READY=false
-
     info "Fetching checksums from GitHub release..."
     if fetch_release_checksums; then
-        CHECKSUMS_READY=true
-    elif [ -f "${INSTALL_DIR}/CHECKSUMS.sha256" ]; then
-        warn "No checksums in GitHub release. Using in-repo CHECKSUMS.sha256"
-        cp "${INSTALL_DIR}/CHECKSUMS.sha256" "$CHECKSUM_FILE"
-        CHECKSUMS_READY=true
-    fi
-
-    if $CHECKSUMS_READY; then
-        info "Verifying file integrity..."
+        info "Verifying file integrity (out-of-band checksums)..."
         (
             cd "$INSTALL_DIR" || exit 1
-            if sha256sum -c "$CHECKSUM_FILE" --quiet 2>/dev/null || \
-               shasum -a 256 -c "$CHECKSUM_FILE" --quiet 2>/dev/null; then
-                printf "${GREEN}>${NC} Integrity check passed\n"
-            else
-                fail "Integrity check FAILED. Files do not match checksums. Your install may be compromised. Re-clone from: https://github.com/${GITHUB_REPO}"
-            fi
-        )
+            sha256sum -c "$CHECKSUM_FILE" --quiet 2>/dev/null || \
+            shasum -a 256 -c "$CHECKSUM_FILE" --quiet 2>/dev/null
+        ) || fail "Integrity check FAILED. Files do not match release checksums. Your install may be compromised. Re-clone from: https://github.com/${GITHUB_REPO}"
+        info "Integrity check passed"
     else
-        warn "Could not verify integrity (no checksums available). Continuing."
+        warn "No checksums in GitHub release. Skipping integrity verification."
+        warn "To verify manually: shasum -a 256 -c CHECKSUMS.sha256 (in ${INSTALL_DIR})"
     fi
 fi
 
