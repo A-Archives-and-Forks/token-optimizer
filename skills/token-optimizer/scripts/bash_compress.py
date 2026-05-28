@@ -14,6 +14,7 @@ Security:
 - Output buffered completely before writing to stdout
 - Partial output on timeout is NEVER compressed
 """
+from __future__ import annotations
 
 import json
 import os

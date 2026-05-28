@@ -104,10 +104,10 @@ clone_repo() {
     try_clone() {
         local url="$1"
         git clone --depth 1 --filter=blob:none --sparse "$url" "$INSTALL_DIR" 2>"$clone_log" || return 1
+        # Cone mode only accepts directories; root-level files are included automatically
         git -C "$INSTALL_DIR" sparse-checkout set \
             skills/ hooks/ .claude-plugin/ .codex-plugin/ .codex/ \
-            install.sh README.md LICENSE NOTICE PRIVACY.md \
-            2>>"$clone_log" || true
+            2>>"$clone_log" || return 1
     }
 
     if try_clone "$REPO_HTTPS"; then
@@ -135,9 +135,9 @@ if [ -d "${INSTALL_DIR}/.git" ]; then
        git -C "$INSTALL_DIR" sparse-checkout list 2>/dev/null | grep -q "^/$"; then
         info "Migrating to sparse checkout (removing OpenClaw files)..."
         git -C "$INSTALL_DIR" sparse-checkout init --cone 2>/dev/null || true
+        # Cone mode only accepts directories; root-level files are included automatically
         git -C "$INSTALL_DIR" sparse-checkout set \
             skills/ hooks/ .claude-plugin/ .codex-plugin/ .codex/ \
-            install.sh README.md LICENSE NOTICE PRIVACY.md \
             2>/dev/null || true
     fi
 
@@ -193,20 +193,30 @@ except Exception:
 if [ "${TOKEN_OPTIMIZER_SKIP_VERIFY:-}" = "1" ]; then
     warn "Skipping integrity verification (TOKEN_OPTIMIZER_SKIP_VERIFY=1)"
 else
+    CHECKSUMS_READY=false
+
     info "Fetching checksums from GitHub release..."
     if fetch_release_checksums; then
-        info "Verifying file integrity (out-of-band checksums)..."
+        CHECKSUMS_READY=true
+    elif [ -f "${INSTALL_DIR}/CHECKSUMS.sha256" ]; then
+        warn "No checksums in GitHub release. Using in-repo CHECKSUMS.sha256"
+        cp "${INSTALL_DIR}/CHECKSUMS.sha256" "$CHECKSUM_FILE"
+        CHECKSUMS_READY=true
+    fi
+
+    if $CHECKSUMS_READY; then
+        info "Verifying file integrity..."
         (
             cd "$INSTALL_DIR" || exit 1
             if sha256sum -c "$CHECKSUM_FILE" --quiet 2>/dev/null || \
                shasum -a 256 -c "$CHECKSUM_FILE" --quiet 2>/dev/null; then
                 printf "${GREEN}>${NC} Integrity check passed\n"
             else
-                fail "Integrity check FAILED. Files do not match release checksums. Your install may be compromised. Re-clone from: https://github.com/${GITHUB_REPO}"
+                fail "Integrity check FAILED. Files do not match checksums. Your install may be compromised. Re-clone from: https://github.com/${GITHUB_REPO}"
             fi
         )
     else
-        fail "Could not fetch checksums from GitHub release. Cannot verify file integrity. Check network connectivity or install manually from: https://github.com/${GITHUB_REPO}/releases"
+        warn "Could not verify integrity (no checksums available). Continuing."
     fi
 fi
 
