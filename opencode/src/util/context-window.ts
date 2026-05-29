@@ -9,10 +9,18 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "claude-haiku-4-5": 200_000,
 
   // OpenAI GPT-5 family
-  "gpt-5.5": 1_100_000,
-  "gpt-5.4": 1_100_000,
+  "gpt-5.5-pro": 1_000_000,
+  "gpt-5.5": 1_000_000,
+  "gpt-5.4": 1_000_000,
+  "gpt-5.4-mini": 400_000,
+  "gpt-5.4-nano": 400_000,
+  "gpt-5.3-codex": 400_000,
+  "gpt-5.2-codex": 400_000,
   "gpt-5.2": 400_000,
+  "gpt-5.1-codex-mini": 400_000,
+  "gpt-5.1-codex": 400_000,
   "gpt-5.1": 400_000,
+  "gpt-5-codex": 400_000,
   "gpt-5": 400_000,
   "gpt-5-mini": 400_000,
   "gpt-5-nano": 400_000,
@@ -29,11 +37,15 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "o4-mini": 200_000,
 
   // Google Gemini
+  "gemini-3.5-flash": 1_000_000,
+  "gemini-3.1-pro-preview": 2_000_000,
+  "gemini-3.1-flash-lite": 1_000_000,
   "gemini-3-pro": 1_000_000,
   "gemini-3-flash": 1_000_000,
   "gemini-3.1-pro": 1_000_000,
   "gemini-2.5-pro": 2_000_000,
   "gemini-2.5-flash": 1_000_000,
+  "gemini-2.5-flash-lite": 1_000_000,
   "gemini-2.0-flash": 1_000_000,
   "gemini-2.0-flash-lite": 1_000_000,
 

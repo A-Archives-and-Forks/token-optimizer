@@ -215,7 +215,7 @@ OPENAI_MODEL_PRICING = {
     "gpt-4.1": {"input": 2.0, "cache_read": 0.50, "output": 8.0},
     "gpt-4.1-mini": {"input": 0.40, "cache_read": 0.10, "output": 1.60},
     "gpt-4.1-nano": {"input": 0.10, "cache_read": 0.025, "output": 0.40},
-    "gpt-4o": {"input": 2.50, "cache_read": 0.125, "output": 10.0},
+    "gpt-4o": {"input": 2.50, "cache_read": 1.25, "output": 10.0},
     "gpt-4o-mini": {"input": 0.15, "cache_read": 0.075, "output": 0.60},
     # o-series reasoning models
     "o3-pro": {"input": 20.0, "cache_read": 5.0, "output": 80.0},

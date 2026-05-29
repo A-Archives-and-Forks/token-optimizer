@@ -364,6 +364,8 @@ export const TokenOptimizerPlugin: Plugin = async (
                     sessionId: currentSessionId,
                     project: ctx.project.id ?? null,
                     model: currentModel ?? null,
+                    // TODO: OpenCode session.deleted events do not expose token usage.
+                    // Cost is computed later by measure.py collect from the session JSONL.
                     tokensInput: 0,
                     tokensOutput: 0,
                     tokensCacheRead: 0,

@@ -59,16 +59,25 @@ export interface ModelPricing {
   cacheWrite: number;
 }
 
-/** Default pricing (USD per token). Verified March 17, 2026. */
+/** Default pricing (USD per token). Verified May 29, 2026. */
 export const DEFAULT_PRICING: Record<string, ModelPricing> = {
   // Anthropic Claude (1M context for Opus/Sonnet as of March 13, 2026)
   opus:            { input: 5.0 / 1e6,   output: 25.0 / 1e6,  cacheRead: 0.5 / 1e6,   cacheWrite: 6.25 / 1e6 },
   sonnet:          { input: 3.0 / 1e6,   output: 15.0 / 1e6,  cacheRead: 0.3 / 1e6,   cacheWrite: 3.75 / 1e6 },
   haiku:           { input: 1.0 / 1e6,   output: 5.0 / 1e6,   cacheRead: 0.1 / 1e6,   cacheWrite: 1.25 / 1e6 },
   // OpenAI GPT-5 family
+  "gpt-5.5-pro":   { input: 30.0 / 1e6,  output: 180.0 / 1e6, cacheRead: 30.0 / 1e6,  cacheWrite: 0 },  // cache N/A per OpenAI; billed at full input rate
+  "gpt-5.5":       { input: 5.0 / 1e6,   output: 30.0 / 1e6,  cacheRead: 0.50 / 1e6,  cacheWrite: 0 },
   "gpt-5.4":       { input: 2.5 / 1e6,   output: 15.0 / 1e6,  cacheRead: 0.25 / 1e6,  cacheWrite: 0 },
+  "gpt-5.4-mini":  { input: 0.75 / 1e6,  output: 4.5 / 1e6,   cacheRead: 0.075 / 1e6, cacheWrite: 0 },
+  "gpt-5.4-nano":  { input: 0.20 / 1e6,  output: 1.25 / 1e6,  cacheRead: 0.02 / 1e6,  cacheWrite: 0 },
+  "gpt-5.3-codex": { input: 1.75 / 1e6,  output: 14.0 / 1e6,  cacheRead: 0.175 / 1e6, cacheWrite: 0 },
+  "gpt-5.2-codex": { input: 1.75 / 1e6,  output: 14.0 / 1e6,  cacheRead: 0.175 / 1e6, cacheWrite: 0 },
   "gpt-5.2":       { input: 1.75 / 1e6,  output: 14.0 / 1e6,  cacheRead: 0.175 / 1e6, cacheWrite: 0 },
+  "gpt-5.1-codex-mini": { input: 0.25 / 1e6, output: 2.0 / 1e6, cacheRead: 0.025 / 1e6, cacheWrite: 0 },
+  "gpt-5.1-codex": { input: 1.25 / 1e6,  output: 10.0 / 1e6,  cacheRead: 0.125 / 1e6, cacheWrite: 0 },
   "gpt-5.1":       { input: 1.25 / 1e6,  output: 10.0 / 1e6,  cacheRead: 0.125 / 1e6, cacheWrite: 0 },
+  "gpt-5-codex":   { input: 1.25 / 1e6,  output: 10.0 / 1e6,  cacheRead: 0.125 / 1e6, cacheWrite: 0 },
   "gpt-5":         { input: 1.25 / 1e6,  output: 10.0 / 1e6,  cacheRead: 0.125 / 1e6, cacheWrite: 0 },
   "gpt-5-mini":    { input: 0.25 / 1e6,  output: 2.0 / 1e6,   cacheRead: 0.025 / 1e6, cacheWrite: 0 },
   "gpt-5-nano":    { input: 0.05 / 1e6,  output: 0.4 / 1e6,   cacheRead: 0.005 / 1e6, cacheWrite: 0 },
@@ -80,15 +89,19 @@ export const DEFAULT_PRICING: Record<string, ModelPricing> = {
   "gpt-4o-mini":   { input: 0.15 / 1e6,  output: 0.6 / 1e6,   cacheRead: 0.075 / 1e6, cacheWrite: 0 },
   // OpenAI reasoning (o3 is $2/$8, NOT $0.40/$1.60 which was batch pricing)
   "o3":            { input: 2.0 / 1e6,   output: 8.0 / 1e6,   cacheRead: 0.5 / 1e6,   cacheWrite: 0 },
-  "o3-pro":        { input: 20.0 / 1e6,  output: 80.0 / 1e6,  cacheRead: 0,           cacheWrite: 0 },
-  "o3-mini":       { input: 1.1 / 1e6,   output: 4.4 / 1e6,   cacheRead: 0,           cacheWrite: 0 },
-  "o4-mini":       { input: 1.1 / 1e6,   output: 4.4 / 1e6,   cacheRead: 0,           cacheWrite: 0 },
+  "o3-pro":        { input: 20.0 / 1e6,  output: 80.0 / 1e6,  cacheRead: 5.0 / 1e6,   cacheWrite: 0 },
+  "o3-mini":       { input: 1.1 / 1e6,   output: 4.4 / 1e6,   cacheRead: 0.55 / 1e6, cacheWrite: 0 },
+  "o4-mini":       { input: 0.55 / 1e6,  output: 2.2 / 1e6,   cacheRead: 0.14 / 1e6, cacheWrite: 0 },
   // Google Gemini
+  "gemini-3.5-flash": { input: 1.5 / 1e6, output: 9.0 / 1e6,  cacheRead: 0.15 / 1e6,  cacheWrite: 0 },
+  "gemini-3.1-pro-preview": { input: 2.0 / 1e6, output: 12.0 / 1e6, cacheRead: 0.20 / 1e6, cacheWrite: 0 },
+  "gemini-3.1-flash-lite": { input: 0.25 / 1e6, output: 1.5 / 1e6, cacheRead: 0.025 / 1e6, cacheWrite: 0 },
   "gemini-3-pro":  { input: 2.0 / 1e6,   output: 12.0 / 1e6,  cacheRead: 0,           cacheWrite: 0 },
   "gemini-3-flash": { input: 0.5 / 1e6,  output: 3.0 / 1e6,   cacheRead: 0,           cacheWrite: 0 },
-  "gemini-3.1-pro": { input: 2.0 / 1e6,  output: 12.0 / 1e6,  cacheRead: 0,           cacheWrite: 0 },
+  "gemini-3.1-pro": { input: 2.0 / 1e6,  output: 12.0 / 1e6,  cacheRead: 0.20 / 1e6,  cacheWrite: 0 },
   "gemini-2.5-pro": { input: 1.25 / 1e6, output: 10.0 / 1e6,  cacheRead: 0.125 / 1e6, cacheWrite: 0 },
   "gemini-2.5-flash": { input: 0.3 / 1e6, output: 2.5 / 1e6,  cacheRead: 0.03 / 1e6,  cacheWrite: 0 },
+  "gemini-2.5-flash-lite": { input: 0.1 / 1e6, output: 0.4 / 1e6, cacheRead: 0.01 / 1e6, cacheWrite: 0 },
   "gemini-2.0-flash": { input: 0.1 / 1e6, output: 0.4 / 1e6,  cacheRead: 0,           cacheWrite: 0 },
   "gemini-2.0-flash-lite": { input: 0.075 / 1e6, output: 0.3 / 1e6, cacheRead: 0,     cacheWrite: 0 },
   "gemini-flash-lite": { input: 0.1 / 1e6, output: 0.4 / 1e6, cacheRead: 0,           cacheWrite: 0 },
@@ -201,12 +214,21 @@ export function normalizeModelName(modelId: string): string | null {
   if (m.includes("sonnet")) return "sonnet";
   if (m.includes("haiku")) return "haiku";
 
-  // OpenAI GPT-5 family (specific before general, order matters)
+  // OpenAI GPT-5 family (most-specific first to prevent prefix shadowing)
+  if (m.includes("gpt-5.5-pro")) return "gpt-5.5-pro";
+  if (m.includes("gpt-5.5")) return "gpt-5.5";
+  if (m.includes("gpt-5.4") && m.includes("nano")) return "gpt-5.4-nano";
+  if (m.includes("gpt-5.4") && m.includes("mini")) return "gpt-5.4-mini";
+  if (m.includes("gpt-5.4")) return "gpt-5.4";
+  if (m.includes("gpt-5.3") && m.includes("codex")) return "gpt-5.3-codex";
+  if (m.includes("gpt-5.2") && m.includes("codex")) return "gpt-5.2-codex";
+  if (m.includes("gpt-5.2")) return "gpt-5.2";
+  if (m.includes("gpt-5.1") && m.includes("codex") && m.includes("mini")) return "gpt-5.1-codex-mini";
+  if (m.includes("gpt-5.1") && m.includes("codex")) return "gpt-5.1-codex";
+  if (m.includes("gpt-5.1")) return "gpt-5.1";
+  if (m.includes("gpt-5") && m.includes("codex")) return "gpt-5-codex";
   if (m.includes("gpt-5") && m.includes("nano")) return "gpt-5-nano";
   if (m.includes("gpt-5") && m.includes("mini")) return "gpt-5-mini";
-  if (m.includes("gpt-5.4")) return "gpt-5.4";
-  if (m.includes("gpt-5.2")) return "gpt-5.2";
-  if (m.includes("gpt-5.1")) return "gpt-5.1";
   if (m.includes("gpt-5")) return "gpt-5";
 
   // OpenAI GPT-4 family
@@ -222,15 +244,19 @@ export function normalizeModelName(modelId: string): string | null {
   if (m.includes("o3-pro")) return "o3-pro";
   if (m === "o3" || m.startsWith("o3-")) return "o3";
 
-  // Google Gemini (specific before general)
-  if (m.includes("2.0") && m.includes("flash") && m.includes("lite")) return "gemini-2.0-flash-lite";
-  if (m.includes("2.0") && m.includes("flash")) return "gemini-2.0-flash";
-  if (m.includes("flash-lite") || m.includes("flash_lite")) return "gemini-flash-lite";
+  // Google Gemini (most-specific first to prevent prefix shadowing)
+  if (m.includes("gemini") && m.includes("3.5") && m.includes("flash")) return "gemini-3.5-flash";
+  if (m.includes("gemini") && m.includes("3.1") && m.includes("pro") && m.includes("preview")) return "gemini-3.1-pro-preview";
+  if (m.includes("gemini") && m.includes("3.1") && m.includes("flash") && m.includes("lite")) return "gemini-3.1-flash-lite";
   if (m.includes("gemini") && m.includes("3.1") && m.includes("pro")) return "gemini-3.1-pro";
+  if (m.includes("gemini") && m.includes("2.5") && m.includes("flash") && m.includes("lite")) return "gemini-2.5-flash-lite";
   if (m.includes("gemini") && m.includes("2.5") && m.includes("flash")) return "gemini-2.5-flash";
   if (m.includes("gemini") && m.includes("2.5") && m.includes("pro")) return "gemini-2.5-pro";
+  if (m.includes("2.0") && m.includes("flash") && m.includes("lite")) return "gemini-2.0-flash-lite";
+  if (m.includes("2.0") && m.includes("flash")) return "gemini-2.0-flash";
   if (m.includes("gemini-3") && m.includes("flash")) return "gemini-3-flash";
   if (m.includes("gemini-3") && m.includes("pro")) return "gemini-3-pro";
+  if (m.includes("flash-lite") || m.includes("flash_lite")) return "gemini-flash-lite";
 
   // DeepSeek
   if (m.includes("deepseek") && (m.includes("r1") || m.includes("reasoner"))) return "deepseek-r1";
