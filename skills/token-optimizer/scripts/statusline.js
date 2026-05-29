@@ -98,20 +98,35 @@ process.stdin.on('end', () => {
     const cacheMatchesSession = q && q.session_file && safeSessionId && q.session_file.includes(safeSessionId);
 
     // ---- ROW 1: Core identity + context health ----
+    // Staleness guard: the score is recomputed by hooks (PostToolUse is
+    // throttled to ~2min). If the cache is older than 5 min the displayed score
+    // may not reflect recent activity, so mark it (~ prefix + dim) rather than
+    // showing a frozen score as if it were live.
+    let stale = false;
+    if (q) {
+      // Absent or unparseable timestamp => unknown age => treat as stale, so a
+      // cache written by an older plugin version can't show as live.
+      const ts = q.timestamp ? new Date(q.timestamp).getTime() : NaN;
+      if (isNaN(ts) || (Date.now() - ts) / 1000 > 300) stale = true;
+    }
     let qScore = '';
     if (q) {
       const rh = q.resource_health != null ? q.resource_health : q.score;
       if (rh != null) {
         const score = Math.round(rh);
         const grade = q.resource_health_grade || q.grade || (score >= 90 ? 'S' : score >= 80 ? 'A' : score >= 70 ? 'B' : score >= 55 ? 'C' : score >= 40 ? 'D' : 'F');
+        // Keep the score's value-color (green/yellow/orange/red) regardless of
+        // staleness; the `~` prefix is the only stale indicator so the number
+        // stays readable. (Dimming the whole score made it barely visible.)
+        const tag = `ContextQ:${stale ? '~' : ''}${grade}(${score})`;
         if (score >= 85) {
-          qScore = `${SEP}\x1b[32mContextQ:${grade}(${score})${RESET}`;
+          qScore = `${SEP}\x1b[32m${tag}${RESET}`;
         } else if (score >= 75) {
-          qScore = `${SEP}\x1b[33mContextQ:${grade}(${score})${RESET}`;
+          qScore = `${SEP}\x1b[33m${tag}${RESET}`;
         } else if (score >= 50) {
-          qScore = `${SEP}\x1b[38;5;208mContextQ:${grade}(${score})${RESET}`;
+          qScore = `${SEP}\x1b[38;5;208m${tag}${RESET}`;
         } else {
-          qScore = `${SEP}\x1b[31mContextQ:${grade}(${score})${RESET}`;
+          qScore = `${SEP}\x1b[31m${tag}${RESET}`;
         }
       }
     } else {

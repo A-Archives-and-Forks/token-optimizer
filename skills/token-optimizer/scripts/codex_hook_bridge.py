@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
+import time
 from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any, Callable
@@ -19,6 +21,9 @@ from typing import Any, Callable
 import codex_session
 import measure
 from hook_io import read_stdin_hook_input
+
+# Emit a sprawl nudge once this many subagents are open concurrently.
+_SUBAGENT_SPRAWL_THRESHOLD = 8
 
 
 def _capture_stdout(func: Callable[..., Any], *args: Any, **kwargs: Any) -> str:
@@ -150,6 +155,91 @@ def handle_user_prompt_submit() -> None:
     _emit_additional_context("UserPromptSubmit", additional_context)
 
 
+def _subagent_log_path(session_id: str | None) -> Path:
+    """Path to the per-session subagent event log.
+
+    This log exists ONLY to drive the real-time sprawl nudge (a live open-count
+    while a session runs). It is NOT a reporting source. Authoritative subagent
+    counts and token costs come from ``codex_state.subagent_costs()`` (the
+    ``thread_spawn_edges`` SQLite table), which is historical and complete. The
+    quality scorer and audit never read this file (KTD8: DB primary, JSONL
+    fallback, hooks for nudge only).
+    """
+    # Cap length: a crafted oversized session_id would otherwise produce a
+    # filename past the OS limit, silently disabling sprawl tracking.
+    safe = (measure.sanitize_session_id(session_id) if session_id else "")[:128]
+    base = measure.QUALITY_CACHE_DIR
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"codex-subagents-{safe or 'unknown'}.jsonl"
+
+
+def _record_subagent_event(session_id: str | None, event: str) -> None:
+    """Append a subagent lifecycle event.
+
+    Append-only with ``O_APPEND`` makes each small line write atomic on local
+    POSIX filesystems (the kernel holds the inode lock for the write), so
+    concurrent SubagentStart/Stop hook invocations never lose an increment the
+    way a read-modify-write counter would. (Not guaranteed on NFS/CIFS, which is
+    not a supported location for the cache dir.)
+    """
+    path = _subagent_log_path(session_id)
+    line = (json.dumps({"event": event, "ts": time.time()}) + "\n").encode("utf-8")
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        print(f"[Token Optimizer] Codex subagent log failed: {exc}", file=sys.stderr)
+
+
+def _open_subagent_count(session_id: str | None) -> int:
+    path = _subagent_log_path(session_id)
+    starts = stops = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("event") == "start":
+                    starts += 1
+                elif rec.get("event") == "stop":
+                    stops += 1
+    except OSError:
+        return 0
+    return max(0, starts - stops)
+
+
+def handle_subagent_start() -> None:
+    hook_input = read_stdin_hook_input()
+    session_id = hook_input.get("session_id")
+    # Subagent identity (v0.134) is optional; we count regardless of whether
+    # the payload carries it, so a missing identity never breaks the nudge.
+    _record_subagent_event(session_id, "start")
+    open_count = _open_subagent_count(session_id)
+    if open_count >= _SUBAGENT_SPRAWL_THRESHOLD:
+        _emit_additional_context(
+            "SubagentStart",
+            f"[Token Optimizer] {open_count} subagents are running concurrently. "
+            "Each carries its own context and token cost - consider closing finished "
+            "agents or consolidating work to reduce sprawl.",
+        )
+    # Below threshold: stay silent so this hook adds no per-spawn noise.
+
+
+def handle_subagent_stop() -> None:
+    hook_input = read_stdin_hook_input()
+    session_id = hook_input.get("session_id")
+    _record_subagent_event(session_id, "stop")
+    # Stop only updates the count log; never emits output.
+
+
 def main() -> int:
     try:
         if len(sys.argv) < 2:
@@ -160,6 +250,10 @@ def main() -> int:
             handle_session_start()
         elif command == "user-prompt-submit":
             handle_user_prompt_submit()
+        elif command == "subagent-start":
+            handle_subagent_start()
+        elif command == "subagent-stop":
+            handle_subagent_stop()
     except Exception as exc:
         print(f"[Token Optimizer] Codex hook bridge failed: {exc}", file=sys.stderr)
     return 0

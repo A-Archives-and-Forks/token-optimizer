@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Manage Token Optimizer's Codex CLI status line config."""
+"""Manage Token Optimizer's Codex CLI status line config.
+
+Codex v0.131+ ships a native ``[tui].status_line`` mechanism (blended token
+count, permissions, context). Token Optimizer does NOT add a separate status
+bar; it configures that same native mechanism with a token-aware item set
+(context-remaining / context-used / used-tokens alongside model and git info).
+
+Because it writes the user's native config, it must never silently clobber a
+hand-tuned ``[tui]`` block: an existing ``status_line``/``terminal_title`` is
+preserved and the install errors unless ``--force`` is given, which comments the
+originals out rather than deleting them.
+"""
 
 from __future__ import annotations
 
@@ -82,7 +93,11 @@ def _replace_or_append_config(config_text: str, *, force: bool) -> tuple[str, st
     has_status = STATUS_LINE_RE.search(tui_body)
     has_title = TERMINAL_TITLE_RE.search(tui_body)
     if (has_status or has_title) and not force:
-        raise ValueError("config.toml already has [tui] status_line/terminal_title; rerun with --force to replace")
+        raise ValueError(
+            "config.toml already defines a native [tui] status_line/terminal_title "
+            "(Codex v0.131+). Leaving it untouched; rerun with --force to replace it "
+            "with Token Optimizer's token-aware items (the originals are commented, not deleted)."
+        )
     if has_status or has_title:
         tui_body = _comment_out_existing_settings(tui_body)
 

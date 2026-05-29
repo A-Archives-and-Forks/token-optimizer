@@ -2664,6 +2664,59 @@ var DB = (function() {
       }
       gridEl.parentNode.insertBefore(ctaEl, gridEl.nextSibling);
     }
+
+    // Codex Runtime State card. Present only on Codex payloads; on Claude,
+    // data.codex_state is null/absent so this block is skipped entirely and
+    // no Codex section renders (backward-compatible, no JS errors).
+    var cs = data.codex_state;
+    if (cs) {
+      var ov = document.getElementById('view-overview');
+      if (ov) {
+        var existingCsCard = document.getElementById('codex-state-card');
+        if (existingCsCard) existingCsCard.parentNode.removeChild(existingCsCard);
+        var sub = cs.subagents || {}, mem = cs.memory || {}, goals = cs.goals || {};
+        var rows = '';
+        if (sub.available) {
+          var leakWarn = sub.leaked_subagents > 0
+            ? ' &middot; <span style="color:#ff9f43;font-weight:600;">' + sub.leaked_subagents + ' leaked</span>' : '';
+          rows += '<div class="bar-row"><span class="bar-label">Subagents</span><span class="bar-value">' +
+            sub.total_subagents + ' total (' + sub.open_subagents + ' open)' + leakWarn +
+            ' &middot; ' + fn(sub.total_child_tokens) + ' tokens</span></div>';
+        } else {
+          rows += '<div class="bar-row"><span class="bar-label">Subagents</span><span class="bar-value">no state data yet</span></div>';
+        }
+        rows += '<div class="bar-row"><span class="bar-label">Memory</span><span class="bar-value">' +
+          ((mem.available && mem.thread_count) ? fn(mem.total_memory_tokens) + ' tokens / ' + mem.thread_count + ' thread(s)' : 'none recorded') +
+          '</span></div>';
+        if (goals.available && goals.total_goals) {
+          var limited = (goals.budget_limited || 0) + (goals.usage_limited || 0);
+          var goalWarn = limited > 0 ? ' &middot; <span style="color:#ff9f43;font-weight:600;">' + limited + ' limited</span>' : '';
+          rows += '<div class="bar-row"><span class="bar-label">Goals</span><span class="bar-value">' +
+            goals.total_goals + ' (' + goals.active_goals + ' active)' + goalWarn + '</span></div>';
+        } else {
+          rows += '<div class="bar-row"><span class="bar-label">Goals</span><span class="bar-value">none active</span></div>';
+        }
+        var rl = cs.rate_limits && cs.rate_limits.primary;
+        if (rl && rl.used_percent != null) {
+          rows += '<div class="bar-row"><span class="bar-label">Rate limit</span><span class="bar-value">' + Math.round(rl.used_percent) + '% used (primary)</span></div>';
+        }
+        if (cs.effort) {
+          rows += '<div class="bar-row"><span class="bar-label">Effort</span><span class="bar-value">' + esc(String(cs.effort)) + '</span></div>';
+        }
+        if (cs.compaction && cs.compaction.avg_ratio != null) {
+          rows += '<div class="bar-row"><span class="bar-label">Compaction</span><span class="bar-value">' +
+            cs.compaction.count + ' this session &middot; avg to ' + Math.round(cs.compaction.avg_ratio * 100) + '% of pre-compaction</span></div>';
+        }
+        var csCard = document.createElement('div');
+        csCard.className = 'card wide';
+        csCard.id = 'codex-state-card';
+        csCard.innerHTML = '<div class="card-header"><span>Codex Runtime State</span></div>' +
+          '<div style="padding: var(--s-2) var(--s-3);">' + rows + '</div>';
+        // Appended last in the overview by design; re-render removes the prior
+        // copy above. New overview cards added after this will sit below it.
+        ov.appendChild(csCard);
+      }
+    }
   }
 
   function renderSectionViews(singleSec) {

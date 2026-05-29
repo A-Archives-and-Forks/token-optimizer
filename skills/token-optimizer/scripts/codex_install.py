@@ -16,7 +16,10 @@ import codex_statusline
 from runtime_env import codex_home
 
 TOKEN_OPTIMIZER_MARKER = "token-optimizer/scripts"
-SUPPORTED_EVENTS = ("PreToolUse", "SessionStart", "UserPromptSubmit", "PostToolUse", "Stop")
+SUPPORTED_EVENTS = (
+    "PreToolUse", "SessionStart", "UserPromptSubmit", "PostToolUse", "Stop",
+    "SubagentStart", "SubagentStop",
+)
 
 
 def _repo_root() -> Path:
@@ -39,6 +42,7 @@ def _managed_hooks(
     enable_bash_compression: bool = False,
     enable_hot_path_hooks: bool = False,
     enable_prompt_hooks: bool = False,
+    enable_subagent_hooks: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
     """Build Codex project hooks.
 
@@ -93,6 +97,41 @@ def _managed_hooks(
                             "user-prompt-submit",
                         ),
                         "timeout": 12,
+                    }
+                ]
+            }
+        ],
+        })
+    if enable_subagent_hooks:
+        hooks.update({
+        "SubagentStart": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        # Not redirect_quiet: the sprawl nudge is emitted on
+                        # stdout (only when the threshold is crossed; silent
+                        # otherwise) so Codex can inject it as context.
+                        "command": _hook_command(
+                            "skills/token-optimizer/scripts/codex_hook_bridge.py",
+                            "subagent-start",
+                        ),
+                        "timeout": 6,
+                    }
+                ]
+            }
+        ],
+        "SubagentStop": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": _hook_command(
+                            "skills/token-optimizer/scripts/codex_hook_bridge.py",
+                            "subagent-stop",
+                            redirect_quiet=True,
+                        ),
+                        "timeout": 6,
                     }
                 ]
             }
@@ -222,6 +261,7 @@ def _merge_hooks(
     enable_bash_compression: bool = False,
     enable_hot_path_hooks: bool = False,
     enable_prompt_hooks: bool = False,
+    enable_subagent_hooks: bool = False,
 ) -> dict[str, Any]:
     result = json.loads(json.dumps(existing))
     hooks = result.setdefault("hooks", {})
@@ -229,6 +269,7 @@ def _merge_hooks(
         enable_bash_compression=enable_bash_compression,
         enable_hot_path_hooks=enable_hot_path_hooks,
         enable_prompt_hooks=enable_prompt_hooks,
+        enable_subagent_hooks=enable_subagent_hooks,
     )
     for event in SUPPORTED_EVENTS:
         groups = hooks.get(event, [])
@@ -265,6 +306,7 @@ def install(
     enable_bash_compression: bool = False,
     enable_hot_path_hooks: bool = False,
     enable_prompt_hooks: bool = False,
+    enable_subagent_hooks: bool = False,
     enable_status_line: bool = False,
     force_status_line: bool = False,
 ) -> tuple[Path, str, dict[str, Any]]:
@@ -275,12 +317,14 @@ def install(
         enable_bash_compression=enable_bash_compression,
         enable_hot_path_hooks=enable_hot_path_hooks,
         enable_prompt_hooks=enable_prompt_hooks,
+        enable_subagent_hooks=enable_subagent_hooks,
     )
     details: dict[str, Any] = {
         "hook_events": sorted(updated.get("hooks", {}).keys()),
         "bash_compression": enable_bash_compression,
         "hot_path_hooks": enable_hot_path_hooks,
         "prompt_hooks": enable_prompt_hooks,
+        "subagent_hooks": enable_subagent_hooks,
         "compact_prompt": "skipped" if skip_compact_prompt else None,
         "status_line": "skipped" if not enable_status_line else None,
     }
@@ -337,6 +381,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Add visible SessionStart/UserPromptSubmit hooks when using --profile quiet; balanced already includes them",
     )
+    parser.add_argument(
+        "--enable-subagent-hooks",
+        action="store_true",
+        help="Add SubagentStart/SubagentStop hooks for real-time subagent sprawl nudges when using --profile quiet; balanced/aggressive include them",
+    )
+    parser.add_argument(
+        "--no-subagent-hooks",
+        action="store_true",
+        help="Install without SubagentStart/SubagentStop hooks even on balanced/aggressive profiles",
+    )
     parser.add_argument("--enable-status-line", action="store_true", help="Opt into Codex CLI context/status visibility")
     parser.add_argument("--force-status-line", action="store_true", help="Replace existing Codex [tui] status_line settings")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable output")
@@ -354,6 +408,9 @@ def main(argv: list[str] | None = None) -> int:
             enable_prompt_hooks = args.enable_prompt_hooks or args.profile in {"balanced", "aggressive"}
             enable_hot_path_hooks = args.enable_hot_path_hooks or args.profile in {"telemetry", "aggressive"}
             enable_bash_compression = args.enable_bash_compression or args.profile == "aggressive"
+            enable_subagent_hooks = (
+                args.enable_subagent_hooks or args.profile in {"balanced", "aggressive"}
+            ) and not args.no_subagent_hooks
             path, action, details = install(
                 project,
                 is_global=is_global,
@@ -363,6 +420,7 @@ def main(argv: list[str] | None = None) -> int:
                 enable_bash_compression=enable_bash_compression,
                 enable_hot_path_hooks=enable_hot_path_hooks,
                 enable_prompt_hooks=enable_prompt_hooks,
+                enable_subagent_hooks=enable_subagent_hooks,
                 enable_status_line=args.enable_status_line,
                 force_status_line=args.force_status_line,
             )

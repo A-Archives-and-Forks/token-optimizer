@@ -31,8 +31,11 @@ Run these before giving advice:
 TOKEN_OPTIMIZER_RUNTIME=codex python3 "$MEASURE_PY" report
 TOKEN_OPTIMIZER_RUNTIME=codex python3 "$MEASURE_PY" coach --json
 TOKEN_OPTIMIZER_RUNTIME=codex python3 "$MEASURE_PY" quality current --json
+TOKEN_OPTIMIZER_RUNTIME=codex python3 "$MEASURE_PY" codex-state --json
 TOKEN_OPTIMIZER_RUNTIME=codex python3 "$MEASURE_PY" codex-doctor --project "$PWD" --json
 ```
+
+`codex-state` reads Codex's versioned SQLite state read-only (`state_*.sqlite`, `goals_*.sqlite`): subagent count and token cost (with leaked/never-closed subagents), memory overhead from `stage1_outputs`, and goal budget utilization. It is empty-safe when those tables have no rows yet.
 
 If `quality current` has no parseable session, continue without it. Do not block the audit.
 
@@ -49,7 +52,9 @@ STATUS
 
 SETUP
 - AGENTS.md: X tokens
-- Codex memories: X files / X lines
+- Codex memory: X tokens of densified memory (state_*.sqlite stage1_outputs)
+- Subagents: X total, Y leaked (open + stale), Z tokens of subagent cost
+- Goals: X active, any budget-limited/usage-limited
 - Skills/plugin skills: X active, Y tokens of discovery surface
 - MCP: X servers
 - Hooks: balanced / quiet / missing / custom
@@ -85,6 +90,7 @@ Default to the balanced profile. Balanced means:
 
 - `SessionStart`: recovery context when Codex can use it.
 - `UserPromptSubmit`: prompt-quality and loop nudges.
+- `SubagentStart`/`SubagentStop`: silent subagent counting with a sprawl nudge when too many run concurrently (opt out with `--no-subagent-hooks`).
 - `Stop`: throttled dashboard refresh and continuity checkpoints.
 - Codex compact prompt in `~/.codex/config.toml`.
 
@@ -105,7 +111,9 @@ Use these as the Codex equivalent of Phase 4:
 | Action | What To Inspect | Safe Fix |
 |---|---|---|
 | AGENTS.md | Global/project `AGENTS.md` and `AGENTS.override.md` size, duplication, volatile content | Keep root guidance lean; move long workflows into skills or referenced docs |
-| Codex memories | `~/.codex/memories/**/*.md` when present | Keep high-signal durable preferences only; remove stale operating history |
+| Codex memory | `codex-state` memory overhead (densified `stage1_outputs` in `state_*.sqlite`; the legacy `~/.codex/memories/` dir is deprecated) | Memory is auto-densified by Codex; flag only when overhead is large relative to the window |
+| Subagent sprawl | `codex-state` subagent count, token cost, and leaked (open + stale) subagents | Close finished subagents; consolidate work; high leaked counts mean agents never closed cleanly |
+| Goal budgets | `codex-state` goal utilization and budget-limited/usage-limited status | When a goal is budget/usage limited, raise its budget deliberately or split the work |
 | Skills/plugin skills | `coach`, `report`, dashboard Manage data | Disable stale user skills with `measure.py codex-skill disable`; do not edit plugin cache directly |
 | MCP servers | Codex config MCP inventory | Disable unused servers with `measure.py codex-mcp disable NAME` after checking whether the user actually uses them |
 | Hooks | `codex-doctor`, `.codex/hooks.json` | Install/update balanced hooks; keep per-tool hooks opt-in |
@@ -122,8 +130,13 @@ Always explain side effects before changing config. Prefer dry-runs before write
 - Balanced hooks for prompt-quality nudges, topic-relevant continuity hints, session continuity, and dashboard refresh.
 - Quality-aware checkpoints that preserve score, weakest signals, model/window metadata, decisions, files, and next step.
 - Stop-time backfill of large/high-signal Codex tool outputs into the local archive and SQLite session store, without enabling noisy per-tool hooks by default.
+- Read-only Codex state metrics via `codex-state`: subagent token cost and leak detection (`thread_spawn_edges` + `threads`), memory overhead (`stage1_outputs`), and goal budget utilization (`thread_goals`). Historical and complete, no hooks required.
+- Modern subagent parsing from `collab_agent_spawn_end`/`collab_close_end` events plus legacy `spawn_agent`, so multi-agent Codex sessions are no longer invisible.
+- Compaction compression measured per session (post-compaction context vs. pre-compaction occupancy from `compacted.replacement_history` + per-turn token counts).
+- Rate-limit, per-turn effort, and tool/turn duration signals parsed from the Codex transcript.
+- Optional `SubagentStart`/`SubagentStop` hooks for real-time sprawl nudges.
 - Compact prompt installation in `~/.codex/config.toml`.
-- Codex status line support.
+- Codex native `[tui]` status line configuration (coexists with the v0.131+ blended-token display; never clobbers a custom config without `--force`).
 - Skill/plugin/MCP inventory and enable/disable commands.
 - Bounded log parsing so huge Codex transcripts do not burn CPU.
 - Explicit file outline tools (`outline.py`, structure helpers) when the user asks to inspect a large file before rereading it.
@@ -135,10 +148,10 @@ Be honest about these. Do not imply they are working invisibly:
 - Delta read substitution is not active in Codex.
 - Structure-map substitution is not active in Codex.
 - Invisible Bash command rewriting/compression is not reliable in current Codex; keep it experimental and opt-in.
-- Claude-style `PreCompact`, `PostCompact`, and `StopFailure` hook parity is approximated with compact prompts and checkpoints.
+- Claude-style `PreCompact`/`PostCompact` hook parity is approximated with compact prompts and checkpoints; compaction quality is now measured after the fact from the transcript.
 - Cache-write TTL breakdowns are limited by what Codex logs expose.
-- Per-session skill invocation telemetry is incomplete; stale-skill advice is a starting point, not a verdict.
 - Tool-result archiving in balanced mode happens at Stop, not immediately after each tool call.
+- For generic Codex runtime/auth/network health, defer to the native `codex doctor`; Token Optimizer's `codex-doctor` focuses on token and optimization setup.
 
 ## 6. Codex Chat Close
 

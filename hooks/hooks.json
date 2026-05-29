@@ -161,6 +161,15 @@
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/python-launcher.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/run.py\" skills/token-optimizer/scripts/read_cache.py --invalidate --quiet"
           }
         ]
+      },
+      {
+        "matcher": "Bash|Read|Glob|Grep|Agent|Edit|Write|MultiEdit|NotebookEdit|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/python-launcher.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/run.py\" skills/token-optimizer/scripts/measure.py quality-cache --quiet --throttle-only"
+          }
+        ]
       }
     ],
     "PostCompact": [

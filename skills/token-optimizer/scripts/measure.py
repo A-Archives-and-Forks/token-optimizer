@@ -94,6 +94,7 @@ from runtime_env import claude_home, detect_runtime, runtime_home, runtime_name_
 
 import codex_io
 import codex_session
+import codex_state
 
 try:
     import fcntl
@@ -3551,6 +3552,107 @@ def _sanitize_dashboard_paths(data):
     return data
 
 
+def _codex_state_summary():
+    """Collect Codex runtime-state metrics for display, or None unless Codex.
+
+    Combines read-only SQLite state (subagent costs, memory overhead, goal
+    budgets) with the current session's parsed signals (rate limits, effort,
+    compaction compression). Returns None on the Claude runtime so dashboard,
+    report, and doctor consumers can treat the key as optional (no Claude-path
+    behavior change). All sources degrade to empty rather than raising.
+    """
+    if detect_runtime() != "codex":
+        return None
+    summary = {
+        "subagents": codex_state.subagent_costs(),
+        "memory": codex_state.memory_overhead(),
+        "goals": codex_state.goal_budgets(),
+        "rate_limits": None,
+        "effort": None,
+        "compaction": None,
+    }
+    try:
+        current = codex_session.find_current_session_jsonl()
+        if current:
+            session = codex_session.parse_session_jsonl(current)
+            if session:
+                summary.update({
+                    "rate_limits": session.get("rate_limits"),
+                    "effort": session.get("effort"),
+                    "effort_breakdown": session.get("effort_breakdown"),
+                    "tool_duration_p90_ms": session.get("tool_duration_p90_ms"),
+                    "task_duration_ms_max": session.get("task_duration_ms_max"),
+                    "ttft_ms_avg": session.get("ttft_ms_avg"),
+                })
+            quality = codex_session.parse_jsonl_for_quality(current)
+            if quality and quality.get("compaction_ratios"):
+                ratios = [r["ratio"] for r in quality["compaction_ratios"] if r.get("ratio") is not None]
+                summary["compaction"] = {
+                    "count": quality.get("compactions", 0),
+                    "ratios": quality["compaction_ratios"],
+                    "avg_ratio": round(sum(ratios) / len(ratios), 3) if ratios else None,
+                }
+    except Exception:
+        pass
+    return summary
+
+
+def codex_state_report(as_json=False):
+    """Print the Codex runtime-state summary (subagents, memory, goals, signals)."""
+    summary = _codex_state_summary()
+    if as_json:
+        print(json.dumps(summary, indent=2, default=str))
+        return
+    if summary is None:
+        print("Codex runtime state is only available on the Codex runtime.")
+        return
+    print("\nToken Optimizer - Codex Runtime State")
+    print("=" * 38)
+
+    sub = summary["subagents"]
+    if sub.get("available"):
+        print(f"\nSubagents: {sub['total_subagents']} total "
+              f"({sub['open_subagents']} open, {sub['closed_subagents']} closed, "
+              f"{sub['leaked_subagents']} leaked)")
+        print(f"  Subagent token cost: {sub['total_child_tokens']:,}")
+        for leak in sub.get("leaked", [])[:5]:
+            age = f"{leak['age_minutes']}min" if leak["age_minutes"] is not None else "unknown age"
+            print(f"  ! leaked {leak['child_thread_id'][:16]} ({leak['tokens_used']:,} tokens, open {age})")
+    else:
+        print("\nSubagents: no state data yet (no spawn edges recorded)")
+
+    mem = summary["memory"]
+    if mem.get("available") and mem["thread_count"]:
+        print(f"\nMemory overhead: {mem['total_memory_tokens']:,} tokens across {mem['thread_count']} thread(s); "
+              f"largest {mem['max_thread_memory_tokens']:,}")
+    else:
+        print("\nMemory overhead: none recorded")
+
+    goals = summary["goals"]
+    if goals.get("available") and goals["total_goals"]:
+        print(f"\nGoals: {goals['total_goals']} ({goals['active_goals']} active)")
+        if goals["budget_limited"] or goals["usage_limited"] or goals["over_budget"]:
+            print(f"  ! {goals['budget_limited']} budget-limited, {goals['usage_limited']} usage-limited, "
+                  f"{goals['over_budget']} over budget")
+    else:
+        print("\nGoals: none active")
+
+    rl = summary.get("rate_limits") or {}
+    primary = rl.get("primary")
+    if isinstance(primary, dict) and primary.get("used_percent") is not None:
+        print(f"\nRate limit (primary): {primary['used_percent']:.0f}% used")
+    if summary.get("effort"):
+        print(f"Effort (dominant this session): {summary['effort']}")
+    if summary.get("task_duration_ms_max"):
+        print(f"Longest task: {summary['task_duration_ms_max'] / 1000:.0f}s"
+              + (f" (first token ~{summary['ttft_ms_avg'] / 1000:.0f}s avg)" if summary.get("ttft_ms_avg") else ""))
+    comp = summary.get("compaction")
+    if comp and comp.get("avg_ratio") is not None:
+        print(f"Compaction: {comp['count']} this session, "
+              f"avg compression to {comp['avg_ratio'] * 100:.0f}% of pre-compaction context")
+    print()
+
+
 def generate_dashboard(coord_path):
     """Generate an interactive HTML dashboard from audit results."""
     coord = Path(coord_path)
@@ -3680,6 +3782,7 @@ def generate_dashboard(coord_path):
         "version": TOKEN_OPTIMIZER_VERSION,
         "runtime": detect_runtime(),
         "runtime_label": runtime_name_for_humans(),
+        "codex_state": _codex_state_summary(),
     }
     data = _sanitize_dashboard_paths(data)
 
@@ -9543,7 +9646,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.7.15"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.8.0"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DAEMON_RUNTIME = detect_runtime()
 _DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else "claude"
@@ -12086,8 +12189,11 @@ def detect_duplicates(quality_data):
     return {"duplicates": duplicates, "estimated_waste_tokens": estimated_waste_tokens}
 
 
-def compute_quality_score(quality_data):
+def compute_quality_score(quality_data, session_id=None):
     """Compute weighted composite quality score 0-100.
+
+    session_id, when provided, gates the global live-fill.json sidecar so a
+    session is never scored against another concurrent session's context fill.
 
     Each signal is scored 0-100, then weighted per _QUALITY_WEIGHTS.
     Higher = better quality (less waste).
@@ -12114,7 +12220,14 @@ def compute_quality_score(quality_data):
         if fill_pct is None and live_fill_path.exists():
             live = json.loads(live_fill_path.read_text(encoding="utf-8"))
             age = time.time() - live.get("timestamp", 0) / 1000  # JS timestamp is ms
-            if age < 10:
+            # live-fill.json is a single global file written by whichever session's
+            # status line rendered last. Only trust it when its session_id matches
+            # the session being scored — otherwise a fresh session reads another
+            # active session's fill, scores a false-low fill, and the resource_health
+            # ratchet pins that wrong value for the rest of the session.
+            live_sid = sanitize_session_id(str(live.get("session_id") or ""))
+            want_sid = sanitize_session_id(str(session_id or ""))
+            if age < 10 and want_sid and live_sid == want_sid:
                 fill_pct = live["used_percentage"] / 100.0
     except (json.JSONDecodeError, OSError, KeyError):
         pass
@@ -16835,7 +16948,49 @@ def _maybe_loop_warning(result, cache_path, quality_data, quiet=False):
     return None
 
 
-def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_jsonl=None, force=False):
+def _acquire_quality_lock(cache_path):
+    """Non-blocking per-session lock serializing quality_cache recompute+write.
+
+    Returns an fd on success, None when locking is unavailable (caller proceeds
+    unlocked, e.g. Windows), or False when another process already holds it
+    (caller should skip the recompute and return the current cached score).
+
+    Why: the PostToolUse refresh fires on every tool call, so with parallel
+    subagents many quality_cache() processes can recompute concurrently. The
+    score itself is idempotent, but the nudge/loop carry-forward counters are
+    not — concurrent read-modify-write would clobber them and double-fire
+    nudges. Serializing recompute eliminates that race and the redundant
+    thundering-herd recomputes. Hook processes are one-shot, so the advisory
+    lock is also released on process exit as a safety net.
+    """
+    if not _HAS_FCNTL:
+        return None
+    try:
+        fd = os.open(str(cache_path.with_suffix(".qlock")), os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        os.close(fd)
+        return False
+    return fd
+
+
+def _release_quality_lock(fd):
+    if not fd:  # None or False
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_jsonl=None, force=False, pure_time_throttle=False):
     """Run quality analysis and write score to cache file for status line.
 
     Skips analysis if cache is younger than throttle_seconds (unless force=True).
@@ -16843,6 +16998,15 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
         session_jsonl: Path string to the session JSONL (from hook transcript_path).
                        If provided, used directly instead of guessing by mtime.
         force: If True, bypass throttle (used by PostCompact hook for immediate refresh).
+        pure_time_throttle: If True, throttle purely on cache age and ignore whether
+                       the transcript changed. The default (False) recomputes whenever
+                       the session changed, which is right for the infrequent
+                       UserPromptSubmit path. The PostToolUse path sets this True:
+                       during a long autonomous run the transcript changes on every
+                       tool call, so without it the status score would either recompute
+                       on every call (costly) or — as it did before this existed — never
+                       refresh at all, leaving the bar frozen at a stale value. With it,
+                       the score refreshes at most once per throttle window mid-run.
     Returns the quality score, or None if skipped/failed.
     """
     # Resolve the session file: prefer explicit path, fall back to mtime guess
@@ -16860,7 +17024,10 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
         try:
             age = time.time() - cache_path.stat().st_mtime
             session_unchanged = filepath is not None and filepath.stat().st_mtime <= cache_path.stat().st_mtime
-            if age < throttle_seconds and session_unchanged:
+            # pure_time_throttle still requires a resolvable session file: a missing
+            # file must return None (no score), never serve a cached value as if live.
+            throttle_skip = (age < throttle_seconds and filepath is not None) if pure_time_throttle else (age < throttle_seconds and session_unchanged)
+            if throttle_skip:
                 if not quiet:
                     try:
                         cached = _read_quality_cache(cache_path)
@@ -16872,6 +17039,19 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
             pass
 
     if not filepath:
+        return None
+
+    # Serialize recompute+write per session (closes the concurrent-PostToolUse
+    # nudge-state race). Released at every return below; process exit is the
+    # safety net for one-shot hook invocations.
+    _qlock = _acquire_quality_lock(cache_path)
+    if _qlock is False:
+        if not quiet:
+            try:
+                cached = _read_quality_cache(cache_path)
+                return cached.get("score") if cached else None
+            except (json.JSONDecodeError, OSError):
+                pass
         return None
 
     # Run quality analysis
@@ -16891,6 +17071,7 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
             "session_file": Path(filepath).name,
         }
         _write_quality_cache(cache_path, result)
+        _release_quality_lock(_qlock)
         return 100
 
     # Carry forward nudge/loop state from previous cache (survives across
@@ -16902,7 +17083,8 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
         except Exception:
             prev_result = {}
 
-    result = compute_quality_score(quality_data)
+    _session_id = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
+    result = compute_quality_score(quality_data, session_id=_session_id)
     for carry_key in ("_nudge_fill_pct_at_fire", "_nudge_count", "_nudge_last_epoch",
                        "_nudge_previous_score", "_loop_warning_count",
                        "progressive_bands_captured", "_last_fill_warn_level",
@@ -16960,6 +17142,7 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
         result["cache_hit_rate"] = 0
 
     if not _write_quality_cache(cache_path, result):
+        _release_quality_lock(_qlock)
         return None
 
     # v5.0: Quality nudges + loop detection
@@ -17052,6 +17235,7 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
         filepath=filepath,
     )
 
+    _release_quality_lock(_qlock)
     return result.get("score")
 
 
@@ -18909,6 +19093,8 @@ if __name__ == "__main__":
     elif args[0] == "codex-install":
         import codex_install
         sys.exit(codex_install.main(args[1:]))
+    elif args[0] == "codex-state":
+        codex_state_report(as_json="--json" in args)
     elif args[0] == "drift":
         output_json = "--json" in args
         drift_check(as_json=output_json)
@@ -19541,6 +19727,7 @@ if __name__ == "__main__":
             quiet = "--quiet" in args or "-q" in args
             warn = "--warn" in args
             force = "--force" in args
+            throttle_only = "--throttle-only" in args
             throttle = 120
             warn_threshold = 70
             for i, a in enumerate(args):
@@ -19576,7 +19763,7 @@ if __name__ == "__main__":
                     session_jsonl = payload.get("transcript_path")
                 except (json.JSONDecodeError, OSError):
                     pass
-            score = quality_cache(throttle_seconds=throttle, warn_threshold=warn_threshold, quiet=quiet, session_jsonl=session_jsonl, force=force)
+            score = quality_cache(throttle_seconds=throttle, warn_threshold=warn_threshold, quiet=quiet, session_jsonl=session_jsonl, force=force, pure_time_throttle=throttle_only)
             if warn and score is not None and score < warn_threshold:
                 _emit_warn = True
                 try:

@@ -15,7 +15,6 @@ Controlled by: TOKEN_OPTIMIZER_BASH_COMPRESS=0 to disable (default: ON)
 import json
 import os
 import shlex
-import sys
 import time
 from pathlib import Path
 

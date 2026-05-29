@@ -249,6 +249,13 @@ export const TokenOptimizerPlugin: Plugin = async (
         store.recordMessage(idx, "tool_result", resultSize, resultSize > 100);
         const assistantIdx = store.incrementOperationIndex();
         store.recordMessage(assistantIdx, "assistant", resultSize, true);
+
+        // Refresh quality during autonomous tool runs, not just on chat.message.
+        // Otherwise token_status reports a stale (falsely high) score mid-run when
+        // the agent makes many tool calls without a user prompt. maybeComputeQuality
+        // is throttled (2min), so this is cheap on the hot path.
+        const fillPct = estimateFillFromSession(store, currentModel);
+        maybeComputeQuality(store, fillPct);
       } catch (err) {
         console.warn("[Token Optimizer] tool.execute.after hook error:", err);
       }

@@ -300,6 +300,11 @@ def parse_session_jsonl(filepath: str | Path) -> dict[str, Any] | None:
     last_usage: dict[str, int] | None = None
     current_model = _UNKNOWN_MODEL
     per_model_usage: dict[str, dict[str, int]] = {}
+    rate_limits_latest: dict[str, Any] | None = None
+    effort_counts: dict[str, int] = {}
+    tool_durations_ms: list[float] = []
+    task_durations_ms: list[float] = []
+    ttft_ms: list[float] = []
 
     for record in _iter_json_records(filepath):
         payload = _payload(record)
@@ -313,6 +318,10 @@ def parse_session_jsonl(filepath: str | Path) -> dict[str, Any] | None:
         if record.get("type") == "session_meta":
             version = version or payload.get("cli_version")
             slug = slug or payload.get("id")
+        elif record.get("type") == "turn_context":
+            effort = payload.get("effort")
+            if isinstance(effort, str) and effort.strip():
+                effort_counts[effort.strip()] = effort_counts.get(effort.strip(), 0) + 1
 
         model = _extract_model(payload)
         if model:
@@ -322,6 +331,9 @@ def parse_session_jsonl(filepath: str | Path) -> dict[str, Any] | None:
             usage = _token_usage(payload, cumulative=True)
             if usage:
                 last_usage = usage
+            rl = _extract_rate_limits(payload)
+            if rl:
+                rate_limits_latest = rl
             turn_usage = _token_usage(payload, cumulative=False)
             if turn_usage:
                 model_key = current_model if current_model != _UNKNOWN_MODEL else _DEFAULT_MODEL
@@ -332,6 +344,18 @@ def parse_session_jsonl(filepath: str | Path) -> dict[str, Any] | None:
                 bucket["fresh_input"] += turn_usage["input_tokens"]
                 bucket["cache_read"] += turn_usage["cached_input_tokens"]
                 bucket["output"] += turn_usage["output_tokens"] + turn_usage["reasoning_output_tokens"]
+
+        elif payload_type == "collab_agent_spawn_end":
+            # Modern subagent spawn. The legacy spawn_agent function_call path
+            # below also counts subagents; a session that spans a mid-session
+            # Codex upgrade (rare) could emit both and double-count.
+            role = str(payload.get("new_agent_role") or payload.get("new_agent_nickname") or "subagent")
+            subagents_used[role] = subagents_used.get(role, 0) + 1
+            tool_calls["Task"] = tool_calls.get("Task", 0) + 1
+
+        elif payload_type == "task_complete":
+            _append_positive(task_durations_ms, payload.get("duration_ms"))
+            _append_positive(ttft_ms, payload.get("time_to_first_token_ms"))
 
         elif payload_type in {"user_message", "message", "agent_message"}:
             text = _extract_text(payload)
@@ -359,6 +383,9 @@ def parse_session_jsonl(filepath: str | Path) -> dict[str, Any] | None:
             tool_output_chars += len(str(payload.get("output") or ""))
         elif payload_type in {"exec_command_end", "patch_apply_end"}:
             tool_output_chars += len(_event_output_text(payload))
+            _append_duration(tool_durations_ms, payload.get("duration"))
+        elif payload_type == "mcp_tool_call_end":
+            _append_duration(tool_durations_ms, payload.get("duration"))
 
     if message_count == 0 and api_calls == 0:
         return None
@@ -422,6 +449,12 @@ def parse_session_jsonl(filepath: str | Path) -> dict[str, Any] | None:
         "estimated": token_source != "codex_token_count",
         "runtime": "codex",
         "token_source": token_source,
+        "rate_limits": rate_limits_latest,
+        "effort": max(effort_counts, key=effort_counts.get) if effort_counts else None,
+        "effort_breakdown": dict(effort_counts),
+        "tool_duration_p90_ms": _percentile(tool_durations_ms, 90),
+        "task_duration_ms_max": max(task_durations_ms) if task_durations_ms else None,
+        "ttft_ms_avg": round(sum(ttft_ms) / len(ttft_ms), 1) if ttft_ms else None,
     }
 
 
@@ -489,10 +522,13 @@ def parse_jsonl_for_quality(filepath: str | Path) -> dict[str, Any] | None:
     compactions = 0
     agent_dispatches: list[tuple[int, int, int]] = []
     decisions: list[tuple[int, str]] = []
+    compaction_ratios: list[dict[str, Any]] = []
     last_usage: dict[str, int] | None = None
     current_model = _UNKNOWN_MODEL
     topic = None
     idx = 0
+    prev_was_compacted = False
+    last_turn_context: int | None = None
 
     for record in _iter_json_records(filepath):
         payload = _payload(record)
@@ -503,8 +539,34 @@ def parse_jsonl_for_quality(filepath: str | Path) -> dict[str, Any] | None:
         if model:
             current_model = model
 
-        if record.get("type") == "compacted" or payload_type == "context_compacted":
-            compactions += 1
+        # Per compaction: the `compacted` rollout record (which carries
+        # replacement_history) is authoritative — count it and capture the ratio.
+        # Its paired `context_compacted` event_msg fires immediately after, so
+        # count that ONLY when standalone (older Codex with no `compacted`
+        # record), detected by the previous record not being a `compacted`. This
+        # keeps the count==len(ratios) invariant even for back-to-back compactions.
+        is_compacted_record = record.get("type") == "compacted"
+        if is_compacted_record or payload_type == "context_compacted":
+            if is_compacted_record:
+                compactions += 1
+                rh = payload.get("replacement_history")
+                # Codex total_token_usage is cumulative (monotonic), so it does
+                # not drop at compaction. The meaningful "before" is the context
+                # occupancy of the last turn (per-turn input+cache); the "after"
+                # is the size of the replacement history that becomes the new
+                # context. ratio < 1 means compaction shrank the context; ratio is
+                # None for a degenerate empty/missing replacement_history.
+                after_tokens = _replacement_content_tokens(rh) if isinstance(rh, list) else None
+                ratio = round(after_tokens / last_turn_context, 3) if after_tokens and last_turn_context else None
+                compaction_ratios.append({
+                    "before_context_tokens": last_turn_context,
+                    "after_context_tokens": after_tokens,
+                    "replacement_msgs": len(rh) if isinstance(rh, list) else None,
+                    "ratio": ratio,
+                })
+            elif not prev_was_compacted:
+                compactions += 1
+            prev_was_compacted = is_compacted_record
             reads = []
             writes = []
             tool_results = []
@@ -514,11 +576,20 @@ def parse_jsonl_for_quality(filepath: str | Path) -> dict[str, Any] | None:
             decisions = []
             idx += 1
             continue
+        prev_was_compacted = False
 
         if payload_type == "token_count":
             usage = _token_usage(payload, cumulative=True)
             if usage:
                 last_usage = usage
+            turn = _token_usage(payload, cumulative=False)
+            if turn:
+                # Context occupancy sent this turn = fresh input + cached input.
+                last_turn_context = turn["input_tokens"] + turn["cached_input_tokens"]
+
+        elif payload_type == "collab_agent_spawn_end":
+            prompt = str(payload.get("prompt") or "")
+            agent_dispatches.append((idx, len(prompt), 0))
 
         elif payload_type in {"user_message", "message", "agent_message"}:
             text = _extract_text(payload)
@@ -573,6 +644,7 @@ def parse_jsonl_for_quality(filepath: str | Path) -> dict[str, Any] | None:
         "compactions": compactions,
         "agent_dispatches": agent_dispatches,
         "decisions": decisions,
+        "compaction_ratios": compaction_ratios,
         "total_entries": idx,
         "estimated": True,
         "context_tokens": last_usage["total_tokens"] if last_usage else None,
@@ -839,3 +911,79 @@ def _event_output_text(payload: dict[str, Any]) -> str:
         if value:
             parts.append(str(value))
     return "\n".join(parts)
+
+
+def _append_positive(bucket: list[float], value: Any) -> None:
+    if isinstance(value, (int, float)) and value > 0:
+        bucket.append(float(value))
+
+
+def _append_duration(bucket: list[float], duration: Any) -> None:
+    ms = _secs_nanos_to_ms(duration)
+    if ms is not None and ms > 0:  # match _append_positive: ignore zero-duration noise
+        bucket.append(ms)
+
+
+def _secs_nanos_to_ms(value: Any) -> float | None:
+    """Convert a Codex ``{secs, nanos}`` duration to milliseconds.
+
+    Observed Codex wire format for tool durations is always the ``{secs, nanos}``
+    dict. A bare number is a defensive fallback assumed to already be in
+    milliseconds; if a future Codex emits bare seconds, durations would read
+    1000x low (the dict form is unaffected)."""
+    if isinstance(value, dict):
+        secs = value.get("secs")
+        nanos = value.get("nanos")
+        if isinstance(secs, (int, float)) or isinstance(nanos, (int, float)):
+            return (float(secs or 0) * 1000.0) + (float(nanos or 0) / 1_000_000.0)
+        return None
+    if isinstance(value, (int, float)) and value >= 0:
+        return float(value)
+    return None
+
+
+def _percentile(values: list[float], pct: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    k = (len(ordered) - 1) * (pct / 100.0)
+    lo = int(k)
+    hi = min(lo + 1, len(ordered) - 1)
+    return round(ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo), 1)
+
+
+def _extract_rate_limits(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Capture the rate_limits block from a token_count payload, defensively.
+
+    Scalars are copied as-is; ``primary``/``secondary`` window objects are kept
+    whole so downstream consumers can read whatever fields Codex exposes without
+    this parser guessing the window schema.
+    """
+    rl = payload.get("rate_limits")
+    if not isinstance(rl, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key, value in rl.items():
+        if value is None or isinstance(value, (str, int, float, bool, dict)):
+            out[key] = value
+    return out or None
+
+
+def _replacement_content_tokens(replacement_history: list[Any]) -> int:
+    """Approximate the token size of a compaction's replacement_history messages."""
+    total_chars = 0
+    for item in replacement_history:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        total_chars += len(text)
+                elif isinstance(part, str):
+                    total_chars += len(part)
+    return total_chars // CHARS_PER_TOKEN

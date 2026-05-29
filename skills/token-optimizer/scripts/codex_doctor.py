@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from runtime_env import codex_home, detect_runtime, runtime_home
+import codex_state
 import codex_statusline
 
 SUPPORTED_HOOK_EVENTS = {
@@ -20,6 +21,8 @@ SUPPORTED_HOOK_EVENTS = {
     "SessionStart",
     "UserPromptSubmit",
     "Stop",
+    "SubagentStart",
+    "SubagentStop",
 }
 BASH_ONLY_EVENTS = {"PreToolUse", "PermissionRequest", "PostToolUse"}
 REQUIRED_FILES = (
@@ -305,6 +308,7 @@ def _project_feature_checks(project: Path) -> list[dict[str, str]]:
     )
     optional_noisy_features = (
         ("Prompt quality nudges", "UserPromptSubmit", None, "codex_hook_bridge.py"),
+        ("Subagent sprawl tracking", "SubagentStart", None, "subagent-start"),
         ("Tool output archive", "PostToolUse", "Bash", "archive_result.py"),
         ("Context intelligence", "PostToolUse", "Bash", "context_intel.py"),
     )
@@ -330,14 +334,6 @@ def _project_feature_checks(project: Path) -> list[dict[str, str]]:
     else:
         checks.append(_check("FAIL", "Feature: Dashboard session parsing", f"missing {parser_path}"))
 
-    checks.append(
-        _check(
-            "WARN",
-            "Codex API limitations",
-            "read deltas, structure maps, dynamic compaction, and StopFailure recovery need additional Codex hook payloads",
-        )
-    )
-
     return checks
 
 
@@ -359,6 +355,30 @@ def _has_project_hook(hooks: dict[str, Any], event: str, matcher: str | None, co
     return False
 
 
+def _state_db_checks() -> list[dict[str, str]]:
+    """Report readability of Codex's versioned state/goals SQLite databases.
+
+    These power subagent/memory/goal measurement (codex-state). Absence is a
+    WARN, not a FAIL: Codex creates them lazily once it records runtime state.
+    """
+    if detect_runtime() != "codex":
+        return []
+    status = codex_state.state_db_status()
+    checks: list[dict[str, str]] = []
+    if status["state_db"]:
+        if status["state_readable"]:
+            checks.append(_check("OK", "Codex state DB", status["state_db"]))
+        else:
+            checks.append(_check("WARN", "Codex state DB", f"{status['state_db']} present but no thread rows yet"))
+    else:
+        checks.append(_check("WARN", "Codex state DB", "no state_*.sqlite yet; subagent/memory metrics unavailable until Codex writes one"))
+    if status["goals_present"]:
+        checks.append(_check("OK", "Codex goals DB", status["goals_db"]))
+    else:
+        checks.append(_check("OK", "Codex goals DB", "no goals_*.sqlite yet (goals are opt-in)"))
+    return checks
+
+
 def run_checks(project: Path | None = None) -> list[dict[str, str]]:
     root = _repo_root()
     project = project or Path.cwd()
@@ -368,6 +388,7 @@ def run_checks(project: Path | None = None) -> list[dict[str, str]]:
         _check("OK", "Runtime home", str(runtime_home())),
     ]
     checks.extend(_codex_home_warnings())
+    checks.extend(_state_db_checks())
     if _is_plugin_repo(root):
         checks.extend(_required_file_checks(root))
         checks.extend(_manifest_checks(root))
@@ -390,6 +411,8 @@ def _print_text(checks: list[dict[str, str]]) -> None:
         print(f"[{check['status']}] {check['name']}: {check['detail']}")
     counts = {status: sum(1 for check in checks if check["status"] == status) for status in ("OK", "WARN", "FAIL")}
     print(f"\nSummary: {counts['OK']} OK, {counts['WARN']} WARN, {counts['FAIL']} FAIL")
+    print("\nThis checks Token Optimizer's Codex integration (token/optimization focus).")
+    print("For generic Codex runtime/auth/network health, run the native `codex doctor`.")
 
 
 def build_parser() -> argparse.ArgumentParser:
