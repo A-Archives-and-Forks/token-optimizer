@@ -99,6 +99,8 @@ RESPONSE GENERATED
 
 ## Token Budget Breakdown (Typical Setup)
 
+**Note**: Percentages assume 1M context window (Opus/Sonnet 4.6+ on Max/Team/Enterprise plans). Haiku users have 200K context, where these same absolute numbers represent 5x higher percentages (multiply by 5).
+
 ### Well-Optimized Setup (~23K baseline, Tool Search active)
 ```
 Core system + tools: 15,000 tokens
@@ -110,7 +112,7 @@ CLAUDE.md:             2,500 tokens  (~170 lines, well under 300-line target)
 MEMORY.md:             1,500 tokens  (~100 lines, well under 200-line cap)
 System reminders:      1,000 tokens
 ---------------------------------
-BASELINE:            ~23,500 tokens (12% of 200K)
+BASELINE:            ~23,500 tokens (2.4% of 1M)
 ```
 
 ### Unaudited Setup (~43K consumed, Tool Search active)
@@ -123,13 +125,13 @@ CLAUDE.md:            3,500 tokens  (250 lines. A 700-line file = 12K)
 MEMORY.md:            3,500 tokens
 System reminders:     3,000 tokens  (no permissions.deny rules)
 ---------------------------------
-CONSUMED:            ~43,000 tokens (22% of 200K)
-+ Autocompact buffer: 33,000 tokens (16.5%, reserved not consumed)
-= UNAVAILABLE:       ~76,000 tokens (38% of 200K)
+CONSUMED:            ~43,000 tokens (4.3% of 1M)
++ Autocompact buffer: 33,000 tokens (3.3%, reserved not consumed)
+= UNAVAILABLE:       ~76,000 tokens (7.6% of 1M)
 ```
 
 **Difference**: ~19,500 tokens consumed per message = 1.8x overhead vs optimized
-**Total unavailable difference**: ~52,500 tokens (38% vs 15% for optimized with autocompact off)
+**Total unavailable difference**: ~52,500 tokens (7.6% vs 3.1% for optimized with autocompact off)
 **Note**: Pre-Tool-Search (2025), MCP alone could add 40-80K tokens. Tool Search (default since Jan 2026) reduced this by ~85%. This "unaudited" baseline is a power user who has been adding to their config for 3+ months without auditing. The autocompact buffer (33K) is reserved on every fresh session when autocompact is enabled (the default).
 
 ---
@@ -439,9 +441,9 @@ CLAUDE.md:            3,500 tokens (grown organically, never trimmed)
 MEMORY.md:            3,500 tokens (duplicates CLAUDE.md content)
 System reminders:     3,000 tokens (no permissions.deny rules)
 ---------------------------------
-CONSUMED:           ~43,000 tokens (22% of 200K)
-+ Autocompact buffer: 33,000 tokens (16.5%, reserved)
-= UNAVAILABLE:      ~76,000 tokens (38% of 200K)
+CONSUMED:           ~43,000 tokens (4.3% of 1M)
++ Autocompact buffer: 33,000 tokens (3.3%, reserved)
+= UNAVAILABLE:      ~76,000 tokens (7.6% of 1M)
 ```
 
 **After config optimization**:
@@ -454,23 +456,23 @@ CLAUDE.md:            2,500 tokens (~170 lines, under 300-line target)
 MEMORY.md:            2,000 tokens (~130 lines, under 200-line cap)
 System reminders:     1,000 tokens (permissions.deny)
 ---------------------------------
-CONSUMED:           ~30,700 tokens (15% of 200K)
-+ Autocompact buffer: 33,000 tokens (16.5%, reserved)
-= UNAVAILABLE:      ~63,700 tokens (32% of 200K)
+CONSUMED:           ~30,700 tokens (3.1% of 1M)
++ Autocompact buffer: 33,000 tokens (3.3%, reserved)
+= UNAVAILABLE:      ~63,700 tokens (6.4% of 1M)
 
 CONFIG SAVINGS: ~12,300 tokens/msg (29% reduction in consumed overhead)
-CONTEXT RECOVERED: 38% -> 32% unavailable (6% of window freed)
+CONTEXT RECOVERED: 7.6% -> 6.4% unavailable (1.2% of window freed)
 ```
 
 **At 100 messages/day, that's 1.2M tokens of overhead saved daily.**
 
 **With autocompact OFF** (advanced users who manage /compact manually):
 ```
-CONSUMED:           ~30,700 tokens (15% of 200K)
+CONSUMED:           ~30,700 tokens (3.1% of 1M)
 + No buffer:               0 tokens
-= UNAVAILABLE:      ~30,700 tokens (15% of 200K)
+= UNAVAILABLE:      ~30,700 tokens (3.1% of 1M)
 
-TOTAL RECOVERY vs unoptimized with buffer: 38% -> 15% = 23% of context freed
+TOTAL RECOVERY vs unoptimized with buffer: 7.6% -> 3.1% = 4.5% of context freed
 ```
 
 Prompt caching means the dollar savings are modest (cached tokens cost 10% of base). But the context window space savings are real: you hit compaction later, quality stays higher longer, and each subagent inherits ~12,000 fewer tokens of overhead.

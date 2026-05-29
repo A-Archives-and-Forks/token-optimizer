@@ -198,6 +198,7 @@ PRICING_TIERS = {
 
 OPENAI_MODEL_PRICING = {
     # Prices per 1M tokens from OpenAI API pricing/model docs.
+    # GPT-5.x family
     "gpt-5-codex": {"input": 1.25, "cache_read": 0.125, "output": 10.0},
     "gpt-5.1-codex": {"input": 1.25, "cache_read": 0.125, "output": 10.0},
     "gpt-5.1-codex-mini": {"input": 0.25, "cache_read": 0.025, "output": 2.0},
@@ -209,12 +210,39 @@ OPENAI_MODEL_PRICING = {
     "gpt-5.4-mini": {"input": 0.75, "cache_read": 0.075, "output": 4.5},
     "gpt-5.4-nano": {"input": 0.20, "cache_read": 0.02, "output": 1.25},
     "gpt-5.5": {"input": 5.0, "cache_read": 0.50, "output": 30.0},
-    "gpt-5.5-pro": {"input": 30.0, "cache_read": 30.0, "output": 180.0},
+    "gpt-5.5-pro": {"input": 30.0, "cache_read": 30.0, "output": 180.0},  # cache_read N/A per OpenAI; billed at full input rate
+    # GPT-4.x family
+    "gpt-4.1": {"input": 2.0, "cache_read": 0.50, "output": 8.0},
+    "gpt-4.1-mini": {"input": 0.40, "cache_read": 0.10, "output": 1.60},
+    "gpt-4.1-nano": {"input": 0.10, "cache_read": 0.025, "output": 0.40},
+    "gpt-4o": {"input": 2.50, "cache_read": 0.125, "output": 10.0},
+    "gpt-4o-mini": {"input": 0.15, "cache_read": 0.075, "output": 0.60},
+    # o-series reasoning models
+    "o3-pro": {"input": 20.0, "cache_read": 5.0, "output": 80.0},
+    "o3-mini": {"input": 1.10, "cache_read": 0.55, "output": 4.40},
+    "o3": {"input": 2.0, "cache_read": 0.50, "output": 8.0},
+    "o4-mini": {"input": 0.55, "cache_read": 0.14, "output": 2.20},
 }
 OPENAI_LONG_CONTEXT_PRICING = {
     "gpt-5.4": {"input": 5.0, "cache_read": 0.50, "output": 22.5},
+    "gpt-5.5": {"input": 10.0, "cache_read": 1.0, "output": 45.0},
 }
 OPENAI_LONG_CONTEXT_INPUT_THRESHOLD = 272_000
+
+GEMINI_MODEL_PRICING = {
+    # Prices per 1M tokens from ai.google.dev/gemini-api/docs/pricing (May 2026).
+    "gemini-3.5-flash": {"input": 1.50, "cache_read": 0.15, "output": 9.0},
+    "gemini-3.1-pro-preview": {"input": 2.0, "cache_read": 0.20, "output": 12.0},
+    "gemini-3.1-flash-lite": {"input": 0.25, "cache_read": 0.025, "output": 1.50},
+    "gemini-2.5-pro": {"input": 1.25, "cache_read": 0.125, "output": 10.0},
+    "gemini-2.5-flash": {"input": 0.30, "cache_read": 0.03, "output": 2.50},
+    "gemini-2.5-flash-lite": {"input": 0.10, "cache_read": 0.01, "output": 0.40},
+}
+GEMINI_LONG_CONTEXT_PRICING = {
+    "gemini-2.5-pro": {"input": 2.50, "cache_read": 0.25, "output": 15.0},
+    "gemini-3.1-pro-preview": {"input": 4.0, "cache_read": 0.40, "output": 18.0},
+}
+GEMINI_LONG_CONTEXT_INPUT_THRESHOLD = 200_000
 
 CODEX_DEFAULT_EFFECTIVE_CONTEXT_WINDOW = 258_400
 _context_window_cache = None
@@ -251,24 +279,29 @@ def _save_pricing_tier(tier):
 def _get_model_cost(model, input_tokens, output_tokens, cache_read=0, cache_create=0, tier=None):
     """Calculate USD cost for a given model and token counts using the active pricing tier.
 
-    Returns cost in USD. OpenAI/Codex models use the API-equivalent OpenAI
-    rate card; Claude models use the selected Claude provider tier.
+    Returns cost in USD. OpenAI/Codex and Gemini models use provider-specific
+    rate cards; Claude models use the selected Claude provider tier.
     """
     if tier is None:
         tier = _load_pricing_tier()
     tier_data = PRICING_TIERS.get(tier, PRICING_TIERS["anthropic"])
 
-    openai_model = _normalize_openai_model_name(model)
-    if openai_model:
-        full_input = int(input_tokens or 0) + int(cache_read or 0) + int(cache_create or 0)
-        rates = OPENAI_MODEL_PRICING[openai_model]
-        if full_input > OPENAI_LONG_CONTEXT_INPUT_THRESHOLD and openai_model in OPENAI_LONG_CONTEXT_PRICING:
-            rates = OPENAI_LONG_CONTEXT_PRICING[openai_model]
-        return (
-            input_tokens * rates["input"] / 1e6
-            + output_tokens * rates["output"] / 1e6
-            + cache_read * rates["cache_read"] / 1e6
-        )
+    full_input = int(input_tokens or 0) + int(cache_read or 0) + int(cache_create or 0)
+
+    for norm_fn, pricing, lc_pricing, lc_threshold in (
+        (_normalize_openai_model_name, OPENAI_MODEL_PRICING, OPENAI_LONG_CONTEXT_PRICING, OPENAI_LONG_CONTEXT_INPUT_THRESHOLD),
+        (_normalize_gemini_model_name, GEMINI_MODEL_PRICING, GEMINI_LONG_CONTEXT_PRICING, GEMINI_LONG_CONTEXT_INPUT_THRESHOLD),
+    ):
+        key = norm_fn(model)
+        if key:
+            rates = pricing[key]
+            if full_input > lc_threshold and key in lc_pricing:
+                rates = lc_pricing[key]
+            return (
+                input_tokens * rates["input"] / 1e6
+                + output_tokens * rates["output"] / 1e6
+                + cache_read * rates["cache_read"] / 1e6
+            )
 
     normalized = _normalize_model_name(model) if model else None
     if normalized and normalized in tier_data["claude_models"]:
@@ -291,6 +324,8 @@ def _get_model_cost(model, input_tokens, output_tokens, cache_read=0, cache_crea
 def _is_priced_model(model, tier=None):
     """True when Token Optimizer has an exact rate card for this model id."""
     if _normalize_openai_model_name(model):
+        return True
+    if _normalize_gemini_model_name(model):
         return True
     if tier is None:
         tier = _load_pricing_tier()
@@ -319,6 +354,43 @@ def _normalize_openai_model_name(model):
         "gpt-5.4",
         "gpt-5.2",
         "gpt-5.1",
+        "gpt-4.1-mini",
+        "gpt-4.1-nano",
+        "gpt-4.1",
+        "gpt-4o-mini",
+        "gpt-4o",
+        "o3-pro",
+        "o3-mini",
+        "o4-mini",
+        "o3",
+    )
+    for alias in aliases:
+        if value == alias or value.startswith(alias + "-"):
+            return alias
+    return None
+
+
+_GEMINI_DEPRECATION_WARNED = set()
+
+def _normalize_gemini_model_name(model):
+    """Return a priced Gemini model id, or None when we cannot price exactly."""
+    if not model:
+        return None
+    value = str(model).strip().lower()
+    if not value.startswith("gemini-"):
+        return None
+    if value.startswith("gemini-2.0"):
+        if value not in _GEMINI_DEPRECATION_WARNED:
+            _GEMINI_DEPRECATION_WARNED.add(value)
+            print(f"[Token Optimizer] WARNING: {value} was deprecated June 1, 2026. Migrate to gemini-2.5-flash or gemini-3.5-flash.", file=sys.stderr)
+        return None
+    aliases = (
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
     )
     for alias in aliases:
         if value == alias or value.startswith(alias + "-"):
@@ -9471,7 +9543,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.7.14"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.7.15"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DAEMON_RUNTIME = detect_runtime()
 _DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else "claude"

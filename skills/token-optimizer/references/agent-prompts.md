@@ -216,6 +216,7 @@ Output file: {COORD_PATH}/audit/mcp.md
    - Check ToolSearch listing in system prompt for "Available deferred tools"
    - With Tool Search active: each deferred tool ~15 tokens (name only in menu)
    - Without Tool Search: each tool loads FULL definition (300-850 tokens each)
+   - **alwaysLoad servers** (v2.1.121+): Check each MCP server config for `"alwaysLoad": true`. When set, ALL tools from that server load as eager tools (~150-850 tokens each) instead of being deferred (~15 tokens each). Exclude alwaysLoad server tools from the deferred count and add them to the eager tool overhead. Flag alwaysLoad servers with 10+ tools as high token overhead.
 
 4. **Per-tool description + server instructions size check** (v2.1.84+):
    - Claude Code caps BOTH tool descriptions AND server instructions at 2KB since v2.1.84
@@ -331,7 +332,9 @@ Output file: {COORD_PATH}/audit/advanced.md
 1. Hooks configuration:
    - Check ~/.claude/settings.json for hooks config
    - Check .claude/settings.json (project-level)
-   - Check for PreCompact, SessionStart, PostToolUse hooks
+   - Check for PreCompact, SessionStart, PostCompact, PostToolUse hooks
+   - **PostCompact hook** (v2.1.85+): fires after compaction with `trigger` ("manual"/"auto") and `compact_summary` in the input payload. Useful for compaction event tracking. No token counts in payload, just the summary text. If user has PreCompact but not PostCompact, note the opportunity for post-compaction analytics.
+   - **Conditional hooks** (v2.1.85+): hooks support an `if` field for conditional execution. Check if any hooks could benefit from conditional guards to reduce per-turn overhead.
    - If no hooks: flag as HIGH PRIORITY opportunity
    - Flag Stop hooks containing "decision":"block" — these re-invoke the model
      every turn (~80+ tokens per turn overhead, adds up fast in long sessions)
@@ -656,7 +659,7 @@ Output file: {COORD_PATH}/verification/results.md
    **Total Savings**: ~X tokens/message (Y% reduction)
 
    ## Context Budget Impact
-   - Context overhead reduced from X% to Y% of 200K window
+   - Context overhead reduced from X% to Y% of context window (1M for Opus/Sonnet 4.6+, 200K for Haiku)
    - Estimated Z fewer compaction cycles per long session
    - Quality zone extended: peak performance lasts N more messages before degradation
 
