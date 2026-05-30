@@ -3,19 +3,20 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.7.2-green" alt="Version 5.7.2"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.8.3-green" alt="Version 5.8.3"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/github/release-date/alexgreensh/token-optimizer?label=last%20release&color=blue" alt="Last Release"></a>
   <a href="https://github.com/alexgreensh/token-optimizer"><img src="https://img.shields.io/badge/Claude_Code-Plugin-blueviolet" alt="Claude Code Plugin"></a>
-  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/openclaw"><img src="https://img.shields.io/badge/OpenClaw-v2.4.1-brightgreen" alt="OpenClaw v2.4.1"></a>
-  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/opencode"><img src="https://img.shields.io/badge/OpenCode-v1.0.0-58a6ff" alt="OpenCode v1.0.0"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/openclaw"><img src="https://img.shields.io/badge/OpenClaw-v2.4.2-brightgreen" alt="OpenClaw v2.4.2"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/opencode"><img src="https://img.shields.io/badge/OpenCode-v1.0.3-58a6ff" alt="OpenCode v1.0.3"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/blob/main/docs/codex-beta.md"><img src="https://img.shields.io/badge/Codex-v0.1.0--beta-orange" alt="Codex v0.1.0-beta"></a>
 </p>
 <p align="center">
-  <img src="https://img.shields.io/badge/quality%20signals-6-blue" alt="6 Quality Signals">
-  <img src="https://img.shields.io/badge/hooks-5%20lifecycle-purple" alt="5 Lifecycle Hooks">
+  <img src="https://img.shields.io/badge/cuts%20context%20waste-3fb950" alt="Cuts context waste">
+  <img src="https://img.shields.io/badge/survives%20compaction-checkpoint%20%2B%20restore-58a6ff" alt="Survives compaction">
+  <img src="https://img.shields.io/badge/saves%20real%20%24-every%20session-2ea043" alt="Saves real dollars every session">
+  <img src="https://img.shields.io/badge/live%20dashboard-tokens%20%2B%20%24%20%2B%20turns-8B5CF6?logo=chartdotjs&logoColor=white" alt="Live dashboard">
+  <img src="https://img.shields.io/badge/quality%20score-6%20signals-blue" alt="Quality score, 6 signals">
   <img src="https://img.shields.io/badge/tests-141-brightgreen" alt="141 Tests">
-  <img src="https://img.shields.io/badge/includes-dashboard-8B5CF6?logo=chartdotjs&logoColor=white" alt="Built-in Dashboard">
-  <img src="https://img.shields.io/badge/smart%20compaction-checkpoint%20%2B%20restore-blue" alt="Smart Compaction">
 </p>
 <p align="center">
   <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Zero Dependencies">
@@ -29,9 +30,9 @@
   <a href="https://github.com/sponsors/alexgreensh"><img src="https://img.shields.io/badge/sponsor-keep%20it%20free-%23ea4aaa?logo=githubsponsors" alt="Sponsor - Keep It Free"></a>
 </p>
 
-<h2 align="center">Your AI is getting dumber and you can't see it.</h2>
+<h2 align="center">Cut the tokens you waste. Keep the work you'd lose.</h2>
 
-<p align="center"><em>Save tokens. Survive compaction. Measure the proof.</em></p>
+<p align="center"><em>Optimize every session, then watch the dollars add up on the dashboard.</em></p>
 
 <p align="center">
 <strong>Most token tools only touch one slice of the problem.</strong>
