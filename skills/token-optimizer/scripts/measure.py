@@ -4556,14 +4556,25 @@ def plugin_cleanup(dry_run=False, quiet=False):
 
 
 def _manage_skill(action, name):
-    """Archive or restore a skill."""
+    """Archive or restore a skill.
+
+    Skills in ~/.claude/skills are often symlinks pointing into a shared skills
+    repo. Archiving a symlinked skill records the link target and removes only
+    the link, never the real source (issue #48).
+    """
+    import shutil
+
     # Validate name: prevent path traversal
-    if not name or "/" in name or "\\" in name or name in (".", "..") or "\0" in name:
+    if not isinstance(name, str) or not name or "/" in name or "\\" in name or name in (".", "..") or "\0" in name:
         print(f"  [!] Invalid skill name: {name}")
         return False
     skills_dir = CLAUDE_DIR / "skills"
-    resolved = (skills_dir / name).resolve()
-    if not resolved.is_relative_to(skills_dir.resolve()):
+    # Containment check on the UN-resolved path. The name is already validated as
+    # a single path component, so the join cannot escape skills_dir. Do NOT use
+    # .resolve() here: legitimate skills are often symlinks pointing outside
+    # ~/.claude/skills, and resolving the target would misflag them (issue #48).
+    candidate = skills_dir / name
+    if candidate.parent != skills_dir:
         print(f"  [!] Path traversal detected: {name}")
         return False
     backups_dir = CLAUDE_DIR / "_backups"
@@ -4572,12 +4583,22 @@ def _manage_skill(action, name):
 
     if action == "archive":
         src = skills_dir / name
-        if not src.exists():
+        if not src.exists() and not src.is_symlink():
             print(f"  Skill '{name}' not found in {skills_dir}")
             return False
-        archive_dir.mkdir(parents=True, exist_ok=True)
         dst = archive_dir / name
-        src.rename(dst)
+        if dst.exists() or dst.is_symlink():
+            print(f"  Skill '{name}' already archived. Remove it first.")
+            return False
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        if src.is_symlink():
+            # Record the link target, remove only the link (not the real source)
+            target = os.readlink(src)
+            dst.mkdir(parents=True, exist_ok=True)
+            (dst / ".symlink-target").write_text(target)
+            src.unlink()
+        else:
+            shutil.move(str(src), str(dst))
         print(f"  Archived: {name} -> {archive_dir.name}/")
         return True
 
@@ -4588,21 +4609,28 @@ def _manage_skill(action, name):
                 if not ad.is_dir() or not ad.name.startswith("skills-archived"):
                     continue
                 src = ad / name
-                if src.exists():
-                    dst = skills_dir / name
-                    if dst.exists():
-                        print(f"  Skill '{name}' already exists in skills/. Remove it first.")
-                        return False
-                    src.rename(dst)
-                    print(f"  Restored: {name} from {ad.name}/")
-                    # Clean up empty archive dir
-                    try:
-                        remaining = list(ad.iterdir())
-                        if not remaining:
-                            ad.rmdir()
-                    except OSError:
-                        pass
-                    return True
+                if not src.exists() and not src.is_symlink():
+                    continue
+                dst = skills_dir / name
+                if dst.exists() or dst.is_symlink():
+                    print(f"  Skill '{name}' already exists in skills/. Remove it first.")
+                    return False
+                marker = src / ".symlink-target"
+                if src.is_dir() and marker.exists():
+                    # Recreate the symlink from the recorded target
+                    target = marker.read_text().strip()
+                    dst.symlink_to(target)
+                    shutil.rmtree(src)
+                else:
+                    shutil.move(str(src), str(dst))
+                print(f"  Restored: {name} from {ad.name}/")
+                # Clean up empty archive dir
+                try:
+                    if not list(ad.iterdir()):
+                        ad.rmdir()
+                except OSError:
+                    pass
+                return True
         print(f"  Skill '{name}' not found in any archive directory.")
         return False
     else:
@@ -9646,7 +9674,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.8.0"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.8.1"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DAEMON_RUNTIME = detect_runtime()
 _DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else "claude"
