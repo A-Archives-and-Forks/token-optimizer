@@ -109,6 +109,17 @@ HOME = Path.home()
 RUNTIME_DIR = runtime_home()
 CLAUDE_DIR = claude_home()
 
+# Sentinel file written inside an archived symlinked skill, recording the
+# original link target so restore can recreate the symlink (issue #48). A dir
+# holds EITHER SKILL.md (real skill) XOR this marker (symlinked skill).
+SYMLINK_TARGET_MARKER = ".symlink-target"
+
+# Backup directories that hold restorable skills. Manual `skill archive` writes
+# to skills-archived-DATE; the auto-dedup pass writes to skills-deduped-DATE.
+# Restore and the dashboard scan must recognize BOTH so dedup'd skills stay
+# recoverable from the UI and the CLI.
+SKILL_ARCHIVE_DIR_PREFIXES = ("skills-archived", "skills-deduped")
+
 # Plugin-data-aware paths: prefer runtime-specific plugin data when set,
 # else discover via installed_plugins.json so dashboard CLI runs find live data
 # (v5.4.23+), else fall back to legacy paths for symlink/script installs.
@@ -4123,6 +4134,33 @@ def _codex_config_lock():
         os.close(fd)
 
 
+@contextmanager
+def _skill_mgmt_lock():
+    """Advisory file lock serializing skill archive/restore mutations.
+
+    Mirrors _config_lock: blocking flock with kernel auto-release on process
+    death; no-op fallback on Windows. The dashboard daemon and a CLI
+    `measure.py skill archive|restore` run in separate processes with no
+    in-process serialization, so this cross-process lock closes the
+    archive/restore TOCTOU windows (issue #48 hardening).
+    """
+    if not _HAS_FCNTL:
+        yield
+        return
+    lock_path = CLAUDE_DIR / "_backups" / ".skill-mgmt.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def _write_codex_config(text: str) -> None:
     path = _safe_codex_config_path()
     with _codex_config_lock():
@@ -4304,13 +4342,29 @@ def _collect_management_data(components=None, trends=None):
     archived_skills = []
     if backups_dir.exists():
         for archive_dir in sorted(backups_dir.iterdir(), reverse=True):
-            if not archive_dir.is_dir() or not archive_dir.name.startswith("skills-archived"):
+            if not archive_dir.is_dir() or not archive_dir.name.startswith(SKILL_ARCHIVE_DIR_PREFIXES):
                 continue
-            date_part = archive_dir.name.replace("skills-archived-", "").replace("skills-archived", "")
-            for item in sorted(archive_dir.iterdir()):
-                if item.is_dir() and (item / "SKILL.md").exists():
-                    desc = ""
-                    try:
+            # "skills-archived-DATE" / "skills-deduped-DATE" -> "DATE"
+            date_part = archive_dir.name.split("-", 2)[2] if archive_dir.name.count("-") >= 2 else ""
+            try:
+                entries = sorted(archive_dir.iterdir())
+            except OSError:
+                continue
+            for item in entries:
+                # One unreadable entry must not blank the whole Manage tab.
+                try:
+                    if not item.is_dir():
+                        continue
+                    # A real archived skill carries SKILL.md; a symlinked skill is
+                    # archived as a dir holding only the marker (issue #48). SKILL.md
+                    # takes precedence so a real skill is never mislabeled as a link.
+                    # Surface both so symlinked skills stay restorable from the UI.
+                    has_skill_md = (item / "SKILL.md").exists()
+                    is_symlink_record = not has_skill_md and (item / SYMLINK_TARGET_MARKER).exists()
+                    if not has_skill_md and not is_symlink_record:
+                        continue
+                    desc = "Symlinked skill" if is_symlink_record else ""
+                    if not is_symlink_record:
                         content = (item / "SKILL.md").read_text(encoding="utf-8")[:2000]
                         if content.startswith("---"):
                             end = content.find("---", 3)
@@ -4319,15 +4373,16 @@ def _collect_management_data(components=None, trends=None):
                                     if line.strip().startswith("description:"):
                                         desc = line.strip()[12:].strip()[:100]
                                         break
-                    except OSError:
-                        pass
-                    archived_skills.append({
-                        "name": item.name,
-                        "archived_date": date_part,
-                        "archive_dir": archive_dir.name,
-                        "description": desc,
-                        "restore_cmd": f"python3 {mp_cmd} skill restore {shlex.quote(item.name)}",
-                    })
+                except OSError:
+                    continue
+                archived_skills.append({
+                    "name": item.name,
+                    "archived_date": date_part,
+                    "archive_dir": archive_dir.name,
+                    "description": desc,
+                    "symlink": is_symlink_record,
+                    "restore_cmd": f"python3 {mp_cmd} skill restore {shlex.quote(item.name)}",
+                })
 
     # MCP servers (local settings.json)
     settings, _ = _read_settings_json()
@@ -4531,7 +4586,7 @@ def plugin_cleanup(dry_run=False, quiet=False):
                         # For symlinks: record target, then remove the symlink
                         target = os.readlink(item)
                         dest.mkdir(parents=True, exist_ok=True)
-                        (dest / ".symlink-target").write_text(target)
+                        (dest / SYMLINK_TARGET_MARKER).write_text(target, encoding="utf-8")
                         item.unlink()
                     else:
                         shutil.move(str(item), str(dest))
@@ -4561,7 +4616,15 @@ def _manage_skill(action, name):
     Skills in ~/.claude/skills are often symlinks pointing into a shared skills
     repo. Archiving a symlinked skill records the link target and removes only
     the link, never the real source (issue #48).
+
+    Held under a cross-process lock so a dashboard-daemon call and a CLI call
+    can't interleave their archive/restore mutations.
     """
+    with _skill_mgmt_lock():
+        return _manage_skill_locked(action, name)
+
+
+def _manage_skill_locked(action, name):
     import shutil
 
     # Validate name: prevent path traversal
@@ -4590,15 +4653,19 @@ def _manage_skill(action, name):
         if dst.exists() or dst.is_symlink():
             print(f"  Skill '{name}' already archived. Remove it first.")
             return False
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        if src.is_symlink():
-            # Record the link target, remove only the link (not the real source)
-            target = os.readlink(src)
-            dst.mkdir(parents=True, exist_ok=True)
-            (dst / ".symlink-target").write_text(target)
-            src.unlink()
-        else:
-            shutil.move(str(src), str(dst))
+        try:
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            if src.is_symlink():
+                # Record the link target, remove only the link (not the real source)
+                target = os.readlink(src)
+                dst.mkdir(parents=True, exist_ok=True)
+                (dst / SYMLINK_TARGET_MARKER).write_text(target, encoding="utf-8")
+                src.unlink()
+            else:
+                shutil.move(str(src), str(dst))
+        except OSError as e:
+            print(f"  [!] Failed to archive '{name}': {e}")
+            return False
         print(f"  Archived: {name} -> {archive_dir.name}/")
         return True
 
@@ -4606,7 +4673,7 @@ def _manage_skill(action, name):
         # Search all archive dirs for this skill
         if backups_dir.exists():
             for ad in sorted(backups_dir.iterdir(), reverse=True):
-                if not ad.is_dir() or not ad.name.startswith("skills-archived"):
+                if not ad.is_dir() or not ad.name.startswith(SKILL_ARCHIVE_DIR_PREFIXES):
                     continue
                 src = ad / name
                 if not src.exists() and not src.is_symlink():
@@ -4615,14 +4682,33 @@ def _manage_skill(action, name):
                 if dst.exists() or dst.is_symlink():
                     print(f"  Skill '{name}' already exists in skills/. Remove it first.")
                     return False
-                marker = src / ".symlink-target"
-                if src.is_dir() and marker.exists():
-                    # Recreate the symlink from the recorded target
-                    target = marker.read_text().strip()
-                    dst.symlink_to(target)
-                    shutil.rmtree(src)
-                else:
-                    shutil.move(str(src), str(dst))
+                # A symlink record is a dir holding the marker and NO SKILL.md.
+                # Requiring SKILL.md to be absent stops a real skill that happens
+                # to ship the marker file from being turned into a link + deleted.
+                marker = src / SYMLINK_TARGET_MARKER
+                is_symlink_record = (
+                    src.is_dir() and marker.exists() and not (src / "SKILL.md").exists()
+                )
+                try:
+                    if is_symlink_record:
+                        target = marker.read_text(encoding="utf-8").strip()
+                        if not target:
+                            print(f"  [!] Archived link target for '{name}' is empty; cannot restore.")
+                            return False
+                        dst.symlink_to(target)
+                        # Link recreated; drop the archive record. If that fails,
+                        # remove the just-created link so a retry isn't blocked.
+                        try:
+                            shutil.rmtree(src)
+                        except OSError as e:
+                            dst.unlink(missing_ok=True)
+                            print(f"  [!] Failed to clear archive for '{name}': {e}")
+                            return False
+                    else:
+                        shutil.move(str(src), str(dst))
+                except OSError as e:
+                    print(f"  [!] Failed to restore '{name}': {e}")
+                    return False
                 print(f"  Restored: {name} from {ad.name}/")
                 # Clean up empty archive dir
                 try:
