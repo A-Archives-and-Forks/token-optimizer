@@ -4,9 +4,35 @@ const WINDOW_SIZE = 10;
 const PRUNE_THRESHOLD = 30;
 const PRUNE_KEEP = 20;
 
-const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "file_write", "file_edit"]);
-const READ_TOOLS = new Set(["Read", "Glob", "Grep", "file_read", "find"]);
-const AGENT_TOOLS = new Set(["Agent", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"]);
+// Tool names span two ecosystems: Claude Code (PascalCase: Read/Write/Edit/Agent)
+// and OpenCode native (lowercase: read/write/edit/task/grep/glob/bash). Both must
+// be recognized or activity tracking silently no-ops on whichever host is in use.
+const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "file_write", "file_edit", "edit", "write"]);
+const READ_TOOLS = new Set(["Read", "Glob", "Grep", "file_read", "find", "read", "grep", "glob"]);
+const AGENT_TOOLS = new Set(["Agent", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "task"]);
+
+// Focused sets for the hooks that record a single file path / dispatch. The
+// writers are exactly EDIT_TOOLS; reads/dispatches are narrower than the broad
+// classifier sets (no Glob/Grep, no Task* status tools).
+const FILE_READ_TOOLS = new Set(["Read", "file_read", "read"]);
+const AGENT_DISPATCH_TOOLS = new Set(["Agent", "TaskCreate", "task"]);
+
+export const isFileReadTool = (tool: string): boolean => FILE_READ_TOOLS.has(tool);
+export const isFileWriteTool = (tool: string): boolean => EDIT_TOOLS.has(tool);
+export const isAgentDispatchTool = (tool: string): boolean => AGENT_DISPATCH_TOOLS.has(tool);
+
+/** Read a file-path argument under either naming convention (filePath | file_path). */
+export function extractFilePath(args: unknown): string | null {
+  if (!args || typeof args !== "object") return null;
+  const a = args as Record<string, unknown>;
+  const p = a.filePath ?? a.file_path;
+  return typeof p === "string" ? p : null;
+}
+
+// Module-level prune cadence: run the COUNT+DELETE only every PRUNE_THRESHOLD
+// calls instead of COUNT(*) on every single tool call (cheap, keeps the table
+// bounded). Shared across sessions, which only affects which call triggers a prune.
+let callsSincePrune = 0;
 
 const INFRA_BASH_RE =
   /\b(?:systemctl|nginx|docker|kubectl|service|daemon|launchctl|brew|apt|apt-get|yum|dnf|pacman)\b/;
@@ -83,10 +109,9 @@ export function logToolUse(
       .query("SELECT tool_bucket, has_error FROM activity_log ORDER BY id DESC LIMIT ?")
       .all(WINDOW_SIZE) as Array<{ tool_bucket: string; has_error: number }>;
 
-    const rowCount = (
-      db.query("SELECT COUNT(*) as cnt FROM activity_log").get() as { cnt: number }
-    ).cnt;
-    if (rowCount > PRUNE_THRESHOLD) {
+    // Prune on a fixed cadence instead of COUNT(*) every call.
+    if (++callsSincePrune >= PRUNE_THRESHOLD) {
+      callsSincePrune = 0;
       db.run(
         "DELETE FROM activity_log WHERE id NOT IN (SELECT id FROM activity_log ORDER BY id DESC LIMIT ?)",
         [PRUNE_KEEP],
@@ -99,7 +124,8 @@ export function logToolUse(
 
     store.setMeta("current_mode", mode);
     return mode;
-  } catch {
+  } catch (e) {
+    console.warn("[Token Optimizer] logToolUse failed:", e);
     return null;
   }
 }

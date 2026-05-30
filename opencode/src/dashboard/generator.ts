@@ -1,5 +1,6 @@
 import { existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { randomBytes } from "node:crypto";
 import { TrendsStore } from "../storage/trends.js";
 import { scoreToGrade, scoreToBand } from "../util/grade.js";
 
@@ -64,12 +65,17 @@ export function generateDashboard(opts: DashboardOptions): string {
   const seGrade = scoreToGrade(Math.round(avgSE));
   const rhBand = scoreToBand(Math.round(avgRH));
 
+  // Per-render nonce so the one inline script doesn't need 'unsafe-inline'.
+  // (Enforced when served over http://; Chromium ignores meta-CSP on file://,
+  // which is why output escaping above is the primary XSS defense.)
+  const nonce = randomBytes(16).toString("base64");
+
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <title>Token Optimizer - OpenCode Dashboard</title>
 <style>
 :root {
@@ -263,7 +269,7 @@ tr:hover td { background: var(--bg-hover); }
   </div>
 </div>
 
-<script>
+<script nonce="${nonce}">
 document.querySelectorAll('.nav a').forEach(a => {
   a.addEventListener('click', () => {
     document.querySelectorAll('.nav a').forEach(x => x.classList.remove('active'));

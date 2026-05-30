@@ -39,8 +39,6 @@ export interface CheckpointMatch {
   mode: string;
 }
 
-const _CHECKPOINT_MAX_CHARS = 4000;
-
 function safeSlice(str: string, maxChars: number): string {
   if (str.length <= maxChars) return str;
   let end = maxChars;
@@ -53,6 +51,7 @@ export function findBestCheckpoint(
   userPrompt: string,
   checkpoints: Array<{ session_id: string; content: string; mode: string; created_at: number }>,
   threshold: number,
+  maxChars: number = 2000,
 ): CheckpointMatch | null {
   let best: CheckpointMatch | null = null;
   let bestScore = 0;
@@ -62,7 +61,7 @@ export function findBestCheckpoint(
     if (score > bestScore && score >= threshold) {
       bestScore = score;
       best = {
-        content: safeSlice(cp.content, _CHECKPOINT_MAX_CHARS),
+        content: safeSlice(cp.content, maxChars),
         score,
         sessionId: cp.session_id,
         mode: cp.mode,

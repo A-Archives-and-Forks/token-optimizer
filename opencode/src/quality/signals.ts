@@ -13,6 +13,10 @@ export function detectStaleReads(store: SessionStore, limit: number): StaleReadR
   const reads = store.getRecentReads(limit);
   const writes = store.getRecentWrites(limit * 2);
 
+  // The DB returns rows DESC by id. Group ascending by operation index so that
+  // `laterWrites[0]` below is the FIRST write after a read, not the last.
+  writes.sort((a, b) => a.idx - b.idx);
+
   const writesByPath = new Map<string, number[]>();
   for (const w of writes) {
     const arr = writesByPath.get(w.path) ?? [];
@@ -67,8 +71,11 @@ export function detectBloatedResults(store: SessionStore, limit: number): Bloate
   const messages = store.getRecentMessages(limit);
 
   // Sort ascending by idx so the early-break on idx > r.idx + 10 works correctly
-  // (DB returns DESC by id, but we need ASC by operation index for lookahead)
+  // (DB returns DESC by id, but we need ASC by operation index for lookahead).
+  // `results` order does not affect the per-result scan, but sort it too so the
+  // two arrays share one ordering invariant and future edits stay correct.
   messages.sort((a, b) => a.idx - b.idx);
+  results.sort((a, b) => a.idx - b.idx);
 
   let bloatedCount = 0;
   let wasteTokens = 0;

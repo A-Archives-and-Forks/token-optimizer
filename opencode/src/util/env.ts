@@ -10,6 +10,7 @@ export interface TokenOptimizerConfig {
   checkpointRetentionMax: number;
   relevanceThreshold: number;
   checkpointCooldownSeconds: number;
+  checkpointMaxChars: number;
   features: {
     qualityNudges: boolean;
     loopDetection: boolean;
@@ -71,8 +72,11 @@ export function resolveConfig(options?: PluginOptions): TokenOptimizerConfig {
     checkpointTtlSeconds: intEnv("TOKEN_OPTIMIZER_CHECKPOINT_TTL", 300),
     checkpointRetentionDays: intEnv("TOKEN_OPTIMIZER_CHECKPOINT_RETENTION_DAYS", 7),
     checkpointRetentionMax: intEnv("TOKEN_OPTIMIZER_CHECKPOINT_RETENTION_MAX", 50),
-    relevanceThreshold: floatEnv("TOKEN_OPTIMIZER_RELEVANCE_THRESHOLD", 0.3),
+    // Restored prior-session content is injected into the system prompt, so the
+    // match must be genuinely relevant before it earns that trust (0.6, not 0.3).
+    relevanceThreshold: floatEnv("TOKEN_OPTIMIZER_RELEVANCE_THRESHOLD", 0.6),
     checkpointCooldownSeconds: intEnv("TOKEN_OPTIMIZER_CHECKPOINT_COOLDOWN_SECONDS", 90),
+    checkpointMaxChars: intEnv("TOKEN_OPTIMIZER_CHECKPOINT_MAX_CHARS", 2000),
     features: {
       qualityNudges: features.qualityNudges !== false && boolEnv("TOKEN_OPTIMIZER_NUDGES", true),
       loopDetection: features.loopDetection !== false && boolEnv("TOKEN_OPTIMIZER_LOOP_DETECTION", true),

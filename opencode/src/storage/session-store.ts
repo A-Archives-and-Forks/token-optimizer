@@ -2,6 +2,12 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
+/** Reduce a session id to the charset used for its DB filename and for echoing
+ * the id into checkpoint content. Single source of truth for all three callers. */
+export function sanitizeSessionId(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS activity_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,8 +99,7 @@ export class SessionStore {
     if (!existsSync(sessDir)) {
       mkdirSync(sessDir, { recursive: true });
     }
-    const safeId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-    this.dbPath = join(sessDir, `${safeId}.db`);
+    this.dbPath = join(sessDir, `${sanitizeSessionId(sessionId)}.db`);
   }
 
   connect(): Database {
@@ -135,9 +140,21 @@ export class SessionStore {
 
   writeQualityCache(cache: Omit<QualityCacheRow, "id" | "updated_at">): void {
     const db = this.connect();
+    // True upsert (ON CONFLICT DO UPDATE), not INSERT OR REPLACE: REPLACE is a
+    // DELETE+INSERT that briefly drops the row and resets any column not listed.
     db.run(
-      `INSERT OR REPLACE INTO quality_cache (id, resource_health, session_efficiency, fill_pct, compactions, tool_calls, last_nudge_time, nudge_count, data, updated_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO quality_cache (id, resource_health, session_efficiency, fill_pct, compactions, tool_calls, last_nudge_time, nudge_count, data, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         resource_health=excluded.resource_health,
+         session_efficiency=excluded.session_efficiency,
+         fill_pct=excluded.fill_pct,
+         compactions=excluded.compactions,
+         tool_calls=excluded.tool_calls,
+         last_nudge_time=excluded.last_nudge_time,
+         nudge_count=excluded.nudge_count,
+         data=excluded.data,
+         updated_at=excluded.updated_at`,
       [
         cache.resource_health,
         cache.session_efficiency,
@@ -228,12 +245,31 @@ export class SessionStore {
 
   private atomicIncrement(key: string): number {
     const db = this.connect();
-    db.run(
-      "INSERT INTO session_meta (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
-      [key],
-    );
-    const row = db.query("SELECT value FROM session_meta WHERE key = ?").get(key) as { value: string } | null;
-    return this.safeParseInt(row?.value);
+    // Single round-trip: RETURNING gives us the post-increment value without a
+    // follow-up SELECT (SQLite >= 3.35, shipped in bun:sqlite).
+    const row = db
+      .query(
+        "INSERT INTO session_meta (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) RETURNING CAST(value AS INTEGER) AS v",
+      )
+      .get(key) as { v: number } | null;
+    return row?.v ?? 1;
+  }
+
+  /**
+   * Cap each per-session signal table to its most recent `maxRows` rows.
+   * Without this, a long session that never compacts grows these tables
+   * unbounded. Table names are a fixed allowlist, never user input.
+   */
+  capSignalTables(maxRows: number): void {
+    const db = this.connect();
+    db.transaction(() => {
+      for (const table of ["reads", "writes", "tool_results", "messages", "agent_dispatches"]) {
+        db.run(
+          `DELETE FROM ${table} WHERE id NOT IN (SELECT id FROM ${table} ORDER BY id DESC LIMIT ?)`,
+          [maxRows],
+        );
+      }
+    })();
   }
 
   getCompactionCount(): number {

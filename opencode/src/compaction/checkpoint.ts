@@ -1,4 +1,4 @@
-import type { SessionStore } from "../storage/session-store.js";
+import { type SessionStore, sanitizeSessionId } from "../storage/session-store.js";
 import type { SessionMode } from "../activity/tracker.js";
 import type { TokenOptimizerConfig } from "../util/env.js";
 
@@ -43,8 +43,12 @@ export function captureCheckpoint(
     }
   }
 
-  const safeSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const sanitizePath = (p: string) => p.replace(/[\r\n]/g, " ").slice(0, 512);
+  const safeSessionId = sanitizeSessionId(sessionId);
+  // This content is later injected into a system prompt, so neutralize anything
+  // that isn't plausibly part of a file path. Drop punctuation an attacker would
+  // use to smuggle instructions, collapse whitespace, and cap length.
+  const sanitizePath = (p: string) =>
+    p.replace(/[^a-zA-Z0-9 /._-]/g, "").replace(/\s+/g, " ").trim().slice(0, 512);
 
   const lines: string[] = [
     `# Checkpoint: ${trigger}`,
@@ -100,6 +104,12 @@ export function pruneCheckpoints(store: SessionStore, config: TokenOptimizerConf
   if (config.checkpointRetentionDays <= 0) return 0;
   const db = store.connect();
   const cutoff = Date.now() / 1000 - config.checkpointRetentionDays * 86400;
-  const result = db.run("DELETE FROM checkpoints WHERE created_at < ?", [cutoff]);
+  // Always keep the 3 newest checkpoints, even if they're past the cutoff. A
+  // short retention window or a clock skew must never wipe the checkpoint we
+  // just wrote and need for continuity restore.
+  const result = db.run(
+    "DELETE FROM checkpoints WHERE created_at < ? AND id NOT IN (SELECT id FROM checkpoints ORDER BY created_at DESC LIMIT 3)",
+    [cutoff],
+  );
   return result.changes;
 }

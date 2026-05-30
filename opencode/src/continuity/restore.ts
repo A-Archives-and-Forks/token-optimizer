@@ -2,6 +2,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { findBestCheckpoint, type CheckpointMatch } from "./matcher.js";
+import { sanitizeSessionId } from "../storage/session-store.js";
 import type { TokenOptimizerConfig } from "../util/env.js";
 
 export function restoreCheckpoint(
@@ -14,6 +15,10 @@ export function restoreCheckpoint(
 
   const sessDir = join(dataDir, "token-optimizer", "sessions");
   if (!existsSync(sessDir)) return null;
+
+  // DB filenames are the sanitized session id, so compare like-for-like or a
+  // session whose id contains special chars would fail to exclude its own file.
+  const safeCurrentId = sanitizeSessionId(currentSessionId);
 
   const cutoff = config.checkpointRetentionDays <= 0
     ? 0
@@ -31,7 +36,7 @@ export function restoreCheckpoint(
 
     for (const file of dbFiles) {
       const sessionId = file.replace(".db", "");
-      if (sessionId === currentSessionId) continue;
+      if (sessionId === safeCurrentId) continue;
 
       const dbPath = join(sessDir, file);
       let db: Database | null = null;
@@ -64,5 +69,5 @@ export function restoreCheckpoint(
   allCheckpoints.sort((a, b) => b.created_at - a.created_at);
   const candidates = allCheckpoints.slice(0, config.checkpointRetentionMax);
 
-  return findBestCheckpoint(userPrompt, candidates, config.relevanceThreshold);
+  return findBestCheckpoint(userPrompt, candidates, config.relevanceThreshold, config.checkpointMaxChars);
 }

@@ -1,18 +1,27 @@
 const MAX_SUMMARIES_PER_WINDOW = 3;
 const COOLDOWN_WINDOW_MS = 5 * 60 * 1000;
-const LARGE_OUTPUT_THRESHOLD = 8192;
 
-let recentSummaries: number[] = [];
+/** Tool output at or above this size (chars) is treated as "large". */
+export const LARGE_OUTPUT_THRESHOLD = 8192;
 
-export function summarizeLargeOutput(output: string): void {
-  if (output.length < LARGE_OUTPUT_THRESHOLD) return;
-
+/**
+ * Rate-limit marker for large tool outputs, scoped to a single session's state.
+ * `recentSummaries` is mutated in place (it lives on the per-session state, so
+ * each session keeps its own cooldown). Returns true if the event was counted,
+ * false if the per-window cap is already reached.
+ */
+export function trackLargeOutputEvent(recentSummaries: number[]): boolean {
   const now = Date.now();
-  recentSummaries = recentSummaries.filter((t) => now - t < COOLDOWN_WINDOW_MS);
-  if (recentSummaries.length >= MAX_SUMMARIES_PER_WINDOW) return;
-  recentSummaries.push(now);
-}
+  const cutoff = now - COOLDOWN_WINDOW_MS;
 
-export function resetIntelCooldown(): void {
-  recentSummaries = [];
+  // Drop expired markers in place.
+  let w = 0;
+  for (let r = 0; r < recentSummaries.length; r++) {
+    if (recentSummaries[r] >= cutoff) recentSummaries[w++] = recentSummaries[r];
+  }
+  recentSummaries.length = w;
+
+  if (recentSummaries.length >= MAX_SUMMARIES_PER_WINDOW) return false;
+  recentSummaries.push(now);
+  return true;
 }

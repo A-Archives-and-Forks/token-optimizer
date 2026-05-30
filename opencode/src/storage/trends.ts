@@ -73,11 +73,22 @@ export class TrendsStore {
   recordSession(data: SessionTrendData): void {
     const db = this.connect();
     const date = new Date().toISOString().split("T")[0];
+    // Upsert that PRESERVES the original date + created_at. INSERT OR REPLACE is a
+    // DELETE+INSERT, so a re-recorded session (double session.deleted) would jump
+    // to today's date bucket and lose its original timestamp.
     db.run(
-      `INSERT OR REPLACE INTO session_log
+      `INSERT INTO session_log
        (session_id, date, project, model, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write,
         cost_usd, resource_health, session_efficiency, tool_calls, compactions, mode, duration_seconds, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         project=excluded.project, model=excluded.model,
+         tokens_input=excluded.tokens_input, tokens_output=excluded.tokens_output,
+         tokens_cache_read=excluded.tokens_cache_read, tokens_cache_write=excluded.tokens_cache_write,
+         cost_usd=excluded.cost_usd, resource_health=excluded.resource_health,
+         session_efficiency=excluded.session_efficiency, tool_calls=excluded.tool_calls,
+         compactions=excluded.compactions, mode=excluded.mode,
+         duration_seconds=excluded.duration_seconds`,
       [
         data.sessionId,
         date,
