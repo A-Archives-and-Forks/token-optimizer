@@ -239,7 +239,10 @@ function parseSession(filePath, agentName, openclawDir) {
     let totalCacheWrite = 0;
     let totalCacheWrite1h = 0;
     let totalCacheWrite5m = 0;
+    let exactCostUsd = 0;
+    let pricedUsageSeen = false;
     let messageCount = 0;
+    const requestUsage = new Map();
     const modelUsage = new Map();
     const toolsUsed = new Set();
     let firstTs = null;
@@ -289,9 +292,19 @@ function parseSession(filePath, agentName, openclawDir) {
                 const out = usage.outputTokens ??
                     usage.output_tokens ??
                     0;
-                const cacheRead = usage.cacheReadInputTokens ??
-                    usage.cache_read_input_tokens ??
+                const promptDetails = usage.promptTokensDetails ??
+                    usage.prompt_tokens_details ??
+                    {};
+                const promptCached = promptDetails.cachedTokens ??
+                    promptDetails.cached_tokens;
+                const explicitCacheRead = usage.cacheReadInputTokens ??
+                    usage.cache_read_input_tokens;
+                const cacheRead = explicitCacheRead ??
+                    promptCached ??
                     0;
+                const inputForCost = explicitCacheRead === undefined && promptCached !== undefined
+                    ? Math.max(0, inp - cacheRead)
+                    : inp;
                 const cacheCreation = usage.cacheCreation ??
                     usage.cache_creation ??
                     {};
@@ -304,16 +317,31 @@ function parseSession(filePath, agentName, openclawDir) {
                 const cacheWrite = usage.cacheCreationInputTokens ??
                     usage.cache_creation_input_tokens ??
                     (cacheWrite1h + cacheWrite5m);
-                totalInput += inp;
-                totalOutput += out;
-                totalCacheRead += cacheRead;
-                totalCacheWrite += cacheWrite;
-                totalCacheWrite1h += cacheWrite1h;
-                totalCacheWrite5m += cacheWrite5m;
-                // Track model usage
                 const modelId = msg?.model ?? record.model ?? "unknown";
-                const current = modelUsage.get(modelId) ?? 0;
-                modelUsage.set(modelId, current + inp + out + cacheRead + cacheWrite);
+                const reqId = record.requestId;
+                const key = reqId || `__noreq__${requestUsage.size}`;
+                const previous = requestUsage.get(key);
+                if (!previous) {
+                    requestUsage.set(key, {
+                        input: inputForCost,
+                        output: out,
+                        cacheRead,
+                        cacheWrite,
+                        cacheWrite1h,
+                        cacheWrite5m,
+                        model: modelId,
+                    });
+                }
+                else {
+                    previous.input = Math.max(previous.input, inputForCost);
+                    previous.output = Math.max(previous.output, out);
+                    previous.cacheRead = Math.max(previous.cacheRead, cacheRead);
+                    previous.cacheWrite = Math.max(previous.cacheWrite, cacheWrite);
+                    previous.cacheWrite1h = Math.max(previous.cacheWrite1h, cacheWrite1h);
+                    previous.cacheWrite5m = Math.max(previous.cacheWrite5m, cacheWrite5m);
+                    if (modelId && modelId !== "unknown")
+                        previous.model = modelId;
+                }
             }
             // Extract tool usage
             const msgContent = msg?.content;
@@ -332,6 +360,29 @@ function parseSession(filePath, agentName, openclawDir) {
     }
     if (messageCount === 0)
         return null;
+    for (const usage of requestUsage.values()) {
+        totalInput += usage.input;
+        totalOutput += usage.output;
+        totalCacheRead += usage.cacheRead;
+        totalCacheWrite += usage.cacheWrite;
+        totalCacheWrite1h += usage.cacheWrite1h;
+        totalCacheWrite5m += usage.cacheWrite5m;
+        const current = modelUsage.get(usage.model) ?? 0;
+        modelUsage.set(usage.model, current + usage.input + usage.output + usage.cacheRead + usage.cacheWrite);
+        const normalizedModel = (0, pricing_1.normalizeModelName)(usage.model) ?? usage.model;
+        const callCost = (0, pricing_1.calculateCost)({
+            input: usage.input,
+            output: usage.output,
+            cacheRead: usage.cacheRead,
+            cacheWrite: usage.cacheWrite,
+        }, normalizedModel, openclawDir, {
+            cacheWrite1hTokens: usage.cacheWrite1h,
+            cacheWrite5mTokens: usage.cacheWrite5m,
+        });
+        if (callCost > 0)
+            pricedUsageSeen = true;
+        exactCostUsd += callCost;
+    }
     // Duration
     let durationSeconds = 0;
     if (firstTs && lastTs) {
@@ -361,7 +412,12 @@ function parseSession(filePath, agentName, openclawDir) {
     else if (totalOutput < 100 && totalInput > 50_000) {
         outcome = "empty";
     }
-    const costUsd = (0, pricing_1.calculateCost)(tokens, model, openclawDir);
+    const costUsd = pricedUsageSeen
+        ? exactCostUsd
+        : (0, pricing_1.calculateCost)(tokens, model, openclawDir, {
+            cacheWrite1hTokens: totalCacheWrite1h,
+            cacheWrite5mTokens: totalCacheWrite5m,
+        });
     const topic = firstUserText ? extractTopic(firstUserText) : undefined;
     return {
         system: "openclaw",
@@ -440,7 +496,10 @@ function scanAllSessions(openclawDir, days = 30) {
                 if (indexed) {
                     run.tokens.input = indexed.inputTokens;
                     run.tokens.output = indexed.outputTokens;
-                    run.costUsd = (0, pricing_1.calculateCost)(run.tokens, run.model, openclawDir);
+                    run.costUsd = (0, pricing_1.calculateCost)(run.tokens, run.model, openclawDir, {
+                        cacheWrite1hTokens: run.cacheWrite1hTokens ?? 0,
+                        cacheWrite5mTokens: run.cacheWrite5mTokens ?? 0,
+                    });
                 }
             }
             allRuns.push(run);
@@ -548,11 +607,18 @@ function parseSessionTurns(filePath, openclawDir) {
         // --- Cache read ---
         // Claude: cache_read_input_tokens
         // OpenAI: usage.prompt_tokens_details.cached_tokens
-        const promptDetails = usageRaw.prompt_tokens_details ?? {};
-        const cacheRead = usageRaw.cacheReadInputTokens ??
-            usageRaw.cache_read_input_tokens ??
-            promptDetails.cached_tokens ??
+        const promptDetails = usageRaw.promptTokensDetails ??
+            usageRaw.prompt_tokens_details ?? {};
+        const promptCached = promptDetails.cachedTokens ??
+            promptDetails.cached_tokens;
+        const explicitCacheRead = usageRaw.cacheReadInputTokens ??
+            usageRaw.cache_read_input_tokens;
+        const cacheRead = explicitCacheRead ??
+            promptCached ??
             0;
+        const freshInputTokens = explicitCacheRead === undefined && promptCached !== undefined
+            ? Math.max(0, inputTokens - cacheRead)
+            : inputTokens;
         // --- Cache creation (write) ---
         // Claude: cache_creation_input_tokens or ephemeral buckets
         const cacheCreationObj = usageRaw.cacheCreation ??
@@ -587,12 +653,15 @@ function parseSessionTurns(filePath, openclawDir) {
         }
         // --- Cost ---
         const tokens = {
-            input: inputTokens,
+            input: freshInputTokens,
             output: outputTokens,
             cacheRead,
             cacheWrite: cacheCreation,
         };
-        const costUsd = (0, pricing_1.calculateCost)(tokens, model, openclawDir);
+        const costUsd = (0, pricing_1.calculateCost)(tokens, model, openclawDir, {
+            cacheWrite1hTokens: cacheWrite1h,
+            cacheWrite5mTokens: cacheWrite5m,
+        });
         turns.push({
             turnIndex: turnIndex++,
             role: "assistant",

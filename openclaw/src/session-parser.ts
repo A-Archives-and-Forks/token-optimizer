@@ -15,6 +15,16 @@ import * as path from "path";
 import { AgentRun, TokenBreakdown, Outcome, TurnData, CostlyPrompt } from "./models";
 import { normalizeModelName, calculateCost } from "./pricing";
 
+interface UsageBucket {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cacheWrite1h: number;
+  cacheWrite5m: number;
+  model: string;
+}
+
 const HOME = process.env.HOME ?? process.env.USERPROFILE ?? "";
 const OPENCLAW_DIRS = [
   path.join(HOME, ".openclaw"),
@@ -224,7 +234,10 @@ export function parseSession(
   let totalCacheWrite = 0;
   let totalCacheWrite1h = 0;
   let totalCacheWrite5m = 0;
+  let exactCostUsd = 0;
+  let pricedUsageSeen = false;
   let messageCount = 0;
+  const requestUsage = new Map<string, UsageBucket>();
   const modelUsage: Map<string, number> = new Map();
   const toolsUsed: Set<string> = new Set();
   let firstTs: Date | null = null;
@@ -280,10 +293,24 @@ export function parseSession(
           (usage.outputTokens as number) ??
           (usage.output_tokens as number) ??
           0;
-        const cacheRead =
+        const promptDetails =
+          (usage.promptTokensDetails as Record<string, unknown>) ??
+          (usage.prompt_tokens_details as Record<string, unknown>) ??
+          {};
+        const promptCached =
+          (promptDetails.cachedTokens as number) ??
+          (promptDetails.cached_tokens as number);
+        const explicitCacheRead =
           (usage.cacheReadInputTokens as number) ??
-          (usage.cache_read_input_tokens as number) ??
+          (usage.cache_read_input_tokens as number);
+        const cacheRead =
+          explicitCacheRead ??
+          promptCached ??
           0;
+        const inputForCost =
+          explicitCacheRead === undefined && promptCached !== undefined
+            ? Math.max(0, inp - cacheRead)
+            : inp;
         const cacheCreation =
           (usage.cacheCreation as Record<string, unknown>) ??
           (usage.cache_creation as Record<string, unknown>) ??
@@ -301,18 +328,30 @@ export function parseSession(
           (usage.cache_creation_input_tokens as number) ??
           (cacheWrite1h + cacheWrite5m);
 
-        totalInput += inp;
-        totalOutput += out;
-        totalCacheRead += cacheRead;
-        totalCacheWrite += cacheWrite;
-        totalCacheWrite1h += cacheWrite1h;
-        totalCacheWrite5m += cacheWrite5m;
-
-        // Track model usage
         const modelId =
           (msg?.model as string) ?? (record.model as string) ?? "unknown";
-        const current = modelUsage.get(modelId) ?? 0;
-        modelUsage.set(modelId, current + inp + out + cacheRead + cacheWrite);
+        const reqId = record.requestId as string | undefined;
+        const key = reqId || `__noreq__${requestUsage.size}`;
+        const previous = requestUsage.get(key);
+        if (!previous) {
+          requestUsage.set(key, {
+            input: inputForCost,
+            output: out,
+            cacheRead,
+            cacheWrite,
+            cacheWrite1h,
+            cacheWrite5m,
+            model: modelId,
+          });
+        } else {
+          previous.input = Math.max(previous.input, inputForCost);
+          previous.output = Math.max(previous.output, out);
+          previous.cacheRead = Math.max(previous.cacheRead, cacheRead);
+          previous.cacheWrite = Math.max(previous.cacheWrite, cacheWrite);
+          previous.cacheWrite1h = Math.max(previous.cacheWrite1h, cacheWrite1h);
+          previous.cacheWrite5m = Math.max(previous.cacheWrite5m, cacheWrite5m);
+          if (modelId && modelId !== "unknown") previous.model = modelId;
+        }
       }
 
       // Extract tool usage
@@ -333,6 +372,34 @@ export function parseSession(
   }
 
   if (messageCount === 0) return null;
+
+  for (const usage of requestUsage.values()) {
+    totalInput += usage.input;
+    totalOutput += usage.output;
+    totalCacheRead += usage.cacheRead;
+    totalCacheWrite += usage.cacheWrite;
+    totalCacheWrite1h += usage.cacheWrite1h;
+    totalCacheWrite5m += usage.cacheWrite5m;
+    const current = modelUsage.get(usage.model) ?? 0;
+    modelUsage.set(usage.model, current + usage.input + usage.output + usage.cacheRead + usage.cacheWrite);
+    const normalizedModel = normalizeModelName(usage.model) ?? usage.model;
+    const callCost = calculateCost(
+      {
+        input: usage.input,
+        output: usage.output,
+        cacheRead: usage.cacheRead,
+        cacheWrite: usage.cacheWrite,
+      },
+      normalizedModel,
+      openclawDir,
+      {
+        cacheWrite1hTokens: usage.cacheWrite1h,
+        cacheWrite5mTokens: usage.cacheWrite5m,
+      }
+    );
+    if (callCost > 0) pricedUsageSeen = true;
+    exactCostUsd += callCost;
+  }
 
   // Duration
   let durationSeconds = 0;
@@ -369,7 +436,12 @@ export function parseSession(
     outcome = "empty";
   }
 
-  const costUsd = calculateCost(tokens, model, openclawDir);
+  const costUsd = pricedUsageSeen
+    ? exactCostUsd
+    : calculateCost(tokens, model, openclawDir, {
+        cacheWrite1hTokens: totalCacheWrite1h,
+        cacheWrite5mTokens: totalCacheWrite5m,
+      });
 
   const topic = firstUserText ? extractTopic(firstUserText) : undefined;
 
@@ -457,7 +529,10 @@ export function scanAllSessions(
         if (indexed) {
           run.tokens.input = indexed.inputTokens;
           run.tokens.output = indexed.outputTokens;
-          run.costUsd = calculateCost(run.tokens, run.model, openclawDir);
+          run.costUsd = calculateCost(run.tokens, run.model, openclawDir, {
+            cacheWrite1hTokens: run.cacheWrite1hTokens ?? 0,
+            cacheWrite5mTokens: run.cacheWrite5mTokens ?? 0,
+          });
         }
       }
 
@@ -592,12 +667,22 @@ export function parseSessionTurns(
     // Claude: cache_read_input_tokens
     // OpenAI: usage.prompt_tokens_details.cached_tokens
     const promptDetails =
+      (usageRaw.promptTokensDetails as Record<string, unknown>) ??
       (usageRaw.prompt_tokens_details as Record<string, unknown>) ?? {};
-    const cacheRead =
+    const promptCached =
+      (promptDetails.cachedTokens as number) ??
+      (promptDetails.cached_tokens as number);
+    const explicitCacheRead =
       (usageRaw.cacheReadInputTokens as number) ??
-      (usageRaw.cache_read_input_tokens as number) ??
-      (promptDetails.cached_tokens as number) ??
+      (usageRaw.cache_read_input_tokens as number);
+    const cacheRead =
+      explicitCacheRead ??
+      promptCached ??
       0;
+    const freshInputTokens =
+      explicitCacheRead === undefined && promptCached !== undefined
+        ? Math.max(0, inputTokens - cacheRead)
+        : inputTokens;
 
     // --- Cache creation (write) ---
     // Claude: cache_creation_input_tokens or ephemeral buckets
@@ -643,12 +728,15 @@ export function parseSessionTurns(
 
     // --- Cost ---
     const tokens: TokenBreakdown = {
-      input: inputTokens,
+      input: freshInputTokens,
       output: outputTokens,
       cacheRead,
       cacheWrite: cacheCreation,
     };
-    const costUsd = calculateCost(tokens, model, openclawDir);
+    const costUsd = calculateCost(tokens, model, openclawDir, {
+      cacheWrite1hTokens: cacheWrite1h,
+      cacheWrite5mTokens: cacheWrite5m,
+    });
 
     turns.push({
       turnIndex: turnIndex++,

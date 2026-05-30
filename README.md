@@ -3,20 +3,20 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.8.3-green" alt="Version 5.8.3"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.8.4-green" alt="Version 5.8.4"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/github/release-date/alexgreensh/token-optimizer?label=last%20release&color=blue" alt="Last Release"></a>
   <a href="https://github.com/alexgreensh/token-optimizer"><img src="https://img.shields.io/badge/Claude_Code-Plugin-blueviolet" alt="Claude Code Plugin"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/tree/main/openclaw"><img src="https://img.shields.io/badge/OpenClaw-v2.4.2-brightgreen" alt="OpenClaw v2.4.2"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/tree/main/opencode"><img src="https://img.shields.io/badge/OpenCode-v1.0.3-58a6ff" alt="OpenCode v1.0.3"></a>
-  <a href="https://github.com/alexgreensh/token-optimizer/blob/main/docs/codex-beta.md"><img src="https://img.shields.io/badge/Codex-v0.1.0--beta-orange" alt="Codex v0.1.0-beta"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/blob/main/docs/codex.md"><img src="https://img.shields.io/badge/Codex-supported-orange" alt="Codex supported"></a>
 </p>
 <p align="center">
   <img src="https://img.shields.io/badge/cuts%20context%20waste-3fb950" alt="Cuts context waste">
   <img src="https://img.shields.io/badge/survives%20compaction-checkpoint%20%2B%20restore-58a6ff" alt="Survives compaction">
   <img src="https://img.shields.io/badge/saves%20real%20%24-every%20session-2ea043" alt="Saves real dollars every session">
   <img src="https://img.shields.io/badge/live%20dashboard-tokens%20%2B%20%24%20%2B%20turns-8B5CF6?logo=chartdotjs&logoColor=white" alt="Live dashboard">
-  <img src="https://img.shields.io/badge/quality%20score-6%20signals-blue" alt="Quality score, 6 signals">
-  <img src="https://img.shields.io/badge/tests-141-brightgreen" alt="141 Tests">
+  <img src="https://img.shields.io/badge/quality%20score-v6%20dual--score-blue" alt="Quality score v6 dual-score">
+  <img src="https://img.shields.io/badge/tests-257-brightgreen" alt="257 Tests">
 </p>
 <p align="center">
   <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Zero Dependencies">
@@ -41,10 +41,10 @@
 They compress command output, which covers 15-25% of your context on a good day. The other 75-85% (bloated configs, unused skills, duplicate system prompts, stale memory, plus the 60-70% you lose on every compaction) goes untouched.
 </p>
 <p align="center">
-Token Optimizer covers all of it, keeps your work alive across compactions, measures whether the optimization actually helped, and gives you a <strong>live dashboard</strong> that shows every token, every dollar, and every turn, auto-updated after every session. Runs fully local. Zero context tokens used. Zero runtime dependencies.
+Token Optimizer covers all of it, keeps your work alive across compactions, measures whether the optimization actually helped, and gives you a <strong>live dashboard</strong> that shows every token, every dollar, and every turn, auto-updated after every session. Runs fully local. Zero baseline context overhead. Zero runtime dependencies.
 </p>
 <p align="center">
-Works on <strong>Claude Code</strong>, <strong>OpenCode</strong>, <strong>OpenClaw</strong>, and <strong>Codex</strong> (beta) today. Windsurf, Cursor, and more on the way.
+Works on <strong>Claude Code</strong>, <strong>OpenCode</strong>, <strong>OpenClaw</strong>, and <strong>Codex</strong> today. Windsurf, Cursor, and more on the way.
 </p>
 
 <p align="center">
@@ -81,30 +81,30 @@ If you've already hit the EBUSY error:
 4. If Windows still refuses to delete (file in use), reboot, then delete.
 5. Open a fresh Claude Code window and run the two `/plugin` commands above.
 
-**Manual ZIP fallback** (if plugin install repeatedly fails): download [the repo ZIP](https://github.com/alexgreensh/token-optimizer/archive/refs/heads/main.zip) (~800 KB), extract to `C:\Users\<you>\.claude\token-optimizer\`, then run `python measure.py setup-quality-bar` from that directory. Note: on Windows the command is `python`, not `python3`.
+**Manual ZIP fallback** (advanced, if plugin install repeatedly fails): download a versioned source ZIP from the [latest GitHub Release](https://github.com/alexgreensh/token-optimizer/releases/latest), download that release's `CHECKSUMS.sha256`, verify the extracted scripts, then run `python measure.py setup-quality-bar` from `C:\Users\<you>\.claude\token-optimizer\`. Note: on Windows the command is `python`, not `python3`.
 
 </details>
 
 <details>
 <summary><h3>macOS / Linux only: script install (alternative)</h3></summary>
 
-If you prefer a script-managed install on macOS or Linux, this works too and auto-updates daily via `git pull --ff-only`. **Do not run this on Windows, and do not run it alongside the plugin install above on any platform.** Pick one method.
+If you prefer a script-managed install on macOS or Linux, this works too and auto-updates daily by re-running the verified installer against the latest release tag. **Do not run this on Windows, and do not run it alongside the plugin install above on any platform.** Pick one method.
 
 ```bash
 git clone https://github.com/alexgreensh/token-optimizer.git ~/.claude/token-optimizer
 bash ~/.claude/token-optimizer/install.sh
 ```
 
-The installer verifies file integrity against checksums from the latest GitHub release. If you're offline or behind a restrictive proxy, set `TOKEN_OPTIMIZER_SKIP_VERIFY=1` before running.
+The installer resolves the latest GitHub release tag, checks out that tag, and verifies file integrity against that release's checksums. If you're offline or behind a restrictive proxy, set `TOKEN_OPTIMIZER_SKIP_VERIFY=1` before running.
 
 Works on Claude Code, [OpenCode](#opencode), and [OpenClaw](#openclaw). Each platform has its own native plugin (Python for Claude Code, TypeScript for OpenCode and OpenClaw). No bridging, no shared runtime, zero cross-platform dependencies.
 
 </details>
 
 <details>
-<summary><h3>Codex (beta)</h3></summary>
+<summary><h3>Codex</h3></summary>
 
-Token Optimizer works on OpenAI Codex (CLI and Desktop). Same core engine, adapted for AGENTS.md, GPT-5.x models, and Codex's hook surface. This is a **beta** -- core audit, coaching, dashboard, and fleet scanning work. Some advanced features (Delta Mode, Structure Map, invisible Bash compression) are waiting on upstream Codex hook parity.
+Token Optimizer works on OpenAI Codex (CLI and Desktop). Same core engine, adapted for AGENTS.md, GPT-5.x models, intelligence levels, and Codex's hook surface. Some Claude Code mechanisms have Codex-native equivalents rather than identical hooks; the Codex docs call out the few upstream hook gaps honestly.
 
 ```bash
 codex plugin marketplace add alexgreensh/token-optimizer
@@ -123,14 +123,14 @@ Dashboard: `http://localhost:24843/token-optimizer` (separate port from Claude C
 
 Auto-updates on startup via `git ls-remote`. Manual: `codex plugin marketplace upgrade`.
 
-See [`docs/codex-beta.md`](docs/codex-beta.md) for the full feature parity table, hook profiles, and Codex model pricing.
+See [`docs/codex.md`](docs/codex.md) for the full feature parity table, hook profiles, and Codex model pricing.
 
 </details>
 
 <details>
 <summary><h3>OpenCode</h3></summary>
 
-Native TypeScript plugin for [OpenCode](https://github.com/anomalyco/opencode) with full Claude Code feature parity. 7-signal dual-score quality engine, smart compaction with mode-aware context injection, session continuity, quality nudges, loop detection, and a built-in dashboard.
+Native TypeScript plugin for [OpenCode](https://github.com/anomalyco/opencode) with full Claude Code feature parity. v6 dual-score quality engine, smart compaction with mode-aware context injection, session continuity, quality nudges, loop detection, and a built-in dashboard.
 
 ```bash
 opencode plugin token-optimizer-opencode
@@ -144,7 +144,7 @@ Or add it to your `opencode.json` (or `.opencode/opencode.jsonc`) plugin array:
 }
 ```
 
-**No npm? Offline install:** clone this repo and run the bundled installer. It builds the plugin and drops it into `~/.config/opencode/plugins/`, which OpenCode auto-loads:
+**No global npm? Local build install:** clone this repo and run the bundled installer. It builds the plugin and drops it into `~/.config/opencode/plugins/`, which OpenCode auto-loads. Requires Bun and registry or cache access unless dependencies are already present:
 
 ```bash
 git clone https://github.com/alexgreensh/token-optimizer.git
@@ -188,7 +188,7 @@ Most tools tell you your context is full. Token Optimizer shows you exactly wher
 
 ![Token Optimizer Dashboard](skills/token-optimizer/assets/dashboard-demo.gif)
 
-One single-file HTML dashboard. Auto-regenerates after every session via the SessionEnd hook. Bookmark `http://localhost:24842/token-optimizer` and it's always current. Zero tokens from your context, zero network calls, zero setup after install.
+One single-file HTML dashboard. Auto-regenerates after every session via the SessionEnd hook. Bookmark `http://localhost:24842/token-optimizer` and it's always current. Zero baseline context overhead, no telemetry, zero setup after install.
 
 ### What the dashboard tracks
 
@@ -203,9 +203,9 @@ One single-file HTML dashboard. Auto-regenerates after every session via the Ses
 - **Model mix over time**: Opus, Sonnet, Haiku breakdown across every session
 - **CLAUDE.md and MEMORY.md health cards** on the Overview tab with line count, orphan count, and status at a glance
 - **Drift detection**: config snapshots compared across time so you catch creep before it costs you
-- **Savings tracker**: cumulative dollars saved from optimizations, checkpoint restores, and archives
+- **Savings tracker**: cumulative dollars saved from optimizations, checkpoint restores, and tool-output replacements
 
-`/context` shows a capacity bar. Proxy compressors print a terminal report. Token Optimizer shows the receipts, auto-updated, at zero context cost.
+`/context` shows a capacity bar. Proxy compressors print a terminal report. Token Optimizer shows the receipts, auto-updated, with zero baseline context overhead.
 
 ### Launch it
 
@@ -220,21 +220,23 @@ Throughout this README, whenever a feature mentions it's also visible on the das
 
 ## What Makes This Different
 
-### Two kinds of token waste, and most tools only fix one
+### Three kinds of token waste, and most tools fix one
 
-**Runtime waste**: verbose command output that floods your context. Covers maybe 15-25% of what you're burning. This is what proxy compressors handle.
+**Structural waste**: bloated CLAUDE.md, unused skills, duplicate system reminders, stale MEMORY.md, invisible entries past line 200, dead MCP servers. Often the biggest share in high-waste setups, and it compounds, since a leaner prefix means a smaller cache-read bill on every turn that follows. Almost nobody touches this.
 
-**Structural waste**: bloated CLAUDE.md, unused skills, duplicate system reminders, stale MEMORY.md, invisible entries past line 200, dead MCP servers. Covers the other 75-85%. Almost nobody touches this.
+**Runtime waste**: verbose command output, oversized MCP results, and re-read files that flood your context mid-session. The slice proxy compressors handle.
 
-Token Optimizer handles both. And because it also checkpoints your session before compaction fires and restores what the summary dropped, the savings actually stick instead of vanishing the moment auto-compact kicks in.
+**Behavioral waste**: the habits that quietly burn tokens. Letting the cache expire, compacting too late, looping on a failing approach, running Opus where Haiku would do. Token Coach flags these and changes how you work.
+
+Token Optimizer covers all three. And because it checkpoints your session before compaction fires and restores what the summary dropped, the savings stick instead of vanishing the moment auto-compact kicks in.
 
 ### Fully local, zero dependencies, zero telemetry
 
 Pure Python stdlib on Claude Code and Codex. TypeScript with zero runtime deps on OpenCode and OpenClaw. Nothing to `pip install`, no analytics endpoint, no phone-home. Every measurement is a local SQLite write to a file you own under your runtime home. You can inspect it, export it, or delete it.
 
-### Zero context tokens consumed
+### Zero baseline context overhead
 
-Token Optimizer runs as an external process. It doesn't inject instructions into your context, it doesn't add MCP overhead, and it never eats into your window. Your full 1M budget stays fully yours.
+Token Optimizer runs as an external process. It doesn't inject always-on instructions into your context and it doesn't add MCP overhead. Optional quality nudges and checkpoint restore hints are short, event-triggered messages when they are useful; idle overhead stays zero.
 
 ### `/context` shows the dashboard light. Token Optimizer opens the hood.
 
@@ -242,17 +244,31 @@ Token Optimizer runs as an external process. It doesn't inject instructions into
 
 ---
 
-## Real Savings
+## What It Saves
 
-One real snapshot from 30 days of heavy Opus use: 942 sessions, 6.13B input tokens, 90% Opus, 82% cache hit rate.
+Savings come from all three waste types. Some are **measured** from real token deltas, some are **estimated** from your baselines and current pricing, and some are **enabled** (a setting Token Optimizer recommends, like an MCP output cap, that does the saving once you apply it). The dollar figures are **API-equivalent**: literal cash if you pay per token (API, Bedrock, Vertex), and capacity plus quality if you are on a flat subscription (more work per session, fewer compaction wipeouts, less drift before you hit a limit).
+
+Pricing uses the current published Anthropic rates used by the modeled Opus profile: $5 input, $25 output, $0.50 cache-read, $6.25 5m cache-write, and $10 1h cache-write per million tokens.
+
+### What different users can expect (modeled estimates)
+
+| Profile | Monthly input mix | Structural waste trimmed | Est. monthly value (API-equivalent) |
+|---|---|---|---|
+| Light | ~0.3B | ~5K/session | ~$80-150 |
+| Typical heavy | ~2B | ~10-20K/session | ~$300-600 |
+| Heavy + high-waste | ~6B+ | ~35K/session | ~$1,500-2,500 |
+
+These are modeled from the volume, structural waste trimmed, cache-hit rate, and model mix, not guarantees. Your number is your own.
+
+### Estimated savings for a heavy user
+
+Modeled on a real heavy-Opus usage profile from local trends data: 428 sessions, 12,430 API calls, and 2.23B total input mix over 30 days. The measured split is 8.7M fresh input, 2.13B cache-read input, 88.5M cache-write input, and 9.65M output. The structural line uses a historical starting-context baseline of ~45K tokens before the first user message, with ~15K-20K prefix tokens trimmed by Token Optimizer. Estimated potential value across the three pillars:
 
 <p align="center">
-  <img src="skills/token-optimizer/assets/real-savings.svg" alt="Monthly savings breakdown across Token Optimizer features" width="800">
+  <img src="skills/token-optimizer/assets/real-savings.svg" alt="Estimated monthly savings for a heavy user, broken down by the three waste types" width="800">
 </p>
 
-**$1,500 to $2,500 per month** for a heavy user at these volumes. Input savings alone come to around $590. The rest is output and thinking tokens saved by catching loops, landing `/compact` at the right moment, and avoiding rebuilds after bad compactions.
-
-Lighter users see proportional savings. Structural audit wins (unused skills, duplicate configs, orphaned memory entries) are immediate regardless of volume, and they compound because a smaller prefix means a smaller cache-read bill on every single turn that follows.
+In that historical-baseline scenario, structural is the giant: the diagram models how a leaner prefix can reduce future input, cache-write, and cache-read work. Runtime compression and behavioral coaching add on top. Estimated potential, not a guarantee. On a flat subscription it shows up as capacity and quality rather than cash.
 
 ---
 
@@ -261,7 +277,7 @@ Lighter users see proportional savings. Structural audit wins (unused skills, du
 <details>
 <summary>🎯 <strong>Can Token Optimizer degrade my context quality?</strong></summary>
 
-No. Structural optimization only removes genuinely unused components (skills you never invoke, duplicate configs, orphaned memory entries). Active Compression features are independently toggleable, and the lossy ones (like Bash Compression) can be disabled with a single command or env var. The 7-signal quality score actively tracks degradation, so if anything ever hurt quality, the score would show it.
+No. Structural optimization only removes genuinely unused components (skills you never invoke, duplicate configs, orphaned memory entries). Active Compression controls can be disabled with a single command or env var. The v6 dual-score quality system actively tracks degradation, so if anything ever hurt quality, the score would show it.
 </details>
 
 <details>
@@ -280,7 +296,7 @@ Be careful with tools that claim to "clean up" your context mid-session. If they
 <details>
 <summary>🔒 <strong>Does it send any data anywhere?</strong></summary>
 
-No network calls. No analytics. No opt-out telemetry because there's nothing to opt out of. Every event is a local SQLite row. You can `sqlite3` it, export it, delete it, or never look at it. It's yours.
+No analytics, no telemetry endpoint, no product data leaves your machine. Measurement events are local SQLite rows you own. Install and update paths may call GitHub to fetch releases, checksums, or marketplace metadata; set `TOKEN_OPTIMIZER_SKIP_VERIFY=1` only if you explicitly accept skipping release verification.
 </details>
 
 <details>
@@ -298,15 +314,15 @@ No. Pure Python stdlib on Claude Code and Codex. TypeScript with zero runtime de
 <details>
 <summary>🧰 <strong>Which platforms does it support?</strong></summary>
 
-Claude Code and OpenClaw today, with native plugins for each. Codex support is in beta, with a Python adapter for chat-first status, coaching, dashboard refresh, and fleet scans.
+Claude Code, OpenCode, OpenClaw, and Codex today, with native support for each. Codex uses a Python adapter for chat-first status, coaching, dashboard refresh, and fleet scans.
 
-Windsurf and Cursor are next on the roadmap. Full Codex parity is waiting on upstream hook/cache surfaces for invisible read substitution, structure-map substitution, and compact lifecycle hooks.
+Windsurf and Cursor are next on the roadmap. Codex has parity on the core audit, coaching, dashboard, cost tracking, continuity, and fleet flows; a few Claude-specific invisible substitution hooks are represented as Codex-safe equivalents or explicit upstream gaps.
 </details>
 
 <details>
 <summary>🔐 <strong>How does install.sh verify file integrity?</strong></summary>
 
-The installer fetches `CHECKSUMS.sha256` from the latest GitHub Release (not from the repo tree), then verifies every script file against those checksums. This out-of-band verification means a compromised commit cannot swap both the code and the checksums simultaneously. If the checksum fetch fails or any file fails verification, the installer exits with a non-zero status and does not continue. You can also verify manually:
+The installer resolves the latest GitHub Release tag, checks out that tag, fetches `CHECKSUMS.sha256` from the same release (not from the repo tree), then verifies every script file against those checksums. This out-of-band verification means a compromised commit cannot swap both the code and the checksums simultaneously. If the checksum fetch fails or any file fails verification, the installer exits with a non-zero status and rolls back an updated install. You can also verify manually:
 
 ```bash
 # Download checksums from the latest release
@@ -331,11 +347,11 @@ With Opus 4.6 and Sonnet 4.6 now at 1M context, that feels like breathing room. 
 - **Higher effort means faster burn.** More thinking tokens per response means you hit compaction sooner, which means more total tokens across the session.
 - **You can't fix what you can't see.** Without per-turn visibility into cache hits, model mix, and subagent spend, every "it feels slow" guess costs money. The dashboard shows exactly which turn was the expensive one.
 
-Token Optimizer tracks all of this. Quality score, degradation bands, compaction loss, drift detection, per-turn cost across four pricing tiers, and skill-and-MCP attribution for every session. Zero context tokens consumed.
+Token Optimizer tracks all of this. Quality score, degradation bands, compaction loss, drift detection, per-turn cost across four pricing tiers, and skill-and-MCP attribution for every session. Zero baseline context overhead.
 
 ![What happens inside a 1M session](skills/token-optimizer/assets/user-profiles.svg)
 
-> **"But doesn't removing tokens hurt the model?"** No. Token Optimizer only touches what's safe to touch. Structural optimization removes genuinely unused components (duplicate configs, unused skill frontmatter, orphaned memory entries), never the conversation itself. Active Compression works on new content entering your window (smart re-reads, credential-safe command summaries) and on the compaction boundary (checkpoints before auto-compact, restore after). Nothing already in your context gets edited or removed, which means your prompt cache stays intact. The 7-signal quality score tracks degradation in real time, and most users see scores improve after optimization because the model has more room for real work.
+> **"But doesn't removing tokens hurt the model?"** No. Token Optimizer only touches what's safe to touch. Structural optimization removes genuinely unused components (duplicate configs, unused skill frontmatter, orphaned memory entries), never the conversation itself. Active Compression works on new content entering your window (smart re-reads, credential-safe command summaries) and on the compaction boundary (checkpoints before auto-compact, restore after). Nothing already in your context gets edited or removed, which means your prompt cache stays intact. The v6 dual-score quality system tracks degradation in real time, and most users see scores improve after optimization because the model has more room for real work.
 
 ---
 
@@ -359,9 +375,11 @@ Background guards handle one-shot threshold capture, cooldown suppression, and d
 
 ### Tool Result Archive (model-aware, no manual lookups)
 
-Large tool results (>4KB) get archived to disk automatically. In your conversation, the full result is replaced with a short preview plus an inline hint like `[Full result archived (12,400 chars). Use 'expand abc123' to retrieve.]`
+Large MCP tool results (>4KB) get archived to disk automatically and replaced with a short preview plus an inline hint like `[Full result archived (12,400 chars). Use 'expand abc123' to retrieve.]`
 
 That hint is visible to Claude, not just you. So after a compaction (when the original tool result has been summarized away), if the model needs the full output again to answer your next question, it invokes `expand abc123` itself and the archived content comes back through the CLI. No command re-run, no lost output, no context cost in the meantime.
+
+Native Bash/Read/Grep-style outputs are archived for continuity too, but Claude's current PostToolUse API cannot replace those already-returned results. Those durability archives are not counted as token savings.
 
 You can run `expand` yourself too when you want to see a specific archived result, but the primary flow is automatic: the model sees the hint, the model asks for the bytes, the bytes come back.
 
@@ -384,17 +402,13 @@ TOKEN_OPTIMIZER_CHECKPOINT_TELEMETRY=1 python3 measure.py checkpoint-stats --day
 
 ## Quality Scoring
 
-Seven signals, weighted to reflect real-world impact:
+v6 reports two composites: **Resource Health** for monotonic session risk, and **Session Efficiency** for behavior that can improve or regress during the session.
 
-| Signal | Weight | What It Means For You |
+| Score | Signals | What It Means For You |
 |--------|--------|----------------|
-| **Context fill** | 20% | How close are you to the degradation cliff? Based on published MRCR benchmarks. |
-| **Stale reads** | 20% | Files you read earlier have changed. Your AI is working with outdated info. |
-| **Bloated results** | 20% | Tool outputs that were never used. Wasting context on noise. |
-| **Compaction depth** | 15% | Each compaction loses 60-70% of your conversation. After 2, 88% is gone. |
-| **Duplicates** | 10% | The same system reminders injected over and over. Pure waste. |
-| **Decision density** | 8% | Are you having a real conversation, or is it mostly overhead? |
-| **Agent efficiency** | 7% | Are your subagents pulling their weight or just burning tokens? |
+| **Resource Health** | Context fill, compaction depth, absolute waste tokens | How close are you to the degradation cliff, and how much hard capacity has already been lost. |
+| **Session Efficiency** | Stale reads, bloated results, decision density, agent efficiency | Whether the session is using its tokens well right now. |
+| **Detail signals** | Duplicate reminders and per-category waste estimates | Extra diagnostics for explaining why a score moved. |
 
 ### Efficiency Grades
 
@@ -434,7 +448,7 @@ Token Optimizer no longer just measures context bloat. It actively reduces it. S
 
 **On by default**: Quality Nudges, Loop Detection, Delta Mode, Structure Map, Bash Compression (16 handlers), Activity Mode Detection, Decision Extraction.
 
-All features are independently toggleable from the Manage tab in the dashboard, via CLI (`measure.py v5 enable|disable <feature>`), or with environment variables.
+Five compression controls are toggleable from the Manage tab in the dashboard, via CLI (`measure.py v5 enable|disable <feature>`), or with environment variables. Activity Mode and Decision Extraction are hook-managed continuity features.
 
 | Feature | Default | Potential Savings | Risk |
 |---|---|---|---|
@@ -446,7 +460,7 @@ All features are independently toggleable from the Manage tab in the dashboard, 
 | Activity Mode | ON | Adapts compaction to session phase | None |
 | Decision Extraction | ON | Preserves decisions across compactions | None |
 
-> **Privacy note**: Every feature runs 100% on your machine. Nothing is ever sent anywhere. No analytics endpoint, no phone-home, no cloud sync. "Measurement" and "beta telemetry" always mean local-only SQLite writes to a file you own, and you can inspect, export, or delete that file at any time. Token Optimizer has zero network calls by design.
+> **Privacy note**: Every feature runs on your machine. No analytics endpoint, no phone-home, no cloud sync. "Measurement" and "beta telemetry" always mean local-only SQLite writes to a file you own, and you can inspect, export, or delete that file at any time. Network use is limited to install/update checks against GitHub or package registries for the install method you chose.
 
 ![Quality Nudges and Loop Detection in action](skills/token-optimizer/assets/v5-nudges-loops.svg)
 
@@ -500,7 +514,7 @@ When Claude re-reads a code file it already saw this session, the Read call is b
 
 ### Bash Output Compression (ON by default, lossy)
 
-Rewrites common CLI commands to return compressed summaries instead of verbose output. v5.1.0 ships seven new handlers covering the command families that eat the most context: lint (rule-code grouping for eslint, ruff, flake8, shellcheck, rubocop, golangci-lint), log tails (adjacent-duplicate collapse), tree (depth-2 truncation), docker build and pull (progress filtering), long listings (pip list, npm ls, docker ps, with top-N plus tail marker), JS/TS/Go build output (error-and-summary view), and test runner routing (cypress, playwright, mocha, karma all route through the unified pytest compressor).
+Rewrites common CLI commands to return compressed summaries instead of verbose output. v5.1.0 ships seven new handlers covering the command families that eat the most context: lint (rule-code grouping for eslint, ruff, flake8, shellcheck, rubocop, golangci-lint), log tails (adjacent-duplicate collapse), tree (depth-2 truncation), docker pull (progress filtering), long listings (pip list, npm ls, docker ps, with top-N plus tail marker), JS/TS/Go build output (error-and-summary view), and test runner routing (cypress, playwright, mocha, karma all route through the unified pytest compressor).
 
 Together with the existing git and pytest handlers, that's full coverage for ~90% of the verbose CLI output real sessions produce.
 
@@ -665,7 +679,7 @@ Hover help on every column explains `Cache`, `TTL`, `Pacing`, `Cache R`, and `Ca
 | `quick` | **"Am I in trouble?"** 10-second answer: context health, degradation risk, biggest token offenders, which model to use. |
 | `doctor` | **"Is everything installed correctly?"** Score out of 10. Broken hooks, missing components, exact fix commands. |
 | `drift` | **"Has my setup grown?"** Side-by-side comparison vs your last snapshot. Catches config creep before it costs you. |
-| `quality` | **"How healthy is this session?"** 7-signal analysis of your live conversation. Stale reads, wasted tokens, compaction damage. |
+| `quality` | **"How healthy is this session?"** v6 dual-score analysis of your live conversation. Stale reads, wasted tokens, compaction damage. |
 | `report` | **"Where are my tokens going?"** Full per-component breakdown. Every skill, every MCP server, every config file. |
 | `conversation` | **"What happened each turn?"** Per-message token and cost breakdown with spike detection. |
 | `pricing-tier` | **"What am I paying?"** View or switch between Anthropic, Vertex, and Bedrock pricing tiers. |
@@ -675,7 +689,7 @@ Hover help on every column explains `Cache`, `TTL`, `Pacing`, `Cache R`, and `Ca
 | `coach` | **"Where do I start?"** Health score with earned vs neutral signals. Detects anti-patterns. |
 | `memory-review` | **"Is my MEMORY.md broken?"** Structural audit: orphaned files, broken links, invisible entries past line 200, duplicate rules. |
 | `dashboard` | **"Show me everything."** Interactive HTML dashboard with all analytics and health cards. |
-| `savings` | **"How much have I saved?"** Cumulative dollar savings from optimizations, checkpoint restores, and archives. |
+| `savings` | **"How much have I saved?"** Cumulative dollar savings from optimizations, checkpoint restores, and tool-output replacements. |
 | `attention-score` | **"Is my CLAUDE.md well-structured?"** Scores sections against the attention curve, flags critical rules in low-attention zones. |
 | `jsonl-inspect` | **"What's in this session?"** Record counts, token distribution, top 10 largest records, compaction markers. |
 | `expand` | **"Get that result back."** Retrieves a tool result the model archived automatically. Usually the model calls this itself when it needs the full output again, but you can also run it manually. |
@@ -688,7 +702,7 @@ Hover help on every column explains `Cache`, `TTL`, `Pacing`, `Cache R`, and `Ca
 | Capability | Token Optimizer | `/context` | context-mode | Proxy compressors |
 |---|---|---|---|---|
 | Structural waste audit | Deep, per-component | Summary only | No | No |
-| Quality degradation tracking | 7-signal score with grades | Capacity % only | No | No |
+| Quality degradation tracking | v6 dual-score with grades | Capacity % only | No | No |
 | Compaction survival | Progressive checkpoints, restore, plus tool output digest | No | Session guide only | No |
 | Runtime output compression | 16 CLI handlers, credential-safe, individually toggleable | No | Yes | Yes, always-on (cannot disable) |
 | Measures if compression actually helped | Yes, local telemetry with before/after tokens | No | No | No |
@@ -696,10 +710,10 @@ Hover help on every column explains `Cache`, `TTL`, `Pacing`, `Cache R`, and `Ca
 | Behavioral coaching and model routing | 11 detectors, cost-ranked subagent breakdown | Basic suggestions | No | No |
 | CLAUDE.md and MEMORY.md structural health | 8 auditors plus attention-curve scoring | No | No | No |
 | Fleet-level waste detection across agents | Yes | No | No | No |
-| Zero context tokens consumed | Yes, external process | Adds ~200 tokens | MCP overhead | Injects instructions into context |
+| Zero baseline context overhead | Yes, external process | Adds ~200 tokens | MCP overhead | Injects instructions into context |
 | Zero runtime dependencies | Yes, pure stdlib | N/A | Varies | External binary |
 | Zero telemetry | Yes | Yes | Varies | Opt-out telemetry |
-| Works across platforms | Claude Code, Codex beta, and OpenClaw (Windsurf and Cursor coming) | Claude Code only | Several platforms | Several platforms |
+| Works across platforms | Claude Code, OpenCode, OpenClaw, and Codex (Windsurf and Cursor coming) | Claude Code only | Several platforms | Several platforms |
 
 A few notes on the compression column: proxy tools quote big compression ratios on the commands they handle best, like `git status` or `tree`. Those numbers are real for those specific commands, but they cover only 15-25% of what you're actually burning. Everything else (configs, skills, memory, compaction loss) stays untouched. And most proxy compressors inject their own instructions into your context, which costs tokens on the way in.
 
@@ -854,9 +868,9 @@ Using Claude Code in the VS Code extension? Most of Token Optimizer works identi
 
 Native TypeScript plugin with session audits, 10 waste detectors, coach mode, Smart Compaction, and interactive dashboard adapted for OpenClaw's architecture. Works with any model (Claude, GPT-5, Gemini, DeepSeek, local via Ollama). Install instructions in the [Install section above](#openclaw). Full docs: [`openclaw/README.md`](openclaw/README.md).
 
-### Codex (Beta)
+### Codex
 
-Python adapter for OpenAI Codex (CLI and Desktop). Same core engine, adapted for AGENTS.md, GPT-5.x models, intelligence levels, and Codex's hook surface. Install instructions in the [Install section above](#codex-beta). Full docs with feature parity table, hook profiles, and model pricing: [`docs/codex-beta.md`](docs/codex-beta.md).
+Python adapter for OpenAI Codex (CLI and Desktop). Same core engine, adapted for AGENTS.md, GPT-5.x models, intelligence levels, and Codex's hook surface. Install instructions in the [Install section above](#codex). Full docs with feature parity table, hook profiles, and model pricing: [`docs/codex.md`](docs/codex.md).
 
 ---
 

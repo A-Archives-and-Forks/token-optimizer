@@ -35,20 +35,54 @@ def normalize_model_name(model_id: str) -> str | None:
     if not model_id or model_id.startswith("<"):
         return None
     m = model_id.lower()
+    # Match OpenClaw behavior: provider-qualified IDs like openai/gpt-4o,
+    # openrouter/openai/gpt-4o, or anthropic:claude-sonnet-4-6 should price as
+    # their underlying model.
+    while re.match(r"^[a-z0-9_.-]+[/:]", m):
+        m = re.sub(r"^[a-z0-9_.-]+[/:]", "", m, count=1)
     if "opus" in m:
         return "opus"
     if "sonnet" in m:
         return "sonnet"
     if "haiku" in m:
         return "haiku"
-    # Non-Claude models: normalize common variants
-    if "gpt-4o-mini" in m:
-        return "gpt-4o-mini"
-    if "gpt-4o" in m:
-        return "gpt-4o"
-    if "gemini" in m and "pro" in m:
-        return "gemini-2.5-pro"
-    return model_id
+    # OpenAI GPT-5 family (most-specific first to prevent prefix shadowing)
+    for alias in (
+        "gpt-5.5-pro",
+        "gpt-5.4-mini",
+        "gpt-5.4-nano",
+        "gpt-5.1-codex-mini",
+        "gpt-5.1-codex",
+        "gpt-5.3-codex",
+        "gpt-5.2-codex",
+        "gpt-5-codex",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.2",
+        "gpt-5.1",
+        "gpt-4.1-mini",
+        "gpt-4.1-nano",
+        "gpt-4.1",
+        "gpt-4o-mini",
+        "gpt-4o",
+        "o3-pro",
+        "o3-mini",
+        "o4-mini",
+        "o3",
+    ):
+        if m == alias or m.startswith(alias + "-"):
+            return alias
+    for alias in (
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+    ):
+        if m == alias or m.startswith(alias + "-"):
+            return alias
+    return m
 
 
 # ---------------------------------------------------------------------------

@@ -117,13 +117,38 @@ SCHEMA_VERSION = "1"
 # ---------------------------------------------------------------------------
 
 DEFAULT_PRICING: dict[str, dict[str, float]] = {
-    # Claude (Opus 4.6 / Sonnet 4.6 / Haiku 4.5 pricing, verified 2026-03-17)
-    "opus":           {"input": 5.0/1e6,  "output": 25.0/1e6, "cache_read": 0.5/1e6,  "cache_write": 6.25/1e6},
-    "sonnet":         {"input": 3.0/1e6,  "output": 15.0/1e6, "cache_read": 0.3/1e6,  "cache_write": 3.75/1e6},
-    "haiku":          {"input": 1.0/1e6,  "output": 5.0/1e6,  "cache_read": 0.1/1e6,  "cache_write": 1.25/1e6},
+    # Claude (Opus 4.6 / Sonnet 4.6 / Haiku 4.5 pricing, verified 2026-05-30)
+    # cache_write = 5-minute TTL (1.25x input); cache_write_1h = 1-hour TTL (2x input).
+    "opus":           {"input": 5.0/1e6,  "output": 25.0/1e6, "cache_read": 0.5/1e6,  "cache_write": 6.25/1e6, "cache_write_1h": 10.0/1e6},
+    "sonnet":         {"input": 3.0/1e6,  "output": 15.0/1e6, "cache_read": 0.3/1e6,  "cache_write": 3.75/1e6, "cache_write_1h": 6.0/1e6},
+    "haiku":          {"input": 1.0/1e6,  "output": 5.0/1e6,  "cache_read": 0.1/1e6,  "cache_write": 1.25/1e6, "cache_write_1h": 2.0/1e6},
+    "gpt-5-codex":    {"input": 1.25/1e6, "output": 10.0/1e6, "cache_read": 0.125/1e6, "cache_write": 0},
+    "gpt-5.1-codex":  {"input": 1.25/1e6, "output": 10.0/1e6, "cache_read": 0.125/1e6, "cache_write": 0},
+    "gpt-5.1-codex-mini": {"input": 0.25/1e6, "output": 2.0/1e6, "cache_read": 0.025/1e6, "cache_write": 0},
+    "gpt-5.1":        {"input": 1.25/1e6, "output": 10.0/1e6, "cache_read": 0.125/1e6, "cache_write": 0},
+    "gpt-5.2":        {"input": 1.75/1e6, "output": 14.0/1e6, "cache_read": 0.175/1e6, "cache_write": 0},
+    "gpt-5.2-codex":  {"input": 1.75/1e6, "output": 14.0/1e6, "cache_read": 0.175/1e6, "cache_write": 0},
+    "gpt-5.3-codex":  {"input": 1.75/1e6, "output": 14.0/1e6, "cache_read": 0.175/1e6, "cache_write": 0},
+    "gpt-5.4":        {"input": 2.5/1e6,  "output": 15.0/1e6, "cache_read": 0.25/1e6, "cache_write": 0},
+    "gpt-5.4-mini":   {"input": 0.75/1e6, "output": 4.5/1e6,  "cache_read": 0.075/1e6, "cache_write": 0},
+    "gpt-5.4-nano":   {"input": 0.20/1e6, "output": 1.25/1e6, "cache_read": 0.02/1e6, "cache_write": 0},
+    "gpt-5.5":        {"input": 5.0/1e6,  "output": 30.0/1e6, "cache_read": 0.50/1e6, "cache_write": 0},
+    "gpt-5.5-pro":    {"input": 30.0/1e6, "output": 180.0/1e6, "cache_read": 30.0/1e6, "cache_write": 0},
+    "gpt-4.1":        {"input": 2.0/1e6,  "output": 8.0/1e6,  "cache_read": 0.50/1e6, "cache_write": 0},
+    "gpt-4.1-mini":   {"input": 0.40/1e6, "output": 1.60/1e6, "cache_read": 0.10/1e6, "cache_write": 0},
+    "gpt-4.1-nano":   {"input": 0.10/1e6, "output": 0.40/1e6, "cache_read": 0.025/1e6, "cache_write": 0},
     "gpt-4o":         {"input": 2.5/1e6,  "output": 10.0/1e6, "cache_read": 1.25/1e6, "cache_write": 0},
-    "gpt-4o-mini":    {"input": 0.15/1e6, "output": 0.6/1e6,  "cache_read": 0,        "cache_write": 0},
-    "gemini-2.5-pro": {"input": 1.25/1e6, "output": 10.0/1e6, "cache_read": 0.315/1e6, "cache_write": 0},
+    "gpt-4o-mini":    {"input": 0.15/1e6, "output": 0.6/1e6,  "cache_read": 0.075/1e6, "cache_write": 0},
+    "o3-pro":         {"input": 20.0/1e6, "output": 80.0/1e6, "cache_read": 5.0/1e6, "cache_write": 0},
+    "o3-mini":        {"input": 1.10/1e6, "output": 4.40/1e6, "cache_read": 0.55/1e6, "cache_write": 0},
+    "o3":             {"input": 2.0/1e6,  "output": 8.0/1e6,  "cache_read": 0.50/1e6, "cache_write": 0},
+    "o4-mini":        {"input": 1.10/1e6, "output": 4.40/1e6, "cache_read": 0.275/1e6, "cache_write": 0},
+    "gemini-3.5-flash": {"input": 1.50/1e6, "output": 9.0/1e6, "cache_read": 0.15/1e6, "cache_write": 0},
+    "gemini-3.1-pro-preview": {"input": 2.0/1e6, "output": 12.0/1e6, "cache_read": 0.20/1e6, "cache_write": 0},
+    "gemini-3.1-flash-lite": {"input": 0.25/1e6, "output": 1.50/1e6, "cache_read": 0.025/1e6, "cache_write": 0},
+    "gemini-2.5-pro": {"input": 1.25/1e6, "output": 10.0/1e6, "cache_read": 0.125/1e6, "cache_write": 0},
+    "gemini-2.5-flash": {"input": 0.30/1e6, "output": 2.50/1e6, "cache_read": 0.03/1e6, "cache_write": 0},
+    "gemini-2.5-flash-lite": {"input": 0.10/1e6, "output": 0.40/1e6, "cache_read": 0.01/1e6, "cache_write": 0},
 }
 
 _pricing_override: dict | None = None
@@ -141,16 +166,32 @@ def _load_pricing() -> dict[str, dict[str, float]]:
         try:
             with open(override_path, "r") as f:
                 user_pricing = json.load(f)
+            if not isinstance(user_pricing, dict):
+                user_pricing = {}
             for model, rates in user_pricing.items():
-                pricing[model] = {**pricing.get(model, {}), **rates}
-        except (json.JSONDecodeError, PermissionError, OSError):
+                if not isinstance(rates, dict):
+                    continue
+                merged = {**pricing.get(model, {}), **rates}
+                if "cache_write_1h" not in rates and ("input" in rates or "cache_write" in rates):
+                    if merged.get("input"):
+                        merged["cache_write_1h"] = merged["input"] * 2
+                    elif merged.get("cache_write"):
+                        merged["cache_write_1h"] = merged["cache_write"] * 1.6
+                pricing[model] = merged
+        except (json.JSONDecodeError, PermissionError, OSError, TypeError, AttributeError):
             pass
     _pricing_override = pricing
     return pricing
 
 
-def calculate_cost(tokens: "TokenBreakdown", model: str) -> float:
-    """Calculate USD cost for a token breakdown at given model rates."""
+def calculate_cost(tokens: "TokenBreakdown", model: str,
+                   cache_write_1h: int = 0, cache_write_5m: int = 0) -> float:
+    """Calculate USD cost for a token breakdown at given model rates.
+
+    For Claude models, pass cache_write_1h / cache_write_5m to apply the correct
+    per-TTL-tier rate (1h = 2x input; 5m = 1.25x input). When the split is
+    unavailable (both 0) the full tokens.cache_write uses the 5m rate.
+    """
     pricing = _load_pricing()
     rates = pricing.get(model)
     if not rates:
@@ -159,7 +200,13 @@ def calculate_cost(tokens: "TokenBreakdown", model: str) -> float:
     cost += tokens.input * rates.get("input", 0)
     cost += tokens.output * rates.get("output", 0)
     cost += tokens.cache_read * rates.get("cache_read", 0)
-    cost += tokens.cache_write * rates.get("cache_write", 0)
+    # Split cache-write cost by TTL tier when data is available.
+    if cache_write_1h or cache_write_5m:
+        unsplit = max(0, tokens.cache_write - cache_write_1h - cache_write_5m)
+        cost += cache_write_1h * rates.get("cache_write_1h", rates.get("cache_write", 0))
+        cost += (cache_write_5m + unsplit) * rates.get("cache_write", 0)
+    else:
+        cost += tokens.cache_write * rates.get("cache_write", 0)
     return cost
 
 
@@ -484,13 +531,51 @@ class ClaudeCodeAdapter(BaseAdapter):
         total_output = 0
         total_cache_read = 0
         total_cache_create = 0
+        total_cache_create_1h = 0
+        total_cache_create_5m = 0
+        exact_cost = 0.0
         model_usage: dict[str, int] = {}
         message_count = 0
         api_calls = 0
+        current_req_key: str | None = None
+        current_usage: dict[str, Any] | None = None
         tools_used_set: set[str] = set()
         first_ts: datetime | None = None
         last_ts: datetime | None = None
         version = None
+
+        def add_usage(usage: dict[str, Any]) -> None:
+            nonlocal total_input, total_output, total_cache_read, total_cache_create
+            nonlocal total_cache_create_1h, total_cache_create_5m, api_calls, exact_cost
+            inp_tok = int(usage["input"])
+            out_tok = int(usage["output"])
+            cr = int(usage["cache_read"])
+            cc = int(usage["cache_write"])
+            cc_1h = int(usage["cache_write_1h"])
+            cc_5m = int(usage["cache_write_5m"])
+            total_input += inp_tok
+            total_output += out_tok
+            total_cache_read += cr
+            total_cache_create += cc
+            total_cache_create_1h += cc_1h
+            total_cache_create_5m += cc_5m
+            api_calls += 1
+            model_id = str(usage.get("model") or "unknown")
+            model_usage[model_id] = model_usage.get(model_id, 0) + inp_tok + cr + cc + out_tok
+            normalized = normalize_model_name(model_id) or model_id
+            exact_cost += calculate_cost(
+                TokenBreakdown(input=inp_tok, output=out_tok, cache_read=cr, cache_write=cc),
+                normalized,
+                cache_write_1h=cc_1h,
+                cache_write_5m=cc_5m,
+            )
+
+        def flush_current_usage() -> None:
+            nonlocal current_req_key, current_usage
+            if current_usage is not None:
+                add_usage(current_usage)
+            current_req_key = None
+            current_usage = None
 
         for record in iter_jsonl(filepath):
             # Version
@@ -523,21 +608,65 @@ class ClaudeCodeAdapter(BaseAdapter):
 
                 usage = msg.get("usage", {})
                 if usage:
-                    inp_tok = usage.get("input_tokens", 0)
-                    out_tok = usage.get("output_tokens", 0)
-                    cr = usage.get("cache_read_input_tokens", 0)
-                    cc = usage.get("cache_creation_input_tokens", 0)
-                    total_input += inp_tok
-                    total_output += out_tok
-                    total_cache_read += cr
-                    total_cache_create += cc
-                    api_calls += 1
-
+                    inp_tok = usage.get("input_tokens", 0) or 0
+                    out_tok = usage.get("output_tokens", 0) or 0
+                    cr = usage.get("cache_read_input_tokens", 0) or 0
+                    # Parse 1h/5m TTL split from cache_creation sub-object or flat keys.
+                    cache_creation = usage.get("cache_creation", {})
+                    if not isinstance(cache_creation, dict):
+                        cache_creation = {}
+                    cc_1h = (
+                        cache_creation.get("ephemeral_1h_input_tokens", 0)
+                        or usage.get("ephemeral_1h_input_tokens", 0)
+                        or 0
+                    )
+                    cc_5m = (
+                        cache_creation.get("ephemeral_5m_input_tokens", 0)
+                        or usage.get("ephemeral_5m_input_tokens", 0)
+                        or 0
+                    )
+                    cc = usage.get("cache_creation_input_tokens", 0) or (cc_1h + cc_5m)
                     model_id = msg.get("model", "unknown")
-                    model_usage[model_id] = model_usage.get(model_id, 0) + inp_tok + cr + cc + out_tok
+                    req_id = record.get("requestId")
+                    current = {
+                        "input": inp_tok,
+                        "output": out_tok,
+                        "cache_read": cr,
+                        "cache_write": cc,
+                        "cache_write_1h": cc_1h,
+                        "cache_write_5m": cc_5m,
+                        "model": model_id,
+                    }
+                    if not req_id:
+                        flush_current_usage()
+                        add_usage(current)
+                        continue
+                    key = str(req_id)
+                    if current_req_key != key:
+                        flush_current_usage()
+                        current_req_key = key
+                        current_usage = current
+                        continue
+                    previous = current_usage
+                    if previous is None:
+                        current_usage = current
+                        continue
+                    previous["input"] = max(previous["input"], inp_tok)
+                    previous["output"] = max(previous["output"], out_tok)
+                    previous["cache_read"] = max(previous["cache_read"], cr)
+                    previous["cache_write"] = max(previous["cache_write"], cc)
+                    previous["cache_write_1h"] = max(previous["cache_write_1h"], cc_1h)
+                    previous["cache_write_5m"] = max(previous["cache_write_5m"], cc_5m)
+                    if model_id and model_id != "unknown":
+                        previous["model"] = model_id
 
         if message_count == 0:
             return None
+
+        # Claude Code streaming writes cumulative usage chunks per requestId.
+        # Chunks are emitted consecutively, so keep one in-flight accumulator and
+        # flush it when the request id changes.
+        flush_current_usage()
 
         # Duration
         duration_seconds = 0.0
@@ -576,7 +705,11 @@ class ClaudeCodeAdapter(BaseAdapter):
         # Determine run type
         run_type = "delegate" if is_subagent else "manual"
 
-        cost = calculate_cost(tokens, model)
+        cost = calculate_cost(tokens, model,
+                              cache_write_1h=total_cache_create_1h,
+                              cache_write_5m=total_cache_create_5m)
+        if exact_cost > 0:
+            cost = exact_cost
 
         return AgentRun(
             system="claude",
@@ -827,6 +960,9 @@ class OpenClawAdapter(BaseAdapter):
                     return True, 0.8, f"Found {p.name} directory with agents/"
                 return True, 0.4, f"Found {p.name} directory (no agents/ yet)"
         return False, 0.0, "No OpenClaw directories found"
+
+    def scan(self, since: datetime, conn: sqlite3.Connection | None = None) -> tuple[list[AgentRun], list[str]]:
+        return [], ["OpenClaw fleet collection is not implemented in this Python adapter; use the OpenClaw dashboard for OpenClaw runs."]
 
 
 class NanoClawAdapter(BaseAdapter):

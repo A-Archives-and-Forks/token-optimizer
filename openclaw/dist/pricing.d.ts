@@ -14,9 +14,16 @@ export interface ModelPricing {
     input: number;
     output: number;
     cacheRead: number;
+    /** 5-minute cache-write rate (1.25x input). Use for 5m-TTL writes or when TTL is unknown. */
     cacheWrite: number;
+    /** 1-hour cache-write rate (2x input). Only set for Claude models that support the 1h tier. */
+    cacheWrite1h?: number;
 }
-/** Default pricing (USD per token). Verified March 17, 2026. */
+export interface CacheWriteSplit {
+    cacheWrite1hTokens?: number;
+    cacheWrite5mTokens?: number;
+}
+/** Default pricing (USD per token). Verified May 30, 2026. */
 export declare const DEFAULT_PRICING: Record<string, ModelPricing>;
 /** Get pricing with user overrides merged on top of defaults. */
 export declare function getPricing(openclawDir?: string): Record<string, ModelPricing>;
@@ -38,6 +45,12 @@ export declare function simulateModelSwitch(tokens: TokenBreakdown, currentModel
     savingsUsd: number;
     savingsPct: number;
 };
-/** Calculate USD cost. Uses user config pricing if available, then defaults. */
-export declare function calculateCost(tokens: TokenBreakdown, model: string, openclawDir?: string): number;
+/** Calculate USD cost. Uses user config pricing if available, then defaults.
+ *
+ * For Claude models pass cacheWriteSplit to apply
+ * the correct per-TTL-tier rate (1h = 2x input; 5m = 1.25x input). When
+ * the split is unavailable, or when a remainder is unsplit, those tokens use
+ * the 5m rate.
+ */
+export declare function calculateCost(tokens: TokenBreakdown, model: string, openclawDir?: string, cacheWriteSplit?: CacheWriteSplit): number;
 //# sourceMappingURL=pricing.d.ts.map

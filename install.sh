@@ -23,6 +23,12 @@ REPO_HTTPS="https://github.com/${GITHUB_REPO}.git"
 REPO_SSH="git@github.com:${GITHUB_REPO}.git"
 INSTALL_DIR="${HOME}/.claude/token-optimizer"
 SKILL_DIR="${HOME}/.claude/skills"
+CHECKSUM_FILE="/tmp/token-optimizer-checksums-$$.sha256"
+RELEASE_TAG=""
+CHECKSUM_ASSET_URL=""
+INSTALL_OLD_HEAD=""
+INSTALL_UPDATED=0
+trap 'rm -f "$CHECKSUM_FILE"' EXIT
 
 # ── Colors ────────────────────────────────────────────────────
 
@@ -89,10 +95,14 @@ install_opencode() {
     info "Installing OpenCode dependencies (bun install)..."
     # --frozen-lockfile: install exactly what bun.lock pins, no silent drift to a
     # newer (untested) transitive version at install time.
-    ( cd "$oc_src" && bun install --frozen-lockfile --silent ) || fail "bun install failed in ${oc_src} (lockfile out of sync? run 'bun install' in opencode/)."
+    if ! ( cd "$oc_src" && bun install --frozen-lockfile --silent ); then
+        fail "bun install failed in ${oc_src} (lockfile out of sync? run 'bun install' in opencode/)."
+    fi
 
     info "Building plugin bundle..."
-    ( cd "$oc_src" && bun run build:bundle ) || fail "Plugin bundle build failed."
+    if ! ( cd "$oc_src" && bun run build:bundle ); then
+        fail "Plugin bundle build failed."
+    fi
 
     local bundle="${oc_src}/dist-bundle/token-optimizer.js"
     [ -f "$bundle" ] || fail "Bundle not produced at ${bundle}"
@@ -178,6 +188,74 @@ if [ -d "${HOME}/.claude/plugins/cache" ]; then
     fi
 fi
 
+# ── Integrity Metadata ─────────────────────────────────────────
+# Checksums are fetched from the GitHub release (out-of-band), NOT from
+# the repo tree. This prevents a single compromised commit from swapping
+# both code and checksums simultaneously.
+# Set TOKEN_OPTIMIZER_SKIP_VERIFY=1 to bypass (air-gapped installs).
+
+verification_enabled() {
+    [ "${TOKEN_OPTIMIZER_SKIP_VERIFY:-}" != "1" ]
+}
+
+resolve_latest_release() {
+    local release_json parsed
+    release_json=$(curl -fsSL \
+        "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" \
+        2>/dev/null) || return 1
+
+    parsed=$(printf '%s' "$release_json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print(data.get("tag_name", ""))
+    asset = ""
+    for a in data.get("assets", []):
+        if a.get("name") == "CHECKSUMS.sha256":
+            asset = a.get("browser_download_url", "")
+            break
+    print(asset)
+except Exception:
+    print("")
+    print("")
+' 2>/dev/null) || return 1
+
+    RELEASE_TAG=$(printf '%s\n' "$parsed" | sed -n '1p')
+    CHECKSUM_ASSET_URL=$(printf '%s\n' "$parsed" | sed -n '2p')
+    [ -n "$RELEASE_TAG" ] && [ -n "$CHECKSUM_ASSET_URL" ]
+}
+
+rollback_install_update() {
+    if [ -n "$INSTALL_OLD_HEAD" ] && [ "$INSTALL_UPDATED" = "1" ] && [ -d "${INSTALL_DIR}/.git" ]; then
+        local attempted_head
+        attempted_head=$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")
+        warn "Rolling back unverified update from ${attempted_head} to ${INSTALL_OLD_HEAD}"
+        if git -C "$INSTALL_DIR" reset --hard "$INSTALL_OLD_HEAD" >/dev/null 2>&1; then
+            info "Rollback succeeded"
+        else
+            warn "Rollback failed. Re-clone from: https://github.com/${GITHUB_REPO}"
+        fi
+    fi
+}
+
+fail_verified_install() {
+    rollback_install_update
+    fail "$1"
+}
+
+fetch_release_checksums() {
+    [ -n "$CHECKSUM_ASSET_URL" ] || return 1
+    curl -fsSL -o "$CHECKSUM_FILE" "$CHECKSUM_ASSET_URL" 2>/dev/null && [ -s "$CHECKSUM_FILE" ]
+}
+
+if verification_enabled; then
+    info "Resolving latest verified release..."
+    resolve_latest_release || fail_verified_install "Could not resolve the latest GitHub Release and checksum asset. Integrity verification is required. Set TOKEN_OPTIMIZER_SKIP_VERIFY=1 only if you explicitly accept this risk."
+    info "Latest verified release: ${RELEASE_TAG}"
+else
+    warn "Skipping integrity verification (TOKEN_OPTIMIZER_SKIP_VERIFY=1)"
+fi
+
 # ── Clone or Update ───────────────────────────────────────────
 
 clone_repo() {
@@ -186,7 +264,11 @@ clone_repo() {
     # Sparse checkout: only pull Claude Code files, skip OpenClaw platform files
     try_clone() {
         local url="$1"
-        git clone --depth 1 --filter=blob:none --sparse "$url" "$INSTALL_DIR" 2>"$clone_log" || return 1
+        if verification_enabled; then
+            git clone --depth 1 --filter=blob:none --sparse --branch "$RELEASE_TAG" "$url" "$INSTALL_DIR" 2>"$clone_log" || return 1
+        else
+            git clone --depth 1 --filter=blob:none --sparse "$url" "$INSTALL_DIR" 2>"$clone_log" || return 1
+        fi
         # Cone mode only accepts directories; root-level files are included automatically
         git -C "$INSTALL_DIR" sparse-checkout set \
             skills/ hooks/ .claude-plugin/ .codex-plugin/ .codex/ \
@@ -210,8 +292,28 @@ clone_repo() {
     fail "Could not clone repository. Check network connectivity and GitHub access."
 }
 
+update_repo() {
+    local before_head after_head
+    before_head=$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo "")
+    if verification_enabled; then
+        info "Updating to verified release ${RELEASE_TAG}..."
+        git -C "$INSTALL_DIR" fetch --force --depth 1 origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" || return 1
+        git -C "$INSTALL_DIR" checkout --detach -q "$RELEASE_TAG" || return 1
+    else
+        git -C "$INSTALL_DIR" pull --ff-only || {
+            warn "git pull failed. Try: cd ${INSTALL_DIR} && git pull"
+            warn "Continuing with existing version."
+        }
+    fi
+    after_head=$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo "")
+    if [ -n "$before_head" ] && [ "$after_head" != "$before_head" ]; then
+        INSTALL_UPDATED=1
+    fi
+}
+
 if [ -d "${INSTALL_DIR}/.git" ]; then
     info "Existing install found. Updating..."
+    INSTALL_OLD_HEAD=$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || true)
 
     # Enable sparse checkout on existing installs (migrates full clones)
     if ! git -C "$INSTALL_DIR" sparse-checkout list &>/dev/null || \
@@ -223,11 +325,6 @@ if [ -d "${INSTALL_DIR}/.git" ]; then
             skills/ hooks/ .claude-plugin/ .codex-plugin/ .codex/ \
             2>/dev/null || true
     fi
-
-    git -C "$INSTALL_DIR" pull --ff-only || {
-        warn "git pull failed. Try: cd ${INSTALL_DIR} && git pull"
-        warn "Continuing with existing version."
-    }
 
     # Self-heal: v5.7.5-5.7.9 had a sparse-checkout bug that pruned skills/ and hooks/.
     # If they're missing after update, fix the sparse checkout config.
@@ -246,6 +343,21 @@ if [ -d "${INSTALL_DIR}/.git" ]; then
             fail "Could not restore skills/ directory. Try: cd ${INSTALL_DIR} && git sparse-checkout disable"
         fi
     fi
+
+    update_repo || fail_verified_install "Could not update to verified release ${RELEASE_TAG}. Check network connectivity or re-clone from: https://github.com/${GITHUB_REPO}"
+
+    # A release checkout can change sparse checkout behavior. Repair again after update.
+    if [ ! -d "${INSTALL_DIR}/skills" ] || [ ! -d "${INSTALL_DIR}/hooks" ]; then
+        warn "Broken sparse checkout detected after update. Repairing..."
+        git -C "$INSTALL_DIR" sparse-checkout set \
+            skills/ hooks/ .claude-plugin/ .codex-plugin/ .codex/ \
+            2>/dev/null || git -C "$INSTALL_DIR" sparse-checkout disable 2>/dev/null || true
+        if [ ! -d "${INSTALL_DIR}/skills" ]; then
+            warn "Sparse checkout repair failed. Disabling sparse checkout..."
+            git -C "$INSTALL_DIR" sparse-checkout disable 2>/dev/null || true
+        fi
+        [ -d "${INSTALL_DIR}/skills" ] || fail_verified_install "Could not restore skills/ directory. Try re-cloning from: https://github.com/${GITHUB_REPO}"
+    fi
 elif [ -d "$INSTALL_DIR" ]; then
     BACKUP="${INSTALL_DIR}.backup.$(date +%Y%m%d_%H%M%S)"
     warn "Non-git install found at ${INSTALL_DIR}"
@@ -259,41 +371,7 @@ else
 fi
 
 # ── Integrity Verification ────────────────────────────────────
-# Checksums are fetched from the GitHub release (out-of-band), NOT from
-# the repo tree. This prevents a single compromised commit from swapping
-# both code and checksums simultaneously.
-# Set TOKEN_OPTIMIZER_SKIP_VERIFY=1 to bypass (air-gapped installs).
-
-CHECKSUM_FILE="/tmp/token-optimizer-checksums-$$.sha256"
-trap 'rm -f "$CHECKSUM_FILE"' EXIT
-
-fetch_release_checksums() {
-    local asset_url
-    asset_url=$(curl -fsSL \
-        "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" \
-        2>/dev/null \
-        | python3 -c '
-import json, sys
-try:
-    data = json.load(sys.stdin)
-    for a in data.get("assets", []):
-        if a["name"] == "CHECKSUMS.sha256":
-            print(a["browser_download_url"])
-            break
-except Exception:
-    pass
-' 2>/dev/null)
-
-    if [ -z "$asset_url" ]; then
-        return 1
-    fi
-
-    curl -fsSL -o "$CHECKSUM_FILE" "$asset_url" 2>/dev/null && [ -s "$CHECKSUM_FILE" ]
-}
-
-if [ "${TOKEN_OPTIMIZER_SKIP_VERIFY:-}" = "1" ]; then
-    warn "Skipping integrity verification (TOKEN_OPTIMIZER_SKIP_VERIFY=1)"
-else
+if verification_enabled; then
     info "Fetching checksums from GitHub release..."
     if fetch_release_checksums; then
         info "Verifying file integrity (out-of-band checksums)..."
@@ -301,11 +379,10 @@ else
             cd "$INSTALL_DIR" || exit 1
             sha256sum -c "$CHECKSUM_FILE" --quiet 2>/dev/null || \
             shasum -a 256 -c "$CHECKSUM_FILE" --quiet 2>/dev/null
-        ) || fail "Integrity check FAILED. Files do not match release checksums. Your install may be compromised. Re-clone from: https://github.com/${GITHUB_REPO}"
+        ) || fail_verified_install "Integrity check FAILED. Files do not match release checksums. Your install may be compromised. Re-clone from: https://github.com/${GITHUB_REPO}"
         info "Integrity check passed"
     else
-        warn "No checksums in GitHub release. Skipping integrity verification."
-        warn "To verify manually: shasum -a 256 -c CHECKSUMS.sha256 (in ${INSTALL_DIR})"
+        fail_verified_install "Could not fetch CHECKSUMS.sha256 from the latest GitHub Release. Integrity verification is required. Set TOKEN_OPTIMIZER_SKIP_VERIFY=1 only if you explicitly accept this risk."
     fi
 fi
 
@@ -352,7 +429,7 @@ fi
 
 # ── Setup All Hooks (v5.0.1: merge plugin hooks.json into settings.json) ────
 # Canonical way for script installs to get the full v5 hook set.
-# Idempotent: safe to re-run on every install and every `git pull`.
+# Idempotent: safe to re-run on every install and verified release update.
 # Upgrades from v4.x pick up v5 active compression hooks here.
 
 info "Installing all Token Optimizer hooks..."

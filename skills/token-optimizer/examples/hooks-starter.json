@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/token-optimizer}/hooks/python-launcher.sh\" '$MEASURE_PY' compact-restore"
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/token-optimizer}/hooks/python-launcher.sh\" '$MEASURE_PY' compact-restore --compact"
           }
         ]
       },

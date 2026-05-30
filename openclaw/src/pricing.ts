@@ -56,15 +56,24 @@ export interface ModelPricing {
   input: number;
   output: number;
   cacheRead: number;
+  /** 5-minute cache-write rate (1.25x input). Use for 5m-TTL writes or when TTL is unknown. */
   cacheWrite: number;
+  /** 1-hour cache-write rate (2x input). Only set for Claude models that support the 1h tier. */
+  cacheWrite1h?: number;
 }
 
-/** Default pricing (USD per token). Verified May 29, 2026. */
+export interface CacheWriteSplit {
+  cacheWrite1hTokens?: number;
+  cacheWrite5mTokens?: number;
+}
+
+/** Default pricing (USD per token). Verified May 30, 2026. */
 export const DEFAULT_PRICING: Record<string, ModelPricing> = {
   // Anthropic Claude (1M context for Opus/Sonnet as of March 13, 2026)
-  opus:            { input: 5.0 / 1e6,   output: 25.0 / 1e6,  cacheRead: 0.5 / 1e6,   cacheWrite: 6.25 / 1e6 },
-  sonnet:          { input: 3.0 / 1e6,   output: 15.0 / 1e6,  cacheRead: 0.3 / 1e6,   cacheWrite: 3.75 / 1e6 },
-  haiku:           { input: 1.0 / 1e6,   output: 5.0 / 1e6,   cacheRead: 0.1 / 1e6,   cacheWrite: 1.25 / 1e6 },
+  // cacheWrite = 5m-TTL (1.25x input); cacheWrite1h = 1h-TTL (2x input).
+  opus:            { input: 5.0 / 1e6,   output: 25.0 / 1e6,  cacheRead: 0.5 / 1e6,   cacheWrite: 6.25 / 1e6, cacheWrite1h: 10.0 / 1e6 },
+  sonnet:          { input: 3.0 / 1e6,   output: 15.0 / 1e6,  cacheRead: 0.3 / 1e6,   cacheWrite: 3.75 / 1e6, cacheWrite1h: 6.0 / 1e6 },
+  haiku:           { input: 1.0 / 1e6,   output: 5.0 / 1e6,   cacheRead: 0.1 / 1e6,   cacheWrite: 1.25 / 1e6, cacheWrite1h: 2.0 / 1e6 },
   // OpenAI GPT-5 family
   "gpt-5.5-pro":   { input: 30.0 / 1e6,  output: 180.0 / 1e6, cacheRead: 30.0 / 1e6,  cacheWrite: 0 },  // cache N/A per OpenAI; billed at full input rate
   "gpt-5.5":       { input: 5.0 / 1e6,   output: 30.0 / 1e6,  cacheRead: 0.50 / 1e6,  cacheWrite: 0 },
@@ -91,7 +100,7 @@ export const DEFAULT_PRICING: Record<string, ModelPricing> = {
   "o3":            { input: 2.0 / 1e6,   output: 8.0 / 1e6,   cacheRead: 0.5 / 1e6,   cacheWrite: 0 },
   "o3-pro":        { input: 20.0 / 1e6,  output: 80.0 / 1e6,  cacheRead: 5.0 / 1e6,   cacheWrite: 0 },
   "o3-mini":       { input: 1.1 / 1e6,   output: 4.4 / 1e6,   cacheRead: 0.55 / 1e6, cacheWrite: 0 },
-  "o4-mini":       { input: 0.55 / 1e6,  output: 2.2 / 1e6,   cacheRead: 0.14 / 1e6, cacheWrite: 0 },
+  "o4-mini":       { input: 1.10 / 1e6,  output: 4.40 / 1e6,  cacheRead: 0.275 / 1e6, cacheWrite: 0 },
   // Google Gemini
   "gemini-3.5-flash": { input: 1.5 / 1e6, output: 9.0 / 1e6,  cacheRead: 0.15 / 1e6,  cacheWrite: 0 },
   "gemini-3.1-pro-preview": { input: 2.0 / 1e6, output: 12.0 / 1e6, cacheRead: 0.20 / 1e6, cacheWrite: 0 },
@@ -152,17 +161,42 @@ function loadUserPricing(openclawDir: string): Record<string, ModelPricing> {
 
       for (const model of models) {
         const name = model.name as string | undefined;
-        const cost = model.cost as Record<string, number> | undefined;
+        const cost = model.cost as Record<string, unknown> | undefined;
         if (!name || !cost) continue;
 
         const normalized = normalizeModelName(name);
         if (!normalized) continue;
 
+        const base = DEFAULT_PRICING[normalized] ?? {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        };
+        const parseCost = (value: unknown, fallback: number): number => {
+          if (value === undefined || value === null) return fallback;
+          const numeric = typeof value === "number" ? value : Number(value);
+          return Number.isFinite(numeric) && numeric >= 0 ? numeric / 1e6 : fallback;
+        };
+        const input = parseCost(cost.input, base.input);
+        const output = parseCost(cost.output, base.output);
+        const cacheRead = parseCost(cost.cacheRead, base.cacheRead);
+        const cacheWrite = parseCost(cost.cacheWrite, base.cacheWrite);
+        let cacheWrite1h = base.cacheWrite1h;
+        if (cost.cacheWrite1h !== undefined) {
+          cacheWrite1h = parseCost(cost.cacheWrite1h, base.cacheWrite1h ?? cacheWrite);
+        } else if (cost.input !== undefined) {
+          cacheWrite1h = input * 2;
+        } else if (cost.cacheWrite !== undefined) {
+          cacheWrite1h = cacheWrite * 1.6;
+        }
+
         userPricing[normalized] = {
-          input: (cost.input ?? 0) / 1e6,
-          output: (cost.output ?? 0) / 1e6,
-          cacheRead: (cost.cacheRead ?? 0) / 1e6,
-          cacheWrite: (cost.cacheWrite ?? 0) / 1e6,
+          input,
+          output,
+          cacheRead,
+          cacheWrite,
+          cacheWrite1h,
         };
       }
     }
@@ -206,8 +240,12 @@ export function resetPricingCache(): void {
 export function normalizeModelName(modelId: string): string | null {
   if (!modelId || modelId.startsWith("<")) return null;
 
-  // Strip provider prefix (anthropic/, openai/, google/, deepseek/)
-  const m = modelId.toLowerCase().replace(/^[a-z-]+\//, "");
+  // Strip one or more provider prefixes:
+  // openai/gpt-4o, openrouter/openai/gpt-4o, anthropic:claude-sonnet-4-6.
+  let m = modelId.toLowerCase();
+  while (/^[a-z0-9_.-]+[/:]/.test(m)) {
+    m = m.replace(/^[a-z0-9_.-]+[/:]/, "");
+  }
 
   // Anthropic
   if (m.includes("opus")) return "opus";
@@ -319,22 +357,43 @@ export function simulateModelSwitch(
   };
 }
 
-/** Calculate USD cost. Uses user config pricing if available, then defaults. */
+/** Calculate USD cost. Uses user config pricing if available, then defaults.
+ *
+ * For Claude models pass cacheWriteSplit to apply
+ * the correct per-TTL-tier rate (1h = 2x input; 5m = 1.25x input). When
+ * the split is unavailable, or when a remainder is unsplit, those tokens use
+ * the 5m rate.
+ */
 export function calculateCost(
   tokens: TokenBreakdown,
   model: string,
-  openclawDir?: string
+  openclawDir?: string,
+  cacheWriteSplit?: CacheWriteSplit
 ): number {
   const pricing = getPricing(openclawDir);
   const rates = pricing[model];
 
   // Unknown model with no user-configured pricing: return 0 (show tokens only)
   if (!rates) return 0;
+  const multiplier = tierMultiplier(loadPricingTier(openclawDir), model);
+
+  let cacheWriteCost: number;
+  const split1h = cacheWriteSplit?.cacheWrite1hTokens ?? 0;
+  const split5m = cacheWriteSplit?.cacheWrite5mTokens ?? 0;
+  if (split1h || split5m) {
+        const rate1h = rates.cacheWrite1h ?? rates.cacheWrite;
+    const unsplit = Math.max(0, tokens.cacheWrite - split1h - split5m);
+    cacheWriteCost =
+      split1h * rate1h +
+      (split5m + unsplit) * rates.cacheWrite;
+  } else {
+    cacheWriteCost = tokens.cacheWrite * rates.cacheWrite;
+  }
 
   return (
     tokens.input * rates.input +
     tokens.output * rates.output +
     tokens.cacheRead * rates.cacheRead +
-    tokens.cacheWrite * rates.cacheWrite
-  );
+    cacheWriteCost
+  ) * multiplier;
 }

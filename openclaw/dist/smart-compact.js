@@ -377,6 +377,16 @@ function writeCheckpointArtifact(session, maxMessages, options) {
 function captureCheckpoint(session, maxMessages = 20, options = {}) {
     return writeCheckpointArtifact(session, maxMessages, options);
 }
+const _CHECKPOINT_MAX_CHARS = 4000;
+function _safeSlice(str, maxChars) {
+    if (str.length <= maxChars)
+        return str;
+    let end = maxChars;
+    const code = str.charCodeAt(end - 1);
+    if (code >= 0xd800 && code <= 0xdbff)
+        end--;
+    return str.slice(0, end) + "\n[... truncated]";
+}
 function restoreCheckpoint(sessionId) {
     try {
         const entries = (0, checkpoint_policy_1.getCheckpointFiles)(sessionId);
@@ -394,7 +404,8 @@ function restoreCheckpoint(sessionId) {
         });
         for (const entry of ranked) {
             try {
-                return fs.readFileSync(entry.path, "utf-8");
+                const content = fs.readFileSync(entry.path, "utf-8");
+                return _safeSlice(content, _CHECKPOINT_MAX_CHARS);
             }
             catch {
                 continue;

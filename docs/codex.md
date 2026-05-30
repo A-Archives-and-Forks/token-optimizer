@@ -1,6 +1,6 @@
 # Token Optimizer for Codex
 
-Version: `0.1.0-beta`
+Status: supported
 
 **Your AI is getting dumber and you can't see it.**
 
@@ -10,7 +10,7 @@ Token Optimizer for Codex audits local Codex context usage, tracks real session 
 
 ## Status
 
-This is a **beta release**. The core audit, coaching, dashboard, and fleet scanning work. Some advanced features are waiting on upstream Codex API surfaces. See the [Feature Parity](#feature-parity) table below.
+Token Optimizer supports Codex with a Codex-native adapter. Core audit, coaching, dashboard, cost tracking, continuity, and fleet scanning work today. A few Claude Code mechanisms depend on hook APIs Codex does not expose yet, so those are implemented as Codex-safe equivalents or listed as explicit upstream gaps in the [Feature Parity](#feature-parity) table below.
 
 ## Install
 
@@ -105,7 +105,7 @@ These features work identically on Claude Code and Codex:
 
 | Feature | Details |
 |---------|---------|
-| 7-signal quality scoring | Context fill, stale reads, bloated results, compaction depth, duplicates, decision density, agent efficiency. GPT-5.5 long-context calibration for Codex. |
+| v6 dual-score quality scoring | Resource Health plus Session Efficiency, with Codex-calibrated GPT-5.x long-context curves. |
 | Quality grades | S/A/B/C/D/F grades in dashboard, coach, CLI, and status line |
 | Session continuity | Checkpoints preserve decisions, files, errors, and next step across compaction and session boundaries |
 | Dashboard | Single-file HTML with per-turn token breakdown, cache analysis, cost tracking, quality overlays. Codex-native paths and copy |
@@ -115,7 +115,7 @@ These features work identically on Claude Code and Codex:
 | Cost tracking | Per-turn costs with GPT-5.5/5.4/5.4-Mini/5.3-Codex/5.2 pricing |
 | Memory/config audit | AGENTS.md audit (vs CLAUDE.md), Codex memories audit, skills/plugin/MCP inventory |
 | Setup repair | `codex-doctor` with 20 readiness checks, guided hook install, compact prompt setup |
-| Zero dependencies | Pure Python stdlib. No pip install, no network calls, no telemetry |
+| Zero dependencies | Pure Python stdlib. No pip install, no telemetry |
 
 ### What's different
 
@@ -133,9 +133,9 @@ Codex and Claude Code have different hook surfaces, so some features work differ
 | Plugin install | `/plugin marketplace add alexgreensh/token-optimizer` | `codex plugin marketplace add alexgreensh/token-optimizer` | Same concept, different CLI |
 | Auto-update | Claude Code marketplace auto-update | Codex marketplace `git ls-remote` on startup | Both work |
 
-### What's waiting on upstream Codex
+### Upstream Codex API gaps
 
-These features need Codex API changes before they can work:
+These Claude Code mechanisms need Codex API changes before they can work identically:
 
 | Feature | Claude Code | Codex | Blocker |
 |---------|------------|-------|---------|
@@ -160,19 +160,17 @@ Token Optimizer tracks costs for all Codex models:
 
 Prices sourced from OpenAI API pricing. Dashboard shows per-turn costs using the model detected from session logs.
 
-## Release Gate
+## Verify Setup
 
-Before shipping a beta build:
+After installing or upgrading Codex support:
 
 ```bash
 TOKEN_OPTIMIZER_RUNTIME=codex python3 skills/token-optimizer/scripts/measure.py report
 TOKEN_OPTIMIZER_RUNTIME=codex python3 skills/token-optimizer/scripts/measure.py dashboard --quiet
 TOKEN_OPTIMIZER_RUNTIME=codex python3 skills/token-optimizer/scripts/measure.py codex-doctor --project "$PWD"
-ruff check skills/token-optimizer/scripts/measure.py skills/token-optimizer/scripts/codex_install.py skills/token-optimizer/scripts/codex_doctor.py
-vulture skills/token-optimizer/scripts/measure.py skills/token-optimizer/scripts/codex_install.py skills/token-optimizer/scripts/codex_doctor.py --min-confidence 80
 ```
 
-Expected beta readiness is `codex-doctor` with `0 FAIL`.
+Expected health is `codex-doctor` with `0 FAIL`.
 
 ## Requirements
 
