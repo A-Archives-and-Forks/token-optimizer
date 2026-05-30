@@ -17,8 +17,30 @@ Token Optimizer monitors your OpenCode sessions and helps you get the most out o
 ## Install
 
 ```bash
-opencode plugin add token-optimizer-opencode
+opencode plugin token-optimizer-opencode
 ```
+
+Or add it to your `opencode.json` (or `.opencode/opencode.jsonc`) plugin array:
+
+```jsonc
+{
+  "plugin": ["token-optimizer-opencode"]
+}
+```
+
+### Offline / no-npm install
+
+If you can't (or don't want to) install from npm, clone the repo and run the
+bundled installer. It builds a single-file plugin and copies it into
+`~/.config/opencode/plugins/`, which OpenCode auto-loads at startup:
+
+```bash
+git clone https://github.com/alexgreensh/token-optimizer.git
+token-optimizer/install.sh --opencode
+```
+
+Requires [bun](https://bun.sh) (OpenCode's own runtime). Re-run after a
+`git pull` to update.
 
 ## Configure
 

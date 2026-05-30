@@ -132,15 +132,22 @@ See [`docs/codex-beta.md`](docs/codex-beta.md) for the full feature parity table
 Native TypeScript plugin for [OpenCode](https://github.com/anomalyco/opencode) with full Claude Code feature parity. 7-signal dual-score quality engine, smart compaction with mode-aware context injection, session continuity, quality nudges, loop detection, and a built-in dashboard.
 
 ```bash
-opencode plugin add token-optimizer-opencode
+opencode plugin token-optimizer-opencode
 ```
 
-Or add to `.opencode/opencode.jsonc`:
+Or add it to your `opencode.json` (or `.opencode/opencode.jsonc`) plugin array:
 
 ```jsonc
 {
   "plugin": ["token-optimizer-opencode"]
 }
+```
+
+**No npm? Offline install:** clone this repo and run the bundled installer. It builds the plugin and drops it into `~/.config/opencode/plugins/`, which OpenCode auto-loads:
+
+```bash
+git clone https://github.com/alexgreensh/token-optimizer.git
+token-optimizer/install.sh --opencode
 ```
 
 Two custom tools are available inside OpenCode:
@@ -284,7 +291,7 @@ No. All hooks are non-blocking with fail-open design. If a Token Optimizer scrip
 <details>
 <summary>📦 <strong>Does it have any runtime dependencies?</strong></summary>
 
-No. Pure Python stdlib on Claude Code and Codex. TypeScript with zero runtime deps on OpenCode and OpenClaw. What you clone (or `opencode plugin add`) is everything it needs.
+No. Pure Python stdlib on Claude Code and Codex. TypeScript with zero runtime deps on OpenCode and OpenClaw. What you clone (or `opencode plugin token-optimizer-opencode`) is everything it needs.
 </details>
 
 <details>

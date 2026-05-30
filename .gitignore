@@ -12,6 +12,7 @@ __pycache__/
 *.egg-info/
 dist/
 !openclaw/dist/
+opencode/dist-bundle/
 build/
 node_modules/
 .venv/
