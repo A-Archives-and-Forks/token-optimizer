@@ -40,6 +40,89 @@ info()  { printf "${GREEN}>${NC} %s\n" "$1"; }
 warn()  { printf "${YELLOW}!${NC} %s\n" "$1"; }
 fail()  { printf "${RED}x${NC} %s\n" "$1"; exit 1; }
 
+# ── OpenCode local-dir install (no npm) ───────────────────────
+# `install.sh --opencode` builds the TypeScript plugin and drops a single
+# bundled file into ~/.config/opencode/plugins/, which OpenCode auto-loads
+# at startup. This is the offline / no-npm fallback to:
+#     opencode plugin token-optimizer-opencode
+# It needs bun (OpenCode's own runtime) and a checkout of this repo.
+
+install_opencode() {
+    command -v bun &>/dev/null || fail "bun not found. OpenCode runs on bun; install it first: https://bun.sh"
+
+    # Locate the opencode/ source relative to this script.
+    local script_dir oc_src
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    oc_src="${script_dir}/opencode"
+
+    # If the source isn't present (e.g. a sparse Claude Code checkout), try to
+    # add it to the sparse-checkout cone and pull it.
+    if [ ! -d "$oc_src" ] && [ -d "${script_dir}/.git" ]; then
+        warn "opencode/ not in this checkout. Adding it to sparse-checkout..."
+        git -C "$script_dir" sparse-checkout add opencode/ 2>/dev/null || true
+        git -C "$script_dir" pull --ff-only 2>/dev/null || true
+    fi
+    [ -d "$oc_src" ] || fail "opencode/ source not found. Clone the full repo: git clone ${REPO_HTTPS}"
+
+    # Integrity: this path builds from your local clone, so the trust anchor is
+    # the checkout itself. Surface the commit and flag a dirty tree so a tampered
+    # or modified source tree is visible before it gets auto-loaded by OpenCode.
+    # (npm is the cryptographically-verified channel; see the note below.)
+    if [ -d "${script_dir}/.git" ]; then
+        local oc_sha oc_dirty
+        oc_sha="$(git -C "$script_dir" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+        info "Building from commit ${oc_sha}"
+        oc_dirty="$(git -C "$script_dir" status --porcelain -- opencode/ 2>/dev/null)"
+        if [ -n "$oc_dirty" ]; then
+            warn "opencode/ has uncommitted local changes — building modified source:"
+            printf '%s\n' "$oc_dirty" | sed 's/^/    /'
+            if [ -e /dev/tty ]; then
+                printf "Continue building this modified tree? (y/N) "
+                read -r oc_confirm < /dev/tty
+                [ "$oc_confirm" = "y" ] || [ "$oc_confirm" = "Y" ] || fail "Aborted by user."
+            fi
+        fi
+    else
+        warn "Not a git checkout — cannot verify source provenance. For a verified install use npm: opencode plugin token-optimizer-opencode"
+    fi
+
+    info "Installing OpenCode dependencies (bun install)..."
+    # --frozen-lockfile: install exactly what bun.lock pins, no silent drift to a
+    # newer (untested) transitive version at install time.
+    ( cd "$oc_src" && bun install --frozen-lockfile --silent ) || fail "bun install failed in ${oc_src} (lockfile out of sync? run 'bun install' in opencode/)."
+
+    info "Building plugin bundle..."
+    ( cd "$oc_src" && bun run build:bundle ) || fail "Plugin bundle build failed."
+
+    local bundle="${oc_src}/dist-bundle/token-optimizer.js"
+    [ -f "$bundle" ] || fail "Bundle not produced at ${bundle}"
+
+    local plugin_dir="${HOME}/.config/opencode/plugins"
+    mkdir -p "$plugin_dir"
+    cp "$bundle" "${plugin_dir}/token-optimizer.js"
+    info "Installed to ${plugin_dir}/token-optimizer.js"
+
+    echo ""
+    printf "${BOLD}${GREEN}Token Optimizer for OpenCode installed!${NC}\n"
+    echo ""
+    echo "  Plugin:    ${plugin_dir}/token-optimizer.js (auto-loaded by OpenCode)"
+    echo "  Tools:     token_status, token_dashboard"
+    echo ""
+    echo "  Start OpenCode and ask: \"run token_status\""
+    echo "  Re-run this command after a git pull to update."
+    echo ""
+    echo "  Prefer npm? Once published:  opencode plugin token-optimizer-opencode"
+    echo ""
+    exit 0
+}
+
+# Route --opencode before the Claude Code prerequisite checks (it needs bun, not python).
+for arg in "$@"; do
+    case "$arg" in
+        --opencode) install_opencode ;;
+    esac
+done
+
 # ── Prerequisites ─────────────────────────────────────────────
 
 info "Checking prerequisites..."
