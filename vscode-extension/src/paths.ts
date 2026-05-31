@@ -35,3 +35,10 @@ export function resolvePaths(homeDir: string = os.homedir()): ClaudePaths {
 export function sanitizeSessionId(sessionId: string): string {
   return (sessionId || '').replace(/[^a-zA-Z0-9_-]/g, '');
 }
+
+// Claude Code names each transcript directory after the session's cwd, with
+// every non-alphanumeric character replaced by '-' (so '/Users/x/.claude' →
+// '-Users-x--claude'). Used to scope session resolution to the window's folder.
+export function encodeProjectDir(cwd: string): string {
+  return (cwd || '').replace(/[^a-zA-Z0-9]/g, '-');
+}

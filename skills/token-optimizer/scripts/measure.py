@@ -9876,7 +9876,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.8.6"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.8.7"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DAEMON_RUNTIME = detect_runtime()
 _DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else "claude"
@@ -10018,6 +10018,12 @@ PORT = {DAEMON_PORT}
 # respawning us. Uninstall also writes this tombstone directly.
 THRASH_LIMIT = 3
 
+# Freshness-on-open: if the cached dashboard HTML is older than this when a GET
+# arrives, kick off one background regen (throttled by the same interval) and
+# serve the current file immediately, so the next open reflects recent activity.
+DASHBOARD_FRESH_SECONDS = 120
+_last_regen = 0.0
+
 
 def _read_token():
     """Read per-install CSRF token from disk. Empty string if missing/unreadable."""
@@ -10144,10 +10150,35 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not self._require_localhost():
             return
         if self._is_dashboard_request():
+            if method == "do_GET":
+                self._maybe_refresh_dashboard()
             self.path = "/" + os.path.basename(DASHBOARD)
             getattr(super(), method)()
         else:
             self.send_error(403, "Forbidden")
+
+    def _maybe_refresh_dashboard(self):
+        # Stale-while-revalidate: serve the current HTML now, and if it's stale
+        # kick off ONE throttled background regen so the next open is fresh. Never
+        # blocks the request; failures are silently ignored (best-effort).
+        global _last_regen
+        try:
+            mtime = os.path.getmtime(DASHBOARD)
+        except OSError:
+            return
+        now = time.time()
+        if now - mtime <= DASHBOARD_FRESH_SECONDS or now - _last_regen <= DASHBOARD_FRESH_SECONDS:
+            return
+        _last_regen = now
+        try:
+            import subprocess
+            subprocess.Popen(
+                [sys.executable, {measure_py_literal}, "dashboard", "--quiet"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, close_fds=True,
+            )
+        except (OSError, ValueError):
+            pass
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -10238,7 +10269,22 @@ def _thrash_check_and_update():
             size = 0
         # Size 0 = uninstall tombstone. >0 = thrash counter; process it below.
         if size == 0:
-            return False
+            # Honor it only if FRESH (an uninstall genuinely in progress). A real
+            # uninstall removes the plist + this very script within milliseconds,
+            # so a stale 0-byte tombstone sitting next to a healthy dashboard with
+            # this daemon still running is a stuck state, not an uninstall — clear
+            # it and serve. This self-heals daemons wrongly tombstoned by an
+            # update-window thrash, instead of staying dead until setup-daemon.
+            try:
+                age = time.time() - os.path.getmtime(THRASH_PATH)
+            except OSError:
+                age = 0  # unreadable mtime: treat as fresh, preserve uninstall safety
+            if age < 60:
+                return False
+            try:
+                os.unlink(THRASH_PATH)
+            except OSError:
+                pass
 
     if os.path.exists(DASHBOARD):
         # Healthy start: clear any thrash counter.
@@ -11979,6 +12025,10 @@ def _float_env(key: str, default: float) -> float:
 # use only the last N operations to prevent denominator-expansion bias where
 # scores climb as the session progresses even though context health is degrading.
 _QUALITY_ROLLING_WINDOW = _int_env("TOKEN_OPTIMIZER_QUALITY_WINDOW", 20)
+# Below this many messages a session is too new to judge decision density — a
+# brand-new session hasn't accumulated decisions yet, so scoring it 0 would
+# wrongly drag SessionEfficiency down ~20 points. Stay neutral instead.
+_DENSITY_MIN_MESSAGES = _int_env("TOKEN_OPTIMIZER_DENSITY_MIN_MESSAGES", 6)
 
 # Fill-based warning thresholds that fire independently of the composite score.
 # These cannot be masked by improving ratio signals.
@@ -12528,12 +12578,14 @@ def compute_quality_score(quality_data, session_id=None):
     window_messages = all_messages[-_QUALITY_ROLLING_WINDOW:]
     substantive = sum(1 for _, _, _, s in window_messages if s)
     window_msg_count = len(window_messages)
-    if window_msg_count > 0:
+    if window_msg_count >= _DENSITY_MIN_MESSAGES:
         density_ratio = substantive / window_msg_count
         density_score = min(100, density_ratio * 200)  # 50% substantive = 100
     else:
-        density_ratio = 0
-        density_score = 50
+        # Too few messages to judge decision density (brand-new session). Stay
+        # neutral instead of penalizing — mirrors agent_efficiency's no-data 80.
+        density_ratio = substantive / window_msg_count if window_msg_count else 0
+        density_score = 80
 
     # 6. Agent efficiency: rolling window over last N dispatches.
     all_dispatches = quality_data["agent_dispatches"]

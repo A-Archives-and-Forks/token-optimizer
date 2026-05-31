@@ -19,6 +19,7 @@ const EFFORT_MAP: Record<string, string> = { low: 'lo', medium: 'med', high: 'hi
 export class DataSource {
   private watcher: vscode.FileSystemWatcher | undefined;
   private focusSub: vscode.Disposable | undefined;
+  private workspaceSub: vscode.Disposable | undefined;
   private timer: NodeJS.Timeout | undefined;
   private debounce: NodeJS.Timeout | undefined;
   private tailer: JsonlTailer | undefined;
@@ -67,9 +68,27 @@ export class DataSource {
     } catch {
       // window state API unavailable — timer + watcher still cover us.
     }
+    try {
+      this.workspaceSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        this.needsRescan = true;
+        this.refresh();
+      });
+    } catch {
+      // ignore — folder rarely changes mid-session.
+    }
     // Defer the first (synchronous, fs-walking) refresh off the activation path
     // so activate() returns immediately and never trips VS Code's >500ms watchdog.
     setImmediate(() => this.refresh());
+  }
+
+  // The window's workspace folder, used to scope session resolution to this
+  // window. First folder when a multi-root workspace; undefined if none open.
+  private workspaceDir(): string | null {
+    try {
+      return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
+    } catch {
+      return null;
+    }
   }
 
   private isFocused(): boolean {
@@ -99,19 +118,21 @@ export class DataSource {
 
   private buildFromDisk(): Snapshot {
     if (this.needsRescan) {
-      this.cachedSession = findActiveSession(this.paths.projectsDir);
+      this.cachedSession = findActiveSession(this.paths.projectsDir, {
+        workspaceDir: this.workspaceDir(),
+      });
       this.cachedEffort = this.readEffort();
       this.needsRescan = false;
     }
     const session = this.cachedSession;
 
-    let jsonlFill: number | null = null;
+    let jsonlTokens: number | null = null;
     let jsonlModel: string | null = null;
     if (session) {
       if (!this.tailer) this.tailer = new JsonlTailer(session.jsonlPath);
       else this.tailer.setPath(session.jsonlPath);
       const tail = this.tailer.read();
-      jsonlFill = tail.fillPct;
+      jsonlTokens = tail.tokens;
       jsonlModel = tail.model;
     } else {
       // No session: drop the tailer so a future session starts from offset 0.
@@ -122,10 +143,11 @@ export class DataSource {
       qualityJson: session ? readIfExists(this.paths.qualityCache(session.sessionId)) : null,
       liveFillJson: readIfExists(this.paths.liveFill),
       rateLimitsJson: readIfExists(this.paths.rateLimits),
-      jsonlFill,
+      jsonlTokens,
       jsonlModel,
       effort: this.cachedEffort,
       sessionId: session ? session.sessionId : null,
+      scoped: this.workspaceDir() != null,
       nowMs: Date.now(),
       staleAfterSeconds: this.getStaleAfterSeconds(),
     });
@@ -148,6 +170,7 @@ export class DataSource {
     if (this.timer) clearInterval(this.timer);
     this.watcher?.dispose();
     this.focusSub?.dispose();
+    this.workspaceSub?.dispose();
   }
 }
 

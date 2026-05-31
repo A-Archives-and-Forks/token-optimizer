@@ -29,7 +29,9 @@ process.stdin.on('end', () => {
     // status line, persisted nowhere else, so we bridge it to a sidecar file
     // for the VS Code companion (rate limits are account-wide, not per-session).
     const rateLimits = data.rate_limits || null;
-    const DIM = '\x1b[2m';
+    // A readable medium grey instead of ANSI faint (\x1b[2m), which renders too
+    // low-contrast for secondary info like session time on most terminals.
+    const DIM = '\x1b[38;5;245m';
     const RESET = '\x1b[0m';
     const SEP = ` ${DIM}|${RESET} `;
     const gradeFor = (s) => s >= 90 ? 'S' : s >= 80 ? 'A' : s >= 70 ? 'B' : s >= 55 ? 'C' : s >= 40 ? 'D' : 'F';
@@ -199,8 +201,6 @@ process.stdin.on('end', () => {
         } else if (fw.level === 'WARNING') {
           row2Parts.push(`\x1b[33mFill:${Math.round(fw.fill_pct)}%${RESET}`);
         }
-      } else if (q.regime_change) {
-        row2Parts.push(`\x1b[33mRegime:${Math.round(q.regime_change.fill_pct)}%${RESET}`);
       }
 
       // Tool call fatigue warning

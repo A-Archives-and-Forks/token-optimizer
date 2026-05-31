@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.1.8
+
+- Hardening pass: runtime-allowlist the panel's actions, dedupe fill clamping, and make warnings array-based (no join/re-split). No behavior change.
+
+## 0.1.7
+
+- Improve: brighter, higher-contrast grey for secondary info (session time, labels, reset times) in the panel and terminal status line — the old faint grey was hard to read.
+
+## 0.1.6
+
+- Remove: the "Regime" indicator (obscure context-fill-shift signal that confused more than it helped). The underlying detection stays in the plugin; it's just off the status line now.
+
+## 0.1.5
+
+- Fix: context fill is now computed from the transcript's own token count divided by the real context window (from the quality-cache's `model_context_window`). This is the only source that's correct for both 200k and 1M-context sessions, and it ignores a 0% fill the plugin sometimes writes when it can't attribute fill.
+
+## 0.1.4
+
+- Fix: context fill is now read from the per-session quality-cache's authoritative `fill_pct` (computed against the real context window), fixing badly-wrong fill on 1M-context sessions. Priority: matched live-fill → quality-cache → transcript tail.
+- Honest: with no folder open, the status bar can't scope to this window's session, so it now says so plainly (in tooltip and panel) instead of showing volatile global data.
+- Note: VS Code shows one status bar per window, so multiple Claude tabs in the same window reflect the most-recently-active session — a platform limitation, now documented.
+
+## 0.1.3
+
+- New: clicking the status bar opens an **expanded status panel** — a focused, theme-matched view of context fill, ContextQ, Eff, warnings, compactions, duration, agents, and 5h/7d limits, live-updating. The full browser dashboard is now an explicit "Open full dashboard" button.
+
+## 0.1.2
+
+- Fix: context fill is now read per-session. The shared `live-fill.json` was leaking one session's fill into other windows; the status bar now uses it only when it matches this window's session, falling back to the transcript otherwise.
+- Improve: the 7-day usage limit now shows the reset **date and days remaining** (e.g. "Jun 4, 8:00pm · in 4d"), not just a time-of-day.
+- Improve: a fresh session with no quality scores yet shows "warming up…" instead of an empty gap.
+
+## 0.1.1
+
+- Fix: the status bar now reflects the Claude Code session for **this** window (scoped to the workspace folder), instead of whichever session was most recently active anywhere. Resolves wrong scores showing in one window when another session is running.
+
 ## 0.1.0
 
 - Initial release: Token Optimizer status line in the VS Code status bar.
