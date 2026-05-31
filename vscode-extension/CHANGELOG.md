@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.10
+
+- Fix: replace user-facing "stale" usage-limit wording with clearer cached, estimated, and verified states.
+- Improve: manual refresh now uses local, non-terminal paths first and recalculates transcript-based estimates when exact statusline data is not available.
+- Package: align extension lockfile metadata with the shipped VSIX version.
+
 ## 0.1.8
 
 - Hardening pass: runtime-allowlist the panel's actions, dedupe fill clamping, and make warnings array-based (no join/re-split). No behavior change.
