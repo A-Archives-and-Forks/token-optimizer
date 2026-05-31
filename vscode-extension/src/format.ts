@@ -179,12 +179,6 @@ export function buildTooltip(s: Snapshot, opts: RenderOptions): string {
     lines.push('⚠️ _No folder open — showing the most recent session globally. Open a folder so this reflects this window\'s session._');
   }
 
-  if (five || seven) {
-    lines.push('');
-    lines.push('_Usage labels: verified = fresh Claude statusline cache; estimated = computed from recent transcript usage; cached = last verified value with update age._');
-    lines.push('_Claude does not currently expose exact remaining usage limits to extensions, so this may be estimated._');
-  }
-
   lines.push('');
   lines.push(`[Open dashboard](${DASHBOARD_CMD})`);
   return lines.join('\n');
@@ -271,7 +265,6 @@ function usageWindowText(w: RateWindow, nowMs: number, fallbackStale: boolean): 
   const age = formatAge(w.ageSeconds ?? null);
   if (status === 'stale') parts.push(age ? `cached ${age} ago` : 'cached');
   else parts.push(status);
-  if (status === 'estimated') parts.push('recent transcript usage');
   return parts.join(' · ');
 }
 
@@ -294,9 +287,9 @@ function usageReset(w: RateWindow, nowMs: number, status: UsageLimitStatus): str
 }
 
 function usageDetail(status: UsageLimitStatus, age: string): string {
-  if (status === 'verified') return 'verified from Claude statusline cache';
-  if (status === 'estimated') return 'estimated from recent transcript usage';
-  return age ? `last verified Claude statusline value, updated ${age} ago` : 'last verified Claude statusline value';
+  if (status === 'verified') return 'Captured from Claude statusline';
+  if (status === 'estimated') return 'Estimated from local transcript usage';
+  return age ? `Last captured value, updated ${age} ago` : 'Last captured value';
 }
 
 function displayStatus(status: UsageLimitStatus): UsageLimitDisplayStatus {

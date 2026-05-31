@@ -2,7 +2,7 @@
   "name": "token-optimizer-statusline",
   "displayName": "Token Optimizer",
   "description": "See your Claude Code context health, efficiency, and usage limits in the VS Code status bar.",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "publisher": "alexgreensh",
   "license": "PolyForm-Noncommercial-1.0.0",
   "icon": "icon.png",

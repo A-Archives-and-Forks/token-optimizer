@@ -34,12 +34,12 @@ localhost probe is the only non-OAuth network activity, and it fires only on an 
 
 ## Usage Limits
 
-Claude does not currently expose exact remaining usage limits directly to VS Code
-extensions. Token Optimizer shows the best available value and labels it:
+Usage limits are exact when fresh Claude statusline data is available. If not, Token
+Optimizer falls back to a clearly labeled local estimate or the last captured value:
 
-- **verified** — fresh value captured from Claude Code's statusline cache
+- **verified** — captured from Claude Code's statusline cache
 - **estimated** — computed locally from recent transcript usage
-- **cached** — last known verified value, with update age shown
+- **cached** — last captured value, with update age shown
 
 Use **Token Optimizer: Refresh Now** or the panel's **Refresh** button to re-read the
 cache and recompute the local transcript estimate. No terminal workflow required.

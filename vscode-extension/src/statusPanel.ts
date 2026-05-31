@@ -85,7 +85,6 @@ export class StatusPanel {
   .usage-status { display:inline-block; margin-left:6px; padding:1px 6px; border-radius:8px; font-size:11px;
           background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-style: normal; }
   .usage-status.cached { background: var(--vscode-inputValidation-warningBackground, #5a4a1a); }
-  .usage-note { margin-top: 12px; color: color-mix(in srgb, var(--vscode-foreground) 68%, transparent); font-size: 12px; }
   .warn { color: var(--vscode-charts-orange, #d18616); }
   .pill { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11px;
           background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
@@ -144,7 +143,6 @@ export class StatusPanel {
     if (m.agents && m.agents.length) h += row('Agents', m.agents.map(esc).join('<br>'));
     if (m.fiveHour) h += row('5-hour limit', usageLimit(m.fiveHour));
     if (m.sevenDay) h += row('7-day limit', usageLimit(m.sevenDay));
-    if (m.fiveHour || m.sevenDay) h += '<div class="usage-note">Claude does not currently expose exact remaining usage limits to extensions, so this may be estimated.</div>';
     h += '<div class="actions">';
     h += '<button class="primary" data-act="openDashboard">Open full dashboard</button>';
     h += '<button data-act="refresh">Refresh</button>';
