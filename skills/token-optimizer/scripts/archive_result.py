@@ -52,16 +52,19 @@ _SAVINGS_DB_TIMEOUT_SECONDS = 0.05
 _SAVINGS_DB_BUSY_TIMEOUT_MS = 50
 _DEFAULT_SAVINGS_COST_PER_MTOK = 3.0  # Sonnet input rate; safe fallback for hook-only pricing.
 _HOOK_INPUT_COST_PER_MTOK = {
+    "gpt-5.5-pro": 30.0,
+    "gpt-5.1-codex-mini": 0.25,
+    "gpt-4o-mini": 0.15,
     "gpt-5-codex": 1.25,
     "gpt-5.1-codex": 1.25,
-    "gpt-5.1-codex-mini": 0.25,
     "gpt-5.2-codex": 1.75,
     "gpt-5.3-codex": 1.75,
+    "gpt-5-mini": 0.25,
+    "gpt-5-nano": 0.05,
+    "gpt-5": 1.25,
     "gpt-5.4": 2.5,
     "gpt-5.5": 5.0,
-    "gpt-5.5-pro": 30.0,
     "gpt-4o": 2.5,
-    "gpt-4o-mini": 0.15,
 }
 
 _SAVINGS_SCHEMA = """

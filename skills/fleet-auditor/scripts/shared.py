@@ -21,6 +21,10 @@ from pathlib import Path
 HOME = Path.home()
 CLAUDE_DIR = HOME / ".claude"
 CHARS_PER_TOKEN = 4.0
+_KNOWN_PROVIDER_PREFIXES = {
+    "anthropic", "openai", "google", "gemini", "vertex", "bedrock",
+    "openrouter", "gateway", "litellm", "azure", "aws",
+}
 
 # ---------------------------------------------------------------------------
 # Model normalization
@@ -34,12 +38,10 @@ def normalize_model_name(model_id: str) -> str | None:
     """
     if not model_id or model_id.startswith("<"):
         return None
-    m = model_id.lower()
+    m = _strip_provider_prefixes(model_id)
     # Match OpenClaw behavior: provider-qualified IDs like openai/gpt-4o,
     # openrouter/openai/gpt-4o, or anthropic:claude-sonnet-4-6 should price as
     # their underlying model.
-    while re.match(r"^[a-z0-9_.-]+[/:]", m):
-        m = re.sub(r"^[a-z0-9_.-]+[/:]", "", m, count=1)
     if "opus" in m:
         return "opus"
     if "sonnet" in m:
@@ -56,6 +58,9 @@ def normalize_model_name(model_id: str) -> str | None:
         "gpt-5.3-codex",
         "gpt-5.2-codex",
         "gpt-5-codex",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "gpt-5",
         "gpt-5.5",
         "gpt-5.4",
         "gpt-5.2",
@@ -76,6 +81,9 @@ def normalize_model_name(model_id: str) -> str | None:
         "gemini-3.1-pro-preview",
         "gemini-3.1-flash-lite",
         "gemini-3.5-flash",
+        "gemini-3.1-pro",
+        "gemini-3-flash",
+        "gemini-3-pro",
         "gemini-2.5-flash-lite",
         "gemini-2.5-flash",
         "gemini-2.5-pro",
@@ -83,6 +91,29 @@ def normalize_model_name(model_id: str) -> str | None:
         if m == alias or m.startswith(alias + "-"):
             return alias
     return m
+
+
+def _strip_provider_prefixes(model_id: str) -> str:
+    value = str(model_id).strip().lower()
+    while True:
+        slash = value.find("/")
+        colon = value.find(":")
+        if slash == -1 and colon == -1:
+            return value
+        if slash != -1 and (colon == -1 or slash < colon):
+            idx = slash
+            delimiter = "/"
+        else:
+            idx = colon
+            delimiter = ":"
+        prefix = value[:idx]
+        rest = value[idx + 1:]
+        if not rest or not re.search(r"[a-z]", rest):
+            return value
+        if delimiter == "/" or prefix in _KNOWN_PROVIDER_PREFIXES:
+            value = rest
+            continue
+        return value
 
 
 # ---------------------------------------------------------------------------

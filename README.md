@@ -3,10 +3,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.8.4-green" alt="Version 5.8.4"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.8.8-green" alt="Version 5.8.8"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/github/release-date/alexgreensh/token-optimizer?label=last%20release&color=blue" alt="Last Release"></a>
   <a href="https://github.com/alexgreensh/token-optimizer"><img src="https://img.shields.io/badge/Claude_Code-Plugin-blueviolet" alt="Claude Code Plugin"></a>
-  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/openclaw"><img src="https://img.shields.io/badge/OpenClaw-v2.4.2-brightgreen" alt="OpenClaw v2.4.2"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/openclaw"><img src="https://img.shields.io/badge/OpenClaw-v2.4.3-brightgreen" alt="OpenClaw v2.4.3"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/tree/main/opencode"><img src="https://img.shields.io/badge/OpenCode-v1.0.3-58a6ff" alt="OpenCode v1.0.3"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/blob/main/docs/codex.md"><img src="https://img.shields.io/badge/Codex-supported-orange" alt="Codex supported"></a>
 </p>
@@ -91,11 +91,19 @@ If you've already hit the EBUSY error:
 If you prefer a script-managed install on macOS or Linux, this works too and auto-updates daily by re-running the verified installer against the latest release tag. **Do not run this on Windows, and do not run it alongside the plugin install above on any platform.** Pick one method.
 
 ```bash
-git clone https://github.com/alexgreensh/token-optimizer.git ~/.claude/token-optimizer
+tmp="$(mktemp -d)"
+release_json="$(curl -fsSL https://api.github.com/repos/alexgreensh/token-optimizer/releases/latest)"
+tag="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])' <<<"$release_json")"
+checksums="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(a["browser_download_url"] for a in data["assets"] if a["name"]=="CHECKSUMS.sha256"))' <<<"$release_json")"
+git clone --branch "$tag" --depth 1 https://github.com/alexgreensh/token-optimizer.git ~/.claude/token-optimizer
+curl -fsSL -o "$tmp/CHECKSUMS.sha256" "$checksums"
+install_sum="$(grep '  install.sh$' "$tmp/CHECKSUMS.sha256")"
+(cd ~/.claude/token-optimizer && (printf '%s\n' "$install_sum" | sha256sum -c - --quiet 2>/dev/null || printf '%s\n' "$install_sum" | shasum -a 256 -c - --quiet))
 bash ~/.claude/token-optimizer/install.sh
+rm -rf "$tmp"
 ```
 
-The installer resolves the latest GitHub release tag, checks out that tag, and verifies file integrity against that release's checksums. If you're offline or behind a restrictive proxy, set `TOKEN_OPTIMIZER_SKIP_VERIFY=1` before running.
+This verifies `install.sh` before executing it. The installer then resolves the latest GitHub release tag, checks out that tag, and verifies every installed runtime file against that release's checksums. If you're offline or behind a restrictive proxy, set `TOKEN_OPTIMIZER_SKIP_VERIFY=1` before running.
 
 Works on Claude Code, [OpenCode](#opencode), and [OpenClaw](#openclaw). Each platform has its own native plugin (Python for Claude Code, TypeScript for OpenCode and OpenClaw). No bridging, no shared runtime, zero cross-platform dependencies.
 
@@ -643,7 +651,7 @@ Tell it your goal. Get back specific, prioritized fixes with exact token savings
 
 ### Fleet Auditor
 
-Managing multiple agent systems? Fleet Auditor scans across Claude Code, Codex, OpenClaw, and custom setups to find idle burns, model misrouting, and config bloat with dollar savings per finding. One command, one report, every ecosystem.
+Managing multiple agent systems? Fleet Auditor scans across Claude Code, Codex, and custom transcript setups to find idle burns, model misrouting, and config bloat with dollar savings per finding. Use the OpenClaw dashboard for OpenClaw runs.
 
 ### Subagent Cost Breakdown
 

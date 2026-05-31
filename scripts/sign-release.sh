@@ -34,18 +34,22 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 CHECKSUM_FILE="${REPO_ROOT}/CHECKSUMS.sha256"
 
-echo "Generating checksums for tracked scripts..."
+echo "Generating checksums for installed runtime files..."
 
 HASH_CMD="sha256sum"
 if [ "$(uname)" = "Darwin" ]; then
     HASH_CMD="shasum -a 256"
 fi
 
-{
-    echo "${REPO_ROOT}/install.sh"
-    echo "${REPO_ROOT}/hooks/hooks.json"
-    find "${REPO_ROOT}/skills/token-optimizer/scripts" -type f -name "*.py"
-} | sort | while read -r f; do
+git -C "$REPO_ROOT" ls-files \
+    install.sh \
+    hooks/ \
+    skills/ \
+    .claude-plugin/ \
+    .codex-plugin/ \
+    .codex/ \
+    | sort | while read -r rel; do
+    f="${REPO_ROOT}/${rel}"
     [ -f "$f" ] || continue
     $HASH_CMD "$f" | sed "s|${REPO_ROOT}/||"
 done > "$CHECKSUM_FILE"

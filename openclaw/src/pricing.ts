@@ -242,10 +242,7 @@ export function normalizeModelName(modelId: string): string | null {
 
   // Strip one or more provider prefixes:
   // openai/gpt-4o, openrouter/openai/gpt-4o, anthropic:claude-sonnet-4-6.
-  let m = modelId.toLowerCase();
-  while (/^[a-z0-9_.-]+[/:]/.test(m)) {
-    m = m.replace(/^[a-z0-9_.-]+[/:]/, "");
-  }
+  const m = stripProviderPrefixes(modelId);
 
   // Anthropic
   if (m.includes("opus")) return "opus";
@@ -335,6 +332,31 @@ export function normalizeModelName(modelId: string): string | null {
   return m;
 }
 
+const KNOWN_PROVIDER_PREFIXES = new Set([
+  "anthropic", "openai", "google", "gemini", "vertex", "bedrock",
+  "openrouter", "gateway", "litellm", "azure", "aws",
+]);
+
+function stripProviderPrefixes(modelId: string): string {
+  let value = modelId.trim().toLowerCase();
+  while (true) {
+    const slash = value.indexOf("/");
+    const colon = value.indexOf(":");
+    if (slash === -1 && colon === -1) return value;
+    const useSlash = slash !== -1 && (colon === -1 || slash < colon);
+    const idx = useSlash ? slash : colon;
+    const delimiter = useSlash ? "/" : ":";
+    const prefix = value.slice(0, idx);
+    const rest = value.slice(idx + 1);
+    if (!rest || !/[a-z]/.test(rest)) return value;
+    if (delimiter === "/" || KNOWN_PROVIDER_PREFIXES.has(prefix)) {
+      value = rest;
+      continue;
+    }
+    return value;
+  }
+}
+
 /**
  * Estimate cost delta if a different model was used.
  * Returns savings in USD and percentage.
@@ -371,11 +393,12 @@ export function calculateCost(
   cacheWriteSplit?: CacheWriteSplit
 ): number {
   const pricing = getPricing(openclawDir);
-  const rates = pricing[model];
+  const pricingKey = pricing[model] ? model : (normalizeModelName(model) ?? model);
+  const rates = pricing[pricingKey];
 
   // Unknown model with no user-configured pricing: return 0 (show tokens only)
   if (!rates) return 0;
-  const multiplier = tierMultiplier(loadPricingTier(openclawDir), model);
+  const multiplier = tierMultiplier(loadPricingTier(openclawDir), pricingKey);
 
   let cacheWriteCost: number;
   const split1h = cacheWriteSplit?.cacheWrite1hTokens ?? 0;

@@ -61,7 +61,7 @@ function redactPaths(obj) {
         : val));
 }
 function printUsage() {
-    console.log(`Token Optimizer for OpenClaw v2.4.1
+    console.log(`Token Optimizer for OpenClaw v2.4.3
 
 Usage:
   token-optimizer scan         [--days N] [--json]   Scan sessions and show token usage
@@ -143,7 +143,7 @@ function cmdV5Toggle(featureId, on) {
 }
 function cmdV5Welcome() {
     const features = (0, v5_features_1.listV5Features)();
-    console.log(`\nWelcome to Token Optimizer v2.4.1!`);
+    console.log(`\nWelcome to Token Optimizer v2.4.3!`);
     console.log("=".repeat(50));
     console.log("v5 Active Compression is now live in OpenClaw. The low-risk features ship ON by default; the rest stay opt-in until you flip them on:\n");
     for (const f of features) {

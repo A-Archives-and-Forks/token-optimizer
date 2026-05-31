@@ -23,12 +23,14 @@ REPO_HTTPS="https://github.com/${GITHUB_REPO}.git"
 REPO_SSH="git@github.com:${GITHUB_REPO}.git"
 INSTALL_DIR="${HOME}/.claude/token-optimizer"
 SKILL_DIR="${HOME}/.claude/skills"
-CHECKSUM_FILE="/tmp/token-optimizer-checksums-$$.sha256"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/token-optimizer.XXXXXX")"
+CHECKSUM_FILE="${TMP_DIR}/CHECKSUMS.sha256"
 RELEASE_TAG=""
 CHECKSUM_ASSET_URL=""
 INSTALL_OLD_HEAD=""
 INSTALL_UPDATED=0
-trap 'rm -f "$CHECKSUM_FILE"' EXIT
+VERIFIED_RELEASE_HEAD=""
+trap 'rm -rf "$TMP_DIR"' EXIT
 
 # ── Colors ────────────────────────────────────────────────────
 
@@ -248,6 +250,58 @@ fetch_release_checksums() {
     curl -fsSL -o "$CHECKSUM_FILE" "$CHECKSUM_ASSET_URL" 2>/dev/null && [ -s "$CHECKSUM_FILE" ]
 }
 
+verify_checksum_manifest_coverage() {
+    local target_dir="${1:-$INSTALL_DIR}"
+    local manifest_list tracked_list missing
+    manifest_list="${TMP_DIR}/checksum-manifest.paths"
+    tracked_list="${TMP_DIR}/tracked-runtime.paths"
+
+    awk 'NF >= 2 {print $2}' "$CHECKSUM_FILE" | sort -u > "$manifest_list"
+    git -C "$target_dir" ls-files \
+        install.sh \
+        hooks/ \
+        skills/ \
+        .claude-plugin/ \
+        .codex-plugin/ \
+        .codex/ \
+        | sort -u > "$tracked_list"
+
+    missing="$(comm -23 "$tracked_list" "$manifest_list" || true)"
+    if [ -n "$missing" ]; then
+        warn "Release checksum manifest is missing installed runtime files:"
+        printf '%s\n' "$missing" | sed 's/^/    /'
+        return 1
+    fi
+    return 0
+}
+
+verify_checksums_in_dir() {
+    local target_dir="$1"
+    (
+        cd "$target_dir" || exit 1
+        sha256sum -c "$CHECKSUM_FILE" --quiet 2>/dev/null || \
+        shasum -a 256 -c "$CHECKSUM_FILE" --quiet 2>/dev/null
+    ) || return 1
+    verify_checksum_manifest_coverage "$target_dir"
+}
+
+verify_release_candidate_before_live_update() {
+    local candidate_dir candidate_url
+    candidate_dir="${TMP_DIR}/release-candidate"
+    candidate_url=$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || echo "$REPO_HTTPS")
+
+    [ -s "$CHECKSUM_FILE" ] || fetch_release_checksums || return 1
+    rm -rf "$candidate_dir"
+    git clone --depth 1 --filter=blob:none --sparse --branch "$RELEASE_TAG" \
+        "$candidate_url" "$candidate_dir" >/dev/null 2>&1 || return 1
+    git -C "$candidate_dir" sparse-checkout set \
+        skills/ hooks/ .claude-plugin/ .codex-plugin/ .codex/ \
+        >/dev/null 2>&1 || return 1
+    verify_checksums_in_dir "$candidate_dir" || return 1
+    VERIFIED_RELEASE_HEAD=$(git -C "$candidate_dir" rev-parse HEAD 2>/dev/null || echo "")
+    [ -n "$VERIFIED_RELEASE_HEAD" ]
+}
+
 if verification_enabled; then
     info "Resolving latest verified release..."
     resolve_latest_release || fail_verified_install "Could not resolve the latest GitHub Release and checksum asset. Integrity verification is required. Set TOKEN_OPTIMIZER_SKIP_VERIFY=1 only if you explicitly accept this risk."
@@ -259,7 +313,7 @@ fi
 # ── Clone or Update ───────────────────────────────────────────
 
 clone_repo() {
-    local clone_log="/tmp/token-optimizer-clone-$$.log"
+    local clone_log="${TMP_DIR}/clone.log"
 
     # Sparse checkout: only pull Claude Code files, skip OpenClaw platform files
     try_clone() {
@@ -293,12 +347,15 @@ clone_repo() {
 }
 
 update_repo() {
-    local before_head after_head
+    local before_head after_head fetched_head
     before_head=$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo "")
     if verification_enabled; then
         info "Updating to verified release ${RELEASE_TAG}..."
+        verify_release_candidate_before_live_update || return 1
         git -C "$INSTALL_DIR" fetch --force --depth 1 origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" || return 1
-        git -C "$INSTALL_DIR" checkout --detach -q "$RELEASE_TAG" || return 1
+        fetched_head=$(git -C "$INSTALL_DIR" rev-parse "${RELEASE_TAG}^{commit}" 2>/dev/null || echo "")
+        [ -n "$fetched_head" ] && [ "$fetched_head" = "$VERIFIED_RELEASE_HEAD" ] || return 1
+        git -C "$INSTALL_DIR" checkout --detach -q "$VERIFIED_RELEASE_HEAD" || return 1
     else
         git -C "$INSTALL_DIR" pull --ff-only || {
             warn "git pull failed. Try: cd ${INSTALL_DIR} && git pull"
@@ -373,13 +430,9 @@ fi
 # ── Integrity Verification ────────────────────────────────────
 if verification_enabled; then
     info "Fetching checksums from GitHub release..."
-    if fetch_release_checksums; then
+    if [ -s "$CHECKSUM_FILE" ] || fetch_release_checksums; then
         info "Verifying file integrity (out-of-band checksums)..."
-        (
-            cd "$INSTALL_DIR" || exit 1
-            sha256sum -c "$CHECKSUM_FILE" --quiet 2>/dev/null || \
-            shasum -a 256 -c "$CHECKSUM_FILE" --quiet 2>/dev/null
-        ) || fail_verified_install "Integrity check FAILED. Files do not match release checksums. Your install may be compromised. Re-clone from: https://github.com/${GITHUB_REPO}"
+        verify_checksums_in_dir "$INSTALL_DIR" || fail_verified_install "Integrity check FAILED. Files do not match release checksums or the release manifest is incomplete. Your install may be compromised. Re-clone from: https://github.com/${GITHUB_REPO}"
         info "Integrity check passed"
     else
         fail_verified_install "Could not fetch CHECKSUMS.sha256 from the latest GitHub Release. Integrity verification is required. Set TOKEN_OPTIMIZER_SKIP_VERIFY=1 only if you explicitly accept this risk."

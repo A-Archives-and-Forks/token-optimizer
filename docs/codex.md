@@ -109,7 +109,7 @@ These features work identically on Claude Code and Codex:
 | Quality grades | S/A/B/C/D/F grades in dashboard, coach, CLI, and status line |
 | Session continuity | Checkpoints preserve decisions, files, errors, and next step across compaction and session boundaries |
 | Dashboard | Single-file HTML with per-turn token breakdown, cache analysis, cost tracking, quality overlays. Codex-native paths and copy |
-| Fleet Auditor | Cross-system scanning across Claude Code, Codex, OpenClaw, and others. Codex adapter parses `~/.codex/sessions/` |
+| Fleet Auditor | Cross-system scanning across Claude Code, Codex, and custom transcript setups. Use the OpenClaw dashboard for OpenClaw runs |
 | Token Coach | Conversational coaching adapted for AGENTS.md, Codex memories, intelligence levels, reasoning effort |
 | Waste detectors | 11 detectors: PDF ingestion, web search overhead, retry churn, tool cascade, looping, overpowered model, weak model, bad decomposition, wasteful thinking, output waste, cache instability |
 | Cost tracking | Per-turn costs with GPT-5.5/5.4/5.4-Mini/5.3-Codex/5.2 pricing |
