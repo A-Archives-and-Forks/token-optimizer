@@ -3,6 +3,8 @@
 // unit-testable; the actual fs reads live in dataSource.
 import { Snapshot, RateLimits, AgentInfo, emptySnapshot } from './types';
 import { parseRateWindow } from './rateWindow';
+import { sanitizeSessionId } from './paths';
+import { windowForModel } from './jsonlTail';
 
 const STALE_QUALITY_SECONDS = 300; // mirror statusline.js: score older than 5min => stale
 
@@ -10,10 +12,11 @@ export interface RawInputs {
   qualityJson: string | null;
   liveFillJson: string | null;
   rateLimitsJson: string | null;
-  jsonlFill: number | null;
+  jsonlTokens: number | null; // raw context tokens from the transcript tail
   jsonlModel: string | null;
   effort: string | null;
   sessionId: string | null; // to confirm the cache belongs to the active session
+  scoped: boolean; // resolved via the window's workspace folder?
   nowMs: number;
   staleAfterSeconds: number; // for rate-limit staleness labeling
 }
@@ -64,15 +67,54 @@ export function buildSnapshot(inputs: RawInputs): Snapshot {
 
   snap.model = inputs.jsonlModel;
   snap.effort = inputs.effort;
+  snap.scoped = inputs.scoped;
 
-  // ---- Context fill: live-fill.json wins (authoritative from statusline),
-  // else JSONL tail. ----
-  if (live && typeof live.used_percentage === 'number') {
-    snap.fillPct = Math.max(0, Math.min(100, Math.round(live.used_percentage)));
+  // ---- Context fill ----
+  // The only fully reliable per-session fill = the transcript's own token count
+  // divided by the REAL context window. The token count comes from the JSONL
+  // tail (accurate per-session); the window size comes from the quality-cache's
+  // `model_context_window` (so 1M-context sessions aren't mis-scored against
+  // 200k). We do NOT trust:
+  //   - the global live-fill.json unless its session_id matches (it's the last
+  //     terminal's fill, leaks across windows), and
+  //   - the quality-cache's own fill_pct, which measure.py can write as 0 when it
+  //     can't attribute fill (same global-leak problem on the plugin side).
+  // Order: matched live-fill (authoritative) → JSONL tokens ÷ window → qc.fill_pct.
+  const liveSessionId =
+    live && live.session_id ? sanitizeSessionId(String(live.session_id)) : null;
+  const liveMatchesSession =
+    live &&
+    typeof live.used_percentage === 'number' &&
+    !!liveSessionId &&
+    !!inputs.sessionId &&
+    liveSessionId === inputs.sessionId;
+  const windowTokens =
+    isPlainObject(q) &&
+    typeof q.model_context_window === 'number' &&
+    Number.isFinite(q.model_context_window) &&
+    q.model_context_window > 0
+      ? q.model_context_window
+      : windowForModel(inputs.jsonlModel);
+  const jsonlFill =
+    inputs.jsonlTokens != null && Number.isFinite(inputs.jsonlTokens)
+      ? clampScore((inputs.jsonlTokens / windowTokens) * 100)
+      : null;
+  // Only trust a quality-cache fill that rounds above 0 — measure.py writes 0
+  // when it couldn't attribute fill, which we'd rather skip than display.
+  const qcFillRounded =
+    isPlainObject(q) && typeof q.fill_pct === 'number' && Number.isFinite(q.fill_pct)
+      ? clampScore(q.fill_pct)
+      : null;
+  const qcFill = qcFillRounded != null && qcFillRounded > 0 ? qcFillRounded : null;
+  if (liveMatchesSession) {
+    snap.fillPct = clampScore(live.used_percentage);
     snap.fillSource = 'live-fill';
-  } else if (inputs.jsonlFill != null) {
-    snap.fillPct = inputs.jsonlFill;
+  } else if (jsonlFill != null) {
+    snap.fillPct = jsonlFill;
     snap.fillSource = 'jsonl';
+  } else if (qcFill != null) {
+    snap.fillPct = qcFill;
+    snap.fillSource = 'quality';
   }
 
   // ---- Quality scores ----
@@ -108,8 +150,6 @@ export function buildSnapshot(inputs: RawInputs): Snapshot {
         level: q.fill_warning.level,
         value: Math.round(q.fill_warning.fill_pct || 0),
       };
-    } else if (q.regime_change && typeof q.regime_change.fill_pct === 'number') {
-      snap.regimeChangeFillPct = Math.round(q.regime_change.fill_pct);
     }
 
     if (q.tool_call_warning && q.tool_call_warning.level) {

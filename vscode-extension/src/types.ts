@@ -38,18 +38,18 @@ export interface Snapshot {
   model: string | null;
   effort: string | null; // 'lo' | 'med' | 'hi'
   fillPct: number | null;
-  fillSource: 'live-fill' | 'jsonl' | null;
+  fillSource: 'live-fill' | 'quality' | 'jsonl' | null;
   contextQ: ContextQ | null;
   eff: { score: number; grade: string } | null;
   fillWarning: Warning | null;
   toolWarning: Warning | null;
-  regimeChangeFillPct: number | null;
   compactions: number | null;
   compactionLossPct: number | null;
   durationSec: number | null;
   agents: AgentInfo[];
   rateLimits: RateLimits | null;
   rateLimitsStale: boolean; // true when shown limits are older than the stale threshold
+  scoped: boolean; // true when resolved via the window's workspace folder (vs global fallback)
 }
 
 export function emptySnapshot(): Snapshot {
@@ -63,12 +63,12 @@ export function emptySnapshot(): Snapshot {
     eff: null,
     fillWarning: null,
     toolWarning: null,
-    regimeChangeFillPct: null,
     compactions: null,
     compactionLossPct: null,
     durationSec: null,
     agents: [],
     rateLimits: null,
     rateLimitsStale: false,
+    scoped: false,
   };
 }

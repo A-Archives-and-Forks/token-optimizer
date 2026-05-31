@@ -4,7 +4,9 @@ import { resolvePaths } from './paths';
 import { DataSource } from './dataSource';
 import { UsageProvider } from './usageProvider';
 import { StatusBar } from './statusBar';
+import { StatusPanel, PanelAction } from './statusPanel';
 import { registerCommands } from './commands';
+import { buildPanelModel } from './format';
 import { Snapshot } from './types';
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -18,6 +20,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   let disposed = false;
   let renderSeq = 0;
+
+  const statusPanel = new StatusPanel((action: PanelAction) => {
+    void vscode.commands.executeCommand(`tokenOptimizer.${action}`);
+  });
 
   const renderFrom = async (snap: Snapshot): Promise<void> => {
     const seq = ++renderSeq;
@@ -37,6 +43,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (disposed || seq !== renderSeq) return;
     try {
       statusBar.render(snap, liveUsageOn());
+      statusPanel.update(buildPanelModel(snap, { liveUsageOn: liveUsageOn(), nowMs: Date.now() }));
     } catch {
       // Rendering must never break the editor.
     }
@@ -57,6 +64,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   registerCommands(context, { paths, onConfigChanged });
 
+  // Clicking the status bar opens the expanded panel.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('tokenOptimizer.showStatus', () => statusPanel.show())
+  );
+
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('tokenOptimizer')) onConfigChanged();
@@ -67,6 +79,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // dataSource and statusBar are torn down, so an in-flight renderFrom bails out
   // before touching a disposed status bar item.
   context.subscriptions.push(statusBar);
+  context.subscriptions.push({ dispose: () => statusPanel.dispose() });
   context.subscriptions.push({ dispose: () => dataSource.dispose() });
   context.subscriptions.push({ dispose: () => { disposed = true; } });
 

@@ -3,7 +3,9 @@ import * as vscode from 'vscode';
 import { Snapshot } from './types';
 import { primaryItemText, secondaryItemText, buildTooltip } from './format';
 
-export const OPEN_DASHBOARD_COMMAND = 'tokenOptimizer.openDashboard';
+// Clicking a status bar item opens the expanded panel (not the full browser
+// dashboard — that stays a tooltip/panel link).
+export const STATUS_PANEL_COMMAND = 'tokenOptimizer.showStatus';
 
 const ERROR_BG = new vscode.ThemeColor('statusBarItem.errorBackground');
 const WARNING_BG = new vscode.ThemeColor('statusBarItem.warningBackground');
@@ -20,8 +22,8 @@ export class StatusBar {
   constructor() {
     this.primary = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     this.secondary = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
-    this.primary.command = OPEN_DASHBOARD_COMMAND;
-    this.secondary.command = OPEN_DASHBOARD_COMMAND;
+    this.primary.command = STATUS_PANEL_COMMAND;
+    this.secondary.command = STATUS_PANEL_COMMAND;
     this.primary.name = 'Token Optimizer';
     this.secondary.name = 'Token Optimizer Usage';
   }
@@ -30,7 +32,7 @@ export class StatusBar {
     if (this.disposed) return; // an in-flight render may resume mid-disposal
     // Rebuild the tooltip only when its content changed (it carries live duration,
     // so it does change during an active session — but not when idle).
-    const tooltipStr = buildTooltip(snap, { liveUsageOn });
+    const tooltipStr = buildTooltip(snap, { liveUsageOn, nowMs: Date.now() });
     if (tooltipStr !== this.lastTooltipStr || !this.tooltip) {
       const md = new vscode.MarkdownString(tooltipStr);
       md.isTrusted = true; // enable command: links in the tooltip

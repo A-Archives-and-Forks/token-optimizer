@@ -5,7 +5,7 @@
 import * as fs from 'fs';
 
 export interface TailResult {
-  fillPct: number | null;
+  tokens: number | null; // live context footprint from the last assistant turn
   model: string | null;
 }
 
@@ -23,7 +23,7 @@ export function windowForModel(model: string | null): number {
 
 export class JsonlTailer {
   private offset = 0;
-  private lastResult: TailResult = { fillPct: null, model: null };
+  private lastResult: TailResult = { tokens: null, model: null };
 
   constructor(private filePath: string) {}
 
@@ -32,7 +32,7 @@ export class JsonlTailer {
     if (filePath !== this.filePath) {
       this.filePath = filePath;
       this.offset = 0;
-      this.lastResult = { fillPct: null, model: null };
+      this.lastResult = { tokens: null, model: null };
     }
   }
 
@@ -74,10 +74,11 @@ export class JsonlTailer {
 
     const parsed = parseLatestUsage(chunk);
     if (parsed) {
-      const windowTokens = windowForModel(parsed.model ?? this.lastResult.model);
-      const pct = Math.max(0, Math.min(100, Math.round((parsed.tokens / windowTokens) * 100)));
+      // Return the raw token count and let the caller divide by the authoritative
+      // window size (from the quality-cache) — the model string alone can't tell
+      // us whether this is a 200k or 1M-context session.
       this.lastResult = {
-        fillPct: pct,
+        tokens: parsed.tokens,
         model: parsed.model ?? this.lastResult.model,
       };
     }
