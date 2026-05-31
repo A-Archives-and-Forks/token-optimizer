@@ -221,6 +221,9 @@ OPENAI_MODEL_PRICING = {
     "gpt-5.2": {"input": 1.75, "cache_read": 0.175, "output": 14.0},
     "gpt-5.2-codex": {"input": 1.75, "cache_read": 0.175, "output": 14.0},
     "gpt-5.3-codex": {"input": 1.75, "cache_read": 0.175, "output": 14.0},
+    "gpt-5": {"input": 1.25, "cache_read": 0.125, "output": 10.0},
+    "gpt-5-mini": {"input": 0.25, "cache_read": 0.025, "output": 2.0},
+    "gpt-5-nano": {"input": 0.05, "cache_read": 0.005, "output": 0.40},
     "gpt-5.4": {"input": 2.5, "cache_read": 0.25, "output": 15.0},
     "gpt-5.4-mini": {"input": 0.75, "cache_read": 0.075, "output": 4.5},
     "gpt-5.4-nano": {"input": 0.20, "cache_read": 0.02, "output": 1.25},
@@ -249,6 +252,9 @@ GEMINI_MODEL_PRICING = {
     "gemini-3.5-flash": {"input": 1.50, "cache_read": 0.15, "output": 9.0},
     "gemini-3.1-pro-preview": {"input": 2.0, "cache_read": 0.20, "output": 12.0},
     "gemini-3.1-flash-lite": {"input": 0.25, "cache_read": 0.025, "output": 1.50},
+    "gemini-3.1-pro": {"input": 2.0, "cache_read": 0.20, "output": 12.0},
+    "gemini-3-pro": {"input": 2.0, "cache_read": 0.0, "output": 12.0},
+    "gemini-3-flash": {"input": 0.50, "cache_read": 0.0, "output": 3.0},
     "gemini-2.5-pro": {"input": 1.25, "cache_read": 0.125, "output": 10.0},
     "gemini-2.5-flash": {"input": 0.30, "cache_read": 0.03, "output": 2.50},
     "gemini-2.5-flash-lite": {"input": 0.10, "cache_read": 0.01, "output": 0.40},
@@ -258,6 +264,34 @@ GEMINI_LONG_CONTEXT_PRICING = {
     "gemini-3.1-pro-preview": {"input": 4.0, "cache_read": 0.40, "output": 18.0},
 }
 GEMINI_LONG_CONTEXT_INPUT_THRESHOLD = 200_000
+
+_KNOWN_PROVIDER_PREFIXES = {
+    "anthropic", "openai", "google", "gemini", "vertex", "bedrock",
+    "openrouter", "gateway", "litellm", "azure", "aws",
+}
+
+
+def _strip_provider_prefixes(model):
+    value = str(model).strip().lower()
+    while True:
+        slash = value.find("/")
+        colon = value.find(":")
+        if slash == -1 and colon == -1:
+            return value
+        if slash != -1 and (colon == -1 or slash < colon):
+            idx = slash
+            delimiter = "/"
+        else:
+            idx = colon
+            delimiter = ":"
+        prefix = value[:idx]
+        rest = value[idx + 1:]
+        if not rest or not re.search(r"[a-z]", rest):
+            return value
+        if delimiter == "/" or prefix in _KNOWN_PROVIDER_PREFIXES:
+            value = rest
+            continue
+        return value
 
 CODEX_DEFAULT_EFFECTIVE_CONTEXT_WINDOW = 258_400
 _context_window_cache = None
@@ -374,9 +408,7 @@ def _normalize_openai_model_name(model):
     """Return a priced OpenAI model id, or None when we cannot price exactly."""
     if not model:
         return None
-    value = str(model).strip().lower()
-    while re.match(r"^[a-z0-9_.-]+[/:]", value):
-        value = re.sub(r"^[a-z0-9_.-]+[/:]", "", value, count=1)
+    value = _strip_provider_prefixes(model)
     if not value or value in {"codex", "openai", "unknown"}:
         return None
     aliases = (
@@ -388,6 +420,9 @@ def _normalize_openai_model_name(model):
         "gpt-5.3-codex",
         "gpt-5.2-codex",
         "gpt-5-codex",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "gpt-5",
         "gpt-5.5",
         "gpt-5.4",
         "gpt-5.2",
@@ -414,9 +449,7 @@ def _normalize_gemini_model_name(model):
     """Return a priced Gemini model id, or None when we cannot price exactly."""
     if not model:
         return None
-    value = str(model).strip().lower()
-    while re.match(r"^[a-z0-9_.-]+[/:]", value):
-        value = re.sub(r"^[a-z0-9_.-]+[/:]", "", value, count=1)
+    value = _strip_provider_prefixes(model)
     if not value.startswith("gemini-"):
         return None
     if value.startswith("gemini-2.0"):
@@ -428,6 +461,9 @@ def _normalize_gemini_model_name(model):
         "gemini-3.1-pro-preview",
         "gemini-3.1-flash-lite",
         "gemini-3.5-flash",
+        "gemini-3.1-pro",
+        "gemini-3-flash",
+        "gemini-3-pro",
         "gemini-2.5-flash-lite",
         "gemini-2.5-flash",
         "gemini-2.5-pro",
@@ -9840,7 +9876,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.8.4"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.8.6"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DAEMON_RUNTIME = detect_runtime()
 _DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else "claude"
