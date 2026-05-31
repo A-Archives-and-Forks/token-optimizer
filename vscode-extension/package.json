@@ -2,7 +2,7 @@
   "name": "token-optimizer-statusline",
   "displayName": "Token Optimizer",
   "description": "See your Claude Code context health, efficiency, and usage limits in the VS Code status bar.",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "publisher": "alexgreensh",
   "license": "PolyForm-Noncommercial-1.0.0",
   "icon": "icon.png",
@@ -30,14 +30,6 @@
         "title": "Token Optimizer: Open Dashboard"
       },
       {
-        "command": "tokenOptimizer.enableLiveUsage",
-        "title": "Token Optimizer: Enable Live Usage (authoritative 5h/7d limits)"
-      },
-      {
-        "command": "tokenOptimizer.disableLiveUsage",
-        "title": "Token Optimizer: Disable Live Usage"
-      },
-      {
         "command": "tokenOptimizer.refresh",
         "title": "Token Optimizer: Refresh Now"
       }
@@ -45,15 +37,10 @@
     "configuration": {
       "title": "Token Optimizer",
       "properties": {
-        "tokenOptimizer.liveUsage": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Show **always-fresh** 5-hour and 7-day usage limits even when no Claude Code terminal is open. When on, the extension reads your existing Claude subscription login (the same one Claude Code already uses for `/usage`) to look up your usage. **This costs zero model tokens** — it is a status lookup, not a message — and is never a billed API call. Off by default; the limits still show from the status-line sidecar when a terminal has rendered recently."
-        },
         "tokenOptimizer.staleAfterSeconds": {
           "type": "number",
           "default": 180,
-          "markdownDescription": "How many seconds before sidecar usage-limit data is considered stale and labeled `(est)` (or refreshed via Live Usage if enabled)."
+          "markdownDescription": "How many seconds before sidecar usage-limit data is considered stale and labeled `(est)`."
         }
       }
     }

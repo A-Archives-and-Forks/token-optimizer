@@ -6,9 +6,9 @@ import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { PanelModel } from './format';
 
-export type PanelAction = 'enableLiveUsage' | 'disableLiveUsage' | 'openDashboard';
+export type PanelAction = 'openDashboard';
 
-const VALID_ACTIONS = new Set<PanelAction>(['enableLiveUsage', 'disableLiveUsage', 'openDashboard']);
+const VALID_ACTIONS = new Set<PanelAction>(['openDashboard']);
 
 export class StatusPanel {
   private panel: vscode.WebviewPanel | undefined;
@@ -98,6 +98,15 @@ export class StatusPanel {
             font-size: 12px; margin-bottom: 14px; }
   .usagebar { height: 6px; border-radius: 3px; background: var(--vscode-panel-border); overflow:hidden; width:120px; display:inline-block; vertical-align:middle; margin-left:8px; }
   .usagefill { height: 100%; background: var(--vscode-charts-blue, #4e8ec9); }
+  .panel-footer { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--vscode-panel-border);
+                  display: flex; align-items: center; gap: 14px; }
+  .gh-star { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; font-size: 12px;
+             text-decoration: none; border-radius: 5px; border: 1px solid var(--vscode-button-border, transparent);
+             background: var(--vscode-button-secondaryBackground, #3a3d41); color: var(--vscode-button-secondaryForeground, #fff); }
+  .gh-star:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }
+  .panel-social { display: inline-flex; gap: 12px; align-items: center; margin-left: auto; }
+  .panel-social a { color: color-mix(in srgb, var(--vscode-foreground) 62%, transparent); display: inline-flex; transition: color .15s; }
+  .panel-social a:hover { color: var(--vscode-foreground); }
 </style>
 </head>
 <body>
@@ -126,11 +135,16 @@ export class StatusPanel {
     if (m.fiveHour) h += row('5-hour limit', m.fiveHour.pct + '% ' + usage(m.fiveHour.pct) + '<br><span class="pending">resets ' + esc(m.fiveHour.reset) + (m.fiveHour.estimated ? ' (est)' : '') + '</span>');
     if (m.sevenDay) h += row('7-day limit', m.sevenDay.pct + '% ' + usage(m.sevenDay.pct) + '<br><span class="pending">resets ' + esc(m.sevenDay.reset) + '</span>');
     h += '<div class="actions">';
-    h += m.liveUsageOn
-      ? '<button data-act="disableLiveUsage">Live usage: on — turn off</button>'
-      : '<button data-act="enableLiveUsage">Enable live usage</button>';
     h += '<button class="primary" data-act="openDashboard">Open full dashboard</button>';
     h += '</div>';
+    h += '<div class="panel-footer">';
+    h += '<a class="gh-star" href="https://github.com/alexgreensh/token-optimizer" target="_blank" rel="noopener" title="Star Token Optimizer on GitHub">';
+    h += '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5l2.9 6.06 6.6.59-5 4.38 1.5 6.47L12 16.98 5.99 20.5l1.5-6.47-5-4.38 6.6-.59L12 2.5z"/></svg>Star on GitHub</a>';
+    h += '<span class="panel-social">';
+    h += '<a href="https://github.com/alexgreensh/token-optimizer" target="_blank" rel="noopener" title="GitHub"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.2 11.39.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.08-.73.08-.73 1.2.08 1.84 1.23 1.84 1.23 1.07 1.83 2.81 1.3 3.5 1 .1-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 016.02 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 011.23 3.22c0 4.61-2.81 5.63-5.48 5.92.42.36.81 1.1.81 2.22v3.29c0 .32.22.7.82.58A12.01 12.01 0 0024 12c0-6.63-5.37-12-12-12z"/></svg></a>';
+    h += '<a href="https://x.com/alexgreensh" target="_blank" rel="noopener" title="X (Twitter)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24h-6.66l-5.214-6.817-5.97 6.817H1.673l7.73-8.835L1.254 2.25h6.83l4.713 6.231 5.447-6.231zm-1.161 17.52h1.833L7.084 4.126H5.117l11.966 15.644z"/></svg></a>';
+    h += '<a href="https://linkedin.com/in/alexgreensh" target="_blank" rel="noopener" title="LinkedIn"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20.45 20.45h-3.56v-5.57c0-1.33-.02-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.34V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 110-4.13 2.06 2.06 0 010 4.13zm1.78 13.02H3.56V9h3.56v11.45zM22.23 0H1.77C.79 0 0 .77 0 1.73v20.54C0 23.23.79 24 1.77 24h20.45c.98 0 1.78-.77 1.78-1.73V1.73C24 .77 23.2 0 22.23 0z"/></svg></a>';
+    h += '</span></div>';
     app.innerHTML = h;
     for (const b of app.querySelectorAll('button[data-act]')) {
       b.addEventListener('click', () => vscode.postMessage({ action: b.getAttribute('data-act') }));

@@ -4,7 +4,6 @@
 import { Snapshot } from './types';
 
 export interface RenderOptions {
-  liveUsageOn: boolean;
   nowMs: number;
 }
 
@@ -102,8 +101,6 @@ export function secondaryItemText(s: Snapshot): string {
 
 // ---- rich hover tooltip (markdown) ----
 
-const ENABLE_CMD = 'command:tokenOptimizer.enableLiveUsage';
-const DISABLE_CMD = 'command:tokenOptimizer.disableLiveUsage';
 const DASHBOARD_CMD = 'command:tokenOptimizer.openDashboard';
 
 export function buildTooltip(s: Snapshot, opts: RenderOptions): string {
@@ -186,16 +183,11 @@ export function buildTooltip(s: Snapshot, opts: RenderOptions): string {
     lines.push('⚠️ _No folder open — showing the most recent session globally. Open a folder so this reflects this window\'s session._');
   }
 
-  lines.push('');
-
-  // Live usage toggle — always visible, one-click. Nudge harder when the only
-  // available number is stale/estimated.
-  if (opts.liveUsageOn) {
-    lines.push(`Live usage: **on** · [turn off](${DISABLE_CMD})`);
-  } else if (s.rateLimitsStale || !five) {
-    lines.push(`⚠️ Usage limit may be stale. [**Enable live usage**](${ENABLE_CMD}) for the always-fresh number (zero token cost).`);
-  } else {
-    lines.push(`Live usage: off · [enable](${ENABLE_CMD})`);
+  // Honesty: when the only usage number we have is the last-known sidecar value,
+  // say it's an estimate rather than implying it's live.
+  if (five && s.rateLimitsStale) {
+    lines.push('');
+    lines.push('_Usage limits are the last known value (est) — open a terminal session to refresh._');
   }
 
   lines.push('');
@@ -222,7 +214,6 @@ export interface PanelModel {
   agents: string[];
   fiveHour: { pct: number; reset: string; estimated: boolean } | null;
   sevenDay: { pct: number; reset: string } | null;
-  liveUsageOn: boolean;
 }
 
 export function buildPanelModel(s: Snapshot, opts: RenderOptions): PanelModel {
@@ -255,7 +246,6 @@ export function buildPanelModel(s: Snapshot, opts: RenderOptions): PanelModel {
           reset: formatReset(s.rateLimits.sevenDay.resetsAt, opts.nowMs),
         }
       : null,
-    liveUsageOn: opts.liveUsageOn,
   };
 }
 

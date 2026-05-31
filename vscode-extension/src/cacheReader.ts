@@ -205,7 +205,7 @@ export function buildSnapshot(inputs: RawInputs): Snapshot {
         fiveHour,
         sevenDay,
         timestamp: ts,
-        source: rl.source === 'oauth' ? 'oauth' : 'statusline',
+        source: 'statusline',
       };
       snap.rateLimits = limits;
       snap.rateLimitsStale = ageSec > inputs.staleAfterSeconds;

@@ -1,4 +1,4 @@
-// Command handlers: open the dashboard, and the discoverable Live Usage toggle.
+// Command handlers: open the dashboard and a manual refresh.
 import * as fs from 'fs';
 import * as http from 'http';
 import * as vscode from 'vscode';
@@ -8,7 +8,7 @@ const DAEMON_URL = 'http://localhost:24842/token-optimizer';
 
 export interface CommandDeps {
   paths: ClaudePaths;
-  onConfigChanged: () => void; // re-resolve usage + re-render immediately
+  onConfigChanged: () => void; // re-read from disk + re-render immediately
 }
 
 export function registerCommands(
@@ -17,22 +17,7 @@ export function registerCommands(
 ): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('tokenOptimizer.openDashboard', () => openDashboard(deps.paths)),
-    vscode.commands.registerCommand('tokenOptimizer.enableLiveUsage', () => setLiveUsage(true, deps)),
-    vscode.commands.registerCommand('tokenOptimizer.disableLiveUsage', () => setLiveUsage(false, deps)),
     vscode.commands.registerCommand('tokenOptimizer.refresh', () => deps.onConfigChanged())
-  );
-}
-
-async function setLiveUsage(on: boolean, deps: CommandDeps): Promise<void> {
-  await vscode.workspace
-    .getConfiguration('tokenOptimizer')
-    .update('liveUsage', on, vscode.ConfigurationTarget.Global);
-  deps.onConfigChanged();
-  vscode.window.setStatusBarMessage(
-    on
-      ? 'Token Optimizer: Live Usage on — always-fresh 5h/7d limits (zero token cost).'
-      : 'Token Optimizer: Live Usage off.',
-    4000
   );
 }
 

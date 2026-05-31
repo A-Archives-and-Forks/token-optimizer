@@ -9,7 +9,6 @@ export interface ClaudePaths {
   projectsDir: string; // ~/.claude/projects
   liveFill: string;
   rateLimits: string;
-  credentials: string;
   dashboardFile: string;
   qualityCache(sessionId: string): string;
 }
@@ -23,7 +22,6 @@ export function resolvePaths(homeDir: string = os.homedir()): ClaudePaths {
     projectsDir: path.join(claudeDir, 'projects'),
     liveFill: path.join(cacheDir, 'live-fill.json'),
     rateLimits: path.join(cacheDir, 'rate-limits.json'),
-    credentials: path.join(claudeDir, '.credentials.json'),
     dashboardFile: path.join(claudeDir, '_backups', 'token-optimizer', 'dashboard.html'),
     qualityCache: (sessionId: string) =>
       path.join(cacheDir, `quality-cache-${sanitizeSessionId(sessionId)}.json`),

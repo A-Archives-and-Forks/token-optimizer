@@ -9,16 +9,35 @@ export interface TailResult {
   model: string | null;
 }
 
-// Context window sizes by model family. Default 200k; the 1M-context variants
-// (model id contains "[1m]" or "-1m") get 1,000,000.
-const DEFAULT_WINDOW = 200_000;
+// Context window sizes by model family. This is the FALLBACK only — when the
+// quality-cache carries an authoritative `model_context_window`, cacheReader uses
+// that instead (measure.py resolves it with full plan/config awareness).
+//
+// Mirrors measure.py `detect_context_window` so the fallback matches the engine:
+//   1. CLAUDE_CODE_DISABLE_1M_CONTEXT=1  -> 200k (explicit opt-out)
+//   2. numeric TOKEN_OPTIMIZER_CONTEXT_SIZE -> that value
+//   3. Haiku -> 200k; any other (or unknown) Claude model -> 1M GA (since Mar 2026)
+// The JSONL `message.model` is the BARE id ("claude-opus-4-8", no "[1m]" suffix),
+// so the old "only [1m] => 1M" rule divided every 1M session by 200k and inflated
+// fill ~5x — the VS Code panel bug. Defaulting non-Haiku to 1M fixes it.
+//
+// NOTE: the env checks only take effect when the extension host inherited the
+// shell environment (e.g. VS Code launched from a terminal). They are a
+// best-effort mirror; the authoritative window is `q.model_context_window` from
+// the quality cache (see cacheReader), which this only backstops when absent.
+const HAIKU_WINDOW = 200_000;
 const MILLION_WINDOW = 1_000_000;
 
 export function windowForModel(model: string | null): number {
-  if (!model) return DEFAULT_WINDOW;
-  const m = model.toLowerCase();
-  if (m.includes('[1m]') || m.includes('-1m')) return MILLION_WINDOW;
-  return DEFAULT_WINDOW;
+  if (process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === '1') return HAIKU_WINDOW;
+  // Number (not parseInt): parseInt('1e6')===1 and parseInt('200000abc')===200000
+  // would both pass the >0 guard and silently set a wrong window. Number rejects
+  // trailing junk (NaN) and reads scientific notation correctly.
+  const override = Number((process.env.TOKEN_OPTIMIZER_CONTEXT_SIZE || '').trim());
+  if (Number.isFinite(override) && override > 0) return override;
+  if (!model) return MILLION_WINDOW; // unknown model: match measure.py's 1M default
+  if (model.toLowerCase().includes('haiku')) return HAIKU_WINDOW;
+  return MILLION_WINDOW;
 }
 
 export class JsonlTailer {

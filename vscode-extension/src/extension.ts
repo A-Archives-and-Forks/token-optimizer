@@ -1,8 +1,8 @@
-// Entry point: wire DataSource -> UsageProvider -> StatusBar, register commands.
+// Entry point: wire DataSource -> StatusBar, register commands. Rate limits come
+// straight from the statusline sidecar on the snapshot (no network lookups).
 import * as vscode from 'vscode';
 import { resolvePaths } from './paths';
 import { DataSource } from './dataSource';
-import { UsageProvider } from './usageProvider';
 import { StatusBar } from './statusBar';
 import { StatusPanel, PanelAction } from './statusPanel';
 import { registerCommands } from './commands';
@@ -12,55 +12,31 @@ import { Snapshot } from './types';
 export function activate(context: vscode.ExtensionContext): void {
   const paths = resolvePaths();
   const statusBar = new StatusBar();
-  const usage = new UsageProvider();
 
   const cfg = () => vscode.workspace.getConfiguration('tokenOptimizer');
-  const liveUsageOn = () => cfg().get<boolean>('liveUsage', false);
   const staleAfter = () => cfg().get<number>('staleAfterSeconds', 180);
 
   let disposed = false;
-  let renderSeq = 0;
 
   const statusPanel = new StatusPanel((action: PanelAction) => {
     void vscode.commands.executeCommand(`tokenOptimizer.${action}`);
   });
 
-  const renderFrom = async (snap: Snapshot): Promise<void> => {
-    const seq = ++renderSeq;
+  const renderFrom = (snap: Snapshot): void => {
+    if (disposed) return; // a queued render may resume mid-disposal
     try {
-      // resolve() may await an OAuth fetch (seconds). It mutates snap in place.
-      await usage.resolve(snap, {
-        liveUsageOn: liveUsageOn(),
-        credentialsPath: paths.credentials,
-        nowMs: Date.now(),
-      });
-    } catch {
-      // resolve is defensive, but never let a rejection escape this `void`-ed
-      // call as an unhandled rejection — fall through and render what we have.
-    }
-    // Drop a slow in-flight render that a newer one already superseded, and
-    // never touch the status bar after disposal.
-    if (disposed || seq !== renderSeq) return;
-    try {
-      statusBar.render(snap, liveUsageOn());
-      statusPanel.update(buildPanelModel(snap, { liveUsageOn: liveUsageOn(), nowMs: Date.now() }));
+      statusBar.render(snap);
+      statusPanel.update(buildPanelModel(snap, { nowMs: Date.now() }));
     } catch {
       // Rendering must never break the editor.
     }
   };
 
-  const dataSource = new DataSource(paths, staleAfter, (snap) => {
-    void renderFrom(snap);
-  });
+  const dataSource = new DataSource(paths, staleAfter, renderFrom);
 
-  // Re-read from disk on any config change (the Live Usage toggle, settings UI,
-  // or the explicit refresh command) rather than re-using the last snapshot —
-  // that snapshot was already resolved/mutated, so its non-stale rate limits
-  // would short-circuit the freshly-enabled OAuth fetch.
-  const onConfigChanged = () => {
-    usage.invalidate();
-    dataSource.refresh();
-  };
+  // Re-read from disk on any config change (settings UI or the explicit refresh
+  // command) so a changed staleAfterSeconds takes effect immediately.
+  const onConfigChanged = () => dataSource.refresh();
 
   registerCommands(context, { paths, onConfigChanged });
 

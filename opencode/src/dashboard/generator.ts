@@ -75,7 +75,7 @@ export function generateDashboard(opts: DashboardOptions): string {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; connect-src 'self' https://api.github.com;">
 <title>Token Optimizer - OpenCode Dashboard</title>
 <style>
 :root {
@@ -113,6 +113,18 @@ tr:hover td { background: var(--bg-hover); }
 .chart-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
 .empty { text-align: center; padding: var(--s-6); color: var(--text-dim); }
 .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+.oc-footer { margin-top: var(--s-6); padding-top: var(--s-4); border-top: 1px solid var(--border);
+             display: flex; align-items: center; gap: 16px; color: var(--text-dim); font-size: 13px; }
+.oc-footer .byline { opacity: 0.85; }
+.oc-footer a { color: var(--accent); text-decoration: none; }
+.gh-star { display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px; font-size: 12px;
+           color: var(--accent); border: 1px solid var(--border); border-radius: 6px; background: var(--bg-card);
+           transition: border-color 0.15s, background 0.15s; }
+.gh-star:hover { border-color: var(--accent); background: var(--bg-hover); }
+.gh-star-count { font-variant-numeric: tabular-nums; padding-left: 7px; border-left: 1px solid var(--border); color: var(--text); }
+.oc-social { display: inline-flex; gap: 13px; align-items: center; margin-left: auto; }
+.oc-social a { color: var(--text-dim); display: inline-flex; transition: color 0.15s; }
+.oc-social a:hover { color: var(--text); }
 </style>
 </head>
 <body>
@@ -267,6 +279,20 @@ tr:hover td { background: var(--bg-hover); }
     </table>
     `}
   </div>
+
+  <footer class="oc-footer">
+    <span class="byline">Built by <a href="https://linkedin.com/in/alexgreensh" target="_blank" rel="noopener">Alex Greenshpun</a></span>
+    <a class="gh-star" href="https://github.com/alexgreensh/token-optimizer" target="_blank" rel="noopener" title="Star Token Optimizer on GitHub">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5l2.9 6.06 6.6.59-5 4.38 1.5 6.47L12 16.98 5.99 20.5l1.5-6.47-5-4.38 6.6-.59L12 2.5z"/></svg>
+      <span>Star on GitHub</span>
+      <span class="gh-star-count" data-gh-stars hidden></span>
+    </a>
+    <span class="oc-social">
+      <a href="https://github.com/alexgreensh/token-optimizer" target="_blank" rel="noopener" title="GitHub"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.2 11.39.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.08-.73.08-.73 1.2.08 1.84 1.23 1.84 1.23 1.07 1.83 2.81 1.3 3.5 1 .1-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 016.02 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 011.23 3.22c0 4.61-2.81 5.63-5.48 5.92.42.36.81 1.1.81 2.22v3.29c0 .32.22.7.82.58A12.01 12.01 0 0024 12c0-6.63-5.37-12-12-12z"/></svg></a>
+      <a href="https://x.com/alexgreensh" target="_blank" rel="noopener" title="X (Twitter)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24h-6.66l-5.214-6.817-5.97 6.817H1.673l7.73-8.835L1.254 2.25h6.83l4.713 6.231 5.447-6.231zm-1.161 17.52h1.833L7.084 4.126H5.117l11.966 15.644z"/></svg></a>
+      <a href="https://linkedin.com/in/alexgreensh" target="_blank" rel="noopener" title="LinkedIn"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20.45 20.45h-3.56v-5.57c0-1.33-.02-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.34V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 110-4.13 2.06 2.06 0 010 4.13zm1.78 13.02H3.56V9h3.56v11.45zM22.23 0H1.77C.79 0 0 .77 0 1.73v20.54C0 23.23.79 24 1.77 24h20.45c.98 0 1.78-.77 1.78-1.73V1.73C24 .77 23.2 0 22.23 0z"/></svg></a>
+    </span>
+  </footer>
 </div>
 
 <script nonce="${nonce}">
@@ -278,6 +304,16 @@ document.querySelectorAll('.nav a').forEach(a => {
     document.getElementById('view-' + a.dataset.view).classList.add('active');
   });
 });
+// Live GitHub star count (public CORS endpoint; degrades silently to no count).
+(function () {
+  function fmt(n) { return (typeof n !== 'number' || !isFinite(n) || n < 0) ? null : (n >= 1000 ? (n / 1000).toFixed(1).replace(/\\.0$/, '') + 'k' : String(n)); }
+  function paint(label) { document.querySelectorAll('[data-gh-stars]').forEach(function (el) { el.textContent = label; el.hidden = false; }); }
+  try { var c = sessionStorage.getItem('to-gh-stars'); if (c) { paint(c); return; } } catch (e) {}
+  fetch('https://api.github.com/repos/alexgreensh/token-optimizer', { headers: { Accept: 'application/vnd.github+json' } })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) { var l = d && fmt(d.stargazers_count); if (!l) return; paint(l); try { sessionStorage.setItem('to-gh-stars', l); } catch (e) {} })
+    .catch(function () {});
+})();
 </script>
 </body>
 </html>`;

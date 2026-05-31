@@ -12149,6 +12149,13 @@ def _parse_jsonl_for_quality(filepath):
     tool_calls = 0   # cumulative tool call count (not reset on compact)
     agent_dispatches = []  # (index, prompt_size, result_size)
     decisions = []   # (index, text_snippet)
+    # Latest assistant usage = the live context footprint. input + both cache
+    # buckets is the same sum ccusage and the VS Code companion use. The last
+    # assistant turn's usage already reflects any compaction, so we keep the most
+    # recent and divide by the real window for an accurate fill (the char-length
+    # estimate below misses cached context — the bulk of real token usage).
+    context_tokens = None
+    current_model = None
 
     idx = 0
     try:
@@ -12189,6 +12196,12 @@ def _parse_jsonl_for_quality(filepath):
                     messages = []
                     agent_dispatches = []
                     decisions = []
+                    # Drop the pre-compaction footprint: the next assistant turn's
+                    # usage reports the new (smaller) context. If the session ends
+                    # right after a compaction with no further turn, leaving the old
+                    # value would over-report fill — None falls through to the
+                    # char-length estimate, which is more honest.
+                    context_tokens = None
                     idx += 1
                     continue
 
@@ -12211,6 +12224,24 @@ def _parse_jsonl_for_quality(filepath):
                     content = msg.get("content", [])
                     text_length = 0
                     is_substantive = False
+
+                    # Track the live context footprint + model from API usage.
+                    # Guard the shape: malformed/truncated JSONL can carry a
+                    # non-dict `usage` or non-int token fields; a raw + would
+                    # raise and abort the whole parse (losing all quality data).
+                    usage = msg.get("usage")
+                    if isinstance(usage, dict):
+                        try:
+                            tok = (int(usage.get("input_tokens") or 0)
+                                   + int(usage.get("cache_creation_input_tokens") or 0)
+                                   + int(usage.get("cache_read_input_tokens") or 0))
+                        except (TypeError, ValueError):
+                            tok = 0
+                        if tok > 0:
+                            context_tokens = tok
+                    model_str = msg.get("model")
+                    if isinstance(model_str, str) and model_str:
+                        current_model = model_str
 
                     if isinstance(content, list):
                         for block in content:
@@ -12297,6 +12328,8 @@ def _parse_jsonl_for_quality(filepath):
         "agent_dispatches": agent_dispatches,
         "decisions": decisions,
         "total_entries": idx,
+        "context_tokens": context_tokens,
+        "model": current_model,
     }
 
 
@@ -12490,7 +12523,11 @@ def compute_quality_score(quality_data, session_id=None):
     fill_pct = None
     try:
         context_tokens = quality_data.get("context_tokens")
-        model_context_window = quality_data.get("model_context_window")
+        # Fall back to the resolved window when the parsed data didn't carry one —
+        # otherwise the most accurate fill source (this session's own usage tokens)
+        # is skipped and we drop to the char-length estimate, which misses cached
+        # context and reads ~0% for sessions with heavy cache_creation/cache_read.
+        model_context_window = quality_data.get("model_context_window") or ctx_window
         if context_tokens is not None and model_context_window:
             fill_pct = min(1.0, max(0.0, float(context_tokens) / float(model_context_window)))
     except (TypeError, ValueError):
@@ -17273,6 +17310,7 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
             "turns": 0,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "session_file": Path(filepath).name,
+            "model_context_window": detect_context_window()[0],
         }
         _write_quality_cache(cache_path, result)
         _release_quality_lock(_qlock)
@@ -17307,6 +17345,11 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
     cfd = result.get("breakdown", {}).get("context_fill_degradation", {})
     result["degradation_band"] = cfd.get("band", "")
     result["fill_pct"] = cfd.get("fill_pct", 0)
+    # Surface the resolved context window at the TOP LEVEL of the cache. Consumers
+    # that compute fill from raw transcript tokens (the VS Code companion's
+    # cacheReader, the dashboard) read `model_context_window` here; without it they
+    # fall back to a 200k guess and inflate every 1M-context session ~5x.
+    result["model_context_window"] = cfd.get("model_context_window") or detect_context_window()[0]
 
     # Enforce ResourceHealth monotonicity within a session.
     # ResourceHealth can only worsen (decrease) within a session. Fill_pct fluctuates

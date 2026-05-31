@@ -6,13 +6,13 @@ export interface RateWindow {
   resetsAt: number | null; // unix epoch seconds
 }
 
-export type RateSource = 'statusline' | 'oauth';
-
 export interface RateLimits {
   fiveHour: RateWindow | null;
   sevenDay: RateWindow | null;
   timestamp: number; // ms since epoch — when this data was captured
-  source: RateSource;
+  // Always the statusline sidecar (rate-limits.json); the extension makes no
+  // network calls of its own. Kept as a literal so the provenance is explicit.
+  source: 'statusline';
 }
 
 export interface AgentInfo {

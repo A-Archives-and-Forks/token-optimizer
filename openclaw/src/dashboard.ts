@@ -1376,12 +1376,20 @@ function renderSidebar(data: DashboardData): string {
     </div>
 
     <div class="version-footer">
-      <div>Built by <a href="https://linkedin.com/in/alexgreensh" target="_blank" rel="noopener">Alex Greenshpun</a></div>
+      <div class="footer-byline">Built by <a href="https://linkedin.com/in/alexgreensh" target="_blank" rel="noopener">Alex Greenshpun</a></div>
+      <a class="gh-star" href="https://github.com/alexgreensh/token-optimizer" target="_blank" rel="noopener" title="Star Token Optimizer on GitHub">
+        <svg class="gh-star-icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5l2.9 6.06 6.6.59-5 4.38 1.5 6.47L12 16.98 5.99 20.5l1.5-6.47-5-4.38 6.6-.59L12 2.5z"/></svg>
+        <span>Star on GitHub</span>
+        <span class="gh-star-count" data-gh-stars hidden></span>
+      </a>
       <div class="social-icons">
-        <a class="social-link" href="https://github.com/alexgreensh/token-optimizer" target="_blank" rel="noopener">
+        <a class="social-link" href="https://github.com/alexgreensh/token-optimizer" target="_blank" rel="noopener" title="GitHub">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.2 11.39.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.08-.73.08-.73 1.2.08 1.84 1.23 1.84 1.23 1.07 1.83 2.81 1.3 3.5 1 .1-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 016.02 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 011.23 3.22c0 4.61-2.81 5.63-5.48 5.92.42.36.81 1.1.81 2.22v3.29c0 .32.22.7.82.58A12.01 12.01 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
         </a>
-        <a class="social-link" href="https://linkedin.com/in/alexgreensh" target="_blank" rel="noopener">
+        <a class="social-link" href="https://x.com/alexgreensh" target="_blank" rel="noopener" title="X (Twitter)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24h-6.66l-5.214-6.817-5.97 6.817H1.673l7.73-8.835L1.254 2.25h6.83l4.713 6.231 5.447-6.231zm-1.161 17.52h1.833L7.084 4.126H5.117l11.966 15.644z"/></svg>
+        </a>
+        <a class="social-link" href="https://linkedin.com/in/alexgreensh" target="_blank" rel="noopener" title="LinkedIn">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M20.45 20.45h-3.56v-5.57c0-1.33-.02-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.34V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 110-4.13 2.06 2.06 0 010 4.13zm1.78 13.02H3.56V9h3.56v11.45zM22.23 0H1.77C.79 0 0 .77 0 1.73v20.54C0 23.23.79 24 1.77 24h20.45c.98 0 1.78-.77 1.78-1.73V1.73C24 .77 23.2 0 22.23 0z"/></svg>
         </a>
       </div>
@@ -1990,13 +1998,27 @@ h1, h2, h3, h4 { font-weight: 400; }
   font-size: 13px;
   color: var(--c-text-dim);
   display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: center;
   align-items: center;
 }
 .version-footer a { color: var(--c-accent-cyan); text-decoration: none; }
-.social-icons { display: flex; gap: var(--s-2); }
-.social-link { color: var(--c-text-dim); transition: color 0.2s; }
-.social-link:hover { color: var(--c-accent-cyan); }
+.version-footer .footer-byline { opacity: 0.45; }
+.social-icons { display: flex; gap: 14px; align-items: center; }
+.social-link { color: var(--c-text-dim); opacity: 0.85; transition: color 0.2s, opacity 0.2s, transform 0.2s, filter 0.2s; display: flex; align-items: center; }
+.social-link:hover { color: var(--c-accent-cyan); opacity: 1; transform: translateY(-1px); filter: drop-shadow(0 0 6px var(--c-accent-glow, rgba(0,240,255,0.4))); }
+.gh-star {
+  display: inline-flex; align-items: center; gap: 7px; padding: 5px 12px;
+  font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.04em; text-transform: none;
+  color: var(--c-accent-cyan); text-decoration: none;
+  border: 1px solid rgba(0, 240, 255, 0.35); border-radius: 6px;
+  background: rgba(0, 240, 255, 0.07);
+  transition: transform 0.2s, box-shadow 0.2s, background 0.2s, border-color 0.2s;
+}
+.gh-star:hover { transform: translateY(-1px); background: rgba(0, 240, 255, 0.14); border-color: var(--c-accent-cyan); box-shadow: 0 0 14px var(--c-accent-glow, rgba(0, 240, 255, 0.4)); }
+.gh-star-icon { filter: drop-shadow(0 0 4px var(--c-accent-glow, rgba(0, 240, 255, 0.4))); flex: none; }
+.gh-star-count { font-variant-numeric: tabular-nums; padding-left: 8px; border-left: 1px solid rgba(0, 240, 255, 0.25); color: var(--c-text-main); opacity: 0.92; }
 
 /* QUICK COMMANDS */
 .quick-cmd {
@@ -2397,7 +2419,7 @@ export function generateDashboardHtml(data: DashboardData): string {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://api.github.com; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
 <title>Token Optimizer - OpenClaw</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -2430,6 +2452,25 @@ ${renderCSS()}
 
 <script>
 ${renderJS()}
+</script>
+<script>
+// Live GitHub star count for the "Star on GitHub" CTA. Public CORS endpoint,
+// cached in sessionStorage; degrades silently to no count on any failure.
+(function () {
+  function fmt(n) {
+    if (typeof n !== 'number' || !isFinite(n) || n < 0) return null;
+    return n >= 1000 ? (n / 1000).toFixed(1).replace(/\\.0$/, '') + 'k' : String(n);
+  }
+  function paint(label) {
+    var els = document.querySelectorAll('[data-gh-stars]');
+    for (var i = 0; i < els.length; i++) { els[i].textContent = label; els[i].hidden = false; }
+  }
+  try { var c = sessionStorage.getItem('to-gh-stars'); if (c) { paint(c); return; } } catch (e) {}
+  fetch('https://api.github.com/repos/alexgreensh/token-optimizer', { headers: { Accept: 'application/vnd.github+json' } })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) { var l = d && fmt(d.stargazers_count); if (!l) return; paint(l); try { sessionStorage.setItem('to-gh-stars', l); } catch (e) {} })
+    .catch(function () {});
+})();
 </script>
 </body>
 </html>`;

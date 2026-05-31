@@ -1,7 +1,7 @@
-// Parse a single usage window from any of the shapes we encounter: the
-// statusline sidecar (`used_percentage` + epoch `resets_at`) and the OAuth
-// usage response (which may use `utilization` and/or an ISO-string `resets_at`).
-// Tolerant of all known variants so both readers share one implementation.
+// Parse a single usage window from the statusline sidecar (`used_percentage` +
+// epoch `resets_at`). Tolerant of a few shape variants (`utilization`, ISO-string
+// `resets_at`) so a future sidecar format change degrades gracefully rather than
+// rendering "NaN%".
 import { RateWindow } from './types';
 
 export function parseRateWindow(w: any): RateWindow | null {

@@ -28,11 +28,11 @@ export class StatusBar {
     this.secondary.name = 'Token Optimizer Usage';
   }
 
-  render(snap: Snapshot, liveUsageOn: boolean): void {
+  render(snap: Snapshot): void {
     if (this.disposed) return; // an in-flight render may resume mid-disposal
     // Rebuild the tooltip only when its content changed (it carries live duration,
     // so it does change during an active session — but not when idle).
-    const tooltipStr = buildTooltip(snap, { liveUsageOn, nowMs: Date.now() });
+    const tooltipStr = buildTooltip(snap, { nowMs: Date.now() });
     if (tooltipStr !== this.lastTooltipStr || !this.tooltip) {
       const md = new vscode.MarkdownString(tooltipStr);
       md.isTrusted = true; // enable command: links in the tooltip
