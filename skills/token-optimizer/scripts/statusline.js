@@ -24,9 +24,15 @@ process.stdin.on('end', () => {
     const remaining = data.context_window?.remaining_percentage;
     const usedPct = data.context_window?.used_percentage;
     const sessionId = data.session_id;
+    // Account-global usage limits (Pro/Max only, populated after first API
+    // response; each window may be independently absent). Handed only to the
+    // status line, persisted nowhere else, so we bridge it to a sidecar file
+    // for the VS Code companion (rate limits are account-wide, not per-session).
+    const rateLimits = data.rate_limits || null;
     const DIM = '\x1b[2m';
     const RESET = '\x1b[0m';
     const SEP = ` ${DIM}|${RESET} `;
+    const gradeFor = (s) => s >= 90 ? 'S' : s >= 80 ? 'A' : s >= 70 ? 'B' : s >= 55 ? 'C' : s >= 40 ? 'D' : 'F';
 
     // Effort level (read from settings.json, not in stdin data)
     let effort = '';
@@ -78,9 +84,42 @@ process.stdin.on('end', () => {
           timestamp: Date.now(),
           session_id: sessionId || null
         });
-        const tmpPath = path.join(cacheDir, '.live-fill.tmp');
+        // PID-scoped tmp so two concurrent terminals never write the same
+        // temp file (which would corrupt one another's rename).
+        const tmpPath = path.join(cacheDir, `.live-fill.${process.pid}.tmp`);
         fs.writeFileSync(tmpPath, liveFillData);
         fs.renameSync(tmpPath, path.join(cacheDir, 'live-fill.json'));
+      } catch (e) {}
+    }
+
+    // ---- Write authoritative rate limits to a global sidecar ----
+    // Bridges status-line-only data (used %, reset time) to disk so the VS Code
+    // companion can show authoritative usage limits with no terminal of its own.
+    // Account-global file (not per-session): rate limits are account-wide.
+    const pickWindow = (w) => {
+      if (!w || typeof w.used_percentage !== 'number' || !isFinite(w.used_percentage)) return null;
+      return {
+        used_percentage: Math.max(0, Math.min(100, w.used_percentage)),
+        resets_at: typeof w.resets_at === 'number'
+          ? w.resets_at
+          : (typeof w.resets_at === 'string'
+              ? (Math.floor(Date.parse(w.resets_at) / 1000) || null)
+              : null)
+      };
+    };
+    const fiveHour = rateLimits ? pickWindow(rateLimits.five_hour) : null;
+    const sevenDay = rateLimits ? pickWindow(rateLimits.seven_day) : null;
+    if (fiveHour || sevenDay) {
+      try {
+        const payload = JSON.stringify({
+          five_hour: fiveHour,
+          seven_day: sevenDay,
+          timestamp: Date.now(),
+          source: 'statusline'
+        });
+        const rlTmp = path.join(cacheDir, `.rate-limits.${process.pid}.tmp`);
+        fs.writeFileSync(rlTmp, payload);
+        fs.renameSync(rlTmp, path.join(cacheDir, 'rate-limits.json'));
       } catch (e) {}
     }
 
@@ -95,7 +134,7 @@ process.stdin.on('end', () => {
       }
     } catch (e) {}
 
-    const cacheMatchesSession = q && q.session_file && safeSessionId && q.session_file.includes(safeSessionId);
+    const cacheMatchesSession = q && typeof q.session_file === 'string' && safeSessionId && q.session_file.includes(safeSessionId);
 
     // ---- ROW 1: Core identity + context health ----
     // Staleness guard: the score is recomputed by hooks (PostToolUse is
@@ -114,7 +153,7 @@ process.stdin.on('end', () => {
       const rh = q.resource_health != null ? q.resource_health : q.score;
       if (rh != null) {
         const score = Math.round(rh);
-        const grade = q.resource_health_grade || q.grade || (score >= 90 ? 'S' : score >= 80 ? 'A' : score >= 70 ? 'B' : score >= 55 ? 'C' : score >= 40 ? 'D' : 'F');
+        const grade = q.resource_health_grade || q.grade || gradeFor(score);
         // Keep the score's value-color (green/yellow/orange/red) regardless of
         // staleness; the `~` prefix is the only stale indicator so the number
         // stays readable. (Dimming the whole score made it barely visible.)
@@ -144,7 +183,7 @@ process.stdin.on('end', () => {
       const se = q.session_efficiency;
       if (se != null) {
         const seScore = Math.round(se);
-        const seGrade = q.session_efficiency_grade || (seScore >= 90 ? 'S' : seScore >= 80 ? 'A' : seScore >= 70 ? 'B' : seScore >= 55 ? 'C' : seScore >= 40 ? 'D' : 'F');
+        const seGrade = q.session_efficiency_grade || gradeFor(seScore);
         row2Parts.push(`${DIM}Eff:${seGrade}(${seScore})${RESET}`);
       }
     } else {
@@ -218,6 +257,29 @@ process.stdin.on('end', () => {
         });
         row2Parts.push(`Agents: ${agentParts.join(' ')}`);
       }
+    }
+
+    // Usage limits row fragment (5h primary, 7d compact). Colored by pressure.
+    const fmtReset = (epochSec) => {
+      if (typeof epochSec !== 'number' || epochSec <= 0) return '';
+      try {
+        const d = new Date(epochSec * 1000);
+        let h = d.getHours();
+        const m = d.getMinutes();
+        const ap = h >= 12 ? 'p' : 'a';
+        h = h % 12; if (h === 0) h = 12;
+        return ` ↺${h}:${String(m).padStart(2, '0')}${ap}`;
+      } catch (e) { return ''; }
+    };
+    const limitColor = (pct) =>
+      pct >= 90 ? '\x1b[5;31m' : pct >= 75 ? '\x1b[38;5;208m' : pct >= 50 ? '\x1b[33m' : '\x1b[32m';
+    if (fiveHour) {
+      const p = Math.round(fiveHour.used_percentage);
+      row2Parts.push(`${limitColor(p)}5h:${p}%${fmtReset(fiveHour.resets_at)}${RESET}`);
+    }
+    if (sevenDay) {
+      const p = Math.round(sevenDay.used_percentage);
+      row2Parts.push(`${DIM}7d:${p}%${RESET}`);
     }
 
     const row2 = row2Parts.join(SEP);

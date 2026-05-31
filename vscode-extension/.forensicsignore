@@ -1,0 +1,10 @@
+# Test files are local-only (never shipped in the VSIX, excluded via .vscodeignore).
+# The scanner mis-parses JSON fixture strings inside these tests as module imports
+# ("phantom dependency"); those are test data, not real dependencies.
+src/__tests__/*
+
+# NOTE: the OAuth credential read in src/oauthUsage.ts is INTENTIONALLY left
+# un-suppressed. It is an authorized, opt-in, off-by-default feature that reads
+# the user's own subscription token and sends it ONLY to the hardcoded Anthropic
+# usage endpoint. Reviewed and accepted; kept visible so future scans re-surface
+# it for re-review rather than hiding it.

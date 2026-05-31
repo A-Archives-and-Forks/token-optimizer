@@ -1,0 +1,70 @@
+{
+  "name": "token-optimizer-statusline",
+  "displayName": "Token Optimizer",
+  "description": "See your Claude Code context health, efficiency, and usage limits in the VS Code status bar.",
+  "version": "0.1.0",
+  "publisher": "alexgreensh",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "icon": "icon.png",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alexgreensh/token-optimizer.git",
+    "directory": "vscode-extension"
+  },
+  "homepage": "https://github.com/alexgreensh/token-optimizer",
+  "categories": ["Other", "Visualization"],
+  "keywords": ["claude", "claude-code", "token", "context", "status bar"],
+  "main": "./out/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      {
+        "command": "tokenOptimizer.openDashboard",
+        "title": "Token Optimizer: Open Dashboard"
+      },
+      {
+        "command": "tokenOptimizer.enableLiveUsage",
+        "title": "Token Optimizer: Enable Live Usage (authoritative 5h/7d limits)"
+      },
+      {
+        "command": "tokenOptimizer.disableLiveUsage",
+        "title": "Token Optimizer: Disable Live Usage"
+      },
+      {
+        "command": "tokenOptimizer.refresh",
+        "title": "Token Optimizer: Refresh Now"
+      }
+    ],
+    "configuration": {
+      "title": "Token Optimizer",
+      "properties": {
+        "tokenOptimizer.liveUsage": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Show **always-fresh** 5-hour and 7-day usage limits even when no Claude Code terminal is open. When on, the extension reads your existing Claude subscription login (the same one Claude Code already uses for `/usage`) to look up your usage. **This costs zero model tokens** — it is a status lookup, not a message — and is never a billed API call. Off by default; the limits still show from the status-line sidecar when a terminal has rendered recently."
+        },
+        "tokenOptimizer.staleAfterSeconds": {
+          "type": "number",
+          "default": 180,
+          "markdownDescription": "How many seconds before sidecar usage-limit data is considered stale and labeled `(est)` (or refreshed via Live Usage if enabled)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "vitest run",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

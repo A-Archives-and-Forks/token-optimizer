@@ -1,0 +1,6 @@
+node_modules/
+out/
+*.vsix
+# Tests are local-only — never pushed to the public repo (repo rule).
+src/__tests__/
+vitest.config.ts
