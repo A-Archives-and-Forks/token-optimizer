@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.11
+
+- Fix: remove the long usage-limit disclaimer from the hover tooltip and panel.
+- Improve: usage labels now stay attached to the actual 5h/7d values, with shorter source details.
+
 ## 0.1.10
 
 - Fix: replace user-facing "stale" usage-limit wording with clearer cached, estimated, and verified states.
