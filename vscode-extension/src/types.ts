@@ -1,18 +1,25 @@
 // Shared data shapes for the Token Optimizer companion.
 // Kept free of any `vscode` import so every consumer is unit-testable off-host.
 
+export type UsageLimitStatus = 'verified' | 'estimated' | 'stale';
+export type UsageLimitDisplayStatus = 'verified' | 'estimated' | 'cached';
+export type UsageLimitSource = 'statusline' | 'transcript-estimate';
+
 export interface RateWindow {
   usedPercentage: number;
   resetsAt: number | null; // unix epoch seconds
+  freshness?: UsageLimitStatus;
+  source?: UsageLimitSource;
+  ageSeconds?: number | null;
 }
 
 export interface RateLimits {
   fiveHour: RateWindow | null;
   sevenDay: RateWindow | null;
   timestamp: number; // ms since epoch — when this data was captured
-  // Always the statusline sidecar (rate-limits.json); the extension makes no
-  // network calls of its own. Kept as a literal so the provenance is explicit.
-  source: 'statusline';
+  // statusline = authoritative sidecar; transcript-estimate = local estimate
+  // calibrated from recent transcript usage.
+  source: UsageLimitSource | 'mixed';
 }
 
 export interface AgentInfo {

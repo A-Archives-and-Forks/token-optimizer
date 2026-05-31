@@ -1,7 +1,7 @@
 // Pure presentation: Snapshot -> display strings. No `vscode` import, so the
 // exact rendered text is unit-testable. statusBar.ts wraps the tooltip string
 // into a MarkdownString and applies status-bar colors.
-import { Snapshot } from './types';
+import { RateWindow, Snapshot, UsageLimitDisplayStatus, UsageLimitStatus } from './types';
 
 export interface RenderOptions {
   nowMs: number;
@@ -92,7 +92,8 @@ export function secondaryItemText(s: Snapshot): string {
   if (s.eff) parts.push(`Eff ${s.eff.grade}`);
   const five = s.rateLimits?.fiveHour;
   if (five) {
-    const tag = s.rateLimitsStale ? ' est' : '';
+    const status = usageStatus(five, s.rateLimitsStale);
+    const tag = status === 'estimated' ? ' est' : status === 'stale' ? ' cached' : '';
     parts.push(`5h ${Math.round(five.usedPercentage)}%${tag}`);
   }
   if (parts.length === 0) return '';
@@ -126,7 +127,7 @@ export function buildTooltip(s: Snapshot, opts: RenderOptions): string {
     lines.push(`| Context | \`${fillBar(s.fillPct)}\` ${s.fillPct}%${src} |`);
   }
   if (s.contextQ) {
-    lines.push(`| ContextQ | ${s.contextQ.grade} (${s.contextQ.score})${s.contextQ.stale ? ' ~stale' : ''} |`);
+    lines.push(`| ContextQ | ${s.contextQ.grade} (${s.contextQ.score})${s.contextQ.stale ? ' _(cached)_' : ''} |`);
   }
   if (s.eff) {
     lines.push(`| Efficiency | ${s.eff.grade} (${s.eff.score}) |`);
@@ -165,15 +166,10 @@ export function buildTooltip(s: Snapshot, opts: RenderOptions): string {
   const five = s.rateLimits?.fiveHour;
   const seven = s.rateLimits?.sevenDay;
   if (five) {
-    const reset = formatReset(five.resetsAt, opts.nowMs);
-    const resetStr = reset ? ` · resets ${reset}` : '';
-    const estStr = s.rateLimitsStale ? ' _(est)_' : '';
-    lines.push(`| 5h limit | ${Math.round(five.usedPercentage)}%${resetStr}${estStr} |`);
+    lines.push(`| 5h limit | ${usageWindowText(five, opts.nowMs, s.rateLimitsStale)} |`);
   }
   if (seven) {
-    const reset = formatReset(seven.resetsAt, opts.nowMs);
-    const resetStr = reset ? ` · resets ${reset}` : '';
-    lines.push(`| 7d limit | ${Math.round(seven.usedPercentage)}%${resetStr} |`);
+    lines.push(`| 7d limit | ${usageWindowText(seven, opts.nowMs, s.rateLimitsStale)} |`);
   }
 
   // Honesty: with no folder open there's no way to scope to THIS window's
@@ -183,11 +179,10 @@ export function buildTooltip(s: Snapshot, opts: RenderOptions): string {
     lines.push('⚠️ _No folder open — showing the most recent session globally. Open a folder so this reflects this window\'s session._');
   }
 
-  // Honesty: when the only usage number we have is the last-known sidecar value,
-  // say it's an estimate rather than implying it's live.
-  if (five && s.rateLimitsStale) {
+  if (five || seven) {
     lines.push('');
-    lines.push('_Usage limits are the last known value (est) — open a terminal session to refresh._');
+    lines.push('_Usage labels: verified = fresh Claude statusline cache; estimated = computed from recent transcript usage; cached = last verified value with update age._');
+    lines.push('_Claude does not currently expose exact remaining usage limits to extensions, so this may be estimated._');
   }
 
   lines.push('');
@@ -212,8 +207,16 @@ export interface PanelModel {
   compactions: { count: number; lossPct: number | null } | null;
   duration: string;
   agents: string[];
-  fiveHour: { pct: number; reset: string; estimated: boolean } | null;
-  sevenDay: { pct: number; reset: string } | null;
+  fiveHour: PanelUsageWindow | null;
+  sevenDay: PanelUsageWindow | null;
+}
+
+export interface PanelUsageWindow {
+  pct: number;
+  reset: string;
+  status: UsageLimitDisplayStatus;
+  age: string;
+  detail: string;
 }
 
 export function buildPanelModel(s: Snapshot, opts: RenderOptions): PanelModel {
@@ -233,19 +236,8 @@ export function buildPanelModel(s: Snapshot, opts: RenderOptions): PanelModel {
       s.compactions != null ? { count: s.compactions, lossPct: s.compactionLossPct } : null,
     duration: formatDuration(s.durationSec),
     agents: s.agents.map((a) => `${a.model}:${a.description}${a.elapsed ? ` (${a.elapsed})` : ''}`),
-    fiveHour: s.rateLimits?.fiveHour
-      ? {
-          pct: Math.round(s.rateLimits.fiveHour.usedPercentage),
-          reset: formatReset(s.rateLimits.fiveHour.resetsAt, opts.nowMs),
-          estimated: s.rateLimitsStale,
-        }
-      : null,
-    sevenDay: s.rateLimits?.sevenDay
-      ? {
-          pct: Math.round(s.rateLimits.sevenDay.usedPercentage),
-          reset: formatReset(s.rateLimits.sevenDay.resetsAt, opts.nowMs),
-        }
-      : null,
+    fiveHour: s.rateLimits?.fiveHour ? panelUsageWindow(s.rateLimits.fiveHour, opts.nowMs, s.rateLimitsStale) : null,
+    sevenDay: s.rateLimits?.sevenDay ? panelUsageWindow(s.rateLimits.sevenDay, opts.nowMs, s.rateLimitsStale) : null,
   };
 }
 
@@ -265,4 +257,58 @@ function warningParts(s: Snapshot): string[] {
     parts.push(`Tools ${s.toolWarning.value}${bang}`);
   }
   return parts;
+}
+
+function usageStatus(w: RateWindow, fallbackStale: boolean): UsageLimitStatus {
+  return w.freshness ?? (fallbackStale ? 'stale' : 'verified');
+}
+
+function usageWindowText(w: RateWindow, nowMs: number, fallbackStale: boolean): string {
+  const status = usageStatus(w, fallbackStale);
+  const reset = usageReset(w, nowMs, status);
+  const parts = [`${Math.round(w.usedPercentage)}%`];
+  if (reset) parts.push(`resets ${reset}`);
+  const age = formatAge(w.ageSeconds ?? null);
+  if (status === 'stale') parts.push(age ? `cached ${age} ago` : 'cached');
+  else parts.push(status);
+  if (status === 'estimated') parts.push('recent transcript usage');
+  return parts.join(' · ');
+}
+
+function panelUsageWindow(w: RateWindow, nowMs: number, fallbackStale: boolean): PanelUsageWindow {
+  const status = usageStatus(w, fallbackStale);
+  const age = status === 'stale' ? formatAge(w.ageSeconds ?? null) : '';
+  return {
+    pct: Math.round(w.usedPercentage),
+    reset: usageReset(w, nowMs, status),
+    status: displayStatus(status),
+    age: age ? `updated ${age} ago` : '',
+    detail: usageDetail(status, age),
+  };
+}
+
+function usageReset(w: RateWindow, nowMs: number, status: UsageLimitStatus): string {
+  const reset = formatReset(w.resetsAt, nowMs);
+  if (status === 'stale' && reset === 'now') return '';
+  return reset;
+}
+
+function usageDetail(status: UsageLimitStatus, age: string): string {
+  if (status === 'verified') return 'verified from Claude statusline cache';
+  if (status === 'estimated') return 'estimated from recent transcript usage';
+  return age ? `last verified Claude statusline value, updated ${age} ago` : 'last verified Claude statusline value';
+}
+
+function displayStatus(status: UsageLimitStatus): UsageLimitDisplayStatus {
+  return status === 'stale' ? 'cached' : status;
+}
+
+function formatAge(ageSeconds: number | null): string {
+  if (ageSeconds == null || !Number.isFinite(ageSeconds) || ageSeconds < 0) return '';
+  if (ageSeconds < 90) return `${Math.round(ageSeconds)}s`;
+  const minutes = Math.round(ageSeconds / 60);
+  if (minutes < 90) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 36) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
 }

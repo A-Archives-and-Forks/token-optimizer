@@ -34,20 +34,22 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const dataSource = new DataSource(paths, staleAfter, renderFrom);
 
-  // Re-read from disk on any config change (settings UI or the explicit refresh
-  // command) so a changed staleAfterSeconds takes effect immediately.
-  const onConfigChanged = () => dataSource.refresh();
+  // Re-read from disk and recompute transcript estimates on explicit refresh.
+  const refreshNow = () => dataSource.refresh(true);
 
-  registerCommands(context, { paths, onConfigChanged });
+  registerCommands(context, { paths, onConfigChanged: refreshNow });
 
   // Clicking the status bar opens the expanded panel.
   context.subscriptions.push(
-    vscode.commands.registerCommand('tokenOptimizer.showStatus', () => statusPanel.show())
+    vscode.commands.registerCommand('tokenOptimizer.showStatus', () => {
+      refreshNow();
+      statusPanel.show();
+    })
   );
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('tokenOptimizer')) onConfigChanged();
+      if (e.affectsConfiguration('tokenOptimizer')) dataSource.refresh(false);
     })
   );
 

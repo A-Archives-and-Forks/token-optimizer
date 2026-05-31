@@ -1,7 +1,7 @@
 // Pure parsing of Token Optimizer's on-disk cache files into a Snapshot.
 // Takes already-read file contents (strings) so it stays vscode-free and fully
 // unit-testable; the actual fs reads live in dataSource.
-import { Snapshot, RateLimits, AgentInfo, emptySnapshot } from './types';
+import { Snapshot, RateLimits, AgentInfo, RateWindow, emptySnapshot } from './types';
 import { parseRateWindow } from './rateWindow';
 import { sanitizeSessionId } from './paths';
 import { windowForModel } from './jsonlTail';
@@ -12,6 +12,7 @@ export interface RawInputs {
   qualityJson: string | null;
   liveFillJson: string | null;
   rateLimitsJson: string | null;
+  estimatedRateLimits?: RateLimits | null;
   jsonlTokens: number | null; // raw context tokens from the transcript tail
   jsonlModel: string | null;
   effort: string | null;
@@ -63,7 +64,11 @@ export function buildSnapshot(inputs: RawInputs): Snapshot {
   const snap = emptySnapshot();
   const q = safeParse(inputs.qualityJson);
   const live = safeParse(inputs.liveFillJson);
-  const rl = safeParse(inputs.rateLimitsJson);
+  const sidecarRateLimits = parseRateLimitsSidecar(
+    inputs.rateLimitsJson,
+    inputs.nowMs,
+    inputs.staleAfterSeconds
+  );
 
   snap.model = inputs.jsonlModel;
   snap.effort = inputs.effort;
@@ -194,26 +199,60 @@ export function buildSnapshot(inputs: RawInputs): Snapshot {
 
   if (snap.fillPct != null) snap.hasData = true;
 
-  // ---- Rate limits: sidecar (authoritative when fresh) ----
-  if (rl) {
-    const fiveHour = parseRateWindow(rl.five_hour);
-    const sevenDay = parseRateWindow(rl.seven_day);
-    if (fiveHour || sevenDay) {
-      const ts = typeof rl.timestamp === 'number' ? rl.timestamp : 0;
-      const ageSec = ts ? (inputs.nowMs - ts) / 1000 : Infinity;
-      const limits: RateLimits = {
-        fiveHour,
-        sevenDay,
-        timestamp: ts,
-        source: 'statusline',
-      };
-      snap.rateLimits = limits;
-      snap.rateLimitsStale = ageSec > inputs.staleAfterSeconds;
-      snap.hasData = true;
-    }
+  // ---- Rate limits ----
+  // Fresh sidecar = verified. Stale sidecar can be replaced by a local
+  // transcript estimate; otherwise show the stale value with age.
+  const sidecarHasStale = !!sidecarRateLimits && anyStale(sidecarRateLimits);
+  if (sidecarRateLimits && (!sidecarHasStale || !inputs.estimatedRateLimits)) {
+    snap.rateLimits = sidecarRateLimits;
+    snap.rateLimitsStale = sidecarHasStale;
+    snap.hasData = true;
+  } else if (inputs.estimatedRateLimits) {
+    snap.rateLimits = inputs.estimatedRateLimits;
+    snap.rateLimitsStale = false;
+    snap.hasData = true;
   }
 
   return snap;
+}
+
+export function parseRateLimitsSidecar(
+  json: string | null,
+  nowMs: number,
+  staleAfterSeconds: number
+): RateLimits | null {
+  const rl = safeParse(json);
+  if (!rl) return null;
+  const fiveHour = parseRateWindow(rl.five_hour);
+  const sevenDay = parseRateWindow(rl.seven_day);
+  if (!fiveHour && !sevenDay) return null;
+  const ts = typeof rl.timestamp === 'number' && Number.isFinite(rl.timestamp) ? rl.timestamp : 0;
+  const ageSec = ts ? Math.max(0, Math.round((nowMs - ts) / 1000)) : null;
+  const stale = ageSec == null || ageSec > staleAfterSeconds;
+  return {
+    fiveHour: annotateWindow(fiveHour, stale, ageSec),
+    sevenDay: annotateWindow(sevenDay, stale, ageSec),
+    timestamp: ts,
+    source: 'statusline',
+  };
+}
+
+function annotateWindow(
+  window: RateWindow | null,
+  stale: boolean,
+  ageSeconds: number | null
+): RateWindow | null {
+  if (!window) return null;
+  return {
+    ...window,
+    freshness: stale ? 'stale' : 'verified',
+    source: 'statusline',
+    ageSeconds,
+  };
+}
+
+function anyStale(limits: RateLimits): boolean {
+  return [limits.fiveHour, limits.sevenDay].some((w) => w?.freshness === 'stale');
 }
 
 function stripControl(s: string): string {

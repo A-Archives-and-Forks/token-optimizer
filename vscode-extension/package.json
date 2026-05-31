@@ -40,7 +40,7 @@
         "tokenOptimizer.staleAfterSeconds": {
           "type": "number",
           "default": 180,
-          "markdownDescription": "How many seconds before sidecar usage-limit data is considered stale and labeled `(est)`."
+          "markdownDescription": "How many seconds before verified statusline usage-limit data is shown as cached. Cached values show their update age; manual refresh also tries a local transcript estimate."
         }
       }
     }

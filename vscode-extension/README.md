@@ -32,16 +32,17 @@ When you click to open the dashboard, the extension first probes a local Token O
 daemon at `http://localhost:24842` and falls back to opening the generated HTML file. That
 localhost probe is the only non-OAuth network activity, and it fires only on an explicit click.
 
-## Live Usage (optional, off by default)
+## Usage Limits
 
-The authoritative 5-hour / 7-day numbers reach the status line only. When no terminal has
-rendered recently, the sidecar value can go stale. Turn on **Live Usage** and the extension
-reads your existing Claude subscription login (the same one Claude Code uses for `/usage`)
-to fetch the always-fresh number.
+Claude does not currently expose exact remaining usage limits directly to VS Code
+extensions. Token Optimizer shows the best available value and labels it:
 
-- **Zero token cost.** It's a status lookup, not a Claude message. Never a billed API call.
-- **One click to enable.** The tooltip shows an "Enable live usage" link whenever the number
-  is stale, or run **Token Optimizer: Enable Live Usage** from the Command Palette.
+- **verified** — fresh value captured from Claude Code's statusline cache
+- **estimated** — computed locally from recent transcript usage
+- **cached** — last known verified value, with update age shown
+
+Use **Token Optimizer: Refresh Now** or the panel's **Refresh** button to re-read the
+cache and recompute the local transcript estimate. No terminal workflow required.
 
 ## Install
 

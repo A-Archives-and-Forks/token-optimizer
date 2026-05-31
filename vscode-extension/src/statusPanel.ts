@@ -6,9 +6,9 @@ import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { PanelModel } from './format';
 
-export type PanelAction = 'openDashboard';
+export type PanelAction = 'openDashboard' | 'refresh';
 
-const VALID_ACTIONS = new Set<PanelAction>(['openDashboard']);
+const VALID_ACTIONS = new Set<PanelAction>(['openDashboard', 'refresh']);
 
 export class StatusPanel {
   private panel: vscode.WebviewPanel | undefined;
@@ -82,6 +82,10 @@ export class StatusPanel {
   .g-B,.g-C { color: var(--vscode-charts-yellow, #d7b500); }
   .g-D,.g-F { color: var(--vscode-charts-red, #e35d5d); }
   .pending { color: color-mix(in srgb, var(--vscode-foreground) 60%, transparent); font-style: italic; }
+  .usage-status { display:inline-block; margin-left:6px; padding:1px 6px; border-radius:8px; font-size:11px;
+          background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-style: normal; }
+  .usage-status.cached { background: var(--vscode-inputValidation-warningBackground, #5a4a1a); }
+  .usage-note { margin-top: 12px; color: color-mix(in srgb, var(--vscode-foreground) 68%, transparent); font-size: 12px; }
   .warn { color: var(--vscode-charts-orange, #d18616); }
   .pill { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11px;
           background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
@@ -117,6 +121,12 @@ export class StatusPanel {
   const gradeClass = (g) => 'grade g-' + esc(g);
   function row(k, vHtml) { return '<div class="row"><span class="k">' + esc(k) + '</span><span class="v">' + vHtml + '</span></div>'; }
   function usage(pct) { return '<span class="usagebar"><span class="usagefill" style="width:' + Math.max(0,Math.min(100,pct)) + '%"></span></span>'; }
+  function usageLimit(w) {
+    const status = esc(w.status || 'verified');
+    const reset = w.reset ? 'resets ' + esc(w.reset) + ' · ' : '';
+    const age = w.age ? ' · ' + esc(w.age) : '';
+    return w.pct + '% ' + usage(w.pct) + '<br><span class="pending">' + reset + '<span class="usage-status ' + status + '" title="' + esc(w.detail || '') + '">' + status + '</span>' + age + '</span>';
+  }
   function render(m) {
     const app = document.getElementById('app');
     if (!m || !m.hasData) { app.innerHTML = '<div class="empty">No active Claude Code session in this window yet.</div>'; return; }
@@ -125,17 +135,19 @@ export class StatusPanel {
     h += '<div class="sub">' + esc(m.model || 'Claude') + (m.effort ? ' · ' + esc(m.effort) : '') + '</div>';
     if (!m.scoped) h += '<div class="banner">⚠️ No folder open — showing the most recent session globally. Open a folder so this reflects this window\\'s session.</div>';
     if (m.fillPct != null) h += row('Context', '<span class="bar">' + esc(m.fillBar) + '</span> ' + m.fillPct + '%' + (m.fillSource === 'jsonl' ? ' <span class="pill">panel</span>' : ''));
-    if (m.contextQ) h += row('ContextQ', '<span class="' + gradeClass(m.contextQ.grade) + '">' + esc(m.contextQ.grade) + ' (' + m.contextQ.score + ')</span>' + (m.contextQ.stale ? ' <span class="pending">~stale</span>' : ''));
+    if (m.contextQ) h += row('ContextQ', '<span class="' + gradeClass(m.contextQ.grade) + '">' + esc(m.contextQ.grade) + ' (' + m.contextQ.score + ')</span>' + (m.contextQ.stale ? ' <span class="pending">cached</span>' : ''));
     if (m.eff) h += row('Efficiency', '<span class="' + gradeClass(m.eff.grade) + '">' + esc(m.eff.grade) + ' (' + m.eff.score + ')</span>');
     if (m.qualityPending) h += row('ContextQ / Eff', '<span class="pending">warming up…</span>');
     if (m.warnings && m.warnings.length) h += row('Warnings', '<span class="warn">' + m.warnings.map(esc).join(', ') + '</span>');
     if (m.compactions) h += row('Compactions', m.compactions.count + (m.compactions.count > 0 && m.compactions.lossPct != null ? ' (~' + m.compactions.lossPct + '% lost)' : ''));
     if (m.duration) h += row('Duration', esc(m.duration));
     if (m.agents && m.agents.length) h += row('Agents', m.agents.map(esc).join('<br>'));
-    if (m.fiveHour) h += row('5-hour limit', m.fiveHour.pct + '% ' + usage(m.fiveHour.pct) + '<br><span class="pending">resets ' + esc(m.fiveHour.reset) + (m.fiveHour.estimated ? ' (est)' : '') + '</span>');
-    if (m.sevenDay) h += row('7-day limit', m.sevenDay.pct + '% ' + usage(m.sevenDay.pct) + '<br><span class="pending">resets ' + esc(m.sevenDay.reset) + '</span>');
+    if (m.fiveHour) h += row('5-hour limit', usageLimit(m.fiveHour));
+    if (m.sevenDay) h += row('7-day limit', usageLimit(m.sevenDay));
+    if (m.fiveHour || m.sevenDay) h += '<div class="usage-note">Claude does not currently expose exact remaining usage limits to extensions, so this may be estimated.</div>';
     h += '<div class="actions">';
     h += '<button class="primary" data-act="openDashboard">Open full dashboard</button>';
+    h += '<button data-act="refresh">Refresh</button>';
     h += '</div>';
     h += '<div class="panel-footer">';
     h += '<a class="gh-star" href="https://github.com/alexgreensh/token-optimizer" target="_blank" rel="noopener" title="Star Token Optimizer on GitHub">';

@@ -8,8 +8,9 @@ import * as vscode from 'vscode';
 import { ClaudePaths } from './paths';
 import { findActiveSession, ActiveSession } from './sessionResolver';
 import { JsonlTailer } from './jsonlTail';
-import { buildSnapshot } from './cacheReader';
-import { Snapshot, emptySnapshot } from './types';
+import { buildSnapshot, parseRateLimitsSidecar } from './cacheReader';
+import { estimateRateLimitsFromTranscripts } from './usageEstimator';
+import { RateLimits, Snapshot, emptySnapshot } from './types';
 
 const DEBOUNCE_MS = 400;
 const TICK_MS = 5000;
@@ -29,6 +30,7 @@ export class DataSource {
   // changes (a new session writes there) or on a periodic safety rescan.
   private cachedSession: ActiveSession | null = null;
   private cachedEffort: string | null = null;
+  private cachedUsageEstimate: RateLimits | null = null;
   private needsRescan = true;
   private tick = 0;
 
@@ -59,11 +61,11 @@ export class DataSource {
       if (!this.isFocused()) return;
       this.tick++;
       if (this.tick % RESCAN_EVERY_TICKS === 0) this.needsRescan = true;
-      this.refresh();
+      this.refresh(false);
     }, TICK_MS);
     try {
       this.focusSub = vscode.window.onDidChangeWindowState((s) => {
-        if (s.focused) this.refresh();
+        if (s.focused) this.refresh(false);
       });
     } catch {
       // window state API unavailable — timer + watcher still cover us.
@@ -71,14 +73,14 @@ export class DataSource {
     try {
       this.workspaceSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
         this.needsRescan = true;
-        this.refresh();
+        this.refresh(false);
       });
     } catch {
       // ignore — folder rarely changes mid-session.
     }
     // Defer the first (synchronous, fs-walking) refresh off the activation path
     // so activate() returns immediately and never trips VS Code's >500ms watchdog.
-    setImmediate(() => this.refresh());
+    setImmediate(() => this.refresh(false));
   }
 
   // The window's workspace folder, used to scope session resolution to this
@@ -102,21 +104,21 @@ export class DataSource {
   private scheduleRefresh(rescan: boolean): void {
     if (rescan) this.needsRescan = true;
     if (this.debounce) clearTimeout(this.debounce);
-    this.debounce = setTimeout(() => this.refresh(), DEBOUNCE_MS);
+    this.debounce = setTimeout(() => this.refresh(false), DEBOUNCE_MS);
   }
 
-  refresh(): void {
+  refresh(recomputeUsageEstimate = false): void {
     if (this.disposed) return;
     let snap: Snapshot;
     try {
-      snap = this.buildFromDisk();
+      snap = this.buildFromDisk(recomputeUsageEstimate);
     } catch {
       snap = emptySnapshot();
     }
     this.onSnapshot(snap);
   }
 
-  private buildFromDisk(): Snapshot {
+  private buildFromDisk(recomputeUsageEstimate: boolean): Snapshot {
     if (this.needsRescan) {
       this.cachedSession = findActiveSession(this.paths.projectsDir, {
         workspaceDir: this.workspaceDir(),
@@ -139,16 +141,30 @@ export class DataSource {
       this.tailer = undefined;
     }
 
+    const nowMs = Date.now();
+    const rateLimitsJson = readIfExists(this.paths.rateLimits);
+    if (recomputeUsageEstimate) {
+      try {
+        this.cachedUsageEstimate = estimateRateLimitsFromTranscripts(this.paths.projectsDir, {
+          nowMs,
+          baseline: parseRateLimitsSidecar(rateLimitsJson, nowMs, this.getStaleAfterSeconds()),
+        });
+      } catch {
+        this.cachedUsageEstimate = null;
+      }
+    }
+
     return buildSnapshot({
       qualityJson: session ? readIfExists(this.paths.qualityCache(session.sessionId)) : null,
       liveFillJson: readIfExists(this.paths.liveFill),
-      rateLimitsJson: readIfExists(this.paths.rateLimits),
+      rateLimitsJson,
+      estimatedRateLimits: this.cachedUsageEstimate,
       jsonlTokens,
       jsonlModel,
       effort: this.cachedEffort,
       sessionId: session ? session.sessionId : null,
       scoped: this.workspaceDir() != null,
-      nowMs: Date.now(),
+      nowMs,
       staleAfterSeconds: this.getStaleAfterSeconds(),
     });
   }
