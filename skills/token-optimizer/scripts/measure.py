@@ -7700,6 +7700,30 @@ def _get_savings_summary(days=30):
             total_cost += cost or 0.0
             total_events += cnt
 
+        # B6: net tool-archive re-expansions out of the tool_archive credit. A
+        # re-popped result didn't stay collapsed, so its eager credit is reversed
+        # (floored at 0). tool_archive_reexpand is a DEBIT, never its own savings
+        # line, so it is removed from by_category and its spurious positive
+        # contribution backed out of the totals. The remaining tool_archive figure
+        # IS the measured progressive-disclosure win (collapsed and stayed so).
+        reexpand = by_category.pop("tool_archive_reexpand", None)
+        if reexpand:
+            r_tok = int(reexpand.get("tokens_saved", 0) or 0)
+            r_cost = float(reexpand.get("cost_saved_usd", 0.0) or 0.0)
+            r_events = int(reexpand.get("events", 0) or 0)
+            ta = by_category.get("tool_archive")
+            c_tok = int(ta["tokens_saved"]) if ta else 0
+            c_cost = float(ta["cost_saved_usd"]) if ta else 0.0
+            net_tok = max(0, c_tok - r_tok)
+            net_cost = max(0.0, c_cost - r_cost)
+            if ta:
+                ta["tokens_saved"] = net_tok
+                ta["cost_saved_usd"] = round(net_cost, 4)
+            # Back out the debit's own positive AND the reversed over-credit.
+            total_tokens += (net_tok - c_tok) - r_tok
+            total_cost += (net_cost - c_cost) - r_cost
+            total_events -= r_events  # re-expand rows are not savings events
+
         daily_avg = total_cost / days if days > 0 else 0.0
 
         return {
@@ -14889,6 +14913,39 @@ def _codex_backfill_tool_archive(filepath=None, session_id=None, max_outputs=20)
     return archived
 
 
+def _log_reexpand_debit(session_id, tool_use_id, response_text):
+    """Record a tool_archive re-expansion as a debit (B6 integrity).
+
+    An archived tool result that gets re-popped into context did not stay
+    collapsed, so its eager `tool_archive` credit must be reversed. We log the
+    re-popped token estimate under `tool_archive_reexpand`; `_get_savings_summary`
+    treats that category as a DEBIT against `tool_archive` (floored at 0), never
+    as its own positive savings line. Deduped per (session_id, tool_use_id) so a
+    second expand of the same item never double-debits. Never raises.
+    """
+    try:
+        tokens = _estimate_tokens(response_text)
+        if tokens <= 0:
+            return
+        sid = sanitize_session_id(session_id) if session_id else None
+        if TRENDS_DB.exists():
+            conn = _init_trends_db()
+            try:
+                # Dedup: skip if this exact item was already debited.
+                row = conn.execute(
+                    "SELECT 1 FROM savings_events WHERE event_type='tool_archive_reexpand' "
+                    "AND detail = ? LIMIT 1",
+                    (tool_use_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            if row:
+                return
+        _log_savings_event("tool_archive_reexpand", tokens, session_id=sid, detail=tool_use_id)
+    except Exception:
+        pass
+
+
 def expand_archived(tool_use_id=None, session_id=None, list_all=False):
     """Retrieve an archived tool result, or list all archived results.
 
@@ -14966,6 +15023,11 @@ def expand_archived(tool_use_id=None, session_id=None, list_all=False):
                 data = json.loads(entry_path.read_text(encoding="utf-8"))
                 response = data.get("response", "")
                 if response:
+                    # B6 integrity: re-popping an archived result means it did NOT
+                    # stay collapsed, so reverse its tool_archive credit. Log the
+                    # re-popped tokens as a debit (netted in _get_savings_summary),
+                    # deduped per item so a second expand never double-debits.
+                    _log_reexpand_debit(sd.name, tool_use_id, response)
                     print(response)
                     return
                 else:
@@ -19331,6 +19393,40 @@ def _estimate_stale_reads_reclaimable(days=30):
         return zero
 
 
+def _progressive_disclosure_summary(days=30):
+    """Count-first view of tool-archive progressive disclosure (B6, informational).
+
+    How many tool results were archived vs later re-expanded, and the net tokens
+    that stayed collapsed. The $ value of the net is ALREADY in the realized
+    tool_archive figure (re-pops are netted out in _get_savings_summary); this is
+    a transparency count, NOT an additional saving to sum. Never raises.
+    """
+    out = {"archived": 0, "reexpanded": 0, "net_collapsed_tokens": 0}
+    try:
+        if not TRENDS_DB.exists():
+            return out
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        conn = _init_trends_db()
+        try:
+            rows = conn.execute(
+                "SELECT event_type, COUNT(*), COALESCE(SUM(tokens_saved),0) "
+                "FROM savings_events WHERE timestamp >= ? "
+                "AND event_type IN ('tool_archive','tool_archive_reexpand') GROUP BY event_type",
+                (cutoff,),
+            ).fetchall()
+        finally:
+            conn.close()
+        agg = {r[0]: (int(r[1]), int(r[2] or 0)) for r in rows}
+        arch_n, arch_tok = agg.get("tool_archive", (0, 0))
+        re_n, re_tok = agg.get("tool_archive_reexpand", (0, 0))
+        out["archived"] = arch_n
+        out["reexpanded"] = re_n
+        out["net_collapsed_tokens"] = max(0, arch_tok - re_tok)
+    except (sqlite3.Error, OSError):
+        pass
+    return out
+
+
 def _get_merged_savings(days=30):
     """Merge savings_events and compression_events into one unified savings view.
 
@@ -19426,6 +19522,9 @@ def _get_merged_savings(days=30):
         # total_tokens/total_cost above — billed waste the user could reclaim,
         # never realized savings.
         "stale_reads_reclaimable": stale_reads_reclaimable,
+        # Informational counts for tool-archive progressive disclosure. The net
+        # $ is already inside realized tool_archive (re-pops netted); not summed.
+        "progressive_disclosure": _progressive_disclosure_summary(days=days),
     }
 
 
