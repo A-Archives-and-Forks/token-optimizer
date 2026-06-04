@@ -18571,6 +18571,9 @@ _LEGACY_SAVINGS_LABELS = {
     # outright (read_cache.py), so the file's tokens never enter context — a
     # real prevention, priced at the file-size estimate at the block site.
     "contextignore_block": "Ignored-file reads blocked",
+    # redundant_block: MEASURED. block-mode hard-denies a redundant reread with no
+    # structure-map replacement, so the file's tokens never re-enter context.
+    "redundant_block": "Redundant rereads blocked",
 }
 
 # v5 Active Compression categories — stored in compression_events and
@@ -19032,9 +19035,14 @@ def _estimate_behavioral_savings(days=30):
     as measured savings -- exactly the "we can't measure it so we ignore it"
     blind spot.
 
-    We estimate it transparently: detected looped volume times an assumed number
-    of prevented iterations (default 3, env-configurable). This is an ESTIMATE,
-    shown as its own behavioral tier and never summed into the measured total.
+    B5: instead of a flat assumed multiplier, we derive the prevented-iteration
+    factor EMPIRICALLY from the user's own loop events: a loop that repeated the
+    same output K times has original/compressed ~= K, and loops do not
+    self-terminate, so the observed repetition count is a grounded proxy for what
+    the loop would have continued to do. We average that observed factor (clamped
+    for sanity) rather than inventing a number. Still an ESTIMATE, shown as its
+    own behavioral tier with its sample size, never summed into the measured
+    total. Falls back to the env constant only when no ratio is observable.
     Returns {tokens_saved, cost_saved_usd, loop_events, prevented_iterations,
     evidence}. Never raises.
     """
@@ -19051,21 +19059,118 @@ def _estimate_behavioral_savings(days=30):
                 "FROM compression_events WHERE feature = 'loop_detection' AND timestamp >= ?",
                 (cutoff,),
             ).fetchone()
+            # B5: observed repetition factor = avg(original/compressed), the number
+            # of copies actually present in each looped output. Grounded, not guessed.
+            ratio_rows = conn.execute(
+                "SELECT original_tokens, compressed_tokens FROM compression_events "
+                "WHERE feature = 'loop_detection' AND timestamp >= ? AND compressed_tokens > 0",
+                (cutoff,),
+            ).fetchall()
         finally:
             conn.close()
         loop_events = int(row[0] or 0)
         loop_tokens_saved = int(row[1] or 0)
         if loop_events <= 0 or loop_tokens_saved <= 0:
             return zero
-        # The measured saving is one interception; absent it, the loop would have
-        # repeated. Credit the avoided continuation at the prevented-iteration factor.
-        est_tokens = loop_tokens_saved * _BEHAVIORAL_PREVENTED_LOOP_ITERATIONS
+        # Empirical factor: mean observed repetition, clamped to [1, 20] so a
+        # pathological ratio cannot blow up the estimate. Fall back to the env
+        # constant when no usable ratio exists.
+        ratios = [int(o) / int(c) for o, c in ratio_rows if c and int(c) > 0 and int(o) > int(c)]
+        if ratios:
+            empirical_factor = max(1.0, min(20.0, sum(ratios) / len(ratios)))
+        else:
+            empirical_factor = float(_BEHAVIORAL_PREVENTED_LOOP_ITERATIONS)
+        est_tokens = int(loop_tokens_saved * empirical_factor)
         cost_per_mtok = _estimate_compression_cost_per_mtok()
         return {
             "tokens_saved": est_tokens,
             "cost_saved_usd": round(est_tokens * cost_per_mtok / 1_000_000, 4),
             "loop_events": loop_events,
-            "prevented_iterations": _BEHAVIORAL_PREVENTED_LOOP_ITERATIONS,
+            "prevented_iterations": round(empirical_factor, 2),
+            "evidence": "estimated",
+        }
+    except Exception:
+        return zero
+
+
+_CONTAMINATION_COHORT_MIN = _int_env("TOKEN_OPTIMIZER_COHORT_MIN", 3)
+
+
+def _estimate_contamination_exit_savings(days=30):
+    """B4: empirical avoided-rework from heeding a low-quality nudge (tier 2).
+
+    The flagship behavioral estimate, built on a NATURAL CONTROL GROUP rather than
+    an invented multiplier. quality_nudge fires are logged per session; a verified
+    follow-through means the user acted (compacted/cleared) -- HEEDED. A fire with
+    no follow-through is IGNORED. We compare the per-session rework signal
+    (B1 stale-read waste in session_log) between the two cohorts: the cohorts
+    differ only in whether the nudge was heeded, so the rework DELTA is the mess a
+    heeded session avoided. Reported with both cohort sizes and a confidence label,
+    gated behind a minimum sample so a thin cohort never shows a number. Strictly
+    estimated tier, never summed into the realized total. Never raises.
+    """
+    zero = {"tokens_saved": 0, "cost_saved_usd": 0.0, "heeded_sessions": 0,
+            "ignored_sessions": 0, "delta_tokens_per_session": 0,
+            "confidence": "insufficient", "evidence": "estimated"}
+    try:
+        if not TRENDS_DB.exists():
+            return zero
+        cutoff_dt = datetime.now() - timedelta(days=days)
+        cutoff_iso = cutoff_dt.isoformat()
+        cutoff_date = cutoff_dt.strftime("%Y-%m-%d")
+        conn = _init_trends_db()
+        try:
+            fired = conn.execute(
+                "SELECT DISTINCT session_id FROM compression_events "
+                "WHERE feature='quality_nudge' AND timestamp >= ? AND session_id IS NOT NULL",
+                (cutoff_iso,),
+            ).fetchall()
+            heeded = conn.execute(
+                "SELECT DISTINCT session_id FROM compression_events "
+                "WHERE feature='quality_nudge' AND verified=1 AND timestamp >= ? AND session_id IS NOT NULL",
+                (cutoff_iso,),
+            ).fetchall()
+            sl = conn.execute(
+                "SELECT jsonl_path, COALESCE(stale_waste_tokens,0) FROM session_log WHERE date >= ?",
+                (cutoff_date,),
+            ).fetchall()
+        finally:
+            conn.close()
+        fired_ids = {r[0] for r in fired if r[0]}
+        if not fired_ids:
+            return zero
+        heeded_ids = {r[0] for r in heeded if r[0]} & fired_ids
+        ignored_ids = fired_ids - heeded_ids
+        # Map session_id -> stale waste (jsonl filename stem == session id).
+        waste_by_sid = {}
+        for path, waste in sl:
+            try:
+                waste_by_sid[Path(path).stem] = int(waste or 0)
+            except (TypeError, ValueError):
+                continue
+
+        def _avg(ids):
+            vals = [waste_by_sid[s] for s in ids if s in waste_by_sid]
+            return (sum(vals) / len(vals), len(vals)) if vals else (0.0, 0)
+
+        avg_heeded, n_heeded = _avg(heeded_ids)
+        avg_ignored, n_ignored = _avg(ignored_ids)
+        if n_heeded < _CONTAMINATION_COHORT_MIN or n_ignored < _CONTAMINATION_COHORT_MIN:
+            z = dict(zero)
+            z["heeded_sessions"], z["ignored_sessions"] = n_heeded, n_ignored
+            return z
+        delta = max(0.0, avg_ignored - avg_heeded)  # rework avoided by heeding
+        est_tokens = int(delta * n_heeded)
+        smaller = min(n_heeded, n_ignored)
+        confidence = "high" if smaller >= 15 else "medium" if smaller >= 5 else "low"
+        cost_per_mtok = _estimate_compression_cost_per_mtok()
+        return {
+            "tokens_saved": est_tokens,
+            "cost_saved_usd": round(est_tokens * cost_per_mtok / 1_000_000, 4),
+            "heeded_sessions": n_heeded,
+            "ignored_sessions": n_ignored,
+            "delta_tokens_per_session": int(delta),
+            "confidence": confidence,
             "evidence": "estimated",
         }
     except Exception:
@@ -19564,6 +19669,7 @@ def _get_merged_savings(days=30):
     potential = _compute_structural_potential(days=days)
     uncaptured = _estimate_uncaptured_runtime(days=days, compression=compression, savings=savings)
     behavioral = _estimate_behavioral_savings(days=days)
+    contamination_exit = _estimate_contamination_exit_savings(days=days)
     model_routing = _compute_model_routing_savings(days=days)
     output_waste = _estimate_output_waste(days=days)
     cache_drop = _estimate_cache_drop_savings(days=days)
@@ -19588,6 +19694,9 @@ def _get_merged_savings(days=30):
         "model_routing": model_routing,
         "output_waste": output_waste,
         "cache_drop": cache_drop,
+        # B4 flagship: contamination-exit avoided-rework (estimated tier, cohort-
+        # grounded, sample size + confidence shown). Never summed into realized.
+        "contamination_exit": contamination_exit,
         # Opportunity tier: reclaimable stale-read waste. Intentionally NOT in
         # total_tokens/total_cost above — billed waste the user could reclaim,
         # never realized savings.

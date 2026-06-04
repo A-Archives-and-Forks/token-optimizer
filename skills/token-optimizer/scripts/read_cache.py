@@ -966,6 +966,7 @@ def handle_read(hook_input: dict[str, Any], mode: str, quiet: bool) -> None:
             return
 
         store.upsert_file_entry(file_path, entry)
+        block_net_saved = max(0, tokens_est - REASON_ONLY_TOKENS_EST)
         _log_decision(
             "block",
             file_path,
@@ -981,11 +982,20 @@ def handle_read(hook_input: dict[str, Any], mode: str, quiet: bool) -> None:
             replacement_type=None,
             file_tokens_est=tokens_est,
             replacement_tokens_est=REASON_ONLY_TOKENS_EST,
-            net_saved_tokens_est=max(0, tokens_est - REASON_ONLY_TOKENS_EST),
+            net_saved_tokens_est=block_net_saved,
             replacement_fingerprint=None,
             repeat_replacement_count=0,
             save_hook_additional_context_enabled=save_hook_context_enabled,
             confidence=summary.confidence if summary else 0.0,
+        )
+        # B3: a hard block of a redundant reread (no structure-map replacement)
+        # still prevents the full file from re-entering context. Credit the saved
+        # tokens as a measured event, mirroring the structure_map path.
+        _log_savings_event(
+            "redundant_block",
+            block_net_saved,
+            session_id,
+            f"{Path(file_path).name}:redundant_read_{entry['read_count']}",
         )
         reason = (
             f"{Path(file_path).name} is unchanged and already in context; "
