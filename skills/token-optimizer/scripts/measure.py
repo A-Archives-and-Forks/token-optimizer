@@ -19891,8 +19891,15 @@ def savings_report(days=30, as_json=False):
 
     by_cat = summary.get("by_category", {})
 
-    # Show all known categories (even if zero)
+    # Relocated keys are not realized: setup_optimization is a one-time line and
+    # mcp_cap is an estimate. They are reported in their own tiers below, never in
+    # this measured table (that was the A1/A3 double-count).
+    _RELOCATED = {"setup_optimization", "mcp_cap"}
+
+    # Show all known measured categories (even if zero)
     for key, label in _SAVINGS_CATEGORY_LABELS.items():
+        if key in _RELOCATED:
+            continue
         cat_data = by_cat.get(key, {})
         events = cat_data.get("events", 0)
         tokens = cat_data.get("tokens_saved", 0)
@@ -19963,14 +19970,53 @@ def savings_report(days=30, as_json=False):
         print(f"  + est. output waste (Write->Edit): ~${ow_monthly:.2f}/mo "
               f"({output_waste.get('avoidable_writes', 0)} of {output_waste.get('writes', 0)} writes avoidable) [estimated]")
 
-    # Opportunity tier — money on the table from pruning + further routing.
+    # Estimated tier — MCP-cap (relocated from measured; Claude Code's own
+    # truncation, inferred not observed).
+    mcp_cap_est = summary.get("mcp_cap_estimated") or {}
+    mce_cost = float(mcp_cap_est.get("cost_saved_usd", 0.0) or 0.0)
+    if mce_cost > 0:
+        mce_monthly = mce_cost / max(days, 1) * 30
+        print(f"  + est. MCP output cap: ~${mce_monthly:.2f}/mo "
+              f"({mcp_cap_est.get('events', 0)} capped MCP results) [estimated]")
+
+    # Estimated tier — FLAGSHIP: contamination-exit avoided rework (cohort).
+    ce = summary.get("contamination_exit") or {}
+    if float(ce.get("cost_saved_usd", 0.0) or 0.0) > 0:
+        ce_monthly = ce["cost_saved_usd"] / max(days, 1) * 30
+        print(f"  + est. avoided rework (heeded nudges): ~${ce_monthly:.2f}/mo "
+              f"({ce.get('heeded_sessions', 0)} heeded vs {ce.get('ignored_sessions', 0)} ignored, "
+              f"~{ce.get('delta_tokens_per_session', 0):,} tok/session less rework, "
+              f"confidence: {ce.get('confidence', '?')}) [estimated]")
+
+    # Estimated tier — handover/continuity avoided rework (cohort).
+    hr = summary.get("handover_rerun") or {}
+    if float(hr.get("cost_saved_usd", 0.0) or 0.0) > 0:
+        hr_monthly = hr["cost_saved_usd"] / max(days, 1) * 30
+        print(f"  + est. avoided rework (continuity handover): ~${hr_monthly:.2f}/mo "
+              f"({hr.get('restored_sessions', 0)} restored vs {hr.get('baseline_sessions', 0)} baseline, "
+              f"confidence: {hr.get('confidence', '?')}) [estimated]")
+
+    # Informational (not summed): one-time first-trim + progressive disclosure.
+    one_time = summary.get("one_time_setup") or {}
+    if int(one_time.get("tokens_saved", 0) or 0) > 0:
+        print(f"  i  first-trim (one-time): {one_time.get('tokens_saved', 0):,} tokens off your prefix "
+              f"(counted as ongoing structural savings above, shown here once)")
+    pd = summary.get("progressive_disclosure") or {}
+    if int(pd.get("archived", 0) or 0) > 0:
+        print(f"  i  progressive disclosure: {pd.get('archived', 0)} tool results archived, "
+              f"{pd.get('reexpanded', 0)} re-expanded, "
+              f"{pd.get('net_collapsed_tokens', 0):,} tokens stayed collapsed")
+
+    # Opportunity tier — what you could save by acting (never realized, never summed).
     potential = summary.get("structural_potential") or {}
     pot_cost = float(potential.get("cost_saved_usd", 0.0) or 0.0)
     routing_potential = float(routing.get("potential_cost_usd", 0.0) or 0.0)
-    if pot_cost > 0 or routing_potential > 0:
+    reclaimable = summary.get("stale_reads_reclaimable") or {}
+    recl_cost = float(reclaimable.get("cost_usd", 0.0) or 0.0)
+    if pot_cost > 0 or routing_potential > 0 or recl_cost > 0:
         print()
         print(f"  {'-' * 58}")
-        print("  UNCLAIMED (opportunity, not yet realized):")
+        print("  COULD SAVE (opportunity — act to realize, not counted above):")
         if pot_cost > 0:
             pot_monthly = pot_cost / max(days, 1) * 30
             print(f"    ~${pot_monthly:.2f}/mo structural: prune {potential.get('unused_skills', 0)} unused skills "
@@ -19979,7 +20025,13 @@ def savings_report(days=30, as_json=False):
             rp_monthly = routing_potential / max(days, 1) * 30
             print(f"    ~${rp_monthly:.2f}/mo routing: move {int(routing.get('routable_fraction', 0.3) * 100)}% "
                   f"of remaining Opus ({routing.get('current_opus_share', 0.0) * 100:.0f}% of tokens) to Sonnet/Haiku.")
+        if recl_cost > 0:
+            recl_monthly = recl_cost / max(days, 1) * 30
+            print(f"    ~${recl_monthly:.2f}/mo reclaimable: {reclaimable.get('tokens', 0):,} tokens of stale "
+                  f"re-reads across {reclaimable.get('sessions', 0)} sessions — avoid re-reading or use .contextignore.")
     print(f"  {'=' * 58}")
+    print("  Tiers are separate: measured (billed events), estimated (your own")
+    print("  cohorts), opportunity (not yet realized). They are never summed.")
 
     if total_events == 0:
         print()
