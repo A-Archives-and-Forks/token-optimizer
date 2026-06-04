@@ -19177,6 +19177,74 @@ def _estimate_contamination_exit_savings(days=30):
         return zero
 
 
+def _estimate_handover_rerun_savings(days=30):
+    """B7: avoided rework from session-continuity handover (tier 2, cohort-grounded).
+
+    Same empirical method as B4 applied to the continuity split: sessions that
+    resumed via a restored checkpoint (a checkpoint_restore savings event) vs
+    sessions that did not. The per-session rework signal (B1 stale-read waste) is
+    compared between cohorts; a lower figure for restored sessions is the rework a
+    handover avoided. Reported in the estimated tier with cohort sizes + a
+    confidence label, gated behind a minimum sample, never summed into realized.
+    Selection bias is possible (restored sessions may differ), so it is labelled
+    estimated and shown alongside its sample sizes, not as a hard number. Never raises.
+    """
+    zero = {"tokens_saved": 0, "cost_saved_usd": 0.0, "restored_sessions": 0,
+            "baseline_sessions": 0, "delta_tokens_per_session": 0,
+            "confidence": "insufficient", "evidence": "estimated"}
+    try:
+        if not TRENDS_DB.exists():
+            return zero
+        cutoff_dt = datetime.now() - timedelta(days=days)
+        conn = _init_trends_db()
+        try:
+            restored = conn.execute(
+                "SELECT DISTINCT session_id FROM savings_events "
+                "WHERE event_type='checkpoint_restore' AND timestamp >= ? AND session_id IS NOT NULL",
+                (cutoff_dt.isoformat(),),
+            ).fetchall()
+            sl = conn.execute(
+                "SELECT jsonl_path, COALESCE(stale_waste_tokens,0) FROM session_log WHERE date >= ?",
+                (cutoff_dt.strftime("%Y-%m-%d"),),
+            ).fetchall()
+        finally:
+            conn.close()
+        restored_ids = {r[0] for r in restored if r[0]}
+        waste_by_sid = {}
+        for path, waste in sl:
+            try:
+                waste_by_sid[Path(path).stem] = int(waste or 0)
+            except (TypeError, ValueError):
+                continue
+        if not waste_by_sid:
+            return zero
+        restored_vals = [w for s, w in waste_by_sid.items() if s in restored_ids]
+        baseline_vals = [w for s, w in waste_by_sid.items() if s not in restored_ids]
+        n_restored, n_baseline = len(restored_vals), len(baseline_vals)
+        if n_restored < _CONTAMINATION_COHORT_MIN or n_baseline < _CONTAMINATION_COHORT_MIN:
+            z = dict(zero)
+            z["restored_sessions"], z["baseline_sessions"] = n_restored, n_baseline
+            return z
+        avg_restored = sum(restored_vals) / n_restored
+        avg_baseline = sum(baseline_vals) / n_baseline
+        delta = max(0.0, avg_baseline - avg_restored)
+        est_tokens = int(delta * n_restored)
+        smaller = min(n_restored, n_baseline)
+        confidence = "high" if smaller >= 15 else "medium" if smaller >= 5 else "low"
+        cost_per_mtok = _estimate_compression_cost_per_mtok()
+        return {
+            "tokens_saved": est_tokens,
+            "cost_saved_usd": round(est_tokens * cost_per_mtok / 1_000_000, 4),
+            "restored_sessions": n_restored,
+            "baseline_sessions": n_baseline,
+            "delta_tokens_per_session": int(delta),
+            "confidence": confidence,
+            "evidence": "estimated",
+        }
+    except Exception:
+        return zero
+
+
 def _model_mix_shares(days=14):
     """Return {model: share_fraction} of total tokens over the window, + total.
 
@@ -19670,6 +19738,7 @@ def _get_merged_savings(days=30):
     uncaptured = _estimate_uncaptured_runtime(days=days, compression=compression, savings=savings)
     behavioral = _estimate_behavioral_savings(days=days)
     contamination_exit = _estimate_contamination_exit_savings(days=days)
+    handover_rerun = _estimate_handover_rerun_savings(days=days)
     model_routing = _compute_model_routing_savings(days=days)
     output_waste = _estimate_output_waste(days=days)
     cache_drop = _estimate_cache_drop_savings(days=days)
@@ -19697,6 +19766,8 @@ def _get_merged_savings(days=30):
         # B4 flagship: contamination-exit avoided-rework (estimated tier, cohort-
         # grounded, sample size + confidence shown). Never summed into realized.
         "contamination_exit": contamination_exit,
+        # B7: handover/continuity avoided-rework (estimated tier, same method).
+        "handover_rerun": handover_rerun,
         # Opportunity tier: reclaimable stale-read waste. Intentionally NOT in
         # total_tokens/total_cost above — billed waste the user could reclaim,
         # never realized savings.
