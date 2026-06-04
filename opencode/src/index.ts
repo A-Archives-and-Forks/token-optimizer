@@ -34,6 +34,17 @@ const CAP_EVERY_N_TOOLCALLS = 200;
 
 type SessionCreatedEvent = Extract<Event, { type: "session.created" }>;
 type SessionDeletedEvent = Extract<Event, { type: "session.deleted" }>;
+type SessionIdleEvent = Extract<Event, { type: "session.idle" }>;
+type MessageUpdatedEvent = Extract<Event, { type: "message.updated" }>;
+
+/** Token usage + cost captured from a single assistant API response. */
+interface MsgUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+}
 
 /**
  * All mutable per-session state. Held in a Map keyed by sessionID so that
@@ -52,6 +63,12 @@ interface SessionState {
   regimeChangeEmitted: boolean;
   recentSummaries: number[];
   toolCallsSinceCap: number;
+  // Token usage keyed by assistant message id. message.updated fires repeatedly
+  // as a response streams, so we keep the LAST value per id (final usage) and
+  // sum across distinct ids at rollup — mirrors measure.py's per-requestId MAX
+  // dedup. OpenCode hooks expose usage nowhere except the message.updated event,
+  // so this map is the only place session token/cost totals can come from (#54).
+  usageByMessage: Map<string, MsgUsage>;
 }
 
 export const TokenOptimizerPlugin: Plugin = async (
@@ -76,7 +93,14 @@ export const TokenOptimizerPlugin: Plugin = async (
     if (sessions.size >= MAX_LIVE_SESSIONS) {
       const oldest = sessions.keys().next().value;
       if (oldest !== undefined) {
-        sessions.get(oldest)?.store.close();
+        const evicted = sessions.get(oldest);
+        if (evicted) {
+          // Roll the evicted session up before closing, or its tool calls /
+          // quality / token usage would be lost forever (it may never receive
+          // a session.deleted). Idempotent upsert, so a later delete is safe.
+          flushSession(oldest, evicted);
+          evicted.store.close();
+        }
         sessions.delete(oldest);
       }
     }
@@ -94,6 +118,7 @@ export const TokenOptimizerPlugin: Plugin = async (
       regimeChangeEmitted: false,
       recentSummaries: [],
       toolCallsSinceCap: 0,
+      usageByMessage: new Map(),
     };
     sessions.set(sessionId, state);
     return state;
@@ -102,6 +127,65 @@ export const TokenOptimizerPlugin: Plugin = async (
   function getTrendsStore(): TrendsStore {
     if (!trendsStore) trendsStore = new TrendsStore(dataDir);
     return trendsStore;
+  }
+
+  /** Sum the per-message usage map into one session total. */
+  function sumUsage(state: SessionState): MsgUsage {
+    const total: MsgUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+    for (const u of state.usageByMessage.values()) {
+      total.input += u.input;
+      total.output += u.output;
+      total.cacheRead += u.cacheRead;
+      total.cacheWrite += u.cacheWrite;
+      total.cost += u.cost;
+    }
+    return total;
+  }
+
+  /**
+   * Roll one session up into trends.db -> session_log. This is the Stage-2
+   * aggregation that the dashboard reads from. It MUST be called from a trigger
+   * that actually fires (session.idle, eviction, dashboard open) and not rely
+   * solely on session.deleted, which OpenCode does not reliably emit on a
+   * normal session exit (#54). recordSession() is an idempotent upsert keyed on
+   * session_id, so calling this repeatedly just refreshes the row in place.
+   */
+  function flushSession(sessionId: string, state: SessionState): void {
+    if (!config.features.trends) return;
+    try {
+      const store = state.store;
+      const trends = getTrendsStore();
+      const cache = store.getQualityCache();
+      const mode = (store.getMeta("current_mode") as SessionMode) ?? "general";
+      const usage = sumUsage(state);
+      trends.recordSession({
+        sessionId,
+        project: ctx.project.id ?? null,
+        model: state.currentModel ?? null,
+        tokensInput: usage.input,
+        tokensOutput: usage.output,
+        tokensCacheRead: usage.cacheRead,
+        tokensCacheWrite: usage.cacheWrite,
+        costUsd: usage.cost,
+        resourceHealth: cache?.resource_health ?? null,
+        sessionEfficiency: cache?.session_efficiency ?? null,
+        toolCalls: store.getToolCallCount(),
+        compactions: store.getCompactionCount(),
+        mode,
+        durationSeconds: Math.round((Date.now() - state.sessionStartTime) / 1000),
+      });
+    } catch (e) {
+      console.warn("[Token Optimizer] flushSession: trends record failed:", e);
+    }
+  }
+
+  /**
+   * Flush every live session before the dashboard renders, so the user always
+   * sees their current sessions even if no session.idle / session.deleted has
+   * fired yet. This is the safety net that makes the dashboard non-empty (#54).
+   */
+  function flushAllLiveSessions(): void {
+    for (const [sid, state] of sessions) flushSession(sid, state);
   }
 
   function maybeComputeQuality(state: SessionState, fillPct: number): QualityResult | null {
@@ -234,7 +318,7 @@ export const TokenOptimizerPlugin: Plugin = async (
           sessionId: currentSessionId,
         };
       }),
-      token_dashboard: createDashboardTool(() => dataDir),
+      token_dashboard: createDashboardTool(() => dataDir, flushAllLiveSessions),
     },
 
     async "chat.message"(input, output) {
@@ -437,6 +521,40 @@ export const TokenOptimizerPlugin: Plugin = async (
           }
         }
 
+        // Capture per-response token usage. This is the ONLY hook that carries
+        // it; the plugin previously discarded message.updated entirely, leaving
+        // session_log.tokens_* / cost_usd / model NULL on OpenCode (#54).
+        if (event.type === "message.updated") {
+          const info = (event as MessageUpdatedEvent).properties?.info;
+          if (info && info.role === "assistant") {
+            // Only accumulate for sessions we already track (created via
+            // chat.message / tool hooks) — don't spin up state from event noise.
+            const state = sessions.get(info.sessionID);
+            if (state) {
+              const t = info.tokens;
+              state.usageByMessage.set(info.id, {
+                input: t?.input ?? 0,
+                output: t?.output ?? 0,
+                cacheRead: t?.cache?.read ?? 0,
+                cacheWrite: t?.cache?.write ?? 0,
+                cost: info.cost ?? 0,
+              });
+              if (info.modelID && !state.currentModel) state.currentModel = info.modelID;
+            }
+          }
+        }
+
+        // session.idle fires when a session stops processing (after each turn).
+        // It is far more reliable than session.deleted, so it is the primary
+        // rollup trigger that keeps trends.db -> session_log populated (#54).
+        if (event.type === "session.idle") {
+          const sid = (event as SessionIdleEvent).properties?.sessionID;
+          if (sid) {
+            const state = sessions.get(sid);
+            if (state) flushSession(sid, state);
+          }
+        }
+
         if (event.type === "session.deleted") {
           const deleted = event as SessionDeletedEvent;
           const endedSessionId = deleted.properties?.info?.id;
@@ -456,32 +574,8 @@ export const TokenOptimizerPlugin: Plugin = async (
               console.warn("[Token Optimizer] session.deleted: checkpoint failed:", e);
             }
 
-            if (config.features.trends) {
-              try {
-                const trends = getTrendsStore();
-                const cache = store.getQualityCache();
-                trends.recordSession({
-                  sessionId: endedSessionId,
-                  project: ctx.project.id ?? null,
-                  model: state.currentModel ?? null,
-                  // OpenCode session.deleted events do not expose token usage;
-                  // cost is computed later by measure.py from the session JSONL.
-                  tokensInput: 0,
-                  tokensOutput: 0,
-                  tokensCacheRead: 0,
-                  tokensCacheWrite: 0,
-                  costUsd: 0,
-                  resourceHealth: cache?.resource_health ?? null,
-                  sessionEfficiency: cache?.session_efficiency ?? null,
-                  toolCalls: store.getToolCallCount(),
-                  compactions: store.getCompactionCount(),
-                  mode,
-                  durationSeconds: Math.round((Date.now() - state.sessionStartTime) / 1000),
-                });
-              } catch (e) {
-                console.warn("[Token Optimizer] session.deleted: trends record failed:", e);
-              }
-            }
+            // Final rollup (usage accumulated from message.updated events).
+            flushSession(endedSessionId, state);
 
             try {
               pruneCheckpoints(store, config);
