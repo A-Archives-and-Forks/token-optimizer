@@ -64,6 +64,7 @@ const context_audit_1 = require("./context-audit");
 const quality_1 = require("./quality");
 const checkpoint_policy_1 = require("./checkpoint-policy");
 const waste_detectors_1 = require("./waste-detectors");
+const continuity_1 = require("./continuity");
 const v5_features_1 = require("./v5-features");
 const telemetry_1 = require("./telemetry");
 var v5_features_2 = require("./v5-features");
@@ -264,6 +265,14 @@ exports.default = definePluginEntry({
             _ctxTs = now;
             return _ctxCache;
         }
+        // Cross-session continuity: tracks sessions that have already received
+        // a topic-matched injection so we fire at most once per new session.
+        // NOTE: session:start is "future/planned" in the OpenClaw plugin spec
+        // (openclaw/docs/openclaw-plugin-spec.md line 242).  Until it lands we
+        // trigger off the FIRST session:patch event that arrives with an
+        // inject callback, guarded by this Set.  When session:start is added,
+        // replace the session:patch guard with a session:start handler here.
+        const _continuityInjectedSessions = new Set();
         // Register service so other plugins/skills can call our methods
         api.registerService("token-optimizer", {
             audit,
@@ -344,11 +353,87 @@ exports.default = definePluginEntry({
                 session.inject(checkpoint);
                 api.logger.info(`[token-optimizer] Checkpoint restored for session ${session.sessionId}`);
             }
+            // Fallback continuity injection: if a cross-session hint was matched on
+            // first session:patch but couldn't be injected then (no inject callback),
+            // consume and inject it now.  This fires at most once per session because
+            // consumePendingContinuityHint() deletes the sidecar after reading.
+            // TODO(continuity): remove this fallback once session:start exposes inject.
+            if (session.inject) {
+                const pendingHint = (0, continuity_1.consumePendingContinuityHint)(session.sessionId);
+                if (pendingHint) {
+                    session.inject(pendingHint);
+                    api.logger.info(`[token-optimizer] Cross-session continuity hint injected via compact:after fallback ` +
+                        `for session ${session.sessionId}`);
+                }
+            }
         });
         safeOn(api, "session:patch", (...args) => {
             const event = args[0];
             if (!event?.sessionId || !openclawDir)
                 return;
+            // ── Cross-session continuity injection (new-session only) ──────────────
+            // Trigger: first session:patch for this sessionId.
+            // We chose session:patch because session:start is "future/planned" per
+            // openclaw-plugin-spec.md line 242.  session:patch is the earliest
+            // session-scoped event available.  The _continuityInjectedSessions guard
+            // ensures we attempt injection at most once per session.
+            if (!_continuityInjectedSessions.has(event.sessionId)) {
+                _continuityInjectedSessions.add(event.sessionId);
+                try {
+                    // Use firstMessage if the gateway provides it; otherwise we cannot
+                    // score against the prompt yet (no text to match).  We still log the
+                    // pending-injection opportunity so a future session:start hook can
+                    // pick it up.
+                    const promptText = event.firstMessage ?? "";
+                    const cwd = process.cwd();
+                    if (promptText && event.inject) {
+                        // Best case: gateway forwards both the first prompt AND inject on
+                        // the first session:patch.
+                        const candidate = (0, continuity_1.findBestContinuityCheckpoint)(promptText, event.sessionId, cwd);
+                        if (candidate) {
+                            const hint = (0, continuity_1.buildContinuityHint)(candidate);
+                            event.inject(hint);
+                            api.logger.info(`[token-optimizer] Cross-session continuity injected for session ${event.sessionId} ` +
+                                `(score=${candidate.score.toFixed(2)}, source=${candidate.entry.sessionDirName})`);
+                        }
+                        else {
+                            api.logger.info(`[token-optimizer] No matching prior checkpoint for session ${event.sessionId} ` +
+                                `(threshold=${continuity_1.RELEVANCE_THRESHOLD})`);
+                        }
+                    }
+                    else if (promptText && !event.inject) {
+                        // Gateway has the first prompt but no inject path on session:patch.
+                        // Score the checkpoints and log the best match so operators can
+                        // see what would have been injected.  When session:start + inject
+                        // lands, this branch can simply call event.inject(hint).
+                        // TODO(continuity): replace this log branch with event.inject(hint)
+                        // once session:start exposes an inject callback.
+                        const candidate = (0, continuity_1.findBestContinuityCheckpoint)(promptText, event.sessionId, cwd);
+                        if (candidate) {
+                            api.logger.info(`[token-optimizer] Cross-session match found but no inject path available. ` +
+                                `Session ${event.sessionId}, source=${candidate.entry.sessionDirName}, ` +
+                                `score=${candidate.score.toFixed(2)}. ` +
+                                `Will inject on next compaction restore as fallback.`);
+                            // Store the hint so the next session:compact:after can inject it
+                            // as a fallback (belt-and-suspenders when compaction happens first).
+                            // TODO(continuity): remove this fallback once session:start inject is live.
+                            (0, continuity_1.storePendingContinuityHint)(event.sessionId, (0, continuity_1.buildContinuityHint)(candidate));
+                        }
+                    }
+                    else {
+                        // No prompt text yet on first patch.  This is expected when the
+                        // gateway emits session:patch on session initialization before the
+                        // first user message.  Injection will be deferred to the
+                        // agent:tool:before path (first tool call carries session context).
+                        api.logger.info(`[token-optimizer] session:patch for new session ${event.sessionId}: ` +
+                            `no first-message text yet; continuity injection deferred to first tool event.`);
+                    }
+                }
+                catch (err) {
+                    api.logger.warn(`[token-optimizer] Cross-session continuity error: ${err}`);
+                }
+            }
+            // ── End continuity injection ──────────────────────────────────────────
             maybeCheckpointFromRuntimeSnapshot(openclawDir, freshContextAudit(), event.agentId, event.sessionId, api, "session-patch");
         });
         // Read Cache: intercept redundant reads (PreToolUse equivalent)
