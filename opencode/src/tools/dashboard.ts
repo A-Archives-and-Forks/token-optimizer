@@ -1,7 +1,10 @@
 import { tool, type ToolDefinition } from "@opencode-ai/plugin";
 import { writeDashboard } from "../dashboard/generator.js";
 
-export function createDashboardTool(getDataDir: () => string): ToolDefinition {
+export function createDashboardTool(
+  getDataDir: () => string,
+  onBeforeGenerate?: () => void,
+): ToolDefinition {
   return tool({
     description:
       "Generate and open the Token Optimizer dashboard. Shows quality trends, session history, " +
@@ -14,6 +17,14 @@ export function createDashboardTool(getDataDir: () => string): ToolDefinition {
       const days = Math.max(1, Math.min(args.days ?? 30, 365));
 
       try {
+        // Roll live sessions into trends.db first so the dashboard is never
+        // empty just because no session-end event has fired yet (#54).
+        try {
+          onBeforeGenerate?.();
+        } catch (err) {
+          console.warn("[Token Optimizer] dashboard pre-flush failed:", err);
+        }
+
         const outputPath = writeDashboard({ dataDir, days });
 
         const { execFileSync } = await import("node:child_process");

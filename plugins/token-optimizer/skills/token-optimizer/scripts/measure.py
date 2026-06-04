@@ -9876,7 +9876,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.8.9"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.8.10"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DAEMON_RUNTIME = detect_runtime()
 _DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else "claude"
@@ -18103,7 +18103,7 @@ def _get_v5_savings_recommendation():
     }
 
 
-def setup_quality_bar(dry_run=False, uninstall=False, status_only=False, force=False):
+def setup_quality_bar(dry_run=False, uninstall=False, status_only=False, force=False, quiet=False):
     """Install, uninstall, or check quality bar (status line + cache hook).
 
     Installs:
@@ -18114,6 +18114,13 @@ def setup_quality_bar(dry_run=False, uninstall=False, status_only=False, force=F
     instructions instead of replacing it — unless force=True, which is used
     by the SessionStart clobber-recovery path (presence of our cache hook
     is strong evidence the user had our full quality bar previously).
+
+    quiet=True suppresses all user-facing output (the foreign-status-line
+    advisory and install chatter) while preserving every side-effect. Used by
+    the automated self-heal callers (UserPromptSubmit / SessionStart hooks) so
+    a silent repair never re-injects the integration advisory into context on
+    every turn (GitHub #53). The advisory is only shown on an explicit,
+    interactive `setup-quality-bar` run.
 
     Side-effects on config.json:
       install        -> clears "quality_bar_disabled" (explicit opt-in)
@@ -18260,13 +18267,20 @@ def setup_quality_bar(dry_run=False, uninstall=False, status_only=False, force=F
         # (handles the rare case where a user manually set the flag but also
         # still has the components in place).
         _set_quality_bar_disabled(False)
-        print("[Token Optimizer] Quality bar already fully installed.")
+        if not quiet:
+            print("[Token Optimizer] Quality bar already fully installed.")
         return
 
     if installed:
         _write_settings_atomic(settings)
         # Explicit install is an explicit opt-in — clear any prior opt-out.
         _set_quality_bar_disabled(False)
+
+    if quiet:
+        # Automated self-heal context (hooks). All side-effects above are
+        # already applied; stay silent so the foreign-status-line advisory and
+        # install chatter never bloat per-turn / per-session context (#53).
+        return
 
     if installed:
         print("[Token Optimizer] Quality Bar installed.")
@@ -19251,7 +19265,13 @@ def run_ensure_health():
             if CONFIG_PATH.exists():
                 _eh_cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
                 _eh_qb_disabled = _eh_cfg.get("quality_bar_disabled", False)
-            if not _eh_qb_disabled and SETTINGS_PATH.exists():
+            # Skip the settings.json self-heal for plugin installs: the cache
+            # hook is provided by hooks.json and intentionally absent from
+            # settings.json (GitHub #7), so "not has_cache_hook" is always true
+            # and would re-emit the foreign-status-line advisory once per
+            # session for no benefit (GitHub #53).
+            _eh_is_plugin = _is_running_from_plugin_cache() or _is_plugin_installed()
+            if not _eh_is_plugin and not _eh_qb_disabled and SETTINGS_PATH.exists():
                 settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
                 has_statusline = bool(settings.get("statusLine"))
                 hooks = settings.get("hooks", {}).get("UserPromptSubmit", [])
@@ -19263,9 +19283,9 @@ def run_ensure_health():
                         "  [Token Optimizer] Statusline was replaced (e.g., by /statusline). "
                         "Auto-restored. Opt out permanently: measure.py setup-quality-bar --uninstall"
                     )
-                    setup_quality_bar(force=True)
+                    setup_quality_bar(force=True, quiet=True)
                 elif not has_statusline or (has_statusline and not has_cache_hook):
-                    setup_quality_bar()
+                    setup_quality_bar(quiet=True)
         except Exception as _e:
             print(f"  [Token Optimizer] quality bar setup failed: {_e}", file=sys.stderr)
     # Auto-update check (once per day, script-installed users only).
@@ -20015,16 +20035,24 @@ if __name__ == "__main__":
                         pass
             # Self-healing: if quality-cache hook is missing from settings.json, reinstall it.
             # Respects "quality_bar_disabled" in config.json for permanent opt-out.
+            #
+            # Skip entirely for plugin installs: the hook is provided by the
+            # plugin's hooks.json and is intentionally kept OUT of settings.json
+            # (GitHub #7), so it is permanently "missing" here. Calling
+            # setup_quality_bar() every turn was futile (it can never add the
+            # hook to settings.json for a plugin) and re-emitted the
+            # foreign-status-line advisory on every prompt (GitHub #53).
+            _is_plugin = _is_running_from_plugin_cache() or _is_plugin_installed()
             try:
                 _qb_disabled = False
                 if CONFIG_PATH.exists():
                     _qb_cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
                     _qb_disabled = _qb_cfg.get("quality_bar_disabled", False)
-                if not _qb_disabled and SETTINGS_PATH.exists():
+                if not _is_plugin and not _qb_disabled and SETTINGS_PATH.exists():
                     _sh_settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
                     _sh_hooks = _sh_settings.get("hooks", {}).get("UserPromptSubmit", [])
                     if not any("quality-cache" in str(h) for h in _sh_hooks):
-                        setup_quality_bar()
+                        setup_quality_bar(quiet=True)
             except Exception:
                 pass
             # Read hook payload from stdin if available (provides exact transcript_path)
