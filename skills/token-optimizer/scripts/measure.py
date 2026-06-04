@@ -7700,6 +7700,27 @@ def _get_savings_summary(days=30):
             total_cost += cost or 0.0
             total_events += cnt
 
+        # A1: setup_optimization (the one-time prefix trim credited by `compare`)
+        # double-counts with structural_savings, which credits the SAME trim as a
+        # perpetual cache annuity. Structural is the correct ongoing model, so the
+        # one-time event is relocated OUT of the realized total into a separate
+        # one_time_setup line (clearly a one-shot, never summed with the annuity).
+        one_time = by_category.pop("setup_optimization", None)
+        if one_time:
+            total_tokens -= int(one_time.get("tokens_saved", 0) or 0)
+            total_cost -= float(one_time.get("cost_saved_usd", 0.0) or 0.0)
+            total_events -= int(one_time.get("events", 0) or 0)
+
+        # A3: mcp_cap is a hardcoded-ratio ESTIMATE of Claude Code's own MCP-output
+        # truncation (the pre-cap size is invisible to us). It must not sit inside
+        # the measured realized total. Relocate it to the estimated tier; the
+        # three-tier rule keeps it from ever being summed with realized tool_archive.
+        mcp_cap_est = by_category.pop("mcp_cap", None)
+        if mcp_cap_est:
+            total_tokens -= int(mcp_cap_est.get("tokens_saved", 0) or 0)
+            total_cost -= float(mcp_cap_est.get("cost_saved_usd", 0.0) or 0.0)
+            total_events -= int(mcp_cap_est.get("events", 0) or 0)
+
         # B6: net tool-archive re-expansions out of the tool_archive credit. A
         # re-popped result didn't stay collapsed, so its eager credit is reversed
         # (floored at 0). tool_archive_reexpand is a DEBIT, never its own savings
@@ -7733,6 +7754,11 @@ def _get_savings_summary(days=30):
             "by_category": by_category,
             "daily_avg_usd": round(daily_avg, 4),
             "period_days": days,
+            # A1: one-time first-trim (compare). Reported separately, NEVER summed
+            # into the realized total (structural_savings is the ongoing model).
+            "one_time_setup": one_time,
+            # A3: MCP-cap estimate, relocated to the estimated tier (not realized).
+            "mcp_cap_estimated": mcp_cap_est,
         }
     except Exception:
         return {
@@ -7742,6 +7768,8 @@ def _get_savings_summary(days=30):
             "by_category": {},
             "daily_avg_usd": 0.0,
             "period_days": days,
+            "one_time_setup": None,
+            "mcp_cap_estimated": None,
         }
 
 
@@ -17175,6 +17203,9 @@ def _maybe_progressive_checkpoint(fill_pct, cache_path, result, filepath):
 
 _NUDGE_COOLDOWN_SECONDS = 300  # 5 minutes between nudges
 _NUDGE_SESSION_CAP = 3
+# A2: a compaction only counts as nudge follow-through if it happens within this
+# window of the nudge firing. A compaction hours later was not a response to it.
+_NUDGE_FOLLOWTHROUGH_WINDOW_SECONDS = 600  # 10 minutes
 _LOOP_SESSION_CAP = 2
 _LOOP_LAST_MESSAGES = 4
 
@@ -17241,6 +17272,29 @@ def _check_realtime_loops(quality_data):
     return warnings
 
 
+def _checkpoint_restore_credited_recently(session_id, window_seconds=_NUDGE_FOLLOWTHROUGH_WINDOW_SECONDS):
+    """True if a checkpoint_restore savings event was logged for this session in
+    the last `window_seconds`. Used by A2 to stop quality_nudge follow-through
+    double-crediting a compaction recovery already counted by checkpoint_restore.
+    Never raises (returns False on any error)."""
+    if not session_id or not TRENDS_DB.exists():
+        return False
+    try:
+        cutoff = (datetime.now() - timedelta(seconds=window_seconds)).isoformat()
+        conn = _init_trends_db()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM savings_events WHERE event_type='checkpoint_restore' "
+                "AND session_id = ? AND timestamp >= ? LIMIT 1",
+                (session_id, cutoff),
+            ).fetchone()
+        finally:
+            conn.close()
+        return bool(row)
+    except (sqlite3.Error, OSError):
+        return False
+
+
 def _maybe_nudge(result, cache_path, quality_data, quiet=False):
     """Check if a quality nudge should fire. Returns systemMessage string or None.
 
@@ -17295,6 +17349,11 @@ def _maybe_nudge(result, cache_path, quality_data, quiet=False):
     session_id = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
     fill_pct = result.get("fill_pct", 0)
     result["_nudge_fill_pct_at_fire"] = fill_pct
+    # A6: persist an explicit fire timestamp alongside the fill snapshot (written
+    # to the sidecar with the rest of `result`). The follow-through uses it to
+    # gate credit to compactions that actually followed the nudge, and the B4
+    # cohort uses fire-vs-follow-through timing to split heeded vs ignored.
+    result["_nudge_fire_epoch"] = now
     _log_compression_event(
         feature="quality_nudge",
         session_id=session_id,
@@ -17631,18 +17690,29 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
         if nudge_fill > 0:
             current_fill = result["fill_pct"]
             fill_delta = nudge_fill - current_fill
-            if fill_delta > 5:
+            ft_sid = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
+            # A2 temporal gate: only credit a compaction that followed the nudge
+            # within the window. A compaction long after the nudge was not its
+            # follow-through, so it must not borrow the nudge's credit.
+            fire_epoch = result.get("_nudge_fire_epoch", 0)
+            within_window = fire_epoch and (time.time() - fire_epoch) <= _NUDGE_FOLLOWTHROUGH_WINDOW_SECONDS
+            # A2 dedup: if a checkpoint_restore already credited this session's
+            # recovery for this compaction (same SessionStart cycle), the nudge
+            # must not double-credit the same tokens.
+            already_credited = _checkpoint_restore_credited_recently(ft_sid)
+            if fill_delta > 5 and within_window and not already_credited:
                 context_size = detect_context_window()[0]
                 measured_tokens_recovered = int(context_size * fill_delta / 100)
                 _log_compression_event(
                     feature="quality_nudge",
                     original_text=" " * (measured_tokens_recovered * 4),
                     compressed_text=f"nudge_followthrough:fill={nudge_fill}->{current_fill}",
-                    session_id=Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None,
+                    session_id=ft_sid,
                     detail=f"measured_recovery: fill {nudge_fill}%->{current_fill}% = {measured_tokens_recovered} tokens on {context_size} context",
                     verified=True,
                 )
             result.pop("_nudge_fill_pct_at_fire", None)
+            result.pop("_nudge_fire_epoch", None)
 
     # Progressive checkpoints (v3.0)
     if _PROGRESSIVE_ENABLED and result.get("fill_pct", 0) > 0:
@@ -19525,6 +19595,10 @@ def _get_merged_savings(days=30):
         # Informational counts for tool-archive progressive disclosure. The net
         # $ is already inside realized tool_archive (re-pops netted); not summed.
         "progressive_disclosure": _progressive_disclosure_summary(days=days),
+        # A1: one-time first-trim, surfaced separately, never in the realized total.
+        "one_time_setup": savings.get("one_time_setup"),
+        # A3: MCP-cap estimate lives in the estimated tier, never realized.
+        "mcp_cap_estimated": savings.get("mcp_cap_estimated"),
     }
 
 
