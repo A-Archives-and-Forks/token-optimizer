@@ -2839,6 +2839,26 @@ def sanitize_label(label):
     return label
 
 
+def _build_snapshot(label):
+    """Assemble a snapshot dict (no I/O). Shared by take_snapshot + auto-capture."""
+    components = measure_components()
+    baselines = get_session_baselines(5)
+    totals = calculate_totals(components)
+    calibration = detect_calibration_gap(components, totals, baselines)
+    return {
+        "label": label,
+        "timestamp": datetime.now().isoformat(),
+        "components": components,
+        "session_baselines": baselines,
+        "totals": totals,
+        "calibration": calibration,
+        "context_window": detect_context_window()[0],
+        # Install-time model mix, so realized model-routing savings can be
+        # measured later against where the user started (e.g. mostly-Opus).
+        "model_mix": _model_mix_shares(days=14),
+    }
+
+
 def take_snapshot(label):
     """Save a measurement snapshot (before or after)."""
     label = sanitize_label(label)
@@ -2850,21 +2870,7 @@ def take_snapshot(label):
         print(f"[Error] Cannot create snapshot directory: {e}")
         sys.exit(1)
 
-    components = measure_components()
-    baselines = get_session_baselines(5)
-    totals = calculate_totals(components)
-
-    calibration = detect_calibration_gap(components, totals, baselines)
-
-    snapshot = {
-        "label": label,
-        "timestamp": datetime.now().isoformat(),
-        "components": components,
-        "session_baselines": baselines,
-        "totals": totals,
-        "calibration": calibration,
-        "context_window": detect_context_window()[0],
-    }
+    snapshot = _build_snapshot(label)
 
     filepath = SNAPSHOT_DIR / f"snapshot_{label}.json"
     if filepath.exists():
@@ -2877,6 +2883,35 @@ def take_snapshot(label):
     print("  [Note] Snapshot contains system config details. Do not share publicly.")
     print_snapshot_summary(snapshot)
     return snapshot
+
+
+def _auto_capture_pristine_baseline():
+    """Capture a 'before' baseline snapshot once, silently, if none exists.
+
+    Called from ensure-health at SessionStart. On a fresh install the user's
+    config is still pre-pruning, so this records the pristine prefix overhead
+    that structural savings are later measured against. Without it, structural
+    savings have no anchor and read $0 forever. Idempotent (no-op once
+    snapshot_before.json exists) and never raises. Returns True on capture.
+    """
+    try:
+        filepath = SNAPSHOT_DIR / "snapshot_before.json"
+        if filepath.exists():
+            return False
+        try:
+            SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            os.chmod(str(SNAPSHOT_DIR), 0o700)
+        except OSError:
+            return False
+        snapshot = _build_snapshot("before")
+        if int(snapshot.get("totals", {}).get("estimated_total", 0) or 0) <= 0:
+            return False
+        fd = os.open(str(filepath), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2, default=str)
+        return True
+    except Exception:
+        return False
 
 
 def print_snapshot_summary(snapshot):
@@ -3832,9 +3867,15 @@ def generate_dashboard(coord_path):
     # expose the same Codex skill/MCP controls as the standalone dashboard.
     management = _collect_management_data(components=components, trends=trends)
 
-    # Savings data for dashboard
+    # Savings data for dashboard. Merged view = measured runtime + realized
+    # structural + opportunity (unclaimed) + estimated uncaptured runtime, all
+    # tier-labelled. Wrapped so a slow/failed savings eval never blocks regen.
     print("  Collecting savings data...")
-    savings_data = _get_savings_summary(days=30)
+    try:
+        savings_data = _get_merged_savings(days=30)
+        savings_data["since_install"] = _savings_since_install()
+    except Exception:
+        savings_data = _get_savings_summary(days=30)
 
     # Fall back to auto-recommendations if LLM plan is missing
     auto_plan_flag = False
@@ -5027,6 +5068,14 @@ def generate_standalone_dashboard(days=30, quiet=False, force=False):
     except Exception:
         pass
 
+    # Merged savings (measured + realized + opportunity + estimated, tier-labelled).
+    # Wrapped so a slow/failed eval never breaks the SessionEnd dashboard regen.
+    try:
+        savings_data = _get_merged_savings(days=30)
+        savings_data["since_install"] = _savings_since_install()
+    except Exception:
+        savings_data = {"total_tokens": 0, "total_cost_usd": 0.0, "by_category": {}}
+
     data = {
         "snapshot": snapshot,
         "audit": {},
@@ -5037,6 +5086,7 @@ def generate_standalone_dashboard(days=30, quiet=False, force=False):
         "quality": quality,
         "manage": management,
         "hooks": hook_status,
+        "savings": savings_data,
         "standalone": True,
         "auto_plan": True,
         "generated_at": datetime.now().isoformat(),
@@ -6488,7 +6538,10 @@ def _extract_skills_and_agents_from_subagent(filepath):
                     if tool_name == "Skill":
                         skill = inp.get("skill", "unknown")
                         skills[skill] = skills.get(skill, 0) + 1
-                    elif tool_name == "Task":
+                    elif tool_name in ("Task", "Agent"):
+                        # Current Claude Code names the sub-agent tool "Agent";
+                        # older transcripts used "Task". Match both, exactly, so
+                        # the TaskCreate/TaskUpdate todo tools are not miscounted.
                         agent_type = inp.get("subagent_type", "unknown")
                         subagents[agent_type] = subagents.get(agent_type, 0) + 1
     except (PermissionError, OSError):
@@ -6815,7 +6868,11 @@ def _parse_session_jsonl(filepath):
                             if tool_name == "Skill":
                                 skill = inp.get("skill", "unknown")
                                 skills_used[skill] = skills_used.get(skill, 0) + 1
-                            elif tool_name == "Task":
+                            elif tool_name in ("Task", "Agent"):
+                                # Current Claude Code names the sub-agent tool
+                                # "Agent"; older transcripts used "Task". Match
+                                # both exactly so TaskCreate/TaskUpdate (todo
+                                # tools) are never miscounted as sub-agents.
                                 agent_type = inp.get("subagent_type", "unknown")
                                 subagents_used[agent_type] = subagents_used.get(agent_type, 0) + 1
 
@@ -7282,7 +7339,8 @@ CREATE TABLE IF NOT EXISTS savings_events (
     tokens_saved INTEGER DEFAULT 0,
     cost_saved_usd REAL DEFAULT 0.0,
     session_id TEXT,
-    detail TEXT
+    detail TEXT,
+    model TEXT
 );
 
 CREATE TABLE IF NOT EXISTS compression_events (
@@ -7345,6 +7403,16 @@ def _init_trends_db():
             conn.execute("ALTER TABLE daily_stats ADD COLUMN avg_quality_score REAL")
         if "worst_grade" not in ds_cols:
             conn.execute("ALTER TABLE daily_stats ADD COLUMN worst_grade TEXT")
+        conn.commit()
+    except sqlite3.Error:
+        pass
+    # Migrate: add per-event model column to savings_events (v5.9+). Lets the
+    # savings view reprice historical events at the rate that was actually in
+    # effect when they were logged, instead of today's active-model rate.
+    try:
+        se_cols = {r[1] for r in conn.execute("PRAGMA table_info(savings_events)").fetchall()}
+        if "model" not in se_cols:
+            conn.execute("ALTER TABLE savings_events ADD COLUMN model TEXT")
         conn.commit()
     except sqlite3.Error:
         pass
@@ -7493,9 +7561,9 @@ def _log_savings_event(event_type, tokens_saved, session_id=None, detail=None, m
         conn = _init_trends_db()
         try:
             conn.execute(
-                "INSERT INTO savings_events (timestamp, event_type, tokens_saved, cost_saved_usd, session_id, detail) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (datetime.now().isoformat(), event_type, tokens_saved, cost_saved, session_id, detail),
+                "INSERT INTO savings_events (timestamp, event_type, tokens_saved, cost_saved_usd, session_id, detail, model) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (datetime.now().isoformat(), event_type, tokens_saved, cost_saved, session_id, detail, normalized),
             )
             conn.commit()
         finally:
@@ -12071,7 +12139,10 @@ _TOOL_CALL_WARN_THRESHOLDS = [
 
 # Configurable via env vars
 _CHECKPOINT_MAX_FILES = _int_env("TOKEN_OPTIMIZER_CHECKPOINT_FILES", 10)
-_CHECKPOINT_TTL_SECONDS = _int_env("TOKEN_OPTIMIZER_CHECKPOINT_TTL", 300)
+# Restore eligibility is governed by the retention-days window below, not a
+# short TTL. The former TOKEN_OPTIMIZER_CHECKPOINT_TTL (300s) gated out the
+# common stop/end triggers and produced 0 restores; checkpoint freshness for
+# fire-cooldown is handled separately by _CHECKPOINT_COOLDOWN_SECONDS.
 _CHECKPOINT_RETENTION_DAYS = _int_env("TOKEN_OPTIMIZER_CHECKPOINT_RETENTION_DAYS", 7)
 _CHECKPOINT_RETENTION_MAX = _int_env("TOKEN_OPTIMIZER_CHECKPOINT_RETENTION_MAX", 50)
 _RELEVANCE_THRESHOLD = _float_env("TOKEN_OPTIMIZER_RELEVANCE_THRESHOLD", 0.3)
@@ -15512,8 +15583,11 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
         # Post-compaction: find best checkpoint for this session.
         # Progressive checkpoints (captured at 50/65/80% fill) are preferred because
         # they contain richer context than emergency checkpoints at ~98%.
-        # Long-lived checkpoint types use the retention-days window; stop/end
-        # checkpoints still use the short TTL to avoid stale auto-injection.
+        # All checkpoint types use the retention-days window here: this path is
+        # both session-matched (sid_safe in filename) and post-compaction, so the
+        # most recent stop/end checkpoint from THIS session is the best continuity
+        # source after a compact regardless of wall-clock age. The old 5-min TTL
+        # gated out stop/end (the common triggers) and produced 0 restores.
         def _checkpoint_restore_rank(trigger):
             if trigger.startswith("progressive-"):
                 try:
@@ -15543,16 +15617,9 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
         for cp in checkpoints:
             if sid_safe not in cp["filename"]:
                 continue
-            trigger = cp.get("trigger", "auto")
-            long_lived = (
-                trigger.startswith("progressive-")
-                or trigger.startswith("quality-")
-                or trigger in ("milestone-pre-fanout", "milestone-edit-batch")
-            )
             if cp["created"] < retention_cutoff:
                 continue
-            if not long_lived and (now - cp["created"]).total_seconds() > _CHECKPOINT_TTL_SECONDS:
-                continue
+            trigger = cp.get("trigger", "auto")
             rank = _checkpoint_restore_rank(trigger)
             session_checkpoints.append((rank, cp))
 
@@ -18370,168 +18437,722 @@ def _estimate_compression_cost_per_mtok(model=None):
 
 
 def _resolve_structural_baseline(days=30):
-    """Return baseline overhead info for structural savings, or None.
+    """Return the pristine prefix-overhead baseline for structural savings, or None.
 
-    Priority: (1) snapshot labelled "before" that is <=90 days old,
-    (2) oldest session_log row within `days`, (3) None.
+    Source is the "before" snapshot (an audit of the prefix: skills, MEMORY,
+    CLAUDE, MCP, core system) captured pre-pruning. The `days` arg is unused
+    here but kept for call-site symmetry with the rest of the savings family.
 
-    Returns dict with keys: source, date (ISO), baseline_tokens. The `source`
-    is "snapshot" or "first_session"; the report header uses it to tell the
-    user how the baseline was established.
+    There is deliberately NO session_log fallback: session_log.input_tokens is
+    the total input MIX (cache-read + cache-write + fresh, billions/month), not
+    a prefix size, so using it as a baseline would overstate savings by orders
+    of magnitude. Structural savings are measurable only once a real prefix
+    snapshot exists; ensure-health auto-captures one on first run for new users.
+
+    Returns {source, date (ISO), baseline_tokens} or None.
     """
     try:
-        # 1. Explicit snapshot
-        if SNAPSHOT_DIR.exists():
-            snap_path = SNAPSHOT_DIR / "snapshot_before.json"
-            if snap_path.exists():
-                try:
-                    data = json.loads(snap_path.read_text(encoding="utf-8"))
-                    ts = data.get("timestamp")
-                    total = int(data.get("totals", {}).get("estimated_total", 0) or 0)
-                    if ts and total > 0:
-                        snap_dt = datetime.fromisoformat(ts.replace("Z", "+00:00").split("+")[0])
-                        age_days = (datetime.now() - snap_dt).days
-                        if 0 <= age_days <= 90:
-                            return {
-                                "source": "snapshot",
-                                "date": snap_dt.isoformat(),
-                                "baseline_tokens": total,
-                            }
-                except (json.JSONDecodeError, KeyError, ValueError, OSError):
-                    pass
-
-        # 2. First session in trends DB within window
-        if TRENDS_DB.exists():
-            conn = _init_trends_db()
-            try:
-                cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-                row = conn.execute(
-                    "SELECT date, input_tokens FROM session_log "
-                    "WHERE date >= ? AND input_tokens > 0 "
-                    "ORDER BY date ASC LIMIT 1",
-                    (cutoff,),
-                ).fetchone()
-                if row and row[1]:
+        snap_path = SNAPSHOT_DIR / "snapshot_before.json"
+        if SNAPSHOT_DIR.exists() and snap_path.exists():
+            data = json.loads(snap_path.read_text(encoding="utf-8"))
+            ts = data.get("timestamp")
+            total = int(data.get("totals", {}).get("estimated_total", 0) or 0)
+            if ts and total > 0:
+                snap_dt = datetime.fromisoformat(ts.replace("Z", "+00:00").split("+")[0])
+                age_days = (datetime.now() - snap_dt).days
+                # A pristine baseline does not expire quickly; cap at a year to
+                # avoid crediting against a baseline that predates major
+                # legitimate config growth.
+                if 0 <= age_days <= 365:
                     return {
-                        "source": "first_session",
-                        "date": row[0],
-                        "baseline_tokens": int(row[1]),
+                        "source": "snapshot",
+                        "date": snap_dt.isoformat(),
+                        "baseline_tokens": total,
                     }
-            finally:
-                conn.close()
-    except (sqlite3.Error, OSError):
+    except (json.JSONDecodeError, KeyError, ValueError, OSError):
         pass
     return None
 
 
-def _count_context_loads(days=30, since_date=None):
-    """Count total context-load events: sessions + subagent invocations.
+def _active_model_cache_rates():
+    """Return (cache_read, cache_write_5m, cache_write_1h) USD/MTok for the active model.
 
-    Each session start loads the full overhead. Each subagent spawn loads it
-    again in a fresh context. Summing both gives a truer multiplier for
-    structural savings than just session count.
+    Falls back to Opus-class rates on any error so structural compounding never
+    silently zeroes out. The 1h write defaults to 1.6x the 5m rate when the tier
+    omits an explicit 1h entry (1h = 2x input, 5m = 1.25x input, ratio 1.6).
     """
-    cutoff = since_date or (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    session_count = 0
-    subagent_count = 0
     try:
-        if not TRENDS_DB.exists():
-            return 0
-        conn = _init_trends_db()
-        try:
-            session_count = conn.execute(
-                "SELECT COUNT(*) FROM session_log WHERE date >= ?",
-                (cutoff,),
-            ).fetchone()[0] or 0
+        tier = _load_pricing_tier()
+        tier_data = PRICING_TIERS.get(tier, PRICING_TIERS.get("anthropic", {}))
+        model = _resolve_session_model()
+        rates = tier_data.get("claude_models", {}).get(model) \
+            or tier_data.get("claude_models", {}).get("opus", {})
+        read = float(rates.get("cache_read", 0.5))
+        write_5m = float(rates.get("cache_write", 6.25))
+        write_1h = float(rates.get("cache_write_1h", write_5m * 1.6))
+        return read, write_5m, write_1h
+    except Exception:
+        return 0.5, 6.25, 10.0
 
-            rows = conn.execute(
-                "SELECT subagents_json FROM session_log "
-                "WHERE date >= ? AND subagents_json IS NOT NULL AND subagents_json != ''",
-                (cutoff,),
-            ).fetchall()
-            for (sj,) in rows:
-                try:
-                    sd = json.loads(sj) if sj else {}
-                    if isinstance(sd, dict):
-                        for v in sd.values():
-                            try:
-                                subagent_count += int(v)
-                            except (TypeError, ValueError):
-                                continue
-                except (json.JSONDecodeError, TypeError):
-                    continue
-        finally:
-            conn.close()
-    except (sqlite3.Error, OSError):
+
+_OVERHEAD_CACHE_TTL_SECONDS = _int_env("TOKEN_OPTIMIZER_OVERHEAD_CACHE_TTL", 3600)
+
+# In-process cache for measure_components(): a filesystem scan of
+# skills/MEMORY/CLAUDE. A single _get_merged_savings call needs it from both
+# _current_overhead_tokens and _unused_skill_overhead_tokens; without this it
+# would scan twice per SessionEnd regen. Short TTL so a long-lived process
+# still picks up config changes.
+_COMPONENTS_CACHE = {"ts": 0.0, "data": None}
+_COMPONENTS_CACHE_TTL_SECONDS = _int_env("TOKEN_OPTIMIZER_COMPONENTS_CACHE_TTL", 60)
+
+
+def _cached_measure_components():
+    """measure_components() with a short in-process cache to avoid double scans."""
+    now = time.time()
+    if _COMPONENTS_CACHE["data"] is not None and (now - _COMPONENTS_CACHE["ts"]) < _COMPONENTS_CACHE_TTL_SECONDS:
+        return _COMPONENTS_CACHE["data"]
+    data = measure_components()
+    _COMPONENTS_CACHE["data"] = data
+    _COMPONENTS_CACHE["ts"] = now
+    return data
+
+
+def _current_overhead_tokens():
+    """Measured current prefix overhead (estimated_total), same units as a snapshot.
+
+    Cached to a sidecar with a 1h TTL because measure_components() scans the
+    skills/MEMORY/CLAUDE filesystem and this runs inside dashboard regen on
+    every SessionEnd. Returns None on any error so the caller skips the
+    structural calc rather than emit a wrong number.
+    """
+    cache_path = SNAPSHOT_DIR / ".current-overhead-cache.json"
+    try:
+        if cache_path.exists():
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            tot = int(data.get("estimated_total", 0) or 0)
+            if tot > 0 and (time.time() - float(data.get("ts", 0))) < _OVERHEAD_CACHE_TTL_SECONDS:
+                return tot
+    except (json.JSONDecodeError, OSError, ValueError, TypeError):
         pass
-    return int(session_count) + int(subagent_count)
+    try:
+        total = int(calculate_totals(_cached_measure_components()).get("estimated_total", 0) or 0)
+        if total <= 0:
+            return None
+        try:
+            cache_path.write_text(
+                json.dumps({"ts": time.time(), "estimated_total": total}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        return total
+    except Exception:
+        return None
+
+
+def _per_session_prefix_tokens(fallback=0):
+    """Average prefix tokens cache-written/read per session (real session-start size).
+
+    Prefers the measured session-start baseline from recent JSONL; falls back to
+    the supplied value (e.g. the snapshot/current overhead). Always returns >= 1
+    to keep the write-fraction division safe.
+    """
+    try:
+        vals = [int(b["baseline_tokens"]) for b in get_session_baselines(5)
+                if b.get("baseline_tokens")]
+        if vals:
+            return max(1, sum(vals) // len(vals))
+    except Exception:
+        pass
+    return max(1, int(fallback or 0)) if fallback else 1
+
+
+def _compound_structural(s, days, fallback_prefix):
+    """Apply the verified cache-compounding formula to S prefix tokens.
+
+        read    = S * SUM(api_calls)                     * cache_read_rate
+        write1h = (S / per_session_prefix) * SUM(cc_1h)  * cache_write_1h_rate
+        write5m = (S / per_session_prefix) * SUM(cc_5m)  * cache_write_5m_rate
+
+    api_calls already include sub-agent calls, so no separate sub-agent
+    multiplier is applied (that would double count with runtime attribution).
+    Shared by realized savings and potential/opportunity so both speak the same
+    math. Returns a dict of the three terms + totals, or None when S<=0 or no DB.
+    """
+    if s <= 0 or not TRENDS_DB.exists():
+        return None
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    conn = _init_trends_db()
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(api_calls),0), COALESCE(SUM(cache_create_1h_tokens),0), "
+            "COALESCE(SUM(cache_create_5m_tokens),0) FROM session_log WHERE date >= ?",
+            (cutoff,),
+        ).fetchone()
+    finally:
+        conn.close()
+    sum_api_calls = int(row[0] or 0)
+    sum_cc_1h = int(row[1] or 0)
+    sum_cc_5m = int(row[2] or 0)
+
+    per_session_prefix = _per_session_prefix_tokens(fallback=fallback_prefix)
+    read_rate, write_5m_rate, write_1h_rate = _active_model_cache_rates()
+    write_fraction = s / per_session_prefix
+
+    read_savings = s * sum_api_calls * read_rate / 1_000_000
+    write_1h_savings = write_fraction * sum_cc_1h * write_1h_rate / 1_000_000
+    write_5m_savings = write_fraction * sum_cc_5m * write_5m_rate / 1_000_000
+    return {
+        "events": sum_api_calls,
+        "tokens_saved": int(s * sum_api_calls + write_fraction * (sum_cc_1h + sum_cc_5m)),
+        "read_savings_usd": round(read_savings, 4),
+        "write_1h_savings_usd": round(write_1h_savings, 4),
+        "write_5m_savings_usd": round(write_5m_savings, 4),
+        "cost_saved_usd": round(read_savings + write_1h_savings + write_5m_savings, 4),
+    }
 
 
 def _compute_structural_savings(days=30):
-    """Compute continuous structural savings from baseline × context loads.
+    """Realized structural savings: prefix reduction compounded over cache events.
 
-    Returns dict matching the shape of other savings categories:
-      {events, tokens_saved, cost_saved_usd, baseline_source, baseline_date,
-       context_loads, overhead_delta}.
+    Structural waste is the unused skill frontmatter, MEMORY/CLAUDE bloat,
+    duplicate reminders and dead MCP loaded into the prefix every session. When
+    the user trims S tokens below their captured baseline, those tokens stop
+    being cache-written and cache-read on every future call, so the saving
+    compounds (see _compound_structural for the formula).
 
-    Returns zeros (with baseline_source=None) if no baseline is available.
-    Never raises.
+    S = max(0, baseline_overhead - current_overhead): both are measured prefix
+    token counts in the same units (snapshot estimated_total vs a live audit).
+    The earlier model compared the snapshot against session_log.input_tokens,
+    which is the TOTAL input mix (billions/month), so the delta always floored
+    to zero.
+
+    Realized stays $0 until the user prunes below the captured baseline; the
+    opportunity figure lives in _compute_structural_potential. Labelled
+    "estimated" (the write term divides write tokens by prefix size, which
+    slightly overcounts when mid-conversation output is cached). Returns zeros
+    (baseline_source=None) with no baseline. Never raises.
     """
     zero = {
-        "events": 0,
-        "tokens_saved": 0,
-        "cost_saved_usd": 0.0,
-        "baseline_source": None,
-        "baseline_date": None,
-        "context_loads": 0,
-        "overhead_delta": 0,
+        "events": 0, "tokens_saved": 0, "cost_saved_usd": 0.0,
+        "baseline_source": None, "baseline_date": None, "overhead_delta": 0,
+        "read_savings_usd": 0.0, "write_1h_savings_usd": 0.0,
+        "write_5m_savings_usd": 0.0, "evidence": "estimated",
     }
     try:
         baseline = _resolve_structural_baseline(days=days)
         if not baseline:
             return zero
+        current_overhead = _current_overhead_tokens()
+        if not current_overhead:
+            return zero
+        baseline_overhead = int(baseline["baseline_tokens"])
+        known = {**zero, "baseline_source": baseline["source"], "baseline_date": baseline["date"]}
+        s = max(0, baseline_overhead - current_overhead)
+        if s <= 0:
+            return known  # baseline known, nothing trimmed below it yet -> realized $0
+        terms = _compound_structural(s, days, fallback_prefix=baseline_overhead)
+        if not terms:
+            return known
+        return {
+            **terms,
+            "baseline_source": baseline["source"],
+            "baseline_date": baseline["date"],
+            "overhead_delta": s,
+            "evidence": "estimated",
+        }
+    except Exception:
+        return zero
 
-        # Current overhead: use the latest `session_log.input_tokens` or
-        # fall back to a measured audit. For stability, use the median of
-        # the most recent 5 sessions to smooth single-session outliers.
-        current_tokens = 0
+
+def _unused_skill_overhead_tokens(days=30):
+    """Estimate recoverable prefix tokens from skills never used in the window.
+
+    Unused skill frontmatter is the largest, most defensible structural lever:
+    each installed skill costs tokens in the startup menu every session whether
+    invoked or not. Returns (tokens, unused_count). Conservative -- counts only
+    skills with zero invocations in `days`. Never raises.
+    """
+    try:
+        components = _cached_measure_components()
+        skills_info = components.get("skills", {})
+        installed = set(skills_info.get("names", []))
+        if not installed:
+            return 0, 0
+        name_to_dir = skills_info.get("name_to_dir", {})
+        count = skills_info.get("count", 0) or len(installed)
+        avg_per_skill = (skills_info.get("tokens", 0) // max(count, 1)) or TOKENS_PER_SKILL_APPROX
+
+        used = set()
         if TRENDS_DB.exists():
+            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             conn = _init_trends_db()
             try:
                 rows = conn.execute(
-                    "SELECT input_tokens FROM session_log "
-                    "WHERE input_tokens > 0 "
-                    "ORDER BY date DESC LIMIT 5"
+                    "SELECT DISTINCT skill FROM skill_daily WHERE date >= ? AND invocations > 0",
+                    (cutoff,),
                 ).fetchall()
-                vals = sorted(int(r[0]) for r in rows if r[0])
-                if vals:
-                    current_tokens = vals[len(vals) // 2]
             finally:
                 conn.close()
+            for (s,) in rows:
+                if s in installed:
+                    used.add(s)
+                elif s in name_to_dir:
+                    used.add(name_to_dir[s])
+                elif ":" in s:
+                    parent = s.split(":")[0]
+                    used.add(parent if parent in installed else name_to_dir.get(parent, s))
+                else:
+                    used.add(s)
+        unused = installed - used
+        return len(unused) * avg_per_skill, len(unused)
+    except Exception:
+        return 0, 0
 
-        if current_tokens <= 0:
+
+def _compute_structural_potential(days=30):
+    """Opportunity: structural $ available if the user prunes recommended waste.
+
+    Distinct from realized savings -- this is what acting on the optimizer's
+    recommendations would unlock. Computes the recoverable prefix tokens (unused
+    skill frontmatter, the dominant lever) and compounds them with the same
+    verified cache formula. Surfaced as "unclaimed" so the dashboard shows the
+    money on the table instead of a wall of $0. Labelled "opportunity". Never raises.
+    """
+    zero = {
+        "recoverable_tokens": 0, "unused_skills": 0, "events": 0, "tokens_saved": 0,
+        "cost_saved_usd": 0.0, "read_savings_usd": 0.0, "write_1h_savings_usd": 0.0,
+        "write_5m_savings_usd": 0.0, "evidence": "opportunity",
+    }
+    try:
+        s_potential, unused_count = _unused_skill_overhead_tokens(days=days)
+        if s_potential <= 0:
+            return zero
+        current_overhead = _current_overhead_tokens() or s_potential
+        terms = _compound_structural(s_potential, days, fallback_prefix=current_overhead)
+        if not terms:
+            return zero
+        return {
+            **terms,
+            "recoverable_tokens": int(s_potential),
+            "unused_skills": int(unused_count),
+            "evidence": "opportunity",
+        }
+    except Exception:
+        return zero
+
+
+def _estimate_uncaptured_runtime(days=30, compression=None, savings=None):
+    """Estimate runtime compression that happens but is never logged as an event.
+
+    The logged runtime savings are a FLOOR. Compression that runs inside
+    sub-agent dispatches is not attributed back to the parent session, so it
+    never lands in compression_events. Estimate it conservatively from the
+    measured per-session runtime savings times the sub-agent dispatch count
+    (each sub-agent carries its own context and compressors), at a 0.5
+    attribution haircut. Clearly labelled estimated; shown separately from the
+    measured runtime number, never merged into it. Never raises.
+
+    `compression`/`savings` may be passed in by the caller (_get_merged_savings
+    already computes both) to avoid re-querying. Never raises.
+
+    Returns {tokens_saved, cost_saved_usd, subagent_dispatches, evidence}.
+    """
+    zero = {"tokens_saved": 0, "cost_saved_usd": 0.0, "subagent_dispatches": 0, "evidence": "estimated"}
+    try:
+        if not TRENDS_DB.exists():
+            return zero
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        conn = _init_trends_db()
+        try:
+            session_count = conn.execute(
+                "SELECT COUNT(*) FROM session_log WHERE date >= ?", (cutoff,)
+            ).fetchone()[0] or 0
+            rows = conn.execute(
+                "SELECT subagents_json FROM session_log "
+                "WHERE date >= ? AND subagents_json IS NOT NULL AND subagents_json != ''",
+                (cutoff,),
+            ).fetchall()
+        finally:
+            conn.close()
+        subagent_dispatches = 0
+        for (sj,) in rows:
+            try:
+                sd = json.loads(sj) if sj else {}
+                if isinstance(sd, dict):
+                    for v in sd.values():
+                        try:
+                            subagent_dispatches += int(v)
+                        except (TypeError, ValueError):
+                            continue
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if session_count <= 0 or subagent_dispatches <= 0:
             return zero
 
-        overhead_delta = max(0, int(baseline["baseline_tokens"]) - current_tokens)
-        if overhead_delta <= 0:
-            return {**zero, "baseline_source": baseline["source"], "baseline_date": baseline["date"]}
-
-        context_loads = _count_context_loads(days=days, since_date=baseline["date"][:10])
-        if context_loads <= 0:
-            return {**zero, "baseline_source": baseline["source"], "baseline_date": baseline["date"]}
-
-        tokens_saved = overhead_delta * context_loads
+        # Measured runtime tokens/session as the per-context compression proxy.
+        # Reuse the caller's summaries when provided to avoid duplicate queries.
+        if compression is None:
+            compression = _get_compression_summary(days=days)
+        if savings is None:
+            savings = _get_savings_summary(days=days)
+        measured_tokens = int(compression.get("total_tokens", 0) or 0) + int(savings.get("total_tokens", 0) or 0)
+        per_session = measured_tokens / session_count
+        attribution = 0.5  # conservative: sub-agents do less of the heavy bash/structure work
+        est_tokens = int(subagent_dispatches * per_session * attribution)
+        if est_tokens <= 0:
+            return zero
         cost_per_mtok = _estimate_compression_cost_per_mtok()
-        cost_saved = tokens_saved * cost_per_mtok / 1_000_000
+        return {
+            "tokens_saved": est_tokens,
+            "cost_saved_usd": round(est_tokens * cost_per_mtok / 1_000_000, 4),
+            "subagent_dispatches": subagent_dispatches,
+            "evidence": "estimated",
+        }
+    except Exception:
+        return zero
+
+
+# How many extra iterations a caught loop would have run if not stopped. Used
+# only for the clearly-labelled behavioral estimate; configurable + conservative.
+_BEHAVIORAL_PREVENTED_LOOP_ITERATIONS = _int_env("TOKEN_OPTIMIZER_PREVENTED_LOOP_ITERATIONS", 3)
+
+
+def _estimate_behavioral_savings(days=30):
+    """Estimate savings from behavioral coaching that cannot be directly metered.
+
+    Some of Token Optimizer's biggest wins never produce a billable event,
+    because the whole point is that the wasteful work never happens. The
+    clearest case is LOOP PREVENTION: when loop detection fires it compresses
+    the repeated output (counted as runtime), but more importantly it stops a
+    runaway loop that would otherwise have burned several more iterations of the
+    same tokens. That avoided continuation is never billed, so it never shows up
+    as measured savings -- exactly the "we can't measure it so we ignore it"
+    blind spot.
+
+    We estimate it transparently: detected looped volume times an assumed number
+    of prevented iterations (default 3, env-configurable). This is an ESTIMATE,
+    shown as its own behavioral tier and never summed into the measured total.
+    Returns {tokens_saved, cost_saved_usd, loop_events, prevented_iterations,
+    evidence}. Never raises.
+    """
+    zero = {"tokens_saved": 0, "cost_saved_usd": 0.0, "loop_events": 0,
+            "prevented_iterations": _BEHAVIORAL_PREVENTED_LOOP_ITERATIONS, "evidence": "estimated"}
+    try:
+        if not TRENDS_DB.exists():
+            return zero
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        conn = _init_trends_db()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(original_tokens - compressed_tokens), 0) "
+                "FROM compression_events WHERE feature = 'loop_detection' AND timestamp >= ?",
+                (cutoff,),
+            ).fetchone()
+        finally:
+            conn.close()
+        loop_events = int(row[0] or 0)
+        loop_tokens_saved = int(row[1] or 0)
+        if loop_events <= 0 or loop_tokens_saved <= 0:
+            return zero
+        # The measured saving is one interception; absent it, the loop would have
+        # repeated. Credit the avoided continuation at the prevented-iteration factor.
+        est_tokens = loop_tokens_saved * _BEHAVIORAL_PREVENTED_LOOP_ITERATIONS
+        cost_per_mtok = _estimate_compression_cost_per_mtok()
+        return {
+            "tokens_saved": est_tokens,
+            "cost_saved_usd": round(est_tokens * cost_per_mtok / 1_000_000, 4),
+            "loop_events": loop_events,
+            "prevented_iterations": _BEHAVIORAL_PREVENTED_LOOP_ITERATIONS,
+            "evidence": "estimated",
+        }
+    except Exception:
+        return zero
+
+
+def _model_mix_shares(days=14):
+    """Return {model: share_fraction} of total tokens over the window, + total.
+
+    Reads model_daily (per-day per-model token totals). Shares sum to ~1.0.
+    Returns {"shares": {...}, "total_tokens": int, "days": days} or empty shares
+    when there is no data. Never raises.
+    """
+    out = {"shares": {}, "total_tokens": 0, "days": days}
+    try:
+        if not TRENDS_DB.exists():
+            return out
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        conn = _init_trends_db()
+        try:
+            rows = conn.execute(
+                "SELECT model, COALESCE(SUM(total_tokens),0) FROM model_daily "
+                "WHERE date >= ? GROUP BY model",
+                (cutoff,),
+            ).fetchall()
+        finally:
+            conn.close()
+        total = sum(int(r[1] or 0) for r in rows)
+        if total <= 0:
+            return out
+        out["shares"] = {r[0]: (int(r[1] or 0) / total) for r in rows if r[0]}
+        out["total_tokens"] = total
+    except (sqlite3.Error, OSError):
+        pass
+    return out
+
+
+def _model_rate_per_mtok(model):
+    """Conservative $/MTok proxy for a model: its input rate.
+
+    model_daily.total_tokens mixes input/cache/output, so this UNDERSTATES true
+    cost (output is up to 5x input). Using the input rate keeps routing savings
+    conservative and defensible. Returns 0.0 for unpriced models.
+    """
+    try:
+        return _get_model_cost(model, 1_000_000, 0)  # input-only -> $/MTok input
+    except Exception:
+        return 0.0
+
+
+def _earliest_model_mix(lookback_days=14):
+    """Measured install-era model mix from the earliest `lookback_days` of model_daily.
+
+    Fallback baseline when no snapshot model_mix was captured (e.g. existing
+    users whose snapshot predates this feature). Measured from the user's own
+    history, so realized routing savings are grounded, not self-reported.
+    Returns {"shares": {...}, "first_date": str} or None.
+    """
+    try:
+        if not TRENDS_DB.exists():
+            return None
+        conn = _init_trends_db()
+        try:
+            first = conn.execute("SELECT MIN(date) FROM model_daily").fetchone()
+            if not first or not first[0]:
+                return None
+            first_date = first[0]
+            end = (datetime.fromisoformat(first_date) + timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+            rows = conn.execute(
+                "SELECT model, COALESCE(SUM(total_tokens),0) FROM model_daily "
+                "WHERE date >= ? AND date <= ? GROUP BY model",
+                (first_date, end),
+            ).fetchall()
+        finally:
+            conn.close()
+        total = sum(int(r[1] or 0) for r in rows)
+        if total <= 0:
+            return None
+        return {"shares": {r[0]: int(r[1] or 0) / total for r in rows if r[0]}, "first_date": first_date}
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+
+
+# Share of remaining Opus tokens assumed routable to a cheaper model (grunt
+# work: data gathering, search, simple edits). Conservative + configurable.
+_ROUTABLE_OPUS_FRACTION = _float_env("TOKEN_OPTIMIZER_ROUTABLE_OPUS_FRACTION", 0.3)
+
+
+def _compute_model_routing_savings(days=30):
+    """Model-routing savings: realized (mix shift vs baseline) + potential (remaining Opus).
+
+    REALIZED: compare current model mix against the install-era baseline (snapshot
+    model_mix, else the earliest model_daily window). If the user moved tokens off
+    expensive models, the counterfactual cost (current volume priced at the
+    baseline mix) minus the actual current cost is real, measured savings. This is
+    the rare pillar that can show a genuine realized win (e.g. Opus 94% -> 67%).
+
+    POTENTIAL: a conservative share of remaining Opus tokens routed to Sonnet,
+    priced at the rate delta -- the opportunity still on the table.
+
+    Rates use each model's input rate (conservative; total_tokens includes output
+    which is pricier, so this understates). Labelled measured (realized) and
+    opportunity (potential). Never raises.
+    """
+    zero = {
+        "realized_cost_usd": 0.0, "potential_cost_usd": 0.0,
+        "baseline_opus_share": 0.0, "current_opus_share": 0.0,
+        "baseline_source": None, "evidence": "measured",
+    }
+    try:
+        current = _model_mix_shares(days=days)
+        cur_shares = current.get("shares", {})
+        cur_total = int(current.get("total_tokens", 0) or 0)
+        if not cur_shares or cur_total <= 0:
+            return zero
+
+        # Baseline mix: snapshot capture first, else earliest measured history.
+        baseline_shares = None
+        baseline_source = None
+        try:
+            snap_path = SNAPSHOT_DIR / "snapshot_before.json"
+            if snap_path.exists():
+                snap = json.loads(snap_path.read_text(encoding="utf-8"))
+                mm = (snap.get("model_mix") or {}).get("shares") or {}
+                if mm:
+                    baseline_shares = mm
+                    baseline_source = "snapshot"
+        except (json.JSONDecodeError, OSError, ValueError):
+            pass
+        if not baseline_shares:
+            early = _earliest_model_mix()
+            if early:
+                baseline_shares = early["shares"]
+                baseline_source = "history"
+        if not baseline_shares:
+            return zero
+
+        # Cost of the current token volume under each mix (per-MTok input rates).
+        def _blended_rate(shares):
+            return sum(share * _model_rate_per_mtok(model) for model, share in shares.items())
+
+        baseline_rate = _blended_rate(baseline_shares)
+        current_rate = _blended_rate(cur_shares)
+        realized_cost = max(0.0, (baseline_rate - current_rate) * cur_total / 1_000_000)
+
+        # Potential: route a conservative share of remaining Opus to Sonnet.
+        opus_share = cur_shares.get("opus", 0.0)
+        opus_tokens = opus_share * cur_total
+        opus_rate = _model_rate_per_mtok("opus")
+        sonnet_rate = _model_rate_per_mtok("sonnet")
+        potential_cost = max(0.0, opus_tokens * _ROUTABLE_OPUS_FRACTION * (opus_rate - sonnet_rate) / 1_000_000)
 
         return {
-            "events": context_loads,
-            "tokens_saved": int(tokens_saved),
-            "cost_saved_usd": round(cost_saved, 4),
-            "baseline_source": baseline["source"],
-            "baseline_date": baseline["date"],
-            "context_loads": context_loads,
-            "overhead_delta": overhead_delta,
+            "realized_cost_usd": round(realized_cost, 4),
+            "potential_cost_usd": round(potential_cost, 4),
+            "baseline_opus_share": round(baseline_shares.get("opus", 0.0), 4),
+            "current_opus_share": round(opus_share, 4),
+            "baseline_source": baseline_source,
+            "routable_fraction": _ROUTABLE_OPUS_FRACTION,
+            "evidence": "measured",
+        }
+    except Exception:
+        return zero
+
+
+# Share of full-file Writes assumed avoidable via a targeted Edit, and the
+# output tokens a typical avoidable rewrite emits beyond an Edit. Conservative.
+_AVOIDABLE_WRITE_FRACTION = _float_env("TOKEN_OPTIMIZER_AVOIDABLE_WRITE_FRACTION", 0.3)
+_AVOIDABLE_WRITE_OUTPUT_TOKENS = _int_env("TOKEN_OPTIMIZER_AVOIDABLE_WRITE_TOKENS", 1500)
+
+
+def _sum_tool_calls(days=30):
+    """Return {tool_name: total_calls} summed across session_log.tool_calls_json."""
+    out = {}
+    try:
+        if not TRENDS_DB.exists():
+            return out
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        conn = _init_trends_db()
+        try:
+            rows = conn.execute(
+                "SELECT tool_calls_json FROM session_log "
+                "WHERE date >= ? AND tool_calls_json NOT IN ('', '{}') AND tool_calls_json IS NOT NULL",
+                (cutoff,),
+            ).fetchall()
+        finally:
+            conn.close()
+        for (tj,) in rows:
+            for k, v in _safe_json_dict(tj).items():
+                try:
+                    out[k] = out.get(k, 0) + int(v)
+                except (TypeError, ValueError):
+                    continue
+    except (sqlite3.Error, OSError):
+        pass
+    return out
+
+
+def _estimate_output_waste(days=30):
+    """Estimate avoidable OUTPUT from full-file Writes that could have been Edits.
+
+    Output is the priciest token class ($25/MTok on Opus, 5x input). A full-file
+    Write re-emits the entire file; a targeted Edit emits only the changed lines.
+    We estimate avoidable output as a conservative share of Write calls times a
+    typical per-rewrite output delta, priced at the OUTPUT rate. This is a
+    coaching OPPORTUNITY (use Edit over Write), never a forced output cap, which
+    would risk truncating real work. Labelled estimated. Never raises.
+
+    Returns {writes, edits, avoidable_writes, tokens_saved, cost_saved_usd, evidence}.
+    """
+    zero = {"writes": 0, "edits": 0, "avoidable_writes": 0, "tokens_saved": 0,
+            "cost_saved_usd": 0.0, "evidence": "estimated"}
+    try:
+        tools = _sum_tool_calls(days=days)
+        writes = int(tools.get("Write", 0) or 0)
+        edits = int(tools.get("Edit", 0) or 0)
+        if writes <= 0:
+            return {**zero, "edits": edits}
+        avoidable = int(writes * _AVOIDABLE_WRITE_FRACTION)
+        if avoidable <= 0:
+            return {**zero, "writes": writes, "edits": edits}
+        tokens_saved = avoidable * _AVOIDABLE_WRITE_OUTPUT_TOKENS
+        # Output rate for the active model (output is ~5x input).
+        try:
+            output_rate = _get_model_cost(_resolve_session_model(), 0, 1_000_000)
+        except Exception:
+            output_rate = 25.0
+        return {
+            "writes": writes,
+            "edits": edits,
+            "avoidable_writes": avoidable,
+            "tokens_saved": tokens_saved,
+            "cost_saved_usd": round(tokens_saved * output_rate / 1_000_000, 4),
+            "evidence": "estimated",
+        }
+    except Exception:
+        return zero
+
+
+# A call gap beyond this many seconds likely dropped the prefix from cache,
+# forcing a full re-write on the next turn. Default 5m (the 5m cache TTL).
+_CACHE_DROP_GAP_SECONDS = _int_env("TOKEN_OPTIMIZER_CACHE_DROP_GAP_SECONDS", 300)
+
+
+def _estimate_cache_drop_savings(days=30):
+    """Estimate cost of mid-session cache drops (the 'coffee-break reload').
+
+    When a session goes quiet longer than the cache TTL, the cached prefix
+    expires and the next turn pays a full cache-WRITE again instead of a cheap
+    cache-read. Sessions whose max call gap exceeds the TTL almost certainly ate
+    at least one such reload. We estimate the avoidable cost as
+    (drops x per_session_prefix x 5m-write rate) -- the behavioral opportunity
+    Token Optimizer coaches away (compact before a break, or use the 1h cache).
+    Labelled estimated/opportunity. Never raises.
+
+    Returns {drop_sessions, est_drops, prefix_tokens, cost_saved_usd, evidence}.
+    """
+    zero = {"drop_sessions": 0, "est_drops": 0, "prefix_tokens": 0,
+            "cost_saved_usd": 0.0, "evidence": "estimated"}
+    try:
+        if not TRENDS_DB.exists():
+            return zero
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        conn = _init_trends_db()
+        try:
+            drop_sessions = conn.execute(
+                "SELECT COUNT(*) FROM session_log "
+                "WHERE date >= ? AND max_call_gap_seconds > ?",
+                (cutoff, _CACHE_DROP_GAP_SECONDS),
+            ).fetchone()[0] or 0
+        finally:
+            conn.close()
+        if drop_sessions <= 0:
+            return zero
+        # Use the measured current overhead as the prefix fallback when no JSONL
+        # session-start baselines are available, so the estimate still computes.
+        prefix = _per_session_prefix_tokens(fallback=_current_overhead_tokens() or 0)
+        if prefix <= 1:
+            return {**zero, "drop_sessions": int(drop_sessions)}
+        _, write_5m_rate, _ = _active_model_cache_rates()
+        # Conservative: one avoidable reload per qualifying session.
+        est_drops = int(drop_sessions)
+        cost = est_drops * prefix * write_5m_rate / 1_000_000
+        return {
+            "drop_sessions": int(drop_sessions),
+            "est_drops": est_drops,
+            "prefix_tokens": int(prefix),
+            "cost_saved_usd": round(cost, 4),
+            "evidence": "estimated",
         }
     except Exception:
         return zero
@@ -18598,6 +19219,16 @@ def _get_merged_savings(days=30):
     tier_data = PRICING_TIERS.get(pricing_tier, PRICING_TIERS["anthropic"])
     rate = tier_data.get("claude_models", {}).get(active_model, {}).get("input", 3.0)
 
+    # Opportunity + estimated tiers. Kept OUT of total_cost/total_tokens: never
+    # sum across measured / estimated / opportunity tiers. The dashboard and CLI
+    # render these as separate, clearly-labelled lines.
+    potential = _compute_structural_potential(days=days)
+    uncaptured = _estimate_uncaptured_runtime(days=days, compression=compression, savings=savings)
+    behavioral = _estimate_behavioral_savings(days=days)
+    model_routing = _compute_model_routing_savings(days=days)
+    output_waste = _estimate_output_waste(days=days)
+    cache_drop = _estimate_cache_drop_savings(days=days)
+
     return {
         "total_tokens": total_tokens,
         "total_cost_usd": round(total_cost, 4),
@@ -18611,7 +19242,76 @@ def _get_merged_savings(days=30):
             "rate_usd_per_mtok": float(rate),
         },
         "structural_detail": structural,
+        "structural_potential": potential,
+        "uncaptured_runtime": uncaptured,
+        "behavioral_estimate": behavioral,
+        "model_routing": model_routing,
+        "output_waste": output_waste,
+        "cache_drop": cache_drop,
     }
+
+
+def _install_date():
+    """Best-known install / first-capture date (ISO YYYY-MM-DD), or None.
+
+    Prefers the pristine baseline snapshot timestamp (captured at first run);
+    falls back to the earliest session_log date. Never raises.
+    """
+    try:
+        snap = SNAPSHOT_DIR / "snapshot_before.json"
+        if snap.exists():
+            ts = json.loads(snap.read_text(encoding="utf-8")).get("timestamp")
+            if ts:
+                return ts[:10]
+    except (json.JSONDecodeError, OSError, ValueError):
+        pass
+    try:
+        if TRENDS_DB.exists():
+            conn = _init_trends_db()
+            try:
+                row = conn.execute("SELECT MIN(date) FROM session_log").fetchone()
+            finally:
+                conn.close()
+            if row and row[0]:
+                return str(row[0])[:10]
+    except (sqlite3.Error, OSError):
+        pass
+    return None
+
+
+def _savings_since_install():
+    """Cumulative savings since install (NOT monthly-ized): the running total.
+
+    Computes the full merged savings over the whole window since install so the
+    measured event tiers sum from day one and the estimate tiers reflect the
+    full history. Returns a compact summary for the dashboard's 'since install'
+    card, split into measured vs estimated. Returns None when no install date is
+    known. Never raises.
+    """
+    try:
+        d = _install_date()
+        if not d:
+            return None
+        days = (datetime.now() - datetime.fromisoformat(d)).days + 1
+        days = max(1, min(days, 3650))
+        full = _get_merged_savings(days=days)
+        # Measured = logged runtime + realized structural + realized routing.
+        measured = float(full.get("total_cost_usd", 0) or 0)
+        measured += float((full.get("model_routing") or {}).get("realized_cost_usd", 0) or 0)
+        # Estimated = the labelled estimate tiers.
+        estimated = sum(
+            float((full.get(k) or {}).get("cost_saved_usd", 0) or 0)
+            for k in ("cache_drop", "output_waste", "behavioral_estimate", "uncaptured_runtime")
+        )
+        return {
+            "install_date": d,
+            "days": days,
+            "measured_usd": round(measured, 2),
+            "estimated_usd": round(estimated, 2),
+            "total_usd": round(measured + estimated, 2),
+        }
+    except Exception:
+        return None
 
 
 def savings_report(days=30, as_json=False):
@@ -18646,10 +19346,11 @@ def savings_report(days=30, as_json=False):
     src = struct.get("baseline_source")
     if src == "snapshot":
         b_date = (struct.get("baseline_date") or "")[:10]
-        print(f"  Baseline: snapshot {b_date} (overhead reduced by {struct.get('overhead_delta', 0):,} tokens)")
-    elif src == "first_session":
-        b_date = (struct.get("baseline_date") or "")[:10]
-        print(f"  Baseline: first session {b_date} (overhead reduced by {struct.get('overhead_delta', 0):,} tokens)")
+        delta = struct.get("overhead_delta", 0)
+        if delta > 0:
+            print(f"  Baseline: snapshot {b_date} (prefix trimmed {delta:,} tokens, compounding [est])")
+        else:
+            print(f"  Baseline: snapshot {b_date} (no prefix trimmed below baseline yet -> realized $0)")
     else:
         print("  Baseline: none (run 'snapshot before' to track structural savings)")
 
@@ -18683,10 +19384,70 @@ def savings_report(days=30, as_json=False):
     daily_avg = summary.get("daily_avg_usd", 0.0)
     est_monthly = daily_avg * 30
 
-    print(f"  {'TOTAL':<28s} {total_events:>8,} {total_tokens:>14,} {'$' + f'{total_cost:.2f}':>11s}")
+    print(f"  {'TOTAL (measured)':<28s} {total_events:>8,} {total_tokens:>14,} {'$' + f'{total_cost:.2f}':>11s}")
     print()
-    print(f"  Daily average: ${daily_avg:.2f} saved")
-    print(f"  Estimated monthly: ${est_monthly:.2f}")
+    print(f"  Daily average: ${daily_avg:.2f} saved (measured)")
+    print(f"  Estimated monthly: ${est_monthly:.2f} (measured)")
+
+    # Realized tier — model routing you already did (mix shift vs install baseline).
+    routing = summary.get("model_routing") or {}
+    routing_realized = float(routing.get("realized_cost_usd", 0.0) or 0.0)
+    if routing_realized > 0:
+        r_monthly = routing_realized / max(days, 1) * 30
+        b_share = routing.get("baseline_opus_share", 0.0) * 100
+        c_share = routing.get("current_opus_share", 0.0) * 100
+        print(f"  + model routing (realized): ~${r_monthly:.2f}/mo "
+              f"(Opus {b_share:.0f}% -> {c_share:.0f}% vs baseline) [measured]")
+
+    # Estimated tier — uncaptured runtime (sub-agent compression not attributed).
+    uncaptured = summary.get("uncaptured_runtime") or {}
+    unc_cost = float(uncaptured.get("cost_saved_usd", 0.0) or 0.0)
+    if unc_cost > 0:
+        unc_monthly = unc_cost / max(days, 1) * 30
+        print(f"  + est. uncaptured runtime: ~${unc_monthly:.2f}/mo "
+              f"(sub-agent compression, {uncaptured.get('subagent_dispatches', 0):,} dispatches) [estimated]")
+
+    # Estimated tier — behavioral coaching (loops prevented, etc.) that never bills.
+    behavioral = summary.get("behavioral_estimate") or {}
+    beh_cost = float(behavioral.get("cost_saved_usd", 0.0) or 0.0)
+    if beh_cost > 0:
+        beh_monthly = beh_cost / max(days, 1) * 30
+        print(f"  + est. behavioral (loops prevented): ~${beh_monthly:.2f}/mo "
+              f"({behavioral.get('loop_events', 0)} loops caught x {behavioral.get('prevented_iterations', 3)} "
+              f"prevented iterations) [estimated]")
+
+    # Estimated tier — cache drops (coffee-break reloads) that re-write the prefix.
+    cache_drop = summary.get("cache_drop") or {}
+    cd_cost = float(cache_drop.get("cost_saved_usd", 0.0) or 0.0)
+    if cd_cost > 0:
+        cd_monthly = cd_cost / max(days, 1) * 30
+        print(f"  + est. cache-drop avoidance: ~${cd_monthly:.2f}/mo "
+              f"({cache_drop.get('drop_sessions', 0)} sessions dropped cache mid-run) [estimated]")
+
+    # Estimated tier — output waste (full-file Writes that could be Edits).
+    output_waste = summary.get("output_waste") or {}
+    ow_cost = float(output_waste.get("cost_saved_usd", 0.0) or 0.0)
+    if ow_cost > 0:
+        ow_monthly = ow_cost / max(days, 1) * 30
+        print(f"  + est. output waste (Write->Edit): ~${ow_monthly:.2f}/mo "
+              f"({output_waste.get('avoidable_writes', 0)} of {output_waste.get('writes', 0)} writes avoidable) [estimated]")
+
+    # Opportunity tier — money on the table from pruning + further routing.
+    potential = summary.get("structural_potential") or {}
+    pot_cost = float(potential.get("cost_saved_usd", 0.0) or 0.0)
+    routing_potential = float(routing.get("potential_cost_usd", 0.0) or 0.0)
+    if pot_cost > 0 or routing_potential > 0:
+        print()
+        print(f"  {'-' * 58}")
+        print("  UNCLAIMED (opportunity, not yet realized):")
+        if pot_cost > 0:
+            pot_monthly = pot_cost / max(days, 1) * 30
+            print(f"    ~${pot_monthly:.2f}/mo structural: prune {potential.get('unused_skills', 0)} unused skills "
+                  f"(~{potential.get('recoverable_tokens', 0):,} tokens), compounds every session.")
+        if routing_potential > 0:
+            rp_monthly = routing_potential / max(days, 1) * 30
+            print(f"    ~${rp_monthly:.2f}/mo routing: move {int(routing.get('routable_fraction', 0.3) * 100)}% "
+                  f"of remaining Opus ({routing.get('current_opus_share', 0.0) * 100:.0f}% of tokens) to Sonnet/Haiku.")
     print(f"  {'=' * 58}")
 
     if total_events == 0:
@@ -18936,6 +19697,15 @@ def run_ensure_health():
             _auto_remove_bad_env_vars()
         except Exception:
             pass
+
+    # Capture the pristine structural baseline once on first run. Records the
+    # pre-pruning prefix overhead that structural savings are measured against.
+    # One-time (no-op once the snapshot exists); never blocks SessionStart.
+    try:
+        if _auto_capture_pristine_baseline():
+            print("  [Token Optimizer] Captured baseline snapshot for structural savings tracking")
+    except Exception:
+        pass
 
     # v5.3.8: auto-regenerate the dashboard HTML when the on-disk file
     # is stale relative to the currently installed plugin version.
