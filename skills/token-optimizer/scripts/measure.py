@@ -15709,9 +15709,28 @@ def _checkpoint_topic_score(prompt_text, checkpoint, cwd=None):
 
 
 def codex_prompt_hints(prompt_text="", session_id=None, cwd=None, max_age_minutes=60 * 24 * 7):
-    """Return short topic-relevant continuity hints for Codex UserPromptSubmit."""
+    """Return short topic-relevant continuity hints for Codex UserPromptSubmit.
+
+    Thin runtime gate over the shared matcher; Claude Code uses the same engine
+    via `_continuity_prompt_hint` (wired through the `prompt-continuity` hook).
+    """
     if detect_runtime() != "codex":
         return ""
+    return _continuity_prompt_hint(
+        prompt_text=prompt_text, session_id=session_id, cwd=cwd, max_age_minutes=max_age_minutes
+    )
+
+
+def _continuity_prompt_hint(prompt_text="", session_id=None, cwd=None, max_age_minutes=60 * 24 * 7):
+    """Topic-matched prior-session continuity hint (runtime-agnostic core).
+
+    Scores recent checkpoints against the incoming prompt and, when the best
+    match clears `_RELEVANCE_THRESHOLD`, returns a compact hint block fenced as
+    recovered DATA (never instructions) for safe injection via additionalContext.
+    Skips same-session checkpoints (that recovery is handled by SessionStart /
+    compact). Returns "" when nothing clears the bar. Never raises for the caller
+    to worry about beyond normal exceptions.
+    """
     text = str(prompt_text or "").strip()
     if not text:
         return ""
@@ -15777,7 +15796,11 @@ def codex_prompt_hints(prompt_text="", session_id=None, cwd=None, max_age_minute
             summary.append(f"{tool_name} ({chars} chars) -> {pointer!r}")
         if summary:
             lines.append("- Archived tool results: " + "; ".join(summary))
-    lines.append("Use this only if it matches the user's current request.")
+    lines.append(
+        "Use this only if it matches the user's current request. If you do use it, "
+        "briefly tell the user you found a relevant prior session (mention its topic / "
+        "checkpoint date) so the recovery is transparent, not silent."
+    )
     return "\n".join(lines)
 
 
@@ -18386,6 +18409,10 @@ _LEGACY_SAVINGS_LABELS = {
     # MAX_MCP_OUTPUT_TOKENS cap. Label carries [est] to distinguish from
     # measured categories. Phase 2 will replace with actual measurement.
     "mcp_cap": "MCP output cap [est]",
+    # contextignore_block: MEASURED. A .contextignore rule denies the read
+    # outright (read_cache.py), so the file's tokens never enter context — a
+    # real prevention, priced at the file-size estimate at the block site.
+    "contextignore_block": "Ignored-file reads blocked",
 }
 
 # v5 Active Compression categories — stored in compression_events and
@@ -18611,7 +18638,10 @@ def _compound_structural(s, days, fallback_prefix):
 
     per_session_prefix = _per_session_prefix_tokens(fallback=fallback_prefix)
     read_rate, write_5m_rate, write_1h_rate = _active_model_cache_rates()
-    write_fraction = s / per_session_prefix
+    # Clamp to 1.0: the prefix trim S can never cache-write more than a full
+    # per-session prefix worth of tokens. An unclamped ratio (S > prefix, e.g.
+    # a stale/small prefix baseline) overstated the structural write-tier >2x.
+    write_fraction = min(1.0, s / per_session_prefix) if per_session_prefix > 0 else 0.0
 
     read_savings = s * sum_api_calls * read_rate / 1_000_000
     write_1h_savings = write_fraction * sum_cc_1h * write_1h_rate / 1_000_000
@@ -18928,6 +18958,60 @@ def _model_rate_per_mtok(model):
         return 0.0
 
 
+def _model_output_rate_per_mtok(model):
+    """$/MTok OUTPUT rate for a model (e.g. Opus $25 vs Sonnet $5). 0.0 if unpriced."""
+    try:
+        return _get_model_cost(model, 0, 1_000_000)  # output-only -> $/MTok output
+    except Exception:
+        return 0.0
+
+
+def _session_output_fraction(days=30):
+    """Measured share of billed tokens that are OUTPUT, from the user's own session_log.
+
+    Returns SUM(output_tokens) / SUM(input_tokens + output_tokens) over the window,
+    clamped to [0, 1]. Used to blend input + output rates so routing savings reflect
+    the true token mix instead of pricing everything at the (cheaper) input rate.
+    This is grounded in the user's OWN data, never an invented multiplier. Returns
+    0.0 (input-only behaviour, conservative) when there is no usable history.
+    """
+    try:
+        if not TRENDS_DB.exists():
+            return 0.0
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        conn = _init_trends_db()
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) "
+                "FROM session_log WHERE date >= ?",
+                (cutoff,),
+            ).fetchone()
+        finally:
+            conn.close()
+        in_tok = int(row[0] or 0)
+        out_tok = int(row[1] or 0)
+        denom = in_tok + out_tok
+        if denom <= 0:
+            return 0.0
+        return max(0.0, min(1.0, out_tok / denom))
+    except (sqlite3.Error, OSError):
+        return 0.0
+
+
+def _model_blended_rate_per_mtok(model, output_fraction):
+    """Per-MTok rate blending input + output by the measured output fraction.
+
+    rate = input_rate*(1-out_frac) + output_rate*out_frac. Captures the dominant
+    routing understatement (output is up to 5x input). Cache-class tokens stay
+    priced at the input rate (conservative). Returns 0.0 for unpriced models.
+    """
+    try:
+        f = max(0.0, min(1.0, float(output_fraction)))
+        return _model_rate_per_mtok(model) * (1.0 - f) + _model_output_rate_per_mtok(model) * f
+    except Exception:
+        return 0.0
+
+
 def _earliest_model_mix(lookback_days=14):
     """Measured install-era model mix from the earliest `lookback_days` of model_daily.
 
@@ -18978,9 +19062,12 @@ def _compute_model_routing_savings(days=30):
     POTENTIAL: a conservative share of remaining Opus tokens routed to Sonnet,
     priced at the rate delta -- the opportunity still on the table.
 
-    Rates use each model's input rate (conservative; total_tokens includes output
-    which is pricier, so this understates). Labelled measured (realized) and
-    opportunity (potential). Never raises.
+    Rates blend each model's input + output $/MTok by the measured output fraction
+    (SUM(output)/SUM(input+output) from session_log). Pricing everything at the
+    input rate alone understated routing savings 1.5-2x because output is up to 5x
+    input ($25 vs $5/MTok on Opus). Cache-class tokens stay input-priced
+    (conservative). The blend is grounded in the user's own token mix, not a
+    multiplier. Labelled measured (realized) and opportunity (potential). Never raises.
     """
     zero = {
         "realized_cost_usd": 0.0, "potential_cost_usd": 0.0,
@@ -19015,9 +19102,13 @@ def _compute_model_routing_savings(days=30):
         if not baseline_shares:
             return zero
 
-        # Cost of the current token volume under each mix (per-MTok input rates).
+        # Blend input + output rates by the user's measured output fraction so the
+        # output-token delta (the bulk of the routing win) is not priced away.
+        out_frac = _session_output_fraction(days=days)
+
+        # Cost of the current token volume under each mix (per-MTok blended rates).
         def _blended_rate(shares):
-            return sum(share * _model_rate_per_mtok(model) for model, share in shares.items())
+            return sum(share * _model_blended_rate_per_mtok(model, out_frac) for model, share in shares.items())
 
         baseline_rate = _blended_rate(baseline_shares)
         current_rate = _blended_rate(cur_shares)
@@ -19026,8 +19117,8 @@ def _compute_model_routing_savings(days=30):
         # Potential: route a conservative share of remaining Opus to Sonnet.
         opus_share = cur_shares.get("opus", 0.0)
         opus_tokens = opus_share * cur_total
-        opus_rate = _model_rate_per_mtok("opus")
-        sonnet_rate = _model_rate_per_mtok("sonnet")
+        opus_rate = _model_blended_rate_per_mtok("opus", out_frac)
+        sonnet_rate = _model_blended_rate_per_mtok("sonnet", out_frac)
         potential_cost = max(0.0, opus_tokens * _ROUTABLE_OPUS_FRACTION * (opus_rate - sonnet_rate) / 1_000_000)
 
         return {
@@ -20766,6 +20857,46 @@ if __name__ == "__main__":
             print(hint)
         else:
             compact_restore(new_session_only=True)
+    elif args[0] == "prompt-continuity":
+        # Claude Code UserPromptSubmit: inject a topic-matched prior-session hint.
+        # Mirrors the Codex bridge but runs the runtime-agnostic matcher directly.
+        # Wall-clock guarded so a slow scan never delays the user's prompt; emits
+        # the hint (fenced as DATA) via hookSpecificOutput.additionalContext.
+        _tok_hook_old_sig = _install_hook_budget(8)
+        try:
+            hook_input = _read_stdin_hook_input()
+            prompt_text = (
+                hook_input.get("prompt")
+                or hook_input.get("current_prompt")
+                or hook_input.get("user_prompt")
+                or ""
+            )
+            sid = hook_input.get("session_id")
+            cwd = hook_input.get("cwd")
+            transcript_path = hook_input.get("transcript_path")
+            if not cwd and transcript_path:
+                try:
+                    cwd = str(Path(transcript_path).parent)
+                except TypeError:
+                    cwd = None
+            hint = ""
+            try:
+                hint = _continuity_prompt_hint(prompt_text=prompt_text, session_id=sid, cwd=cwd)
+            except Exception:
+                hint = ""
+            hint = (hint or "").strip()
+            if hint:
+                print(json.dumps({
+                    "continue": True,
+                    "hookSpecificOutput": {
+                        "hookEventName": "UserPromptSubmit",
+                        "additionalContext": hint,
+                    },
+                }))
+        except _HookTimeout:
+            pass
+        finally:
+            _clear_hook_budget(_tok_hook_old_sig)
     elif args[0] == "compact-instructions":
         output_json = "--json" in args
         install = "--install" in args

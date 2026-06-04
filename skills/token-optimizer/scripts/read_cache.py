@@ -479,6 +479,15 @@ def handle_read(hook_input: dict[str, Any], mode: str, quiet: bool) -> None:
 
     if _is_contextignored(file_path):
         reason = f"Blocked by .contextignore: {Path(file_path).name}"
+        # The read is fully denied, so the tokens that would have entered context
+        # are genuinely saved (measured / realized — TO performed the prevention).
+        # Estimate from file size (st_size//4), matching the redundant-read path's
+        # convention. Guarded: a missing/unreadable file just records zero.
+        ignore_tokens_est = 0
+        try:
+            ignore_tokens_est = max(1, os.stat(file_path).st_size // 4)
+        except OSError:
+            ignore_tokens_est = 0
         _log_decision(
             "block",
             file_path,
@@ -492,12 +501,18 @@ def handle_read(hook_input: dict[str, Any], mode: str, quiet: bool) -> None:
             offset=offset,
             limit=limit,
             replacement_type=None,
-            file_tokens_est=0,
+            file_tokens_est=ignore_tokens_est,
             replacement_tokens_est=0,
-            net_saved_tokens_est=0,
+            net_saved_tokens_est=ignore_tokens_est,
             replacement_fingerprint=None,
             repeat_replacement_count=0,
             save_hook_additional_context_enabled=save_hook_context_enabled,
+        )
+        _log_savings_event(
+            "contextignore_block",
+            ignore_tokens_est,
+            session_id,
+            Path(file_path).name,
         )
         if not quiet:
             print(f"[Read Cache] Blocked by .contextignore: {file_path}", file=sys.stderr)
