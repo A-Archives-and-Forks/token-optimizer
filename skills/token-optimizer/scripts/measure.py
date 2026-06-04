@@ -19021,6 +19021,10 @@ def _estimate_uncaptured_runtime(days=30, compression=None, savings=None):
 # How many extra iterations a caught loop would have run if not stopped. Used
 # only for the clearly-labelled behavioral estimate; configurable + conservative.
 _BEHAVIORAL_PREVENTED_LOOP_ITERATIONS = _int_env("TOKEN_OPTIMIZER_PREVENTED_LOOP_ITERATIONS", 3)
+# B5: conservative continuation factor for the loop behavioral estimate. The
+# avoided continuation is a counterfactual, so we floor it at one more equivalent
+# looping span (1.0x the measured looped volume) rather than guessing iterations.
+_BEHAVIORAL_CONTINUATION_FACTOR = _float_env("TOKEN_OPTIMIZER_LOOP_CONTINUATION_FACTOR", 1.0)
 
 
 def _estimate_behavioral_savings(days=30):
@@ -19035,19 +19039,24 @@ def _estimate_behavioral_savings(days=30):
     as measured savings -- exactly the "we can't measure it so we ignore it"
     blind spot.
 
-    B5: instead of a flat assumed multiplier, we derive the prevented-iteration
-    factor EMPIRICALLY from the user's own loop events: a loop that repeated the
-    same output K times has original/compressed ~= K, and loops do not
-    self-terminate, so the observed repetition count is a grounded proxy for what
-    the loop would have continued to do. We average that observed factor (clamped
-    for sanity) rather than inventing a number. Still an ESTIMATE, shown as its
-    own behavioral tier with its sample size, never summed into the measured
-    total. Falls back to the env constant only when no ratio is observable.
-    Returns {tokens_saved, cost_saved_usd, loop_events, prevented_iterations,
-    evidence}. Never raises.
+    B5: prevented FUTURE iterations are a pure counterfactual (they never
+    happened), so we do not fabricate a multiplier. Instead we anchor to what the
+    data actually records -- the observed repetition `count=N` in each loop
+    event's detail -- for transparency, and estimate the avoided continuation
+    conservatively as ONE more looping span (the measured looped volume), i.e. a
+    continuation factor of 1.0. A loop caught after N repeats would plausibly have
+    run at least one comparable span more before another guard or the context
+    limit stopped it, so this is a deliberate floor, not a guess. Shown as its own
+    behavioral tier with the observed repetition count, never summed into the
+    measured total. Returns {tokens_saved, cost_saved_usd, loop_events,
+    prevented_iterations (observed avg count), evidence}. Never raises.
+
+    NOTE: an earlier version multiplied by original/compressed; real data showed
+    compressed_tokens is a tiny sentinel (~4 tok), making that ratio meaningless
+    (2000x+) -- the count lives in the detail string, not the token columns.
     """
     zero = {"tokens_saved": 0, "cost_saved_usd": 0.0, "loop_events": 0,
-            "prevented_iterations": _BEHAVIORAL_PREVENTED_LOOP_ITERATIONS, "evidence": "estimated"}
+            "prevented_iterations": 0.0, "evidence": "estimated"}
     try:
         if not TRENDS_DB.exists():
             return zero
@@ -19059,11 +19068,9 @@ def _estimate_behavioral_savings(days=30):
                 "FROM compression_events WHERE feature = 'loop_detection' AND timestamp >= ?",
                 (cutoff,),
             ).fetchone()
-            # B5: observed repetition factor = avg(original/compressed), the number
-            # of copies actually present in each looped output. Grounded, not guessed.
-            ratio_rows = conn.execute(
-                "SELECT original_tokens, compressed_tokens FROM compression_events "
-                "WHERE feature = 'loop_detection' AND timestamp >= ? AND compressed_tokens > 0",
+            detail_rows = conn.execute(
+                "SELECT detail FROM compression_events "
+                "WHERE feature = 'loop_detection' AND timestamp >= ? AND detail IS NOT NULL",
                 (cutoff,),
             ).fetchall()
         finally:
@@ -19072,21 +19079,22 @@ def _estimate_behavioral_savings(days=30):
         loop_tokens_saved = int(row[1] or 0)
         if loop_events <= 0 or loop_tokens_saved <= 0:
             return zero
-        # Empirical factor: mean observed repetition, clamped to [1, 20] so a
-        # pathological ratio cannot blow up the estimate. Fall back to the env
-        # constant when no usable ratio exists.
-        ratios = [int(o) / int(c) for o, c in ratio_rows if c and int(c) > 0 and int(o) > int(c)]
-        if ratios:
-            empirical_factor = max(1.0, min(20.0, sum(ratios) / len(ratios)))
-        else:
-            empirical_factor = float(_BEHAVIORAL_PREVENTED_LOOP_ITERATIONS)
-        est_tokens = int(loop_tokens_saved * empirical_factor)
+        # Observed repetition counts from the detail string (e.g. "count=4"), for
+        # transparency only -- this is what HAPPENED, reported alongside the estimate.
+        counts = []
+        for (d,) in detail_rows:
+            m = re.search(r"count=(\d+)", str(d or ""))
+            if m:
+                counts.append(int(m.group(1)))
+        avg_count = (sum(counts) / len(counts)) if counts else 0.0
+        # Conservative continuation factor: one more equivalent looping span.
+        est_tokens = int(loop_tokens_saved * _BEHAVIORAL_CONTINUATION_FACTOR)
         cost_per_mtok = _estimate_compression_cost_per_mtok()
         return {
             "tokens_saved": est_tokens,
             "cost_saved_usd": round(est_tokens * cost_per_mtok / 1_000_000, 4),
             "loop_events": loop_events,
-            "prevented_iterations": round(empirical_factor, 2),
+            "prevented_iterations": round(avg_count, 1),
             "evidence": "estimated",
         }
     except Exception:
@@ -19381,6 +19389,37 @@ def _earliest_model_mix(lookback_days=14):
 _ROUTABLE_OPUS_FRACTION = _float_env("TOKEN_OPTIMIZER_ROUTABLE_OPUS_FRACTION", 0.3)
 
 
+# Explicit pre-Token-Optimizer Opus share, when the user knows their baseline
+# (history may not reach back far enough). 0.0 = unset (fall back to snapshot/history).
+_BASELINE_OPUS_SHARE = _float_env("TOKEN_OPTIMIZER_BASELINE_OPUS_SHARE", 0.0)
+
+
+def _pretool_baseline_mix():
+    """This user's OWN explicit pre-TO model mix, or None. PER-USER, not a default.
+
+    The normal baseline is each user's earliest measured history (see
+    _earliest_model_mix). This override exists only for a user whose history does
+    not reach back to their pre-Token-Optimizer era, so they can record their own
+    true starting point. It is read per-install from a `pretool_baseline.json` in
+    THIS user's SNAPSHOT_DIR (`{"opus_share": <their value>}`), or their
+    TOKEN_OPTIMIZER_BASELINE_OPUS_SHARE env. There is no shared/default value
+    (unset -> fall back to their own history). Remaining share goes to Sonnet.
+    Never raises.
+    """
+    share = 0.0
+    try:
+        bpath = SNAPSHOT_DIR / "pretool_baseline.json"
+        if bpath.exists():
+            share = float(json.loads(bpath.read_text(encoding="utf-8")).get("opus_share", 0.0) or 0.0)
+    except (json.JSONDecodeError, OSError, ValueError, TypeError):
+        share = 0.0
+    if share <= 0.0:
+        share = _BASELINE_OPUS_SHARE
+    if not (0.0 < share <= 1.0):
+        return None
+    return {"opus": share, "sonnet": round(1.0 - share, 4)}
+
+
 def _compute_model_routing_savings(days=30):
     """Model-routing savings: realized (mix shift vs baseline) + potential (remaining Opus).
 
@@ -19412,19 +19451,25 @@ def _compute_model_routing_savings(days=30):
         if not cur_shares or cur_total <= 0:
             return zero
 
-        # Baseline mix: snapshot capture first, else earliest measured history.
+        # Baseline mix: explicit pre-TO baseline (user knows it) first, then
+        # snapshot capture, else earliest measured history.
         baseline_shares = None
         baseline_source = None
-        try:
-            snap_path = SNAPSHOT_DIR / "snapshot_before.json"
-            if snap_path.exists():
-                snap = json.loads(snap_path.read_text(encoding="utf-8"))
-                mm = (snap.get("model_mix") or {}).get("shares") or {}
-                if mm:
-                    baseline_shares = mm
-                    baseline_source = "snapshot"
-        except (json.JSONDecodeError, OSError, ValueError):
-            pass
+        explicit = _pretool_baseline_mix()
+        if explicit:
+            baseline_shares = explicit
+            baseline_source = "pretool_baseline"
+        if not baseline_shares:
+            try:
+                snap_path = SNAPSHOT_DIR / "snapshot_before.json"
+                if snap_path.exists():
+                    snap = json.loads(snap_path.read_text(encoding="utf-8"))
+                    mm = (snap.get("model_mix") or {}).get("shares") or {}
+                    if mm:
+                        baseline_shares = mm
+                        baseline_source = "snapshot"
+            except (json.JSONDecodeError, OSError, ValueError):
+                pass
         if not baseline_shares:
             early = _earliest_model_mix()
             if early:
@@ -19443,6 +19488,11 @@ def _compute_model_routing_savings(days=30):
 
         baseline_rate = _blended_rate(baseline_shares)
         current_rate = _blended_rate(cur_shares)
+        # cur_total (model_daily.total_tokens) is already BILLABLE tokens only
+        # (fresh_input + cache_create + output; cache-reads excluded — see
+        # model_usage in _parse_session_jsonl). Pricing the full billable volume at
+        # the per-model rate delta is correct; if anything it slightly UNDER-states,
+        # since output and cache-writes cost more than the plain input rate used here.
         realized_cost = max(0.0, (baseline_rate - current_rate) * cur_total / 1_000_000)
 
         # Potential: route a conservative share of remaining Opus to Sonnet.
@@ -19951,8 +20001,8 @@ def savings_report(days=30, as_json=False):
     if beh_cost > 0:
         beh_monthly = beh_cost / max(days, 1) * 30
         print(f"  + est. behavioral (loops prevented): ~${beh_monthly:.2f}/mo "
-              f"({behavioral.get('loop_events', 0)} loops caught x {behavioral.get('prevented_iterations', 3)} "
-              f"prevented iterations) [estimated]")
+              f"({behavioral.get('loop_events', 0)} loops caught, repeated ~{behavioral.get('prevented_iterations', 0)}x "
+              f"before catch; avoided continuation estimated at one more span) [estimated]")
 
     # Estimated tier — cache drops (coffee-break reloads) that re-write the prefix.
     cache_drop = summary.get("cache_drop") or {}
