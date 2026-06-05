@@ -3519,6 +3519,47 @@ var DB = (function() {
           '<div style="margin-top:var(--s-2);font-size:13px;color:var(--c-text-dim);font-family:var(--font-mono);line-height:1.8;">' + esc(toks) + ' tokens/session<br>' + esc(opus) + ' Opus</div>' +
         '</div>';
       }
+      // "Where it comes from": waterfall attribution of the $/mo headline. Each lever's
+      // monthly_usd reconciles to the headline (sequential attribution, no residual). A
+      // proportional bar over the POSITIVE levers + a labelled legend; negative levers
+      // (a token class that grew) are shown honestly as a "-$X" note, not in the bar.
+      function baBreakdown(ba) {
+        var rows = (ba && ba.breakdown) || [];
+        if (!rows.length) return '';
+        var posTotal = 0;
+        rows.forEach(function(r){ var v = Number(r.monthly_usd) || 0; if (v > 0) posTotal += v; });
+        // No positive levers (every class grew) means there is nothing to attribute in
+        // the bar, so skip the whole section rather than render an empty bar with a heading.
+        // Unreachable while monthly_savings_usd>0 gates this card, but cheap defense.
+        if (posTotal <= 0) return '';
+        // Stable color per lever keyed on the machine `key`, so a given lever keeps its
+        // color across users/renders regardless of its sorted position. Hardcoded CSS
+        // color strings only; never source palette values from data (CSS-injection safe).
+        var palette = {routing: 'var(--c-accent-cyan)', context_rereads: 'var(--c-accent-blue)',
+          structural: '#5e9bd6', fresh_input: '#7a8cc4', output: '#9a7fb0'};
+        var fallback = ['var(--c-accent-cyan)', 'var(--c-accent-blue)', '#5e9bd6', '#7a8cc4', '#9a7fb0'];
+        var seg = '', legend = '';
+        rows.forEach(function(r, i){
+          var v = Number(r.monthly_usd) || 0;
+          var c = palette[r.key] || fallback[i % fallback.length];
+          var lbl = r.label || r.key || '';
+          if (v > 0) {
+            var pct = (v / posTotal * 100).toFixed(2);
+            seg += '<div class="model-segment" title="' + esc(lbl) + ': ' + esc(money(v)) + '/mo" style="width:' + pct + '%;background:' + c + ';"></div>';
+          }
+          legend += '<span style="display:inline-flex;align-items:center;gap:6px;margin-right:var(--s-3);white-space:nowrap;">' +
+            '<span style="width:9px;height:9px;border-radius:2px;background:' + (v > 0 ? c : 'rgba(255,255,255,0.18)') + ';flex:none;"></span>' +
+            '<span style="color:var(--c-text-dim);">' + esc(lbl) + '</span>' +
+            '<span style="color:' + (v < 0 ? 'var(--c-text-dim)' : 'var(--c-text-main)') + ';font-family:var(--font-mono);">' + (v < 0 ? '-' + esc(money(Math.abs(v))) : esc(money(v))) + '/mo</span>' +
+          '</span>';
+        });
+        return '<div style="margin-top:var(--s-4);">' +
+          '<div class="label" style="margin-bottom:6px;">Where it comes from</div>' +
+          '<div style="display:flex;height:12px;border-radius:6px;overflow:hidden;background:rgba(255,255,255,0.06);box-shadow:0 0 12px var(--c-accent-glow);">' + seg + '</div>' +
+          '<div style="margin-top:var(--s-2);font-size:13px;line-height:2;display:flex;flex-wrap:wrap;">' + legend + '</div>' +
+          (ba.breakdown_caveat ? '<div style="margin-top:6px;font-size:11.5px;color:var(--c-text-dim);font-family:var(--font-mono);line-height:1.6;max-width:760px;">' + esc(ba.breakdown_caveat) + '</div>' : '') +
+        '</div>';
+      }
       var beforeOpusPct = Math.round((Number(ba.before_opus) || 0) * 100);
       var baExplicit = ba.baseline_source === 'pretool_baseline';  // stable flag, not display prose
       html += '<div class="card wide" style="padding:var(--s-5) var(--s-4);margin-bottom:var(--s-3);">' +
@@ -3528,6 +3569,7 @@ var DB = (function() {
           '<span style="font-size:24px;color:var(--c-text-dim);font-family:var(--font-mono);">/mo</span>' +
         '</div>' +
         '<div style="margin-top:var(--s-2);font-size:15px;color:var(--c-text-dim);line-height:1.65;max-width:760px;">Your <span style="color:var(--c-text-main);">' + (Number(ba.sessions_per_month) || 0).toLocaleString() + ' sessions a month</span>, run the way your earliest sessions did (heavier sessions, ' + beforeOpusPct + '% Opus), would cost about ' + money(ba.before_cost_per_session) + ' each. They cost ' + money(ba.after_cost_per_session) + ' now. Lighter sessions, lighter sub-agents, smarter routing &mdash; compounded across every session. Most of that old per-session cost was long sessions re-reading their cached context turn after turn; your shorter sessions cut that.</div>' +
+        baBreakdown(ba) +
         '<div style="display:flex;gap:var(--s-5);flex-wrap:wrap;margin-top:var(--s-4);padding-top:var(--s-3);border-top:1px solid rgba(255,255,255,0.06);">' +
           baCol(baExplicit ? 'Before · your baseline' : 'Before · earliest', money(ba.before_cost_per_session), fmtTok(ba.before_tokens), beforeOpusPct + '%', 'var(--c-text-main)', true) +
           baCol('Now', money(ba.after_cost_per_session), fmtTok(ba.after_tokens), Math.round((Number(ba.after_opus)||0) * 100) + '%', 'var(--c-accent-cyan)', false) +

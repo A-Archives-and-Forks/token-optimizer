@@ -77,6 +77,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import platform
 from collections import deque
@@ -19748,13 +19749,20 @@ def _estimate_before_after_savings(days=30, before_n=60):
     Returns {before_cost_per_session, after_cost_per_session, savings_per_session,
              sessions_per_month, monthly_savings_usd, before_opus, after_opus,
              before_tokens, after_tokens, before_sessions, after_sessions,
-             baseline_source ("pretool_baseline" | "earliest"), evidence}.
+             baseline_source ("pretool_baseline" | "earliest"),
+             breakdown ([{key, waterfall_index, label, monthly_usd}], sorted
+               largest-first; `key`/`waterfall_index` are the stable machine fields,
+               `label` is presentational and may change),
+             breakdown_caveat (str), evidence}.
+    On an empty result, `reason` is one of "insufficient_history" / "net_negative" /
+    "no_recent_sessions" (None when never computed).
     """
     zero = {"before_cost_per_session": 0.0, "after_cost_per_session": 0.0,
             "savings_per_session": 0.0, "sessions_per_month": 0,
             "monthly_savings_usd": 0.0, "before_opus": 0.0, "after_opus": 0.0,
             "before_tokens": 0, "after_tokens": 0, "before_sessions": 0,
-            "after_sessions": 0, "baseline_source": None, "evidence": "estimated"}
+            "after_sessions": 0, "baseline_source": None, "breakdown": [],
+            "breakdown_caveat": "", "reason": None, "evidence": "estimated"}
     try:
         if not TRENDS_DB.exists():
             return zero
@@ -19780,7 +19788,8 @@ def _estimate_before_after_savings(days=30, before_n=60):
         finally:
             conn.close()
         if bn < 20 or an < 10 or recent_n < 5:
-            return {**zero, "before_sessions": bn, "after_sessions": an}
+            return {**zero, "before_sessions": bn, "after_sessions": an,
+                    "reason": "insufficient_history"}
 
         # Pre-TO Opus share: explicit baseline if set (most accurate when the earliest
         # captured data is already optimized), else the user's MEASURED earliest mix —
@@ -19803,9 +19812,11 @@ def _estimate_before_after_savings(days=30, before_n=60):
         # vs sonnet, then blend by the era's Opus share. Opus-vs-rest binary by design
         # (the baseline IS an opus_share); omitting haiku from the current mix is
         # conservative (haiku is cheaper, so it only nudges the "after" cost upward).
+        tier = _load_pricing_tier()  # resolve once; cost_per_session runs 7x below
+
         def cost_per_session(fi, cw, cr, out, opus_share):
-            co = _get_model_cost("opus", int(fi), int(out), int(cr), int(cw))
-            cs = _get_model_cost("sonnet", int(fi), int(out), int(cr), int(cw))
+            co = _get_model_cost("opus", int(fi), int(out), int(cr), int(cw), tier=tier)
+            cs = _get_model_cost("sonnet", int(fi), int(out), int(cr), int(cw), tier=tier)
             return opus_share * co + (1 - opus_share) * cs
 
         before_cost = cost_per_session(bfi, bcw, bcr, bout, before_opus)
@@ -19813,9 +19824,62 @@ def _estimate_before_after_savings(days=30, before_n=60):
         per_session = before_cost - after_cost
         sessions_per_month = int(recent_n / max(days, 1) * 30)
         if per_session <= 0 or sessions_per_month <= 0:
+            # Distinguish "costs went up net" from "no recent activity" so a consumer
+            # can tell why the transformation panel is empty (vs thin history above).
             return {**zero, "before_sessions": bn, "after_sessions": an,
                     "before_cost_per_session": round(before_cost, 4),
-                    "after_cost_per_session": round(after_cost, 4)}
+                    "after_cost_per_session": round(after_cost, 4),
+                    "reason": "net_negative" if per_session <= 0 else "no_recent_sessions"}
+
+        # --- Attribution breakdown of the per-session delta (waterfall) ---
+        # The headline delta is driven by exactly two levers inside cost_per_session:
+        # the per-session token footprint (fi/cw/cr/out) and the Opus share. Decompose
+        # it by morphing the BEFORE cohort into the AFTER cohort one lever at a time,
+        # crediting each the incremental cost it removes. The five UNROUNDED steps
+        # telescope to `per_session` (no residual/interaction term); after per-lever
+        # rounding the displayed lines reconcile to the headline within a few cents.
+        # Sequential attribution is order-dependent, so the order is fixed and disclosed:
+        # routing first (held at the before token mix), then the footprint collapse
+        # priced at today's mix, split by token class heaviest-first. `waterfall_index`
+        # preserves that causal order for machines; the list is sorted largest-first
+        # for display.
+        v0 = cost_per_session(bfi, bcw, bcr, bout, after_opus)  # before tokens, today's mix
+        s_route = before_cost - v0
+        v1 = cost_per_session(bfi, bcw, acr, bout, after_opus)  # context re-reads collapse
+        v2 = cost_per_session(bfi, acw, acr, bout, after_opus)  # structural prefix
+        v3 = cost_per_session(afi, acw, acr, bout, after_opus)  # fresh input
+        # final class: output (v3 holds before-output bout; after_cost holds after-output aout)
+        # Each lever: (key, savings-framed label, grew-framed label, per-session delta).
+        # A negative delta means that class GREW (a cost increase), so the grew label is
+        # shown, so a "-$X" line never reads as if cutting that class saved money.
+        _levers = [
+            ("routing", "Smarter routing (less Opus)",
+             "Routing shifted toward Opus (added cost)", s_route),
+            ("context_rereads", "Lighter sessions (fewer context re-reads)",
+             "Heavier context re-reads (added cost)", v0 - v1),
+            ("structural", "Trimmed structural prefix",
+             "Larger structural prefix (added cost)", v1 - v2),
+            ("fresh_input", "Less fresh input per session",
+             "More fresh input per session (added cost)", v2 - v3),
+            ("output", "Less output per session",
+             "More output per session (added cost)", v3 - after_cost),
+        ]
+        breakdown = sorted(
+            ({"key": k, "waterfall_index": i,
+              "label": (pos if d >= 0 else neg),
+              "monthly_usd": round(d * sessions_per_month, 2)}
+             for i, (k, pos, neg, d) in enumerate(_levers)),
+            key=lambda x: abs(x["monthly_usd"]), reverse=True,
+        )
+        breakdown_caveat = (
+            "Waterfall attribution of the monthly figure: each lever is credited the "
+            "cost it removes as your sessions morph from the earliest cohort to now. "
+            "Attribution is sequential (routing credited first, then footprint by token "
+            "class); lines are shown largest-first and sum to the headline (±a few cents "
+            "from rounding). A negative line means that class grew. Sub-agent weight is "
+            "folded into the per-session token volume; it can't be isolated from session "
+            "aggregates."
+        )
 
         return {
             "before_cost_per_session": round(before_cost, 4),
@@ -19830,9 +19894,11 @@ def _estimate_before_after_savings(days=30, before_n=60):
             "before_sessions": bn,
             "after_sessions": an,
             "baseline_source": baseline_source,
+            "breakdown": breakdown,
+            "breakdown_caveat": breakdown_caveat,
             "evidence": "estimated",
         }
-    except (sqlite3.Error, OSError, ValueError, TypeError):
+    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, OverflowError):
         return zero
 
 
@@ -20128,6 +20194,19 @@ def savings_report(days=30, as_json=False):
         print(f"    {ba.get('sessions_per_month', 0):,} sessions/mo, pre-TO way (~{ba.get('before_opus', 0) * 100:.0f}% Opus, "
               f"heavy) ${ba.get('before_cost_per_session', 0):.2f}/session vs ${ba.get('after_cost_per_session', 0):.2f}/session now "
               f"(~{ba.get('after_opus', 0) * 100:.0f}% Opus). Cut ${ba.get('savings_per_session', 0):.2f}/session [estimated]")
+        # Where it comes from: the waterfall attribution (reconciles to the headline).
+        ba_breakdown = ba.get("breakdown") or []
+        if ba_breakdown:
+            print("    Where it comes from:")
+            for lev in ba_breakdown:
+                amt = float(lev.get("monthly_usd", 0) or 0)
+                sign = "-" if amt < 0 else " "
+                print(f"      {sign}${abs(amt):>8,.0f}/mo  {lev.get('label', lev.get('key', ''))}")
+            caveat = ba.get("breakdown_caveat") or ""
+            if caveat:
+                # Wrap the caveat so the CLI surfaces the same disclosure as the dashboard.
+                for line in textwrap.wrap(caveat, width=72):
+                    print(f"      {line}")
 
     pricing = summary.get("pricing_detail") or {}
     p_model = pricing.get("model", "sonnet")
