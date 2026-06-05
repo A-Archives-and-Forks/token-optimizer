@@ -62,6 +62,43 @@ th, td { padding: 10px !important; }
 .section-header h1 { font-size: 36px !important; }
 .section-header p { font-size: 17px !important; line-height: 1.6 !important; }
 
+/* Foldable elaboration ("click to read more"). Native <details>, so it works
+   inside innerHTML-injected panels with zero JS wiring. The number/headline
+   stays visible; the methodology prose folds away so the panel can breathe. */
+.fold { margin-top: var(--s-3); }
+.fold > summary {
+  cursor: pointer; list-style: none; display: inline-flex; align-items: center;
+  gap: 8px; font-family: var(--font-mono); font-size: 14px;
+  color: var(--c-accent-cyan); user-select: none; padding: 6px 0;
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::before {
+  content: "\25B8"; font-size: 11px; display: inline-block;
+  transition: transform .15s ease;
+}
+.fold[open] > summary::before { transform: rotate(90deg); }
+.fold > summary:hover { color: var(--c-text-main); }
+.fold__body {
+  padding: var(--s-2) 0 var(--s-1); font-size: 15px; line-height: 1.85;
+  color: var(--c-text-dim); max-width: 62ch; text-wrap: pretty;
+}
+.fold__body p { margin: 0 0 var(--s-3); }
+.fold__body p:last-child { margin-bottom: 0; }
+.fold__body strong, .fold__body b { color: var(--c-text-main); font-weight: 600; }
+
+/* Visible lead sentence above a fold: sized to read, capped near 62ch so lines
+   break at natural phrase boundaries instead of mid-thought. */
+.lede {
+  margin-top: var(--s-3); font-size: 17px; line-height: 1.8;
+  color: var(--c-text-dim); max-width: 62ch; text-wrap: pretty;
+}
+.lede strong, .lede b { color: var(--c-text-main); font-weight: 500; }
+/* Plain inline note (methodology one-liners under bars/cards). */
+.note {
+  font-size: 14px; line-height: 1.75; color: var(--c-text-dim);
+  max-width: 62ch; text-wrap: pretty;
+}
+
 body::before {
   content: "";
   position: fixed;
@@ -1637,6 +1674,7 @@ window.__TOKEN_DATA__ = null;
       <div class="brand"><span></span> Token Optimizer <small id="brand-runtime" style="display:block;margin-left:27px;margin-top:2px;font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--c-text-dim);font-weight:600;"></small></div>
       <div class="nav-menu">
         <a class="nav-item active" data-view="overview">Overview</a>
+        <a class="nav-item" data-view="savings">Savings</a>
         <a class="nav-item" data-view="quick">Quick Wins <span class="nav-badge" id="badge-quick"></span></a>
         <a class="nav-item" data-view="medium">Medium <span class="nav-badge" id="badge-medium"></span></a>
         <a class="nav-item" data-view="deep">Deep <span class="nav-badge" id="badge-deep"></span></a>
@@ -1696,6 +1734,8 @@ window.__TOKEN_DATA__ = null;
       </div>
     </div>
 
+    <!-- Savings View -->
+    <div class="view" id="view-savings"></div>
     <!-- Quick Wins View -->
     <div class="view" id="view-quick"></div>
     <!-- Medium View -->
@@ -2162,6 +2202,7 @@ var DB = (function() {
     // empty view.
     safeRender('Nav', null, renderNav);
     safeRender('Overview', 'overview', renderOverview);
+    safeRender('Savings', 'savings', renderSavings);
     safeRender('Quick Wins', 'quick', function() { renderSectionViews('quick'); });
     safeRender('Medium Effort', 'medium', function() { renderSectionViews('medium'); });
     safeRender('Deep Optimization', 'deep', function() { renderSectionViews('deep'); });
@@ -2879,7 +2920,7 @@ var DB = (function() {
     return [{ heading: 'Details', text: detail }];
   }
 
-  var analyticsViews = { trends: true, health: true, hooks: true, manage: true };
+  var analyticsViews = { savings: true, trends: true, health: true, hooks: true, manage: true };
 
   function renderTrends() {
     var el = document.getElementById('view-trends');
@@ -3421,6 +3462,305 @@ var DB = (function() {
     html += '</tbody></table>';
     html += '<div style="font-size:12px;color:var(--c-text-dim);font-family:var(--font-mono);margin-top:var(--s-2);">Click any row to expand per-session details.</div>';
     return html;
+  }
+
+  function renderSavings() {
+    var el = document.getElementById('view-savings');
+    if (!el) return;
+
+    var s = data.savings || {};
+    var days = Number(s.period_days) || 30;
+    var mr  = s.model_routing       || {};
+    var cd  = s.cache_drop          || {};
+    var ow  = s.output_waste        || {};
+    var beh = s.behavioral_estimate || {};
+    var sd  = s.structural_detail   || {};
+    var sp  = s.structural_potential|| {};
+    var unc = s.uncaptured_runtime  || {};
+    var si  = s.since_install        || null;
+
+    function mo(c) { return (Number(c) || 0) / Math.max(days, 1) * 30; }
+    function money(n) {
+      var v = Number(n) || 0;
+      if (v >= 1000) return '$' + Math.round(v).toLocaleString();
+      if (v >= 100)  return '$' + v.toFixed(0);
+      if (v >= 10)   return '$' + v.toFixed(1);
+      return '$' + v.toFixed(2);
+    }
+    function prettyDate(d) {
+      if (!d) return 'install';
+      try { return new Date(d + 'T00:00:00').toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'}); }
+      catch (e) { return d; }
+    }
+    function fmtTok(n) {
+      var v = Number(n) || 0;
+      if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+      if (v >= 1e3) return Math.round(v / 1e3) + 'K';
+      return String(Math.round(v));
+    }
+    // Foldable "read more". Pass body as ready HTML (wrap prose in <p>...</p>).
+    // Native <details> means click-to-unfold works with no event wiring.
+    function fold(summary, bodyHtml) {
+      // summary is escaped (it is always plain label text); bodyHtml is trusted
+      // markup assembled by the caller from esc()'d data + static tags.
+      return '<details class="fold"><summary>' + esc(summary) + '</summary>' +
+        '<div class="fold__body">' + bodyHtml + '</div></details>';
+    }
+
+    // ---- mechanism pillars (structural / runtime / behavioral). Behavioral holds only
+    // what you're actually getting (realized routing + estimated loop prevention); cache-drop
+    // and output-waste are OPPORTUNITY (avoidable waste TO does not yet prevent), not here. ----
+    var mce = s.mcp_cap_estimated || {}, ce = s.contamination_exit || {}, hr = s.handover_rerun || {};
+    var structMo  = mo(sd.cost_saved_usd);
+    var runtimeMo = Math.max(0, mo(s.total_cost_usd) - structMo) + mo(unc.cost_saved_usd) + mo(mce.cost_saved_usd);
+    // behavioral holds every estimated behavioral item (routing + loops + the cohort
+    // estimators), so pillars + estimated always reconcile to gettingMo even once
+    // contamination_exit / handover_rerun populate.
+    var behavMo   = mo(mr.realized_cost_usd) + mo(beh.cost_saved_usd) + mo(ce.cost_saved_usd) + mo(hr.cost_saved_usd);
+    // ---- trust tiers: measured / estimated / opportunity. Opportunity NEVER folds into the headline. ----
+    // Measured = billable events we metered (runtime compression + realized model routing).
+    var measuredMo = mo(s.total_cost_usd) + mo(mr.realized_cost_usd);
+    // Estimated = genuine TO-realized counterfactuals grounded in YOUR behavior; each carries a sample size.
+    // (Pillars + estimated reconcile to gettingMo: mcp_cap folds into runtime.)
+    var estItems = [
+      { label: 'loops prevented',                amt: mo(beh.cost_saved_usd), n: Number(beh.loop_events) || 0,        unit: 'events' },
+      { label: 'sub-agent runtime',              amt: mo(unc.cost_saved_usd), n: Number(unc.subagent_dispatches) || 0, unit: 'dispatches' },
+      { label: 'MCP output cap',                 amt: mo(mce.cost_saved_usd), n: Number(mce.events) || 0,             unit: 'capped results' },
+      { label: 'avoided rework (heeded nudges)', amt: mo(ce.cost_saved_usd),  n: Number(ce.heeded_sessions) || 0,     unit: 'heeded', conf: ce.confidence },
+      { label: 'continuity handover',            amt: mo(hr.cost_saved_usd),  n: Number(hr.restored_sessions) || 0,    unit: 'restored', conf: hr.confidence }
+    ].filter(function(it){ return it.amt > 0 || it.conf; });
+    var estimatedMo = estItems.reduce(function(a, b){ return a + b.amt; }, 0);
+    // What you're getting = measured + estimated (both real value; estimated shown split-out, never hidden).
+    var gettingMo = measuredMo + estimatedMo;
+    // Opportunity = realizable if you act; never realized, never summed into "getting".
+    // output-waste is $ here; cache-drop is shown separately in TOKENS (re-written prefix) —
+    // its $ is Anthropic-specific (OpenAI/OpenCode cache writes are free), but the token count
+    // is a provider-neutral fact, matching Claude Code's own token-denominated display.
+    var recl = s.stale_reads_reclaimable || {};
+    var cdTokensMo = Math.round((Number(cd.est_drops) || 0) * (Number(cd.prefix_tokens) || 0) / Math.max(days, 1) * 30);
+    var addnlMo      = mo(sp.cost_saved_usd) + mo(mr.potential_cost_usd);
+    var opportunityMo = addnlMo + mo(recl.cost_usd) + mo(ow.cost_saved_usd);
+    var unusedSkills = Number(sp.unused_skills) || 0;
+    var currOpus  = Math.round((Number(mr.current_opus_share) || 0) * 100);
+    var ts = data.generated_at ? new Date(data.generated_at).toLocaleString() : 'unknown';
+
+    var html = '<div class="section-header">' +
+      '<div class="label">Value</div><h1>Savings</h1>' +
+      '<p>Two views of what Token Optimizer is worth to you: the full value of working lighter, and the savings we counted action by action. On a flat monthly plan, this is the API spend you are not paying.</p>' +
+      '</div>' +
+      '<div class="last-updated">Updated ' + esc(ts) + ' &middot; refreshes daily</div>';
+
+    // ---- HERO: the before/after transformation (THE headline). Current activity priced at
+    // your pre-TO per-session weight + mix vs actual — comprehensive (volume + structural +
+    // routing + sub-agents), grounded in your own earliest-vs-recent sessions. ----
+    var ba = s.before_after || {};
+    if (Number(ba.monthly_savings_usd) > 0) {
+      function baCol(title, cost, toks, opus, accent, dim) {
+        return '<div>' +
+          '<div class="label" style="margin-bottom:6px;">' + esc(title) + '</div>' +
+          '<div style="font-family:var(--font-mono);font-weight:300;font-size:34px;line-height:1;color:' + accent + ';' + (dim ? '' : 'text-shadow:0 0 12px var(--c-accent-glow);') + '">' + esc(cost) + '<span style="font-size:14px;color:var(--c-text-dim);">/session</span></div>' +
+          '<div style="margin-top:var(--s-2);font-size:14px;color:var(--c-text-dim);font-family:var(--font-mono);line-height:1.95;">' + esc(toks) + ' tokens/session<br>' + esc(opus) + ' Opus</div>' +
+        '</div>';
+      }
+      // "Where it comes from": waterfall attribution of the $/mo headline. Each lever's
+      // monthly_usd reconciles to the headline (sequential attribution, no residual). A
+      // proportional bar over the POSITIVE levers + a labelled legend; negative levers
+      // (a token class that grew) are shown honestly as a "-$X" note, not in the bar.
+      function baBreakdown(ba) {
+        var rows = (ba && ba.breakdown) || [];
+        if (!rows.length) return '';
+        var posTotal = 0;
+        rows.forEach(function(r){ var v = Number(r.monthly_usd) || 0; if (v > 0) posTotal += v; });
+        // No positive levers (every class grew) means there is nothing to attribute in
+        // the bar, so skip the whole section rather than render an empty bar with a heading.
+        // Unreachable while monthly_savings_usd>0 gates this card, but cheap defense.
+        if (posTotal <= 0) return '';
+        // Stable color per lever keyed on the machine `key`, so a given lever keeps its
+        // color across users/renders regardless of its sorted position. Hardcoded CSS
+        // color strings only; never source palette values from data (CSS-injection safe).
+        var palette = {routing: 'var(--c-accent-cyan)', context_rereads: 'var(--c-accent-blue)',
+          structural: '#5e9bd6', fresh_input: '#7a8cc4', output: '#9a7fb0'};
+        var fallback = ['var(--c-accent-cyan)', 'var(--c-accent-blue)', '#5e9bd6', '#7a8cc4', '#9a7fb0'];
+        var seg = '', legend = '';
+        rows.forEach(function(r, i){
+          var v = Number(r.monthly_usd) || 0;
+          var c = palette[r.key] || fallback[i % fallback.length];
+          var lbl = r.label || r.key || '';
+          if (v > 0) {
+            var pct = (v / posTotal * 100).toFixed(2);
+            seg += '<div class="model-segment" title="' + esc(lbl) + ': ' + esc(money(v)) + '/mo" style="width:' + pct + '%;background:' + c + ';"></div>';
+          }
+          legend += '<span style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;">' +
+            '<span style="width:9px;height:9px;border-radius:2px;background:' + (v > 0 ? c : 'rgba(255,255,255,0.18)') + ';flex:none;"></span>' +
+            '<span style="color:var(--c-text-dim);">' + esc(lbl) + '</span>' +
+            '<span style="color:' + (v < 0 ? 'var(--c-text-dim)' : 'var(--c-text-main)') + ';font-family:var(--font-mono);">' + (v < 0 ? '-' + esc(money(Math.abs(v))) : esc(money(v))) + '/mo</span>' +
+          '</span>';
+        });
+        return '<div style="margin-top:var(--s-4);">' +
+          '<div class="label" style="margin-bottom:var(--s-2);">Where it comes from</div>' +
+          '<div style="display:flex;height:12px;border-radius:6px;overflow:hidden;background:rgba(255,255,255,0.06);box-shadow:0 0 12px var(--c-accent-glow);">' + seg + '</div>' +
+          '<div style="margin-top:var(--s-3);font-size:14px;line-height:2.2;display:flex;flex-wrap:wrap;gap:0 var(--s-3);">' + legend + '</div>' +
+          '<div class="note" style="margin-top:var(--s-2);">Each line is the share it accounts for, largest first, and the lines add up to the total. A minus sign means that part grew instead.</div>' +
+        '</div>';
+      }
+      var beforeOpusPct = Math.round((Number(ba.before_opus) || 0) * 100);
+      var baExplicit = ba.baseline_source === 'pretool_baseline';  // stable flag, not display prose
+      html += '<div class="card wide" style="padding:var(--s-5) var(--s-4);margin-bottom:var(--s-3);">' +
+        '<div class="label" style="margin-bottom:var(--s-2);">The big picture &middot; estimated</div>' +
+        '<div style="display:flex;align-items:baseline;gap:var(--s-2);flex-wrap:wrap;">' +
+          '<span style="font-family:var(--font-mono);font-weight:300;font-size:84px;line-height:0.9;color:var(--c-accent-cyan);text-shadow:0 0 28px var(--c-accent-glow);letter-spacing:-0.02em;">' + money(ba.monthly_savings_usd) + '</span>' +
+          '<span style="font-size:24px;color:var(--c-text-dim);font-family:var(--font-mono);">/mo</span>' +
+        '</div>' +
+        '<div class="lede">Running this month\'s work the heavy way you used to would cost about <strong>' + money(ba.monthly_savings_usd) + '/mo more</strong> than it does now. That is the value of working lighter, measured against your own pre-tool baseline.</div>' +
+        '<div class="lede" style="margin-top:var(--s-2);">Your <strong>' + (Number(ba.sessions_per_month) || 0).toLocaleString() + ' sessions a month</strong> ran about <strong>' + money(ba.before_cost_per_session) + '</strong> each back then. They run <strong>' + money(ba.after_cost_per_session) + '</strong> now.</div>' +
+        fold('What changed',
+          '<p>Your earliest sessions ran heavier, with ' + beforeOpusPct + '% of the work on Opus. Now sessions are lighter, sub-agents are lighter, and routine work runs on cheaper models. That compounds across every session you run.</p>' +
+          '<p>Most of the old cost was long sessions re-reading their cached context, turn after turn. Shorter sessions cut that, and Token Optimizer flags when it is happening so you know to start fresh.</p>') +
+        baBreakdown(ba) +
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--s-4) var(--s-5);margin-top:var(--s-4);padding-top:var(--s-4);border-top:1px solid rgba(255,255,255,0.06);">' +
+          baCol(baExplicit ? 'Before, your baseline' : 'Before, baseline window', money(ba.before_cost_per_session), fmtTok(ba.before_tokens), beforeOpusPct + '%', 'var(--c-text-main)', true) +
+          baCol('Now', money(ba.after_cost_per_session), fmtTok(ba.after_tokens), Math.round((Number(ba.after_opus)||0) * 100) + '%', 'var(--c-accent-cyan)', false) +
+          '<div><div class="label" style="margin-bottom:6px;">Cut per session</div>' +
+            '<div style="font-family:var(--font-mono);font-weight:300;font-size:34px;line-height:1;color:var(--c-accent-cyan);text-shadow:0 0 12px var(--c-accent-glow);">' + money(ba.savings_per_session) + '</div>' +
+            '<div style="margin-top:var(--s-2);font-size:14px;color:var(--c-text-dim);font-family:var(--font-mono);line-height:1.95;">across a ' + (Number(ba.before_sessions) || 0).toLocaleString() + '-session baseline</div></div>' +
+        '</div>' +
+        fold('How we work this number out',
+          '<p>We measure how heavy your sessions ran before Token Optimizer, price this month\'s workload at both rates, and report the difference.</p>' +
+          '<p>The baseline is conservative by design. It comes from your earliest recorded sessions, which were already running Token Optimizer, so your true pre-tool sessions were heavier. This figure understates the full gap rather than inflating it.</p>' +
+          (baExplicit
+            ? ''
+            // Offer the set-baseline tip only when the user has not already pinned one.
+            : '<p style="color:var(--c-accent-cyan);">For a sharper baseline, run <strong>/token-optimizer set-baseline --opus 0.95</strong> to pin your real pre-install model mix.</p>') +
+          // Volume-growth context: when you run many more sessions now than in the
+          // baseline era, part of the monthly figure is volume, stated as fact.
+          (Number(ba.before_sessions) > 0 && Number(ba.sessions_per_month) > Number(ba.before_sessions) * 1.5
+            ? '<p>The total also scales with how much you run. More sessions this month means a larger monthly figure.</p>'
+            : '')) +
+      '</div>';
+    }
+
+    // ---- "Counted directly this month": the slice of the transformation we can prove
+    // event-by-event, with the three mechanisms folded in as its plain breakdown. ----
+    // One compact row per mechanism (these add up to this number).
+    function pillarRow(title, amountMo, body) {
+      var zero = amountMo <= 0;
+      return '<div style="display:flex;gap:var(--s-3);align-items:baseline;margin-bottom:var(--s-3);">' +
+        '<div style="flex-shrink:0;width:92px;font-family:var(--font-mono);font-size:22px;font-weight:300;color:' + (zero ? 'var(--c-text-dim)' : 'var(--c-accent-cyan)') + ';">' + money(amountMo) + '<span style="font-size:12px;color:var(--c-text-dim);">/mo</span></div>' +
+        '<div><div style="font-size:16px;color:var(--c-text-main);font-weight:600;margin-bottom:2px;">' + esc(title) + '</div>' +
+        '<div style="font-size:14.5px;color:var(--c-text-dim);line-height:1.7;">' + esc(body) + '</div></div>' +
+      '</div>';
+    }
+    html += '<div style="display:flex;gap:var(--s-3);flex-wrap:wrap;margin-bottom:var(--s-3);">';
+    html += '<div class="card" style="flex:2;min-width:320px;padding:var(--s-5) var(--s-4);">' +
+        '<div class="label" style="margin-bottom:var(--s-2);">' + (Number(ba.monthly_savings_usd) > 0 ? 'Counted, action by action &middot; last ' + days + ' days' : 'Saving you &middot; last ' + days + ' days') + '</div>' +
+        '<div style="display:flex;align-items:baseline;gap:var(--s-2);flex-wrap:wrap;">' +
+          '<span style="font-family:var(--font-mono);font-weight:300;font-size:76px;line-height:0.9;color:var(--c-accent-cyan);text-shadow:0 0 24px var(--c-accent-glow);letter-spacing:-0.02em;">' + money(gettingMo) + '</span>' +
+          '<span style="font-size:22px;color:var(--c-text-dim);font-family:var(--font-mono);">/mo</span>' +
+        '</div>' +
+        '<div class="lede" style="margin-top:var(--s-2);"><strong>Counted directly.</strong> Every time Token Optimizer swapped in a lighter model, trimmed a bulky result, or skipped a repeat read, we logged it and added it up.</div>' +
+        // Plain-language reconciliation: why this is so much smaller than the headline.
+        // Only frame it as a subset when the headline actually exceeds it, so the wording
+        // can never contradict the math (the two are computed independently).
+        (Number(ba.monthly_savings_usd) > gettingMo
+          ? '<div class="note" style="margin-top:var(--s-2);">The figure above estimates your whole workload. This is the slice we metered event by event, so it is smaller and exact.</div>'
+          : '') +
+        '<div style="display:flex;gap:var(--s-4);flex-wrap:wrap;margin-top:var(--s-3);font-family:var(--font-mono);font-size:16px;line-height:1.7;">' +
+          '<span style="color:var(--c-text-dim);"><span style="color:var(--c-text-main);">' + money(measuredMo) + '/mo</span> counted</span>' +
+          '<span style="color:var(--c-text-dim);">+ <span style="color:var(--c-text-main);">' + money(estimatedMo) + '/mo</span> estimated from your habits</span>' +
+        '</div>' +
+        // What makes it up: the three mechanisms folded in (they sum to this number).
+        '<div style="margin-top:var(--s-3);padding-top:var(--s-3);border-top:1px solid rgba(255,255,255,0.06);">' +
+          '<div class="label" style="margin-bottom:var(--s-2);">What makes it up</div>' +
+          pillarRow('Smarter habits', behavMo, 'Nudges routine work to lighter models and heads off repeat loops and cache resets after breaks.') +
+          pillarRow('While you work', runtimeMo, 'Shrinks bulky command output, repeated file reads, and oversized tool results as you go.') +
+          pillarRow('Your setup', structMo, structMo > 0 ? 'Keeps dead weight out of the context that loads at the start of every session.' : 'Trims unused skills and memory from your startup context. Nothing trimmed yet (see "Save more" below).') +
+        '</div>' +
+        // The estimated pieces, each with its sample size, so nothing is taken on
+        // faith. Folded away by default to keep the card scannable.
+        (estItems.length ? '<div style="margin-top:var(--s-2);padding-top:var(--s-2);border-top:1px solid rgba(255,255,255,0.06);">' +
+          fold('Estimated from your own behavior',
+            estItems.map(function(it){
+              var conf = it.conf ? ' &middot; confidence: ' + esc(String(it.conf)) : '';
+              var amt = it.amt > 0 ? money(it.amt) + '/mo' : 'not enough data yet';
+              return '<div style="margin-bottom:var(--s-2);font-family:var(--font-mono);">&bull; ' + esc(it.label) + ' &mdash; <strong>' + amt + '</strong> <span style="opacity:.8;">(' + it.n.toLocaleString() + ' ' + esc(it.unit) + conf + ')</span></div>';
+            }).join('')
+          ) +
+        '</div>' : '') +
+      '</div>';
+    if (si && (Number(si.measured_usd) > 0 || Number(si.estimated_usd) > 0)) {
+      html += '<div class="card" style="flex:1;min-width:210px;padding:var(--s-5) var(--s-4);">' +
+          '<div class="label" style="margin-bottom:var(--s-2);">Measured since you installed</div>' +
+          '<div style="font-family:var(--font-mono);font-weight:300;font-size:52px;line-height:0.9;color:var(--c-text-main);letter-spacing:-0.02em;">' + money(Number(si.measured_usd)) + '</div>' +
+          (Number(si.estimated_usd) > 0 ? '<div style="margin-top:var(--s-1);font-family:var(--font-mono);font-size:14px;color:var(--c-text-dim);">+ ' + money(Number(si.estimated_usd)) + ' estimated</div>' : '') +
+          '<div style="margin-top:var(--s-3);font-size:14px;color:var(--c-text-dim);font-family:var(--font-mono);line-height:1.85;">since ' + esc(prettyDate(si.install_date)) + '<br>adds up every day you work</div>' +
+        '</div>';
+    }
+    html += '</div>';
+
+    // ---- SAVE MORE: suggestions, promoted right under the hero ----
+    var parts = [];
+    if ((Number(sp.cost_saved_usd) || 0) > 0 && unusedSkills > 0) {
+      parts.push('Prune ' + unusedSkills + ' skill' + (unusedSkills === 1 ? '' : 's') + ' you have never used. Worth about ' + money(mo(sp.cost_saved_usd)) + '/mo, automatically, from then on.');
+    }
+    if ((Number(mr.potential_cost_usd) || 0) > 0) {
+      parts.push('Let Token Optimizer route more of your routine work to lighter models. Recovers about ' + money(mo(mr.potential_cost_usd)) + '/mo.');
+    }
+    if (cdTokensMo > 0) {
+      parts.push('Compact before stepping away (or switch on the 1-hour cache). ' + (Number(cd.drop_sessions) || 0) + ' of your sessions idled past the cache window and re-wrote the prefix — about ' + cdTokensMo.toLocaleString() + ' tokens/mo.');
+    }
+    if ((Number(ow.cost_saved_usd) || 0) > 0) {
+      parts.push('Favor targeted Edits over full-file Writes. About ' + (Number(ow.avoidable_writes) || 0) + ' of your Writes could have been Edits, worth about ' + money(mo(ow.cost_saved_usd)) + '/mo in output.');
+    }
+    if (parts.length > 0) {
+      html += '<div class="card wide"><div class="card-header"><span>Save more</span><span class="label">about ' + money(opportunityMo) + '/mo available</span></div>';
+      html += '<div style="display:flex;flex-direction:column;gap:var(--s-4);padding-top:var(--s-2);">';
+      parts.forEach(function(p, i){
+        html += '<div style="display:flex;gap:var(--s-3);align-items:flex-start;">' +
+          '<div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;border:1px solid var(--c-accent-cyan);display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:14px;color:var(--c-accent-cyan);margin-top:2px;">' + (i+1) + '</div>' +
+          '<div style="font-size:16px;color:var(--c-text-main);line-height:1.75;max-width:720px;">' + esc(p) + '</div></div>';
+      });
+      html += '</div>';
+      html += '<div style="margin-top:var(--s-4);padding:var(--s-3);background:rgba(0,240,255,0.04);border:1px solid rgba(0,240,255,0.15);border-radius:8px;font-family:var(--font-mono);font-size:15px;line-height:1.6;color:var(--c-text-dim);">Run <span style="color:var(--c-accent-cyan);">/token-optimizer</span> and follow its suggestions to unlock the rest.</div>';
+      html += '</div>';
+    }
+
+    // (The three mechanisms that make up the number above are now folded into the
+    // "Counted directly" card as its breakdown, so there is no separate section here.)
+
+    // ---- CONTEXT QUALITY: averaged ACROSS sessions, never a single session ----
+    var qt = (data.trends && data.trends.quality_trend) || [];
+    var avgQ = null, sessionsCounted = 0, trendTxt = '';
+    if (qt.length) {
+      // Weight each day's average by its session count -> a true cross-session mean.
+      var wsum = 0, wn = 0;
+      qt.forEach(function(r){
+        var aq = Number(r.avg_quality) || 0, n = Number(r.sessions) || 0;
+        if (aq > 0 && n > 0) { wsum += aq * n; wn += n; }
+      });
+      if (wn > 0) { avgQ = Math.round(wsum / wn); sessionsCounted = wn; }
+      var vals = qt.map(function(r){ return Number(r.avg_quality)||0; }).filter(function(v){ return v>0; });
+      if (vals.length >= 6) {
+        var h = Math.floor(vals.length/2);
+        var firstAvg = vals.slice(0,h).reduce(function(a,b){return a+b;},0)/h;
+        var lastAvg = vals.slice(-h).reduce(function(a,b){return a+b;},0)/h;
+        var dd = lastAvg - firstAvg;
+        trendTxt = dd > 3 ? 'trending up' : (dd < -3 ? 'trending down' : 'holding steady');
+      }
+    }
+    if (avgQ !== null) {
+      var barPct = Math.min(100, Math.max(0, avgQ));
+      html += '<div class="card wide" style="margin-top:var(--s-3);"><div class="card-header"><span>Context quality</span>' +
+        (trendTxt ? '<span class="label">' + esc(trendTxt) + '</span>' : '') + '</div>';
+      html += '<div style="display:flex;align-items:center;gap:var(--s-4);flex-wrap:wrap;">' +
+          '<div style="font-family:var(--font-mono);font-weight:300;font-size:48px;line-height:1;color:var(--c-accent-cyan);">' + avgQ + '<span style="font-size:18px;color:var(--c-text-dim);">/100</span></div>' +
+          '<div style="flex:1;min-width:220px;">' +
+            '<div style="height:8px;border-radius:5px;background:rgba(255,255,255,0.06);overflow:hidden;"><div style="height:100%;width:' + barPct + '%;background:linear-gradient(90deg,var(--c-accent-blue),var(--c-accent-cyan));"></div></div>' +
+            '<div style="margin-top:var(--s-2);font-size:14px;color:var(--c-text-dim);line-height:1.6;">Savings are only half the story. Across your last ' + sessionsCounted + ' sessions, Token Optimizer kept your context averaging ' + avgQ + '/100. Tighter context means sharper answers and fewer compaction interruptions.</div>' +
+          '</div>' +
+        '</div></div>';
+    }
+
+    el.innerHTML = html;
   }
 
   function renderHealth() {

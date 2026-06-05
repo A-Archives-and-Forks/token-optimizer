@@ -10005,7 +10005,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.8.10"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.9.0"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DAEMON_RUNTIME = detect_runtime()
 _DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else "claude"
@@ -19686,70 +19686,281 @@ def _estimate_cache_drop_savings(days=30):
         return zero
 
 
-def _before_after_cohort(conn, order, limit):
-    """Average per-session token classes for the earliest/most-recent N sessions.
+# --- Robust per-user baseline (the stable "before" anchor) ---------------------
+# The transformation headline compares a typical pre-Token-Optimizer session to a
+# typical session now. That comparison is only honest if "before" is a STABLE,
+# robust anchor, captured once. Re-deriving it from the earliest-N cohort every run
+# is fragile: a few onboarding-era marathon sessions (a 269M-token install spike)
+# dominate the mean and inflate the number. So we compute the baseline ONCE over a
+# stable early window, with the onboarding tail trimmed, and freeze it to disk.
+# Bump when the estimator changes so frozen baselines from an older method are
+# recomputed (and re-frozen) instead of silently reused. v2: winsorized mean over a
+# 30-day window (was a 14-day trimmed mean, which under-counted real heavy sessions).
+# v3: fixed the winsorization cap index. v2 used `int(n*cap_pct)-1`, which on a small
+# window (n<100) collapsed to "cap the single largest session" -- far more aggressive
+# than the intended top 1% -- so the baseline (n>=30) and the recent window (different
+# n) were capped at different effective percentiles, biasing the comparison upward. v3
+# uses a true nearest-rank percentile that applies the SAME tail fraction at every
+# sample size, so small windows are no longer over-capped and the two sides stay fair.
+_BASELINE_VERSION = 3
+_BASELINE_ONBOARDING_DAYS = _int_env("TOKEN_OPTIMIZER_BASELINE_ONBOARDING_DAYS", 1)
+_BASELINE_EARLY_WINDOW_DAYS = _int_env("TOKEN_OPTIMIZER_BASELINE_WINDOW_DAYS", 30)
+# Percentile at which a single session's total tokens is capped (winsorized). 0.99
+# caps only the top 1% of sessions (one-off bulk ops), keeping all real heavy work.
+# Below ~1/(1-cap_pct) sessions the top 1% rounds to nothing, so small windows fall
+# back to a plain mean rather than over-capping (see _winsorized_mean_session).
+_BASELINE_WINSOR_PCT = _float_env("TOKEN_OPTIMIZER_BASELINE_WINSOR_PCT", 0.99)
+_BASELINE_MIN_STABLE_SESSIONS = _int_env("TOKEN_OPTIMIZER_BASELINE_MIN_SESSIONS", 30)
+# Minimum recent sessions before the after-window is trusted for the comparison.
+# Matched to a sane floor so the recent-side estimate is not built on a handful of
+# sessions (a thin after-window otherwise swings the headline session to session).
+_AFTER_MIN_SESSIONS = _int_env("TOKEN_OPTIMIZER_AFTER_MIN_SESSIONS", 10)
 
-    Returns (fresh_input, cache_write, cache_read, output, n) averaged per session.
-    fresh_input is full-price input (cache reads and writes removed); cache_read is
-    the cheap (0.1x) re-read of the cached prefix; cache_write is the prefix re-write
-    (1.25x). Heavy pre-TO sessions carry enormous cache_read volume (the prefix is
-    re-read every turn over many calls), which is real billed cost even at 0.1x.
+
+def _session_token_vector(row):
+    """Decompose one session_log row into billed token classes.
+
+    Returns (fresh_input, cache_write, cache_read, output). `input_tokens` already
+    stores total billed input (fresh + cache_read + cache_write), and
+    `cache_hit_rate = cache_read / input`, so this reconstructs each class exactly.
+    Row order: (input_tokens, output_tokens, cache_create_5m, cache_create_1h, cache_hit_rate).
     """
-    # `id` as a secondary sort key gives a stable cohort under day-granularity date
-    # ties (dozens of sessions share a `date`); without it LIMIT picks arbitrary rows
-    # and the headline drifts between runs. `order` is caller-hardcoded "ASC"/"DESC".
-    direction = "DESC" if str(order).upper() == "DESC" else "ASC"
-    rows = conn.execute(
-        "SELECT input_tokens, output_tokens, cache_create_5m_tokens, "
-        "cache_create_1h_tokens, cache_hit_rate FROM session_log "
-        "WHERE input_tokens IS NOT NULL "
-        "ORDER BY date " + direction + ", id " + direction + " LIMIT ?",
-        (limit,),
-    ).fetchall()
+    inp = float(row[0] or 0)
+    out = float(row[1] or 0)
+    cw = float((row[2] or 0) + (row[3] or 0))
+    # A corrupt/recomputed row can report cache_create > input_tokens. Clamp so the
+    # class split can never over-count (fi + cw + cr <= inp is preserved).
+    cw = min(cw, inp)
+    hit = min(1.0, max(0.0, float(row[4] or 0)))
+    cr = inp * hit
+    fresh_raw = inp * (1 - hit) - cw
+    fi = max(0.0, fresh_raw)
+    # cache_hit_rate is a rounded float; cache_create is an integer. Rounding drift can
+    # push fresh slightly negative. Absorb that gap back into cache_read (the cheapest,
+    # most conservative class) so fi + cw + cr == inp exactly and no tokens are dropped.
+    if fresh_raw < 0:
+        cr = max(0.0, cr + fresh_raw)
+    return (fi, cw, cr, out)
+
+
+def _winsorized_mean_session(rows, cap_pct=_BASELINE_WINSOR_PCT):
+    """Winsorized-mean per-session token vector over `rows`.
+
+    Caps each session's TOTAL tokens at the `cap_pct` percentile of the window (by
+    scaling its whole class vector down proportionally), then averages across ALL
+    sessions. This neutralizes one-off bulk operations (a single full-codebase index
+    or vault import that bills hundreds of millions of cache-read tokens in one
+    session) without discarding the many genuine heavy working sessions (where Token
+    Optimizer's value lands). It is deliberately NOT a median or trimmed mean: this
+    workload is heavy-tailed (the mean session is many times the median), so a median
+    anchor would discard real heavy work and badly understate; winsorizing only the
+    extreme tail is a safety rail against a single pathological session, not a thumb
+    on the scale.
+
+    The cap index is a true nearest-rank percentile: `round((n-1) * cap_pct)`. The
+    SAME tail fraction is applied at every sample size and on both sides of the
+    before/after comparison, so neither side is over-capped relative to the other.
+    Below ~1/(1-cap_pct) sessions the index rounds to the max, i.e. nothing is capped
+    and the result is a plain mean -- the correct behavior, since the top 1% of a
+    handful of sessions is not a meaningful tail to clip.
+
+    Each row is (input_tokens, output_tokens, cache_create_5m, cache_create_1h,
+    cache_hit_rate). Returns (vec4, n_used, n_total); vec4 is
+    (fresh_input, cache_write, cache_read, output). n_used == n_total (capping does
+    not drop rows); the tuple shape is (vec4, n_used, n_total).
+    """
     n = len(rows)
     if n == 0:
-        return (0.0, 0.0, 0.0, 0.0, 0)
-    fi = cw = cr = out = 0.0
-    for r in rows:
-        inp = float(r[0] or 0)
-        o = float(r[1] or 0)
-        c = float((r[2] or 0) + (r[3] or 0))
-        # Clamp to [0,1]: a corrupt/recomputed stale row could otherwise over- or
-        # under-count cache-reads vs fresh input.
-        hit = min(1.0, max(0.0, float(r[4] or 0)))
-        cr += inp * hit
-        fi += max(0.0, inp * (1 - hit) - c)
-        cw += c
-        out += o
-    return (fi / n, cw / n, cr / n, out / n, n)
+        return ((0.0, 0.0, 0.0, 0.0), 0, 0)
+    vecs = [_session_token_vector(r) for r in rows]
+    totals = sorted(sum(v) for v in vecs)
+    cap = totals[min(n - 1, max(0, int(round((n - 1) * cap_pct))))]
+    acc = [0.0, 0.0, 0.0, 0.0]
+    for v in vecs:
+        total = sum(v)
+        scale = (cap / total) if (total > cap and total > 0) else 1.0
+        for j in range(4):
+            acc[j] += v[j] * scale
+    return (tuple(a / n for a in acc), n, n)
 
 
-def _estimate_before_after_savings(days=30, before_n=60):
+def _compute_baseline_state():
+    """Compute this user's robust pre-TO baseline from their own history, or None.
+
+    The baseline is the typical session at the user's earliest window: skip the
+    first `_BASELINE_ONBOARDING_DAYS` (install-day setup), take the next
+    `_BASELINE_EARLY_WINDOW_DAYS` (~a month, so the per-session mean is stable), and
+    winsorize the heaviest 1% of sessions (cap one-off bulk ops; keep all real heavy
+    work, see `_winsorized_mean_session`). This is the user's OWN pre-optimization
+    era measured from their OWN real sessions, so it works for existing users who
+    installed before any baseline was captured, not just fresh installs. Returns None
+    when the window hasn't accrued `_BASELINE_MIN_STABLE_SESSIONS` yet (a brand-new
+    install) so we never freeze a half-formed or fake anchor. Never raises.
+
+    Returns a dict: {typical_session: {fresh_input, cache_write, cache_read, output},
+    opus_share, opus_share_source, window {start,end,sessions_used,sessions_total,
+    elapsed}, method, winsor_pct, structural_overhead_tokens, source}.
+    """
+    try:
+        if not TRENDS_DB.exists():
+            return None
+        conn = _init_trends_db()
+        try:
+            rows = conn.execute(
+                "SELECT date, input_tokens, output_tokens, cache_create_5m_tokens, "
+                "cache_create_1h_tokens, cache_hit_rate FROM session_log "
+                "WHERE input_tokens IS NOT NULL ORDER BY date, id"
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return None
+        first = datetime.fromisoformat(str(rows[0][0])[:10])
+        win_start = first + timedelta(days=_BASELINE_ONBOARDING_DAYS)
+        win_end = win_start + timedelta(days=_BASELINE_EARLY_WINDOW_DAYS)
+        window_rows = [
+            r[1:] for r in rows
+            if win_start <= datetime.fromisoformat(str(r[0])[:10]) < win_end
+        ]
+        if len(window_rows) < _BASELINE_MIN_STABLE_SESSIONS:
+            return None
+        vec, used, total = _winsorized_mean_session(window_rows)
+        # Guard against a corrupt DB row poisoning the frozen anchor with a non-finite
+        # value (json would persist `Infinity`, then int() raises later). Bail to None.
+        if not all(math.isfinite(x) for x in vec):
+            return None
+
+        # Pre-TO Opus share: explicit per-user baseline if set, else the earliest measured
+        # mix over the SAME window as the token vector (aligned so the blend is honest;
+        # a 14-day mix on a 30-day vector would overstate if the user routed off Opus in
+        # weeks 3-4).
+        baseline = _pretool_baseline_mix()
+        if baseline:
+            opus_share = float(baseline.get("opus", 0.0))
+            opus_source = "pretool_baseline"
+        else:
+            early = _earliest_model_mix(lookback_days=_BASELINE_EARLY_WINDOW_DAYS)
+            opus_share = float((early.get("shares") or {}).get("opus", 0.0)) if early else 0.0
+            opus_source = "robust_earliest"
+
+        struct_overhead = 0
+        try:
+            snap = SNAPSHOT_DIR / "snapshot_before.json"
+            if snap.exists():
+                struct_overhead = int(
+                    json.loads(snap.read_text(encoding="utf-8"))
+                    .get("totals", {}).get("estimated_total", 0) or 0
+                )
+        except (json.JSONDecodeError, OSError, ValueError, TypeError):
+            struct_overhead = 0
+
+        return {
+            "version": _BASELINE_VERSION,
+            "typical_session": {
+                "fresh_input": round(vec[0], 1), "cache_write": round(vec[1], 1),
+                "cache_read": round(vec[2], 1), "output": round(vec[3], 1),
+            },
+            "opus_share": round(opus_share, 4),
+            "opus_share_source": opus_source,
+            "window": {
+                "start": win_start.strftime("%Y-%m-%d"),
+                "end": win_end.strftime("%Y-%m-%d"),
+                "sessions_used": used, "sessions_total": total,
+                "elapsed": datetime.now() >= win_end,
+            },
+            "method": "winsorized_mean",
+            "winsor_pct": _BASELINE_WINSOR_PCT,
+            "structural_overhead_tokens": struct_overhead,
+        }
+    except (sqlite3.Error, OSError, ValueError, TypeError, OverflowError):
+        return None
+
+
+def _get_baseline_state(freeze=True):
+    """Return this user's frozen baseline, computing + freezing it once when ready.
+
+    Reads `baseline_state.json` if already frozen. Otherwise computes the robust
+    baseline; if it is ready AND its early window has fully elapsed (so we are not
+    freezing a partial window), writes it once (atomic, 0600) and returns it. Until
+    then returns the live computation (or None), so a new user sees no transformation
+    until a real, stable anchor exists. Never raises.
+    """
+    bpath = SNAPSHOT_DIR / "baseline_state.json"
+    try:
+        if bpath.exists():
+            data = json.loads(bpath.read_text(encoding="utf-8"))
+            # Reuse a frozen baseline only if it is well-formed AND from the current
+            # estimator version; a stale version falls through to recompute + re-freeze.
+            if (isinstance(data, dict) and data.get("typical_session")
+                    and data.get("version") == _BASELINE_VERSION):
+                return data
+            # Stale/malformed: remove it so a recompute that returns None (e.g. a window
+            # that no longer qualifies) can't leave the old file to be re-read forever.
+            try:
+                bpath.unlink()
+            except OSError:
+                pass
+    except (json.JSONDecodeError, OSError, ValueError):
+        pass
+
+    state = _compute_baseline_state()
+    if not state:
+        return None
+    if freeze and (state.get("window") or {}).get("elapsed"):
+        try:
+            SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            frozen = dict(state)
+            frozen["captured_at"] = datetime.now().isoformat()
+            frozen["source"] = "frozen_from_history"
+            # Atomic write: unique temp via mkstemp + os.replace, with try/finally
+            # cleanup so a crash mid-write never leaks a stale temp file (matches the
+            # config-writer pattern used elsewhere in this file).
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=str(SNAPSHOT_DIR), prefix=".baseline_state-", suffix=".tmp")
+            try:
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                    json.dump(frozen, f, indent=2, default=str)
+                os.chmod(tmp_path, 0o600)
+                os.replace(tmp_path, str(bpath))
+                tmp_path = None
+            finally:
+                if tmp_path is not None:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+            return frozen
+        except OSError:
+            return state
+    return state
+
+
+def _estimate_before_after_savings(days=30):
     """THE headline saving: your current activity priced at your PRE-TO per-session
     weight + model mix, vs what it actually costs now.
 
     Earlier pillars captured only the model-mix shift on CURRENT (already-light)
     volume — a thin slice. This captures the whole footprint collapse: sessions,
-    sub-agents, structural prefix, and routing together, by comparing cost-PER-SESSION
-    between the user's earliest captured sessions (the pre-TO / heavy era) and their
-    recent sessions, then scaling the per-session delta by current monthly session
-    volume. The per-session token mix already includes the structural prefix (in
-    cache_write) and sub-agent weight, so this is comprehensive — do NOT add
-    structural on top.
+    sub-agents, structural prefix, and routing together, by comparing a typical
+    pre-Token-Optimizer session to a typical session now, then scaling the
+    per-session delta by current monthly session volume. The per-session token mix
+    already includes the structural prefix (in cache_write) and sub-agent weight, so
+    this is comprehensive; do NOT add structural on top.
 
-    Each cohort's avg per-session tokens are priced through the canonical rate card
-    (`_get_model_cost`, which owns the tier / cache-TTL / provider rates) at Opus and
-    Sonnet, then blended by the era's Opus share. Pre-TO Opus share comes from the
-    user's own stated baseline (pretool_baseline.json, default unset); current share
-    is measured. Counterfactual ("your current N sessions, run the old way"), grounded
-    entirely in the user's own cohorts. Conservative: the earliest captured cohort is
-    already a couple weeks post-install, so the true pre-TO era was likely heavier.
-    Returns zeros if history is too short. Never raises.
+    The "before" anchor is the user's FROZEN robust baseline (`_get_baseline_state`:
+    a winsorized-mean typical session over the earliest STABLE window, onboarding +
+    marathon outliers excluded, captured once). This keeps the headline stable and
+    immune to a few install-era spikes dominating the mean. The "after" is a robust
+    (same winsorized-mean) typical CURRENT session. Both are priced through the canonical
+    rate card (`_get_model_cost`) at Opus and Sonnet and blended by the era's Opus
+    share (pre-TO from the frozen baseline, current measured). Counterfactual ("your
+    current sessions, run the old way"), grounded entirely in the user's own history.
+    Returns zeros (with `reason`) when no stable baseline exists yet. Never raises.
 
     Returns {before_cost_per_session, after_cost_per_session, savings_per_session,
              sessions_per_month, monthly_savings_usd, before_opus, after_opus,
              before_tokens, after_tokens, before_sessions, after_sessions,
-             baseline_source ("pretool_baseline" | "earliest"),
+             baseline_source ("pretool_baseline" | "robust_earliest"),
              breakdown ([{key, waterfall_index, label, monthly_usd}], sorted
                largest-first; `key`/`waterfall_index` are the stable machine fields,
                `label` is presentational and may change),
@@ -19767,51 +19978,53 @@ def _estimate_before_after_savings(days=30, before_n=60):
         if not TRENDS_DB.exists():
             return zero
 
-        # Cohorts + recent count first (one connection); bail cheaply on thin history
-        # BEFORE doing any pricing or model-mix work (those open more connections).
+        # "Before" = the user's FROZEN robust baseline (a typical pre-TO session),
+        # captured once over the earliest stable window with outliers trimmed. This is
+        # the stable anchor that keeps the headline immune to onboarding-marathon spikes.
+        baseline = _get_baseline_state()
+        if not baseline or not baseline.get("typical_session"):
+            return {**zero, "reason": "insufficient_history"}
+        ts = baseline["typical_session"]
+        bfi = float(ts.get("fresh_input", 0) or 0)
+        bcw = float(ts.get("cache_write", 0) or 0)
+        bcr = float(ts.get("cache_read", 0) or 0)
+        bout = float(ts.get("output", 0) or 0)
+        before_opus = float(baseline.get("opus_share", 0) or 0)
+        baseline_source = baseline.get("opus_share_source") or "robust_earliest"
+        bn = int((baseline.get("window") or {}).get("sessions_used", 0) or 0)
+        if before_opus <= 0:
+            return {**zero, "before_sessions": bn, "reason": "insufficient_history"}
+
+        # "After" = a robust (same winsorized-mean) typical CURRENT session, priced at the
+        # measured current model mix. Same estimator both sides keeps the comparison fair.
+        # The after-window must NOT overlap the frozen baseline window, or a recently
+        # installed user would be compared to themselves (apparent savings = pure mix
+        # drift within the same sessions). Clamp the cutoff to the baseline window end so
+        # the comparison is clean as soon as enough post-baseline sessions exist; until
+        # then `recent_n < _AFTER_MIN_SESSIONS` hides the panel (no fake number).
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        baseline_end = (baseline.get("window") or {}).get("end")
+        if baseline_end and baseline_end > cutoff:
+            cutoff = baseline_end
         conn = _init_trends_db()
         try:
-            total_avail = conn.execute(
-                "SELECT COUNT(*) FROM session_log WHERE input_tokens IS NOT NULL"
-            ).fetchone()[0] or 0
-            # DISJOINT cohorts: cap each side at total//2 so the earliest and most-recent
-            # windows can never share a row. Overlap would compare sessions to themselves
-            # and fabricate a "transformation" out of the model-mix delta alone — the
-            # 20-floor below then hides it for anyone with < 40 qualifying sessions.
-            cohort = min(before_n, total_avail // 2)
-            bfi, bcw, bcr, bout, bn = _before_after_cohort(conn, "ASC", cohort)
-            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-            afi, acw, acr, aout, an = _before_after_cohort(conn, "DESC", cohort)
-            recent_n = conn.execute(
-                "SELECT COUNT(*) FROM session_log WHERE date >= ?", (cutoff,)
-            ).fetchone()[0] or 0
+            recent_rows = conn.execute(
+                "SELECT input_tokens, output_tokens, cache_create_5m_tokens, "
+                "cache_create_1h_tokens, cache_hit_rate FROM session_log "
+                "WHERE input_tokens IS NOT NULL AND date >= ?", (cutoff,)
+            ).fetchall()
         finally:
             conn.close()
-        if bn < 20 or an < 10 or recent_n < 5:
-            return {**zero, "before_sessions": bn, "after_sessions": an,
-                    "reason": "insufficient_history"}
-
-        # Pre-TO Opus share: explicit baseline if set (most accurate when the earliest
-        # captured data is already optimized), else the user's MEASURED earliest mix —
-        # a pure measured before/after for any user with history, never a strange $0.
-        # Stable machine value (not display prose) so the dashboard can't break on a copy edit.
-        baseline = _pretool_baseline_mix()
-        if baseline:
-            before_opus = float(baseline.get("opus", 0.0))
-            baseline_source = "pretool_baseline"
-        else:
-            early = _earliest_model_mix()
-            before_opus = float((early.get("shares") or {}).get("opus", 0.0)) if early else 0.0
-            baseline_source = "earliest"
-        if before_opus <= 0:
-            return {**zero, "before_sessions": bn, "after_sessions": an}
-
+        recent_n = len(recent_rows)
+        if recent_n < _AFTER_MIN_SESSIONS:
+            return {**zero, "before_sessions": bn, "reason": "no_recent_sessions"}
+        (afi, acw, acr, aout), an, _ = _winsorized_mean_session(recent_rows)
         after_opus = float((_model_mix_shares(days=days).get("shares") or {}).get("opus", 0.0))
 
-        # Price the cohort's avg per-session tokens via the canonical rate card at opus
-        # vs sonnet, then blend by the era's Opus share. Opus-vs-rest binary by design
-        # (the baseline IS an opus_share); omitting haiku from the current mix is
-        # conservative (haiku is cheaper, so it only nudges the "after" cost upward).
+        # Price each typical session via the canonical rate card at opus vs sonnet, then
+        # blend by the era's Opus share. Opus-vs-rest binary by design (the baseline IS an
+        # opus_share); omitting haiku from the current mix is conservative (haiku is
+        # cheaper, so it only nudges the "after" cost upward).
         tier = _load_pricing_tier()  # resolve once; cost_per_session runs 7x below
 
         def cost_per_session(fi, cw, cr, out, opus_share):
@@ -19822,13 +20035,29 @@ def _estimate_before_after_savings(days=30, before_n=60):
         before_cost = cost_per_session(bfi, bcw, bcr, bout, before_opus)
         after_cost = cost_per_session(afi, acw, acr, aout, after_opus)
         per_session = before_cost - after_cost
-        sessions_per_month = int(recent_n / max(days, 1) * 30)
+        # Monthly-ize by the ACTUAL after-window length (the cutoff may have been clamped
+        # to the baseline end for a recently installed user, so it can be < `days`).
+        try:
+            after_window_days = (datetime.now() - datetime.fromisoformat(cutoff)).days + 1
+        except (ValueError, TypeError):
+            after_window_days = days
+        after_window_days = max(1, min(after_window_days, days))
+        # Don't extrapolate a monthly figure from a sliver of a window: a user whose
+        # baseline just elapsed could have a 1-2 day after-window, and recent_n/1*30 would
+        # blow one day's burst up ~30x. Require a week of post-baseline activity first;
+        # until then hide the panel rather than show an inflated number.
+        if after_window_days < 7:
+            return {**zero, "before_sessions": bn, "after_sessions": an,
+                    "reason": "no_recent_sessions"}
+        sessions_per_month = int(recent_n / after_window_days * 30)
         if per_session <= 0 or sessions_per_month <= 0:
             # Distinguish "costs went up net" from "no recent activity" so a consumer
             # can tell why the transformation panel is empty (vs thin history above).
+            # Propagate the computed opus shares so a caller can explain a cost increase.
             return {**zero, "before_sessions": bn, "after_sessions": an,
                     "before_cost_per_session": round(before_cost, 4),
                     "after_cost_per_session": round(after_cost, 4),
+                    "before_opus": round(before_opus, 4), "after_opus": round(after_opus, 4),
                     "reason": "net_negative" if per_session <= 0 else "no_recent_sessions"}
 
         # --- Attribution breakdown of the per-session delta (waterfall) ---
@@ -19873,7 +20102,7 @@ def _estimate_before_after_savings(days=30, before_n=60):
         )
         breakdown_caveat = (
             "Waterfall attribution of the monthly figure: each lever is credited the "
-            "cost it removes as your sessions morph from the earliest cohort to now. "
+            "cost it removes as your sessions morph from your baseline window to now. "
             "Attribution is sequential (routing credited first, then footprint by token "
             "class); lines are shown largest-first and sum to the headline (±a few cents "
             "from rounding). A negative line means that class grew. Sub-agent weight is "
@@ -20079,9 +20308,9 @@ def _get_merged_savings(days=30):
         "handover_rerun": handover_rerun,
         # THE headline before/after transformation: current activity priced at the
         # user's pre-TO per-session weight + mix vs actual. Comprehensive (volume +
-        # structural + routing + sub-agents). Estimated tier, counterfactual,
-        # grounded in the user's own earliest-vs-recent cohorts. Zero without a
-        # pretool_baseline. Never summed into the metered total.
+        # structural + routing + sub-agents). Estimated tier, counterfactual, grounded
+        # in the user's own frozen baseline window vs current sessions. Hidden until the
+        # baseline window has elapsed with enough sessions. Never summed into the metered total.
         "before_after": before_after,
         # Opportunity tier: reclaimable stale-read waste. Intentionally NOT in
         # total_tokens/total_cost above — billed waste the user could reclaim,
