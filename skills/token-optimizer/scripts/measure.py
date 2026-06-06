@@ -96,6 +96,7 @@ from runtime_env import claude_home, detect_runtime, runtime_home, runtime_name_
 import codex_io
 import codex_session
 import codex_state
+import hermes_session
 
 try:
     import fcntl
@@ -139,6 +140,11 @@ DASHBOARD_PATH = SNAPSHOT_DIR / "dashboard.html"
 def _use_codex_session_adapter(filepath=None):
     """True when session JSONL should be parsed with the Codex adapter."""
     return detect_runtime() == "codex" or (filepath is not None and codex_session.is_codex_session_path(filepath))
+
+
+def _use_hermes_session_adapter():
+    """True when sessions should be loaded from the Hermes state.db adapter."""
+    return detect_runtime() == "hermes"
 
 # Tokens per skill frontmatter (loaded at startup)
 TOKENS_PER_SKILL_APPROX = 100
@@ -3972,6 +3978,8 @@ def _collect_hook_status_for_dashboard():
     """Collect hook installation status for dashboard toggle panel."""
     if detect_runtime() == "codex":
         return _collect_codex_hook_status_for_dashboard()
+    if detect_runtime() == "hermes":
+        return _collect_hermes_hook_status_for_dashboard()
 
     settings, _ = _read_settings_json()
 
@@ -4024,7 +4032,7 @@ def _collect_codex_hook_status_for_dashboard():
         "codex_project": {
             "installed": _ok("Project hooks"),
             "label": "Codex Project Hooks",
-            "description": "Installs the balanced default hooks: SessionStart/UserPromptSubmit for quality tracking plus Stop for dashboard refresh and checkpoint capture. Per-tool hooks remain opt-in because Codex Desktop shows every hook row.",
+            "description": "Installs the aggressive default profile (max savings): SessionStart/UserPromptSubmit for quality tracking, Stop for dashboard refresh and checkpoint capture, plus silent PostToolUse archiving and context-intel. All hooks run silently (no visible Codex Desktop rows). Bash compression stays opt-in (Codex can't rewrite command input yet).",
             "install_cmd": base,
             "uninstall_cmd": base + " --uninstall",
         },
@@ -4054,7 +4062,7 @@ def _collect_codex_hook_status_for_dashboard():
         "codex_telemetry_profile": {
             "installed": "PostToolUse" in hooks_text and ("archive_result.py" in hooks_text or "context_intel.py" in hooks_text),
             "label": "PostToolUse Telemetry Profile",
-            "description": "Enables exact tool-output archiving/context-intel, but Codex Desktop shows visible rows after tool calls.",
+            "description": "Enables exact tool-output archiving/context-intel. Wired to run silently (archive redirects output, context-intel emits nothing, Bash-only matcher avoids unsupported MCP replacement), so no visible Codex Desktop rows. Included in the aggressive default.",
             "install_cmd": base + " --profile telemetry",
             "uninstall_cmd": base + " --uninstall",
         },
@@ -4072,6 +4080,59 @@ def _collect_codex_hook_status_for_dashboard():
             "description": "On Codex Stop, collects sessions, regenerates the dashboard, and saves a checkpoint for continuity.",
             "install_cmd": base + " --profile quiet",
             "uninstall_cmd": base + " --uninstall",
+        },
+    }
+
+
+def _collect_hermes_hook_status_for_dashboard():
+    """Collect Hermes plugin hook status for dashboard toggle panel.
+
+    Mirrors _collect_codex_hook_status_for_dashboard(). Uses hermes_doctor
+    to determine whether the plugin payload is installed and wired correctly,
+    and exposes the same install/uninstall command surface.
+    """
+    import hermes_doctor  # noqa: PLC0415
+
+    mp_cmd = shlex.quote(str(Path(__file__).resolve()))
+    checks = hermes_doctor.run_checks()
+    by_name = {check["name"]: check for check in checks}
+
+    def _ok(name):
+        return by_name.get(name, {}).get("status") == "OK"
+
+    install_cmd = f"TOKEN_OPTIMIZER_RUNTIME=hermes python3 {mp_cmd} hermes-install"
+    doctor_cmd = f"TOKEN_OPTIMIZER_RUNTIME=hermes python3 {mp_cmd} hermes-doctor"
+
+    return {
+        "hermes_plugin": {
+            "installed": _ok("Plugin directory") and _ok("Plugin files"),
+            "label": "Hermes Plugin",
+            "description": "Installs the Token Optimizer plugin into ~/.hermes/plugins/token-optimizer/. Provides pre_llm_call nudges, post_api_request capture, and session rollup hooks.",
+            "install_cmd": install_cmd,
+            "uninstall_cmd": install_cmd + " --uninstall",
+        },
+        "hermes_hooks": {
+            "installed": _ok("Declared hooks"),
+            "partial": by_name.get("Declared hooks", {}).get("status") == "WARN",
+            "label": "Hermes Hook Declarations",
+            "description": "Verifies that plugin.yaml declares all required hooks: pre_llm_call, post_api_request, on_session_finalize, on_session_end.",
+            "install_cmd": install_cmd,
+            "uninstall_cmd": install_cmd + " --uninstall",
+        },
+        "hermes_state_db": {
+            "installed": _ok("state.db readable"),
+            "partial": by_name.get("state.db", {}).get("status") == "WARN",
+            "label": "Hermes State DB",
+            "description": "Checks that ~/.hermes/state.db is present and readable. Created automatically on first Hermes session.",
+            "install_cmd": doctor_cmd,
+            "uninstall_cmd": "",
+        },
+        "hermes_dashboard_port": {
+            "installed": _ok(f"Dashboard port {hermes_doctor.DASHBOARD_PORT}"),
+            "label": "Dashboard Port 24844",
+            "description": "Confirms that port 24844 is available or already serving the Hermes Token Optimizer dashboard.",
+            "install_cmd": f"TOKEN_OPTIMIZER_RUNTIME=hermes python3 {mp_cmd} open-dashboard",
+            "uninstall_cmd": "",
         },
     }
 
@@ -5348,22 +5409,20 @@ def _generate_codex_auto_recommendations(components, trends=None, days=30):
     if "Stop" not in hook_names:
         quick.append(
             "**Install the default Codex hooks for real data**: "
-            "The balanced default enables SessionStart/UserPromptSubmit plus Stop, so Token Optimizer can track prompt quality, loop signals, dashboard refresh, and continuity without per-tool hook spam. "
+            "The aggressive default (max savings) enables SessionStart/UserPromptSubmit, Stop, plus silent PostToolUse archiving and context-intel, so Token Optimizer tracks prompt quality, loop signals, output bloat, dashboard refresh, and continuity. All hooks run silently (no visible Codex Desktop rows). "
             "Run `TOKEN_OPTIMIZER_RUNTIME=codex python3 skills/token-optimizer/scripts/measure.py codex-install --project .`."
         )
     if "UserPromptSubmit" not in hook_names:
         medium.append(
-            "**Enable the balanced Codex hook profile for live quality tracking**: "
-            "`codex-install --project .` now installs the balanced profile by default. "
-            "That gives quality cache and loop/nudge timing with one visible row per prompt/session, not one row per tool. "
-            "Use `--profile quiet` only for users who prefer Stop-only continuity over live quality tracking."
+            "**Re-run codex-install for the aggressive (max savings) default**: "
+            "`codex-install --project .` now installs the aggressive profile by default: quality cache, loop/nudge timing, and silent PostToolUse archiving + context-intel. "
+            "Use `--profile balanced` to drop per-tool archiving, or `--profile quiet` for Stop-only continuity."
         )
     if "PostToolUse" not in hook_names:
         deep.append(
-            "**Use PostToolUse only when you accept Codex Desktop hook rows**: "
-            "`codex-install --project . --profile telemetry` enables tool-output archiving and context-intel measurement. "
-            "It is valuable for exact output bloat tracking, but Codex Desktop currently shows every hook lifecycle row. "
-            "Prefer it for QA, CLI/headless runs, or users who explicitly choose maximum telemetry."
+            "**Add PostToolUse for exact output-bloat tracking**: "
+            "`codex-install --project .` (the aggressive default) wires tool-output archiving and context-intel measurement, both silenced (no visible Codex rows). "
+            "If you installed an older balanced/quiet profile, re-run codex-install to pick it up."
         )
     deep.append(
         "**Do not promise invisible Bash compression in Codex yet**: "
@@ -7932,6 +7991,117 @@ def _migrate_streaming_dedup(conn, quiet=False):
         print(f"  [Token Optimizer] migration failed: {e}", file=sys.stderr)
 
 
+def _collect_hermes_sessions(days=90, quiet=False, rebuild=False):
+    """Collect Hermes sessions from state.db into the trends DB.
+
+    Mirrors collect_sessions() but sources rows from hermes_state.recent_sessions()
+    + hermes_session.normalize_session() instead of JSONL files.
+    Uses session slug as the dedup key (jsonl_path column) so idempotent.
+    """
+    import hermes_state as _hs  # noqa: PLC0415
+
+    conn = _init_trends_db()
+    try:
+        if rebuild:
+            if not quiet:
+                print("[Token Optimizer] Rebuilding Hermes trends DB...")
+            conn.execute("PRAGMA user_version = 3")
+            conn.execute("DELETE FROM session_log")
+            conn.execute("DELETE FROM daily_stats")
+            conn.execute("DELETE FROM model_daily")
+            conn.execute("DELETE FROM skill_daily")
+            conn.execute("DELETE FROM subagent_daily")
+            conn.commit()
+
+        rows = _hs.recent_sessions(days=days)
+        if not rows:
+            if not quiet:
+                print(f"No Hermes sessions found in the last {days} days.")
+            return 0
+
+        new_count = 0
+        for row in rows:
+            parsed = hermes_session.normalize_session(row)
+            if not parsed:
+                continue
+
+            slug = parsed.get("slug") or ""
+            dedup_key = f"hermes:{slug}" if slug else None
+            if not dedup_key:
+                continue
+
+            if _is_file_collected(conn, dedup_key):
+                continue
+
+            started_at = row.get("started_at")
+            try:
+                date = (
+                    datetime.fromtimestamp(float(started_at)).strftime("%Y-%m-%d")
+                    if started_at is not None
+                    else datetime.now().strftime("%Y-%m-%d")
+                )
+            except (TypeError, ValueError, OSError):
+                date = datetime.now().strftime("%Y-%m-%d")
+            project_name = str(row.get("cwd") or "hermes")
+
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO session_log
+                   (jsonl_path, date, project, duration_minutes, input_tokens,
+                    output_tokens, message_count, api_calls, cache_hit_rate,
+                    cache_create_1h_tokens, cache_create_5m_tokens, cache_ttl_scanned,
+                    avg_call_gap_seconds, max_call_gap_seconds, p95_call_gap_seconds,
+                    skills_json, subagents_json, tool_calls_json, model_usage_json,
+                    all_model_usage_json, model_usage_breakdown_json, version, slug, topic, collected_at,
+                    quality_score, quality_grade, stale_waste_tokens)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    dedup_key, date, project_name,
+                    parsed["duration_minutes"],
+                    parsed["total_input_tokens"],
+                    parsed["total_output_tokens"],
+                    parsed["message_count"],
+                    parsed.get("api_calls", 0),
+                    parsed["cache_hit_rate"],
+                    parsed.get("total_cache_create_1h", 0),
+                    parsed.get("total_cache_create_5m", 0),
+                    1,
+                    parsed.get("avg_call_gap_seconds"),
+                    parsed.get("max_call_gap_seconds"),
+                    parsed.get("p95_call_gap_seconds"),
+                    json.dumps(parsed.get("skills_used", {})),
+                    json.dumps(parsed.get("subagents_used", {})),
+                    json.dumps(parsed.get("tool_calls", {})),
+                    json.dumps(parsed.get("model_usage", {})),
+                    json.dumps(parsed.get("model_usage", {})),
+                    json.dumps(parsed.get("model_usage_breakdown", {})),
+                    parsed.get("version"),
+                    parsed.get("slug"),
+                    parsed.get("topic"),
+                    datetime.now().isoformat(),
+                    parsed.get("quality_score", 0),
+                    parsed.get("quality_grade", "F"),
+                    0,
+                ),
+            )
+            if cur.rowcount != 1:
+                continue
+            new_count += 1
+
+        # Q2: only rebuild aggregates when new rows were actually inserted.
+        if new_count > 0:
+            _rebuild_aggregate_tables(conn)
+        conn.commit()
+        conn.execute("PRAGMA user_version = 3")
+        conn.commit()
+    finally:
+        conn.close()
+
+    if not quiet:
+        total = conn_total_sessions() if TRENDS_DB.exists() else new_count
+        print(f"[Token Optimizer] Collected {new_count} new Hermes sessions. Total in DB: {total}")
+    return new_count
+
+
 def collect_sessions(days=90, quiet=False, rebuild=False):
     """Parse new JSONL files and insert into SQLite. Zero token cost.
 
@@ -7939,6 +8109,9 @@ def collect_sessions(days=90, quiet=False, rebuild=False):
     With rebuild=True, drops and re-collects all data (e.g., after a
     measurement fix like #18 model attribution).
     """
+    if _use_hermes_session_adapter():
+        return _collect_hermes_sessions(days=days, quiet=quiet, rebuild=rebuild)
+
     conn = _init_trends_db()
 
     # One-time migration for fix #18: wipe model_daily (safe, fast, no data loss)
@@ -10005,18 +10178,26 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.9.3"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.10.0"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DAEMON_RUNTIME = detect_runtime()
-_DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else "claude"
-DAEMON_LABEL = "com.token-optimizer.codex-dashboard" if _DAEMON_RUNTIME == "codex" else "com.token-optimizer.dashboard"
-DAEMON_PORT = 24843 if _DAEMON_RUNTIME == "codex" else 24842
+_DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else ("hermes" if _DAEMON_RUNTIME == "hermes" else "claude")
+DAEMON_LABEL = (
+    "com.token-optimizer.codex-dashboard" if _DAEMON_RUNTIME == "codex"
+    else ("com.token-optimizer.hermes-dashboard" if _DAEMON_RUNTIME == "hermes"
+          else "com.token-optimizer.dashboard")
+)
+DAEMON_PORT = 24843 if _DAEMON_RUNTIME == "codex" else (24844 if _DAEMON_RUNTIME == "hermes" else 24842)
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 PLIST_PATH = LAUNCH_AGENTS_DIR / f"{DAEMON_LABEL}.plist"
 DAEMON_LOG_DIR = SNAPSHOT_DIR / "logs"
 DAEMON_TOKEN_PATH = SNAPSHOT_DIR / "daemon-token"  # 0600, per-install CSRF secret
 DAEMON_THRASH_BREADCRUMB = SNAPSHOT_DIR / ".daemon-thrash"  # adv-005 tombstone
-DAEMON_IDENTITY_MAGIC = "token-optimizer-codex-dashboard-v1" if _DAEMON_RUNTIME == "codex" else "token-optimizer-dashboard-v1"
+DAEMON_IDENTITY_MAGIC = (
+    "token-optimizer-codex-dashboard-v1" if _DAEMON_RUNTIME == "codex"
+    else ("token-optimizer-hermes-dashboard-v1" if _DAEMON_RUNTIME == "hermes"
+          else "token-optimizer-dashboard-v1")
+)
 
 
 def _get_or_create_daemon_token():
@@ -11362,7 +11543,11 @@ def _uninstall_launchd_daemon():
         print("[Token Optimizer] No daemon artifacts found. Nothing to remove.")
 
 
-WINDOWS_TASK_NAME = "TokenOptimizerCodexDashboard" if _DAEMON_RUNTIME == "codex" else "TokenOptimizerDashboard"
+WINDOWS_TASK_NAME = (
+    "TokenOptimizerCodexDashboard" if _DAEMON_RUNTIME == "codex"
+    else ("TokenOptimizerHermesDashboard" if _DAEMON_RUNTIME == "hermes"
+          else "TokenOptimizerDashboard")
+)
 WINDOWS_LAUNCHER_NAME = "dashboard-launcher.cmd"
 
 
@@ -12695,7 +12880,9 @@ def compute_quality_score(quality_data, session_id=None):
             live_sid = sanitize_session_id(str(live.get("session_id") or ""))
             want_sid = sanitize_session_id(str(session_id or ""))
             if age < 10 and want_sid and live_sid == want_sid:
-                fill_pct = live["used_percentage"] / 100.0
+                # Cap at 1.0: the live percentage is measured against an assumed
+                # window, so it must never display/score as >100% fill.
+                fill_pct = min(1.0, max(0.0, live["used_percentage"] / 100.0))
     except (json.JSONDecodeError, OSError, KeyError):
         pass
     if fill_pct is None:
@@ -19797,11 +19984,14 @@ def _session_token_vector(row):
     inp = float(row[0] or 0)
     out = float(row[1] or 0)
     cw = float((row[2] or 0) + (row[3] or 0))
+    # M2 (defensive): guard against corrupt/negative cache_create columns.
+    cw = max(0.0, cw)
     # A corrupt/recomputed row can report cache_create > input_tokens. Clamp so the
     # class split can never over-count (fi + cw + cr <= inp is preserved).
     cw = min(cw, inp)
     hit = min(1.0, max(0.0, float(row[4] or 0)))
-    cr = inp * hit
+    cr = max(0.0, inp * hit)
+    out = max(0.0, out)
     fresh_raw = inp * (1 - hit) - cw
     fi = max(0.0, fresh_raw)
     # cache_hit_rate is a rounded float; cache_create is an integer. Rounding drift can
@@ -21403,6 +21593,48 @@ if __name__ == "__main__":
     elif args[0] == "codex-install":
         import codex_install
         sys.exit(codex_install.main(args[1:]))
+    elif args[0] == "hermes-doctor":
+        import hermes_doctor
+        sys.exit(hermes_doctor.main(args[1:]))
+    elif args[0] == "hermes-install":
+        import hermes_install
+        sys.exit(hermes_install.main(args[1:]))
+    elif args[0] == "hermes-rollup":
+        # Ingest recent Hermes sessions into trends.db.  Called by the Hermes
+        # plugin's on_session_end hook via hermes_hook_bridge.run_rollup().
+        # --session <id> and --platform / --reason are accepted and silently
+        # consumed so the bridge's exact call signature never causes an error;
+        # a full recent collect is always run (INSERT OR IGNORE is idempotent).
+        quiet = "--quiet" in args or "-q" in args
+        _collect_hermes_sessions(days=90, quiet=quiet)
+        sys.exit(0)
+    elif args[0] == "hermes-summary":
+        # Print a brief usage summary for the most recent Hermes sessions.
+        # Called by hermes_hook_bridge.run_summary() on /token-optimizer command.
+        # --session <id> is accepted but treated as "show recent" (Hermes state.db
+        # does not expose a single-session fast path that avoids a full collect).
+        quiet = False
+        days = 7
+        i = 1
+        while i < len(args):
+            if args[i] == "--session" and i + 1 < len(args):
+                i += 2  # accept arg, ignore value — we always show recent
+            elif args[i] in ("--quiet", "-q"):
+                quiet = True
+                i += 1
+            elif args[i] == "--days" and i + 1 < len(args):
+                try:
+                    days = int(args[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+            else:
+                i += 1
+        new_count = _collect_hermes_sessions(days=days, quiet=True)
+        if not quiet:
+            print(f"[Token Optimizer / Hermes] {new_count} new session(s) ingested.")
+        usage_trends(days=days, as_json=False)
+        sys.exit(0)
     elif args[0] == "codex-state":
         codex_state_report(as_json="--json" in args)
     elif args[0] == "drift":
@@ -22578,6 +22810,8 @@ if __name__ == "__main__":
         print("  python3 measure.py doctor --json        # Machine-readable doctor output")
         print("  python3 measure.py codex-doctor         # Codex adapter readiness check")
         print("  python3 measure.py codex-install        # Install Codex hooks into a project")
+        print("  python3 measure.py hermes-doctor         # Hermes adapter readiness check")
+        print("  python3 measure.py hermes-install        # Install Hermes plugin into ~/.hermes/plugins/")
         print("  python3 measure.py codex-compact-prompt # Render/install Codex compact prompt")
         print("  python3 measure.py drift                # Drift report: compare against last snapshot")
         print("  python3 measure.py drift --json          # Machine-readable drift output")

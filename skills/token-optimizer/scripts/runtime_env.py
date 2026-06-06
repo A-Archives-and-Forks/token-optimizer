@@ -1,13 +1,14 @@
-"""Runtime home detection shared by Claude Code and Codex adapters.
+"""Runtime home detection shared by Claude Code, Codex, and Hermes adapters.
 
-This module keeps the first Codex integration step deliberately simple:
+This module keeps runtime integration deliberately simple:
 
-- Claude Code stays the default runtime unless Codex is clearly indicated.
+- Claude Code stays the default runtime unless Codex or Hermes is clearly indicated.
 - Codex activates when CODEX_HOME is set or TOKEN_OPTIMIZER_RUNTIME=codex.
+- Hermes activates when HERMES_HOME is set or TOKEN_OPTIMIZER_RUNTIME=hermes.
 - Callers can keep legacy variable names while resolving to the correct home.
 
-The goal is to let Token Optimizer share one Python core while the Codex
-adapter grows feature-by-feature on top of it.
+The goal is to let Token Optimizer share one Python core while platform
+adapters grow feature-by-feature on top of it.
 """
 
 from __future__ import annotations
@@ -20,9 +21,11 @@ from pathlib import Path
 _RUNTIME_OVERRIDE = "TOKEN_OPTIMIZER_RUNTIME"
 _RUNTIME_CLAUDE = "claude"
 _RUNTIME_CODEX = "codex"
-_VALID_RUNTIMES = frozenset({_RUNTIME_CLAUDE, _RUNTIME_CODEX})
+_RUNTIME_HERMES = "hermes"
+_VALID_RUNTIMES = frozenset({_RUNTIME_CLAUDE, _RUNTIME_CODEX, _RUNTIME_HERMES})
 _CLAUDE_PLUGIN_ENVS = ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA")
 _CODEX_HOME_ENV = "CODEX_HOME"
+_HERMES_HOME_ENV = "HERMES_HOME"
 
 
 def _home_root() -> Path:
@@ -67,7 +70,8 @@ def detect_runtime() -> str:
       1. Explicit override via TOKEN_OPTIMIZER_RUNTIME
       2. Claude plugin env vars imply Claude Code
       3. CODEX_HOME implies Codex
-      4. Default to Claude Code for backward compatibility
+      4. HERMES_HOME implies Hermes
+      5. Default to Claude Code for backward compatibility
     """
     override = os.environ.get(_RUNTIME_OVERRIDE, "").strip().lower()
     if override in _VALID_RUNTIMES:
@@ -78,6 +82,9 @@ def detect_runtime() -> str:
 
     if os.environ.get(_CODEX_HOME_ENV):
         return _RUNTIME_CODEX
+
+    if os.environ.get(_HERMES_HOME_ENV):
+        return _RUNTIME_HERMES
 
     return _RUNTIME_CLAUDE
 
@@ -92,6 +99,11 @@ def codex_home() -> Path:
     return _safe_home_from_env(_CODEX_HOME_ENV, Path.home() / ".codex")
 
 
+def hermes_home() -> Path:
+    """Return Hermes's home directory, safely honoring HERMES_HOME when valid."""
+    return _safe_home_from_env(_HERMES_HOME_ENV, Path.home() / ".hermes")
+
+
 def runtime_home() -> Path:
     """Return the home directory used by the active runtime."""
     runtime = detect_runtime()
@@ -99,16 +111,24 @@ def runtime_home() -> Path:
     if runtime == _RUNTIME_CODEX:
         return codex_home()
 
+    if runtime == _RUNTIME_HERMES:
+        return hermes_home()
+
     return claude_home()
 
 
 def plugin_data_env_vars() -> tuple[str, ...]:
     """Return plugin-data env vars in runtime-specific priority order."""
-    if detect_runtime() == _RUNTIME_CODEX:
+    if detect_runtime() in (_RUNTIME_CODEX, _RUNTIME_HERMES):
         return ("TOKEN_OPTIMIZER_PLUGIN_DATA",)
     return ("CLAUDE_PLUGIN_DATA", "TOKEN_OPTIMIZER_PLUGIN_DATA")
 
 
 def runtime_name_for_humans() -> str:
     """Return a display label for logs and user-facing output."""
-    return "Codex" if detect_runtime() == _RUNTIME_CODEX else "Claude Code"
+    runtime = detect_runtime()
+    if runtime == _RUNTIME_CODEX:
+        return "Codex"
+    if runtime == _RUNTIME_HERMES:
+        return "Hermes"
+    return "Claude Code"
