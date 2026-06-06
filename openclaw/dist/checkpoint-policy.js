@@ -288,7 +288,9 @@ function buildRuntimeSnapshot(run, contextAudit) {
     const ctxWindow = (0, quality_1.contextWindowForModel)(run.model);
     const dynamicFill = ctxWindow > 0 ? (run.tokens.input / ctxWindow) * 100 : 0;
     const overheadFill = contextAudit ? (contextAudit.totalOverhead / ctxWindow) * 100 : 0;
-    const fillPct = Math.max(dynamicFill, overheadFill);
+    // Cap at 100%: the window is an assumption, so a token count above it (wrong
+    // window, or genuinely over the assumed cap) must never display as >100% fill.
+    const fillPct = Math.min(100, Math.max(dynamicFill, overheadFill));
     const qualityScore = (0, quality_1.scoreSessionQuality)(run).score;
     return {
         fillPct,

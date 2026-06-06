@@ -7,6 +7,7 @@
 import { AgentRun, WasteFinding, AuditReport, Severity } from "./models";
 import { QualityReport } from "./quality";
 import { ContextAudit } from "./context-audit";
+import type { RealizedSavings } from "./savings";
 import { CoachData } from "./coach";
 export interface AgentCostBreakdown {
     name: string;
@@ -32,6 +33,7 @@ export interface DashboardData {
     pricingTier: string;
     pricingTierLabel: string;
     coach: CoachData | null;
+    savings: RealizedSavings | null;
 }
 interface OverviewData {
     totalRuns: number;
@@ -97,7 +99,7 @@ interface SessionRow {
  * classified "unknown" and the list is simply cost-ranked.
  */
 export declare function buildAgentCostBreakdown(runs: AgentRun[]): AgentCostBreakdown[];
-export declare function buildDashboardData(runs: AgentRun[], report: AuditReport, quality?: QualityReport | null, context?: ContextAudit | null, coach?: CoachData | null): DashboardData;
+export declare function buildDashboardData(runs: AgentRun[], report: AuditReport, quality?: QualityReport | null, context?: ContextAudit | null, coach?: CoachData | null, savings?: RealizedSavings | null): DashboardData;
 export declare function generateDashboardHtml(data: DashboardData): string;
 export declare function writeDashboard(data: DashboardData): string;
 export declare function getDashboardPath(): string;

@@ -23,6 +23,14 @@ export interface QualityReport {
     recommendations: string[];
     distortionBounds?: DistortionBounds;
 }
+/**
+ * Resolve a model's context window. Tries exact match, then a Claude-family rule,
+ * then substring match, so a full model id (e.g. "claude-sonnet-4-6",
+ * "anthropic/claude-opus-4-8") resolves to its real window instead of silently
+ * defaulting to 200K -- which would overstate fill% up to ~5x for a 1M-window
+ * Claude session. Unknown models fall back to a conservative 200K ASSUMED
+ * window; callers must label fill as an estimate against an assumed window.
+ */
 export declare function contextWindowForModel(model: string): number;
 export interface DistortionBounds {
     /** Estimated best quality score for this configuration (heuristic upper bound). */

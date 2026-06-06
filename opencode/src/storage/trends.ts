@@ -121,6 +121,15 @@ export class TrendsStore {
       .all(cutoffStr) as Array<Record<string, unknown>>;
   }
 
+  /** All sessions ever recorded, oldest-first. Used to establish the realized-
+   *  savings baseline (the earliest stable usage window). */
+  getAllSessions(): Array<Record<string, unknown>> {
+    const db = this.connect();
+    return db
+      .query("SELECT * FROM session_log ORDER BY created_at ASC")
+      .all() as Array<Record<string, unknown>>;
+  }
+
   getDailyStats(days: number = 30): Array<Record<string, unknown>> {
     const db = this.connect();
     const cutoff = new Date();

@@ -52,6 +52,7 @@ const path = __importStar(require("path"));
 const session_parser_1 = require("./session-parser");
 Object.defineProperty(exports, "parseSessionTurns", { enumerable: true, get: function () { return session_parser_1.parseSessionTurns; } });
 Object.defineProperty(exports, "extractCostlyPrompts", { enumerable: true, get: function () { return session_parser_1.extractCostlyPrompts; } });
+const savings_1 = require("./savings");
 const smart_compact_1 = require("./smart-compact");
 const read_cache_1 = require("./read-cache");
 const models_1 = require("./models");
@@ -185,7 +186,8 @@ function generateDashboard(days = 30) {
     allCostlyPrompts.sort((a, b) => b.costUsd - a.costUsd);
     const topCostlyPrompts = allCostlyPrompts.slice(0, 5);
     const coachData = (0, coach_1.generateCoachData)(contextAudit, runs, topCostlyPrompts, agentCosts, unusedSkillFindings);
-    const data = (0, dashboard_1.buildDashboardData)(runs, report, qualityReport, contextAudit, coachData);
+    const savings = (0, savings_1.computeRealizedSavings)(openclawDir, days);
+    const data = (0, dashboard_1.buildDashboardData)(runs, report, qualityReport, contextAudit, coachData, savings);
     return (0, dashboard_1.writeDashboard)(data);
 }
 function doctor() {

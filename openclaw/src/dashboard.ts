@@ -10,6 +10,7 @@ import * as path from "path";
 import { AgentRun, WasteFinding, AuditReport, totalTokens, Severity, CostlyPrompt } from "./models";
 import { QualityReport, contextWindowForModel, scoreSessionQuality, scoreToGrade } from "./quality";
 import { ContextAudit, SkillDetail, McpServer, ManageData } from "./context-audit";
+import type { RealizedSavings } from "./savings";
 import { loadPricingTier, PRICING_TIER_LABELS, getPricing, normalizeModelName } from "./pricing";
 import { CoachData } from "./coach";
 
@@ -42,6 +43,7 @@ export interface DashboardData {
   pricingTier: string;
   pricingTierLabel: string;
   coach: CoachData | null;
+  savings: RealizedSavings | null;
 }
 
 interface OverviewData {
@@ -248,7 +250,8 @@ export function buildDashboardData(
   report: AuditReport,
   quality: QualityReport | null = null,
   context: ContextAudit | null = null,
-  coach: CoachData | null = null
+  coach: CoachData | null = null,
+  savings: RealizedSavings | null = null
 ): DashboardData {
   const allCostZero = runs.every((r) => r.costUsd === 0);
   // A run is "unpriced" when its model has NO rate card at all -- a named-but-
@@ -343,6 +346,7 @@ export function buildDashboardData(
     pricingTier,
     pricingTierLabel,
     coach,
+    savings,
   };
 }
 
@@ -453,6 +457,7 @@ function renderNav(data: DashboardData): string {
       <div class="brand"><span></span> Token Optimizer</div>
       <div class="nav-menu">
         <a class="nav-item active" data-view="overview">Overview</a>
+        <a class="nav-item" data-view="savings">Savings</a>
         <a class="nav-item" data-view="context">Context</a>
         <a class="nav-item" data-view="quality">Quality</a>
         <a class="nav-item" data-view="waste">Waste ${wasteBadge}</a>
@@ -909,11 +914,38 @@ function renderDaily(data: DashboardData): string {
   }
 
   const useCost = !data.overview.allCostZero;
+
+  // A day-by-day trend needs at least two days to mean anything. With one day,
+  // the bar chart degenerates into a single full-width block (flex:1 + 100%
+  // height), which reads as broken. Show a plain single-day summary instead.
+  if (d.length === 1) {
+    const b = d[0];
+    return `<div class="view" id="view-daily">
+      <div class="section-header">
+        <div class="label">Daily Trends</div>
+        <h1>Daily</h1>
+        <p>Day-by-day cost and run trends.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><span>${esc(b.date)}</span></div>
+        <div class="daily-single">
+          <div><div class="daily-stat-val">${useCost ? fmtCost(b.cost) : fmtTokens(b.tokens)}</div><div class="daily-stat-label">${useCost ? "Cost" : "Tokens"}</div></div>
+          <div><div class="daily-stat-val">${b.runs}</div><div class="daily-stat-label">Runs</div></div>
+          <div><div class="daily-stat-val">${fmtTokens(b.tokens)}</div><div class="daily-stat-label">Tokens</div></div>
+        </div>
+        <p class="daily-hint">Day-over-day trends appear once you've run Token Optimizer across 2+ days. For per-pattern savings right now, see the Waste view.</p>
+      </div>
+    </div>`;
+  }
+
   const maxCost = Math.max(...d.map((b) => b.cost), 0.01);
   const maxRuns = Math.max(...d.map((b) => b.runs), 1);
   const maxTokens = Math.max(...d.map((b) => b.tokens), 1);
   const firstDate = d[0].date;
   const lastDate = d[d.length - 1].date;
+  const dateLabel = firstDate === lastDate
+    ? `<span>${esc(firstDate)}</span>`
+    : `<span>${esc(firstDate)}</span><span>${esc(lastDate)}</span>`;
 
   const costChartData = d.map((b) => ({
     date: b.date,
@@ -950,7 +982,7 @@ function renderDaily(data: DashboardData): string {
               return `<div class="bar" style="height:${Math.max(h, 1)}%" data-tt-date="${b.date}" data-tt-val="${useCost ? fmtCost(b.value) : fmtTokens(b.value)}" data-tt-runs="${b.runs}"></div>`;
             }).join("")}
           </div>
-          <div class="bar-label"><span>${esc(firstDate)}</span><span>${esc(lastDate)}</span></div>
+          <div class="bar-label">${dateLabel}</div>
         </div>
       </div>
     </div>
@@ -976,10 +1008,93 @@ function renderDaily(data: DashboardData): string {
               return `<div class="bar bar-secondary" style="height:${Math.max(h, 1)}%" data-tt-date="${b.date}" data-tt-val="${b.runs} runs" data-tt-runs="${b.runs}"></div>`;
             }).join("")}
           </div>
-          <div class="bar-label"><span>${esc(firstDate)}</span><span>${esc(lastDate)}</span></div>
+          <div class="bar-label">${dateLabel}</div>
         </div>
       </div>
     </div>
+  </div>`;
+}
+
+function renderSavings(data: DashboardData): string {
+  const s = data.savings;
+  const header = `
+    <div class="section-header">
+      <div class="label">Realized Savings</div>
+      <h1>Savings</h1>
+      <p>Your measured before/after cost change since you started using Token Optimizer.</p>
+    </div>`;
+
+  if (!s || (!s.ready && s.cumulativeSavedUsd === 0 && s.monthlySavingsUsd === 0)) {
+    const status = s?.status ?? "no sessions yet";
+    return `<div class="view" id="view-savings">
+      ${header}
+      <div class="card">
+        <div class="empty-state">
+          Realized savings need a baseline of your early usage to compare against.<br>
+          <span style="color:var(--c-text-dim);font-size:13px">${esc(status)}</span>
+        </div>
+      </div>
+      <p class="daily-hint">This measures your actual cost-per-session drop over time. Until the baseline is set, the Waste view shows per-pattern savings you can act on now.</p>
+    </div>`;
+  }
+
+  const installLine = s.installDate
+    ? `<span style="color:var(--c-text-dim);font-size:13px">since ${esc(s.installDate)}</span>`
+    : "";
+
+  // Headline: clamp the monthly figure at 0 for display (a negative means usage
+  // grew, which we show honestly in the per-session line rather than the hero).
+  const heroMonthly = Math.max(0, s.monthlySavingsUsd);
+  const hero = s.ready
+    ? `<div class="card">
+        <div class="card-header"><span>Estimated monthly savings</span> ${installLine}</div>
+        <div style="display:flex;align-items:baseline;gap:var(--s-3);padding:var(--s-2) 0">
+          <div class="daily-stat-val" style="font-size:64px">${fmtCost(heroMonthly)}</div>
+          <div style="color:var(--c-text-dim);font-size:15px">/ month</div>
+        </div>
+        <div class="savings-beforeafter">
+          <span class="sba-before">${fmtCost(s.beforeCostPerSession)}<small>/session</small></span>
+          <span class="sba-arrow">&rarr;</span>
+          <span class="sba-after">${fmtCost(s.afterCostPerSession)}<small>/session</small></span>
+          <span class="sba-delta">${s.savingsPerSession >= 0 ? "&minus;" : "+"}${fmtCost(Math.abs(s.savingsPerSession))}/session</span>
+        </div>
+        <div style="color:var(--c-text-dim);font-size:13px;margin-top:var(--s-2)">
+          ${esc(s.beforeMixLabel)} &rarr; ${esc(s.afterMixLabel)} &middot; ~${Math.round(s.sessionsPerMonth)} sessions/mo
+        </div>
+      </div>`
+    : `<div class="card">
+        <div class="card-header"><span>Baseline frozen &mdash; building comparison</span> ${installLine}</div>
+        <div class="empty-state" style="padding:var(--s-3) 0">
+          <span style="color:var(--c-text-dim);font-size:13px">${esc(s.status)}</span>
+        </div>
+      </div>`;
+
+  const cumulative = s.cumulativeSavedUsd > 0
+    ? `<div class="card">
+        <div class="card-header"><span>Saved so far</span></div>
+        <div class="daily-stat-val" style="font-size:36px;padding:var(--s-2) 0">${fmtCost(s.cumulativeSavedUsd)}</div>
+        <div style="color:var(--c-text-dim);font-size:13px">Per-session delta applied across every session since your baseline.</div>
+      </div>`
+    : "";
+
+  const levers = s.ready && s.breakdown.length
+    ? `<div class="card">
+        <div class="card-header"><span>Where the savings come from</span></div>
+        ${s.breakdown
+          .filter((b) => Math.abs(b.monthlyUsd) >= 0.005)
+          .map((b) => `<div class="bar-row">
+            <span class="bar-row-label">${esc(b.label)}</span>
+            <span style="font-family:var(--font-mono);color:${b.monthlyUsd >= 0 ? "var(--c-accent-cyan)" : "var(--c-danger)"}">${b.monthlyUsd >= 0 ? "" : "+"}${fmtCost(Math.abs(b.monthlyUsd))}/mo</span>
+          </div>`)
+          .join("")}
+      </div>`
+    : "";
+
+  return `<div class="view" id="view-savings">
+    ${header}
+    ${hero}
+    ${cumulative}
+    ${levers}
   </div>`;
 }
 
@@ -1875,6 +1990,22 @@ h1, h2, h3, h4 { font-weight: 400; }
   font-family: var(--font-mono);
   margin-top: var(--s-1);
 }
+/* Daily trend charts: left-align and cap bar width so a handful of days
+   render as readable bars instead of stretching to full-width blocks. */
+#daily-cost-chart, #daily-runs-chart { justify-content: flex-start; }
+#daily-cost-chart .bar, #daily-runs-chart .bar { max-width: 64px; }
+/* Single-day summary (a trend chart needs >= 2 days to mean anything) */
+.daily-single { display: flex; gap: var(--s-5); padding: var(--s-3) 0 var(--s-2); }
+.daily-stat-val { font-size: 30px; font-weight: 600; color: var(--c-accent-cyan); font-family: var(--font-mono); line-height: 1.1; }
+.daily-stat-label { font-size: 12px; color: var(--c-text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+.daily-hint { font-size: 13px; color: var(--c-text-dim); margin-top: var(--s-2); }
+/* Realized savings before -> after */
+.savings-beforeafter { display: flex; align-items: center; gap: var(--s-3); font-family: var(--font-mono); font-size: 22px; margin-top: var(--s-1); flex-wrap: wrap; }
+.sba-before { color: var(--c-text-dim); text-decoration: line-through; }
+.sba-before small, .sba-after small { font-size: 12px; opacity: 0.7; }
+.sba-arrow { color: var(--c-text-dim); }
+.sba-after { color: var(--c-text); }
+.sba-delta { font-size: 14px; color: var(--c-accent-cyan); background: rgba(0,240,255,0.08); padding: 2px 10px; border-radius: 999px; }
 
 /* BAR ROWS (horizontal) */
 .bar-row {
@@ -2278,13 +2409,19 @@ function renderJS(): string {
   }
   function hideTooltip() { tooltip.classList.remove('visible'); }
 
+  // Escape dataset values before they re-enter innerHTML. The HTML-attribute
+  // esc() at render time is decoded by the browser when read back via dataset,
+  // so model names (from session JSONL = untrusted) must be re-escaped here to
+  // prevent an XSS round-trip.
+  function te(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
   // Bind bar tooltips
   document.querySelectorAll('.bar[data-tt-date]').forEach(function(bar) {
     bar.addEventListener('mouseover', function(e) {
       showTooltip(e,
-        '<div class="tt-label">' + this.dataset.ttDate + '</div>' +
-        '<div class="tt-value">' + this.dataset.ttVal + '</div>' +
-        '<div class="tt-secondary">' + this.dataset.ttRuns + ' runs</div>'
+        '<div class="tt-label">' + te(this.dataset.ttDate) + '</div>' +
+        '<div class="tt-value">' + te(this.dataset.ttVal) + '</div>' +
+        '<div class="tt-secondary">' + te(this.dataset.ttRuns) + ' runs</div>'
       );
     });
     bar.addEventListener('mousemove', positionTooltip);
@@ -2295,9 +2432,9 @@ function renderJS(): string {
   document.querySelectorAll('.model-segment[data-tt-model]').forEach(function(seg) {
     seg.addEventListener('mouseover', function(e) {
       showTooltip(e,
-        '<div class="tt-label">' + this.dataset.ttModel + '</div>' +
-        '<div class="tt-value">' + this.dataset.ttPct + '%</div>' +
-        '<div class="tt-secondary">' + this.dataset.ttCost + '</div>'
+        '<div class="tt-label">' + te(this.dataset.ttModel) + '</div>' +
+        '<div class="tt-value">' + te(this.dataset.ttPct) + '%</div>' +
+        '<div class="tt-secondary">' + te(this.dataset.ttCost) + '</div>'
       );
     });
     seg.addEventListener('mousemove', positionTooltip);
@@ -2445,6 +2582,7 @@ ${renderCSS()}
 
   <main class="main-col">
     ${renderOverview(data)}
+    ${renderSavings(data)}
     ${renderContext(data)}
     ${renderQuality(data)}
     ${renderWaste(data)}

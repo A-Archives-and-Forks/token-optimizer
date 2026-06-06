@@ -33,7 +33,7 @@ export function createTokenStatusTool(getState: () => {
         "",
         `**Resource Health**: ${Math.round(q.resourceHealth)}/100 (${q.resourceHealthGrade})`,
         `**Session Efficiency**: ${Math.round(q.sessionEfficiency)}/100 (${q.sessionEfficiencyGrade})`,
-        `**Context Fill**: ${Math.round(q.fillPct * 100)}% | **Band**: ${scoreToBand(q.resourceHealth)}`,
+        `**Context Fill**: ~${Math.round(q.fillPct * 100)}% est. (vs assumed window) | **Band**: ${scoreToBand(q.resourceHealth)}`,
         `**Activity Mode**: ${mode}`,
         `**Tool Calls**: ${q.toolCalls} | **Compactions**: ${state.store.getCompactionCount()}`,
       ];
