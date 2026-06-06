@@ -10005,7 +10005,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.9.2"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.9.3"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DAEMON_RUNTIME = detect_runtime()
 _DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else "claude"
@@ -17210,6 +17210,24 @@ _NUDGE_FOLLOWTHROUGH_WINDOW_SECONDS = 600  # 10 minutes
 _LOOP_SESSION_CAP = 2
 _LOOP_LAST_MESSAGES = 4
 
+# Transient nudge/loop/warning state that must survive across the separate
+# UserPromptSubmit and PostCompact hook processes. compute_quality_score() builds
+# a fresh result each run, so quality_cache() carries these forward from the prior
+# on-disk cache. Any new "_nudge_*"/"_loop_*"/warning-dedup key set in _maybe_nudge
+# or _maybe_loop_warning MUST be registered here — a sibling key silently missing
+# from this set is exactly what broke the nudge follow-through credit (A6).
+_CARRY_KEYS = (
+    "_nudge_fill_pct_at_fire",
+    "_nudge_fire_epoch",
+    "_nudge_count",
+    "_nudge_last_epoch",
+    "_nudge_previous_score",
+    "_loop_warning_count",
+    "progressive_bands_captured",
+    "_last_fill_warn_level",
+    "_last_tool_call_warn_level",
+)
+
 
 def _check_realtime_loops(quality_data):
     """Lightweight loop detection using already-parsed quality_data.
@@ -17565,10 +17583,7 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
 
     _session_id = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
     result = compute_quality_score(quality_data, session_id=_session_id)
-    for carry_key in ("_nudge_fill_pct_at_fire", "_nudge_count", "_nudge_last_epoch",
-                       "_nudge_previous_score", "_loop_warning_count",
-                       "progressive_bands_captured", "_last_fill_warn_level",
-                       "_last_tool_call_warn_level"):
+    for carry_key in _CARRY_KEYS:
         if carry_key in prev_result and carry_key not in result:
             result[carry_key] = prev_result[carry_key]
     result["total_messages"] = len(quality_data["messages"])
@@ -17687,33 +17702,53 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
     # Nudge follow-through: if PostCompact triggered this run (force=True)
     # and a nudge preceded the compact, measure the actual fill_pct recovery.
     if force and result.get("fill_pct", 0) > 0:
-        nudge_fill = result.get("_nudge_fill_pct_at_fire", 0)
-        if nudge_fill > 0:
-            current_fill = result["fill_pct"]
-            fill_delta = nudge_fill - current_fill
-            ft_sid = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
-            # A2 temporal gate: only credit a compaction that followed the nudge
-            # within the window. A compaction long after the nudge was not its
-            # follow-through, so it must not borrow the nudge's credit.
-            fire_epoch = result.get("_nudge_fire_epoch", 0)
-            within_window = fire_epoch and (time.time() - fire_epoch) <= _NUDGE_FOLLOWTHROUGH_WINDOW_SECONDS
-            # A2 dedup: if a checkpoint_restore already credited this session's
-            # recovery for this compaction (same SessionStart cycle), the nudge
-            # must not double-credit the same tokens.
-            already_credited = _checkpoint_restore_credited_recently(ft_sid)
-            if fill_delta > 5 and within_window and not already_credited:
-                context_size = detect_context_window()[0]
-                measured_tokens_recovered = int(context_size * fill_delta / 100)
-                _log_compression_event(
-                    feature="quality_nudge",
-                    original_text=" " * (measured_tokens_recovered * 4),
-                    compressed_text=f"nudge_followthrough:fill={nudge_fill}->{current_fill}",
-                    session_id=ft_sid,
-                    detail=f"measured_recovery: fill {nudge_fill}%->{current_fill}% = {measured_tokens_recovered} tokens on {context_size} context",
-                    verified=True,
-                )
-            result.pop("_nudge_fill_pct_at_fire", None)
-            result.pop("_nudge_fire_epoch", None)
+        # A6: the nudge fires during a prior UserPromptSubmit process; this
+        # follow-through runs in a SEPARATE PostCompact process. Fire-state reaches
+        # us via the atomic per-session quality cache (carried forward at the top of
+        # this function). Fall back to prev_result directly in case the carry did not
+        # run, so a heeded session is never misclassified as ignored. Wrapped so a
+        # corrupt cache value can never crash the host hook — it degrades to "no
+        # credit", not a traceback.
+        try:
+            nudge_fill = result.get("_nudge_fill_pct_at_fire") or prev_result.get("_nudge_fill_pct_at_fire", 0)
+            if nudge_fill > 0:
+                current_fill = result["fill_pct"]
+                fill_delta = nudge_fill - current_fill
+                ft_sid = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
+                # A2 temporal gate: only credit a compaction that followed the nudge
+                # within the window. A compaction long after the nudge was not its
+                # follow-through, so it must not borrow the nudge's credit.
+                fire_epoch = result.get("_nudge_fire_epoch") or prev_result.get("_nudge_fire_epoch", 0)
+                within_window = fire_epoch and (time.time() - fire_epoch) <= _NUDGE_FOLLOWTHROUGH_WINDOW_SECONDS
+                # A2 dedup: if a checkpoint_restore already credited this session's
+                # recovery for this compaction (same SessionStart cycle), the nudge
+                # must not double-credit the same tokens.
+                already_credited = _checkpoint_restore_credited_recently(ft_sid)
+                should_credit = fill_delta > 5 and within_window and not already_credited
+                # Consume the fire-state FIRST, then credit only if the consume was
+                # actually persisted. The fire-state lives in exactly one place (this
+                # per-session cache), so once it is cleared from disk no later
+                # PostCompact can re-enter this block for the same nudge — that makes
+                # the credit idempotent without a second DB query. If the process
+                # dies between here and the credit, or the clear-write fails, we skip
+                # the credit (a conservative under-count) rather than risk a
+                # double-count that would inflate the savings number.
+                result.pop("_nudge_fill_pct_at_fire", None)
+                result.pop("_nudge_fire_epoch", None)
+                consumed = _write_quality_cache(cache_path, result)
+                if should_credit and consumed:
+                    context_size = detect_context_window()[0]
+                    measured_tokens_recovered = int(context_size * fill_delta / 100)
+                    _log_compression_event(
+                        feature="quality_nudge",
+                        original_text=" " * (measured_tokens_recovered * 4),
+                        compressed_text=f"nudge_followthrough:fill={nudge_fill}->{current_fill}",
+                        session_id=ft_sid,
+                        detail=f"measured_recovery: fill {nudge_fill}%->{current_fill}% = {measured_tokens_recovered} tokens on {context_size} context",
+                        verified=True,
+                    )
+        except Exception:
+            pass
 
     # Progressive checkpoints (v3.0)
     if _PROGRESSIVE_ENABLED and result.get("fill_pct", 0) > 0:
