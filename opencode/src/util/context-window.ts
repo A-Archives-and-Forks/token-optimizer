@@ -84,6 +84,11 @@ export function contextWindowForModel(model: string): number {
   const direct = MODEL_CONTEXT_WINDOWS[lower];
   if (direct !== undefined) return direct;
 
+  // Legacy Claude (2.x/3.x) is genuinely 200K. Guard before the substring loop,
+  // which would otherwise match the bare "opus"/"sonnet" keys and over-promote
+  // e.g. "claude-3-5-sonnet-20241022" to 1M (understating fill).
+  if (lower.includes("claude-2") || lower.includes("claude-3")) return 200_000;
+
   for (const [key, value] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
     if (lower.includes(key)) return value;
   }

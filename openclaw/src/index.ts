@@ -17,6 +17,7 @@ import {
   parseSessionTurns,
   extractCostlyPrompts,
 } from "./session-parser";
+import { computeRealizedSavings } from "./savings";
 import {
   captureCheckpoint,
   captureCheckpointV2,
@@ -258,7 +259,9 @@ export function generateDashboard(days: number = 30): string | null {
     unusedSkillFindings
   );
 
-  const data = buildDashboardData(runs, report, qualityReport, contextAudit, coachData);
+  const savings = computeRealizedSavings(openclawDir, days);
+
+  const data = buildDashboardData(runs, report, qualityReport, contextAudit, coachData, savings);
   return writeDashboard(data);
 }
 

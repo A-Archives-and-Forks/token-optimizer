@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { TrendsStore } from "../storage/trends.js";
 import { scoreToGrade, scoreToBand } from "../util/grade.js";
+import { computeRealizedSavings } from "../savings.js";
 
 export interface DashboardOptions {
   dataDir: string;
@@ -49,6 +50,11 @@ export function generateDashboard(opts: DashboardOptions): string {
   } finally {
     store.close();
   }
+
+  // Realized before/after savings (opens its own short-lived store connection).
+  const savings = computeRealizedSavings(opts.dataDir, days);
+  const fmtCost = (n: number): string =>
+    !Number.isFinite(n) ? "$0" : n >= 1000 ? `$${(n / 1000).toFixed(1)}k` : `$${n.toFixed(2)}`;
 
   const totalSessions = sessions.length;
   const avgRH = totalSessions > 0
@@ -139,6 +145,7 @@ tr:hover td { background: var(--bg-hover); }
 
   <div class="nav">
     <a class="active" data-view="overview">Overview</a>
+    <a data-view="savings">Savings</a>
     <a data-view="quality">Quality Trends</a>
     <a data-view="sessions">Sessions</a>
     <a data-view="daily">Daily Stats</a>
@@ -200,6 +207,51 @@ tr:hover td { background: var(--bg-hover); }
       </tbody>
     </table>
     ` : ""}
+  </div>
+
+  <!-- SAVINGS -->
+  <div class="view" id="view-savings">
+    <div class="section-title">Realized Savings</div>
+    ${!savings.ready ? `
+    <div class="empty">
+      Realized savings need a baseline of your early usage to compare against.<br>
+      <span style="font-size:13px">${esc(savings.status)}</span>
+    </div>
+    <div class="stat-sub" style="margin-top:var(--s-4)">This measures your actual cost-per-session drop over time, priced from your recorded spend. Until the baseline is set, the Sessions view shows current usage.</div>
+    ` : `
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-value" style="color:var(--success)">${fmtCost(Math.max(0, savings.monthlySavingsUsd))}</div>
+        <div class="stat-label">Est. Monthly Savings</div>
+        <div class="stat-sub">${savings.installDate ? "since " + esc(savings.installDate) : ""}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value">${fmtCost(savings.beforeCostPerSession)} &rarr; ${fmtCost(savings.afterCostPerSession)}</div>
+        <div class="stat-label">Cost / Session</div>
+        <div class="stat-sub">${savings.savingsPerSession >= 0 ? "&minus;" : "+"}${fmtCost(Math.abs(savings.savingsPerSession))}/session</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value">${fmtCost(savings.cumulativeSavedUsd)}</div>
+        <div class="stat-label">Saved So Far</div>
+        <div class="stat-sub">across all sessions since baseline</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" style="font-size:18px">${esc(savings.beforeMixLabel)} &rarr; ${esc(savings.afterMixLabel)}</div>
+        <div class="stat-label">Model Mix Shift</div>
+        <div class="stat-sub">~${Math.round(savings.sessionsPerMonth)} sessions/mo</div>
+      </div>
+    </div>
+    <div class="section-title">Where the savings come from</div>
+    <table>
+      <thead><tr><th>Lever</th><th>Est. $/month</th></tr></thead>
+      <tbody>
+        ${savings.breakdown.filter((b) => Math.abs(b.monthlyUsd) >= 0.005).map((b) => `<tr>
+          <td>${esc(b.label)}</td>
+          <td style="font-family:monospace;color:${b.monthlyUsd >= 0 ? "var(--success)" : "var(--danger)"}">${b.monthlyUsd >= 0 ? "" : "+"}${fmtCost(Math.abs(b.monthlyUsd))}/mo</td>
+        </tr>`).join("")}
+      </tbody>
+    </table>
+    `}
   </div>
 
   <!-- QUALITY TRENDS -->

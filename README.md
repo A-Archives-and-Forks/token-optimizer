@@ -6,8 +6,8 @@
   <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.9.3-green" alt="Version 5.9.3"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/github/release-date/alexgreensh/token-optimizer?label=last%20release&color=blue" alt="Last Release"></a>
   <a href="https://github.com/alexgreensh/token-optimizer"><img src="https://img.shields.io/badge/Claude_Code-Plugin-blueviolet" alt="Claude Code Plugin"></a>
-  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/openclaw"><img src="https://img.shields.io/badge/OpenClaw-v2.4.5-brightgreen" alt="OpenClaw v2.4.5"></a>
-  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/opencode"><img src="https://img.shields.io/badge/OpenCode-v1.0.5-58a6ff" alt="OpenCode v1.0.5"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/openclaw"><img src="https://img.shields.io/badge/OpenClaw-v2.4.6-brightgreen" alt="OpenClaw v2.4.6"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/opencode"><img src="https://img.shields.io/badge/OpenCode-v1.0.6-58a6ff" alt="OpenCode v1.0.6"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/blob/main/docs/codex.md"><img src="https://img.shields.io/badge/Codex-supported-orange" alt="Codex supported"></a>
 </p>
 <p align="center">

@@ -70,8 +70,38 @@ const MODEL_CONTEXT_WINDOWS = {
     "o3-pro": 200_000,
     local: 128_000,
 };
+const DEFAULT_CONTEXT_WINDOW = 200_000;
+/**
+ * Resolve a model's context window. Tries exact match, then a Claude-family rule,
+ * then substring match, so a full model id (e.g. "claude-sonnet-4-6",
+ * "anthropic/claude-opus-4-8") resolves to its real window instead of silently
+ * defaulting to 200K -- which would overstate fill% up to ~5x for a 1M-window
+ * Claude session. Unknown models fall back to a conservative 200K ASSUMED
+ * window; callers must label fill as an estimate against an assumed window.
+ */
 function contextWindowForModel(model) {
-    return MODEL_CONTEXT_WINDOWS[model] ?? 200_000;
+    if (!model)
+        return DEFAULT_CONTEXT_WINDOW;
+    const lower = model.toLowerCase();
+    const direct = MODEL_CONTEXT_WINDOWS[lower];
+    if (direct !== undefined)
+        return direct;
+    // Claude families. All haiku and all Claude 2.x/3.x are 200K; only Claude 4.x+
+    // non-haiku is 1M GA (since March 2026). Match before the generic substring
+    // loop so this rule is authoritative.
+    if (lower.includes("claude") || lower.includes("opus") || lower.includes("sonnet")) {
+        if (lower.includes("haiku"))
+            return 200_000;
+        // Legacy generations never had 1M -- don't over-promote them.
+        if (lower.includes("claude-2") || lower.includes("claude-3"))
+            return 200_000;
+        return 1_000_000;
+    }
+    for (const [key, value] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
+        if (lower.includes(key))
+            return value;
+    }
+    return DEFAULT_CONTEXT_WINDOW;
 }
 /**
  * Signal 1: Context fill (20%)
