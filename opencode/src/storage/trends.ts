@@ -134,29 +134,12 @@ export class TrendsStore {
                 SUM(tokens_input) as total_input,
                 SUM(tokens_output) as total_output,
                 AVG(COALESCE(resource_health, 0)) as avg_resource_health,
-                AVG(COALESCE(session_efficiency, 0)) as avg_session_efficiency,
-                SUM(cost_usd) as total_cost
+                AVG(COALESCE(session_efficiency, 0)) as avg_session_efficiency
          FROM session_log
          WHERE date >= ?
          GROUP BY date
          ORDER BY date DESC`,
       )
       .all(cutoffStr) as Array<Record<string, unknown>>;
-  }
-
-  generateDashboardData(days: number = 30): string {
-    const sessions = this.getRecentSessions(days);
-    const dailyStats = this.getDailyStats(days);
-
-    return JSON.stringify(
-      {
-        generated: new Date().toISOString(),
-        platform: "opencode",
-        sessions,
-        dailyStats,
-      },
-      null,
-      2,
-    );
   }
 }
