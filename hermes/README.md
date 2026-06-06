@@ -19,8 +19,10 @@ Clone the repo and run the bundled installer:
 
 ```bash
 git clone https://github.com/alexgreensh/token-optimizer.git
-python3 token-optimizer/skills/token-optimizer/scripts/measure.py hermes-install
+token-optimizer/install.sh --hermes
 ```
+
+Preview without writing anything: `token-optimizer/install.sh --hermes --dry-run`. (Direct equivalent if you prefer: `python3 token-optimizer/skills/token-optimizer/scripts/measure.py hermes-install`.)
 
 The installer copies the `hermes/` payload into `~/.hermes/plugins/token-optimizer/`. Hermes auto-discovers plugins from that directory on startup. No additional activation step is needed.
 
@@ -39,7 +41,7 @@ The doctor checks: HERMES_HOME resolution, plugin directory presence, required f
 **Uninstall:**
 
 ```bash
-python3 token-optimizer/skills/token-optimizer/scripts/measure.py hermes-install --uninstall
+token-optimizer/install.sh --hermes --uninstall
 ```
 
 ## Usage Inside Hermes
