@@ -76,17 +76,21 @@ token volume (commonly 80%+, rising with session length) is cache-reads — the 
 each user's own measured cache-hit rate. Cache-reads are cheap per token (0.1×) but enormous in volume, so they
 dominate cost. The whole savings story is largely about cache-read *volume* falling.
 
-**Per-session cost** (`cost_per_session`): price the class vector at the era's REAL model
-mix. For each priced model in the mix, price the vector at that model's rate card via
-`_get_model_cost`, then blend by the model's share (renormalized over the priced models so
-an unpriced entry never drags the cost toward zero):
+**Per-session cost** (`_cost_per_session`): price the class vector at the era's REAL model
+mix as a weighted average over EVERY model present. Each model's share is priced at its rate
+card via `_get_model_cost`; an unpriced entry (an unknown or local model with no rate card) is
+proxy-priced at the runtime-default rate rather than dropped or renormalized away. The
+denominator is the TOTAL present share (not the priced share), so a tiny priced sliver can
+never be inflated to represent the whole mix:
 ```
-cost = Σ_model (share_model / Σ priced shares) × cost_model(vec)
+cost = ( Σ_model share_model × cost_model'(vec) ) / Σ_model share_model
+       where cost_model'(vec) uses the model's own rate card if priced, else the runtime-default rate
 ```
 This is provider-agnostic: an Anthropic era blends Opus/Sonnet/Haiku; a Codex era blends
-gpt-5-codex / gpt-5.x / mini by their measured shares. The same blend is applied to both the
-before and after windows, so the comparison is fair. If a mix has no priced models at all, the
-session is priced at a single runtime-default model (Codex → gpt-5-codex, else Sonnet).
+gpt-5-codex / gpt-5.x / mini by their measured shares; an unrecognized model is estimated at
+the runtime default. The same estimator is applied to both the before and after windows, so
+the comparison is fair. If a mix has no priced models at all, the session is priced at a single
+runtime-default model (Codex → gpt-5-codex, else Sonnet).
 
 ---
 
