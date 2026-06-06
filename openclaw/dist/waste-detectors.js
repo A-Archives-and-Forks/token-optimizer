@@ -104,7 +104,7 @@ function detectHeartbeatModelWaste(runs, _config) {
             monthlyWasteUsd: savings,
             monthlyWasteTokens: expensive.reduce((sum, r) => sum + (0, models_1.totalTokens)(r.tokens), 0),
             recommendation: `Route heartbeat/cron tasks to Haiku. Saves ~$${savings.toFixed(2)}/month.`,
-            fixSnippet: '# In your agent config (config.json or cron/*.json):\n"model": "haiku"  # was: opus/sonnet',
+            fixSnippet: `# In your agent config (config.json or cron/*.json):\n"model": "haiku"  # was: ${modelsUsed.join("/")}`,
             evidence: {
                 expensiveCount: expensive.length,
                 modelsUsed,

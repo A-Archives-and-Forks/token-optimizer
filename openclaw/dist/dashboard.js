@@ -182,7 +182,17 @@ function aggregateByModel(runs) {
 }
 function buildDashboardData(runs, report, quality = null, context = null, coach = null) {
     const allCostZero = runs.every((r) => r.costUsd === 0);
-    const unknownModelRuns = runs.filter((r) => r.model === "unknown").length;
+    // A run is "unpriced" when its model has NO rate card at all -- a named-but-
+    // unrecognized model (Cohere, a brand-new id), not just the literal "unknown"
+    // label. A model that DOES have a rate card priced at $0 (a local/Ollama model)
+    // is intentionally free, not unpriced, so it must not inflate the "excludes N
+    // runs" disclosure. Resolve the rate-card key exactly as calculateCost does.
+    const pricing = (0, pricing_1.getPricing)();
+    const hasRateCard = (model) => {
+        const key = pricing[model] ? model : ((0, pricing_1.normalizeModelName)(model) ?? model);
+        return pricing[key] !== undefined;
+    };
+    const unknownModelRuns = runs.filter((r) => (0, models_1.totalTokens)(r.tokens) > 0 && !hasRateCard(r.model)).length;
     const activeDays = new Set(runs.map((r) => r.timestamp.toISOString().slice(0, 10))).size;
     // Determine dominant model's context window
     const modelCounts = new Map();
@@ -392,7 +402,7 @@ function renderOverview(data) {
     const o = data.overview;
     const costDisplay = o.allCostZero ? "Unknown" : fmtCost(o.totalCost);
     const costQualifier = o.unknownModelRuns > 0 && !o.allCostZero
-        ? `<div class="stat-card-qualifier">excludes ${o.unknownModelRuns} unknown-model runs</div>`
+        ? `<div class="stat-card-qualifier">excludes ${o.unknownModelRuns} unpriced-model runs</div>`
         : "";
     const qualityScore = data.quality
         ? `<div class="stat-card">

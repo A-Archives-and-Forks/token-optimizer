@@ -10,7 +10,7 @@ import * as path from "path";
 import { AgentRun, WasteFinding, AuditReport, totalTokens, Severity, CostlyPrompt } from "./models";
 import { QualityReport, contextWindowForModel, scoreSessionQuality, scoreToGrade } from "./quality";
 import { ContextAudit, SkillDetail, McpServer, ManageData } from "./context-audit";
-import { loadPricingTier, PRICING_TIER_LABELS } from "./pricing";
+import { loadPricingTier, PRICING_TIER_LABELS, getPricing, normalizeModelName } from "./pricing";
 import { CoachData } from "./coach";
 
 // ---------------------------------------------------------------------------
@@ -251,8 +251,18 @@ export function buildDashboardData(
   coach: CoachData | null = null
 ): DashboardData {
   const allCostZero = runs.every((r) => r.costUsd === 0);
+  // A run is "unpriced" when its model has NO rate card at all -- a named-but-
+  // unrecognized model (Cohere, a brand-new id), not just the literal "unknown"
+  // label. A model that DOES have a rate card priced at $0 (a local/Ollama model)
+  // is intentionally free, not unpriced, so it must not inflate the "excludes N
+  // runs" disclosure. Resolve the rate-card key exactly as calculateCost does.
+  const pricing = getPricing();
+  const hasRateCard = (model: string): boolean => {
+    const key = pricing[model] ? model : (normalizeModelName(model) ?? model);
+    return pricing[key] !== undefined;
+  };
   const unknownModelRuns = runs.filter(
-    (r) => r.model === "unknown"
+    (r) => totalTokens(r.tokens) > 0 && !hasRateCard(r.model)
   ).length;
   const activeDays = new Set(
     runs.map((r) => r.timestamp.toISOString().slice(0, 10))
@@ -462,7 +472,7 @@ function renderOverview(data: DashboardData): string {
   const o = data.overview;
   const costDisplay = o.allCostZero ? "Unknown" : fmtCost(o.totalCost);
   const costQualifier = o.unknownModelRuns > 0 && !o.allCostZero
-    ? `<div class="stat-card-qualifier">excludes ${o.unknownModelRuns} unknown-model runs</div>`
+    ? `<div class="stat-card-qualifier">excludes ${o.unknownModelRuns} unpriced-model runs</div>`
     : "";
   const qualityScore = data.quality
     ? `<div class="stat-card">
