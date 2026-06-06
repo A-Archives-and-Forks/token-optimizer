@@ -188,6 +188,33 @@ See [`openclaw/README.md`](openclaw/README.md) for full docs.
 
 </details>
 
+<details>
+<summary><h3>Hermes</h3></summary>
+
+> **Beta (v0.1.0).** Token Optimizer for [NousResearch Hermes](https://github.com/NousResearch/hermes-agent) — the autonomous agent that lives in your terminal and messaging apps. Per-turn usage capture, cost, context-quality scoring, before/after savings, a proactive pre-turn context nudge, and a dashboard — all read from Hermes's own `~/.hermes/state.db`. Model-agnostic: each session is priced at its real model (Nous Portal, OpenRouter, OpenAI, Anthropic, local), so free/cheap models never show inflated savings.
+
+Native Python plugin. Installs into `~/.hermes/plugins/token-optimizer/`, which Hermes auto-loads. Read-only access to your Hermes data, no telemetry, no Python dependency conflicts.
+
+```bash
+git clone https://github.com/alexgreensh/token-optimizer.git
+python3 token-optimizer/skills/token-optimizer/scripts/measure.py hermes-install
+```
+
+Verify the install:
+
+```bash
+python3 token-optimizer/skills/token-optimizer/scripts/measure.py hermes-doctor
+```
+
+Inside Hermes:
+- `/token-optimizer` — usage + context-quality summary for recent sessions
+- `hermes token-optimizer` — open the dashboard (http://localhost:24844)
+- A short context nudge appears automatically before a turn once context fills past ~70%
+
+See [`hermes/README.md`](hermes/README.md) for full docs.
+
+</details>
+
 ---
 
 ## Full Visibility: See Every Token, Every Dollar, Every Turn
