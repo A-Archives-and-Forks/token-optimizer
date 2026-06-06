@@ -197,12 +197,13 @@ Native Python plugin. Installs into `~/.hermes/plugins/token-optimizer/`, which 
 
 ```bash
 git clone https://github.com/alexgreensh/token-optimizer.git
-python3 token-optimizer/skills/token-optimizer/scripts/measure.py hermes-install
+token-optimizer/install.sh --hermes
 ```
 
 Verify the install:
 
 ```bash
+token-optimizer/install.sh --hermes --dry-run   # preview
 python3 token-optimizer/skills/token-optimizer/scripts/measure.py hermes-doctor
 ```
 

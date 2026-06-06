@@ -128,10 +128,59 @@ install_opencode() {
     exit 0
 }
 
-# Route --opencode before the Claude Code prerequisite checks (it needs bun, not python).
+# ── Hermes plugin install ─────────────────────────────────────
+# `install.sh --hermes` installs the Token Optimizer plugin into
+# ~/.hermes/plugins/token-optimizer/, which NousResearch Hermes auto-loads.
+# Beta. Needs python3 and a checkout of this repo. Extra args (e.g. --dry-run,
+# --uninstall) are forwarded to the underlying hermes-install command.
+install_hermes() {
+    command -v python3 &>/dev/null || fail "python3 not found. Token Optimizer for Hermes needs Python 3."
+
+    local script_dir measure_py
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    measure_py="${script_dir}/skills/token-optimizer/scripts/measure.py"
+
+    if [ ! -f "$measure_py" ] && [ -d "${script_dir}/.git" ]; then
+        warn "skills/ not in this checkout. Adding it to sparse-checkout..."
+        git -C "$script_dir" sparse-checkout add skills/ hermes/ 2>/dev/null || true
+        git -C "$script_dir" pull --ff-only 2>/dev/null || true
+    fi
+    [ -f "$measure_py" ] || fail "measure.py not found. Clone the full repo: git clone ${REPO_HTTPS}"
+
+    if [ -d "${script_dir}/.git" ]; then
+        local h_sha
+        h_sha="$(git -C "$script_dir" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+        info "Installing from commit ${h_sha}"
+    else
+        warn "Not a git checkout — cannot verify source provenance."
+    fi
+
+    # Forward any extra flags (--dry-run, --uninstall, --json) after --hermes.
+    local extra=()
+    for a in "$@"; do [ "$a" = "--hermes" ] || extra+=("$a"); done
+
+    info "Installing Token Optimizer into Hermes (~/.hermes/plugins/token-optimizer/)..."
+    if ! python3 "$measure_py" hermes-install "${extra[@]}"; then
+        fail "Hermes install failed."
+    fi
+
+    echo ""
+    printf "${BOLD}${GREEN}Token Optimizer for Hermes installed (beta)!${NC}\n"
+    echo ""
+    echo "  Plugin:    ~/.hermes/plugins/token-optimizer/ (auto-loaded by Hermes)"
+    echo "  Verify:    python3 ${measure_py} hermes-doctor"
+    echo "  In Hermes: /token-optimizer  -  hermes token-optimizer (dashboard :24844)"
+    echo "  Re-run this command after a git pull to update."
+    echo ""
+    exit 0
+}
+
+# Route --opencode / --hermes before the Claude Code prerequisite checks
+# (OpenCode needs bun; Hermes needs python3, not the Claude Code plugin env).
 for arg in "$@"; do
     case "$arg" in
         --opencode) install_opencode ;;
+        --hermes) install_hermes "$@" ;;
     esac
 done
 
