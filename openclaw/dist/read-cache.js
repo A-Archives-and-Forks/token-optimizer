@@ -51,6 +51,10 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.logSavingsEvent = logSavingsEvent;
+exports.getActiveReadTokens = getActiveReadTokens;
+exports.recordHintServe = recordHintServe;
+exports.claimHintFollow = claimHintFollow;
 exports.clearDeltaCacheForSession = clearDeltaCacheForSession;
 exports.handleReadBefore = handleReadBefore;
 exports.handleWriteAfter = handleWriteAfter;
@@ -61,6 +65,204 @@ const os = __importStar(require("os"));
 const v5_features_1 = require("./v5-features");
 const telemetry_1 = require("./telemetry");
 const delta_diff_1 = require("./delta-diff");
+const token_estimate_1 = require("./token-estimate");
+// ---------------------------------------------------------------------------
+// Savings event log (U-B + U-G, JSONL append, mirrors Python savings_events)
+// ---------------------------------------------------------------------------
+const SAVINGS_DIR = path.join(os.homedir(), ".openclaw", "token-optimizer");
+const SAVINGS_EVENTS_PATH = path.join(SAVINGS_DIR, "savings-events.jsonl");
+const MAX_SAVINGS_DETAIL_LEN = 200;
+/**
+ * Append a savings event to ~/.openclaw/token-optimizer/savings-events.jsonl.
+ * Shape matches Python's _log_savings_event() row (timestamp, event_type,
+ * tokens_saved, session_id, detail). Best-effort: never throws.
+ *
+ * OpenClaw savings events are kept separate from the Python trends.db so each
+ * platform owns its own storage; the categories (checkpoint_restore,
+ * hint_followed) are the same strings the Python dashboard uses, enabling
+ * consistent cross-platform labelling if they are ever merged.
+ */
+function logSavingsEvent(eventType, tokensSaved, sessionId, detail) {
+    try {
+        const detailTrunc = detail && detail.length > MAX_SAVINGS_DETAIL_LEN
+            ? detail.slice(0, MAX_SAVINGS_DETAIL_LEN)
+            : (detail ?? null);
+        const row = JSON.stringify({
+            timestamp: new Date().toISOString(),
+            event_type: eventType,
+            tokens_saved: Math.round(tokensSaved),
+            session_id: sessionId || null,
+            detail: detailTrunc,
+        });
+        try {
+            fs.mkdirSync(SAVINGS_DIR, { recursive: true, mode: 0o700 });
+        }
+        catch { /* best effort */ }
+        fs.appendFileSync(SAVINGS_EVENTS_PATH, row + "\n", { encoding: "utf8", mode: 0o600 });
+    }
+    catch {
+        // Best-effort: never let savings bookkeeping break a read or inject.
+    }
+}
+// ---------------------------------------------------------------------------
+// U-B: working-set token sum (getActiveReadTokens)
+// ---------------------------------------------------------------------------
+const ACTIVE_READ_MAX_FILES = 25;
+const ACTIVE_READ_MIN_COUNT = 2;
+const ACTIVE_READ_TOKEN_CAP = 200_000;
+/**
+ * Sum tokensEst for files read at least MIN_COUNT times this session,
+ * capped at 200 000 tokens and limited to 25 most-recently-accessed entries.
+ *
+ * Session-SCOPED, not agent-scoped: reads are cached under
+ * `<agentId>-<session>.json` where agentId is often "unknown"/per-agent, but the
+ * compact handler doesn't know that agentId. So we aggregate every
+ * `*-<session>.json` cache for this session, which is robust to the agent key
+ * and matches the intent ("what did THIS session read repeatedly").
+ *
+ * Mirrors Python SessionStore.get_active_read_tokens(limit=25, min_read_count=2).
+ * Returns 0 on any error (floor fallback will be used instead).
+ */
+function getActiveReadTokens(_agentId, sessionId) {
+    try {
+        const safeSession = sessionId.replace(/[^a-zA-Z0-9_-]/g, "") || "unknown";
+        const suffix = `-${safeSession}.json`;
+        let files = [];
+        try {
+            files = fs.readdirSync(CACHE_DIR).filter((f) => f.endsWith(suffix));
+        }
+        catch {
+            return 0;
+        }
+        const entries = [];
+        for (const f of files) {
+            try {
+                const cache = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, f), "utf-8"));
+                for (const e of Object.values(cache.files || {})) {
+                    if (e && e.readCount >= ACTIVE_READ_MIN_COUNT)
+                        entries.push(e);
+                }
+            }
+            catch { /* skip unreadable/corrupt cache */ }
+        }
+        const total = entries
+            .sort((a, b) => b.lastAccess - a.lastAccess)
+            .slice(0, ACTIVE_READ_MAX_FILES)
+            .reduce((sum, e) => sum + (e.tokensEst ?? 0), 0);
+        return Math.min(ACTIVE_READ_TOKEN_CAP, total);
+    }
+    catch {
+        return 0;
+    }
+}
+// ---------------------------------------------------------------------------
+// U-G: per-hint avoided-search (recordHintServe / claimHintFollow)
+// ---------------------------------------------------------------------------
+const HINT_FOLLOW_MAX_AGE_SECONDS = 4 * 60 * 60; // 4 hours, mirrors Python
+const HINT_FOLLOW_TOKEN_CREDIT = 5_000; // mirrors Python _HINT_FOLLOW_AVOIDED_TOKENS
+const HINT_SERVE_MAX_PATHS = 25;
+/** Path to the per-session hint-serves sidecar JSON under the read-cache dir. */
+function hintServesPath(sessionId) {
+    const safeSession = sessionId.replace(/[^a-zA-Z0-9_-]/g, "") || "unknown";
+    return path.join(CACHE_DIR, `hint-serves-${safeSession}.json`);
+}
+function loadHintServes(sessionId) {
+    const p = hintServesPath(sessionId);
+    if (!fs.existsSync(p))
+        return {};
+    try {
+        const data = JSON.parse(fs.readFileSync(p, "utf-8"));
+        if (!data || typeof data !== "object")
+            return {};
+        return data;
+    }
+    catch {
+        try {
+            fs.unlinkSync(p);
+        }
+        catch { /* ignore */ }
+        return {};
+    }
+}
+function saveHintServes(sessionId, entries) {
+    const p = hintServesPath(sessionId);
+    const dir = path.dirname(p);
+    try {
+        if (!fs.existsSync(dir))
+            fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        const tmp = p + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(entries), { mode: 0o600 });
+        fs.renameSync(tmp, p);
+    }
+    catch {
+        // Best-effort: hint-serve bookkeeping must never break the hint injection.
+    }
+}
+/**
+ * Record that a continuity hint surfaced these file paths to the session.
+ * Idempotent: if a path already has an UNCREDITED entry, do NOT reset its
+ * servedAt or credited flag (preserves the original freshness window).
+ * Already-credited entries are not re-inserted so a re-serve of the same hint
+ * can't resurrect a spent credit.
+ *
+ * Cap at 25 paths (matches Python record_hint_serve).
+ */
+function recordHintServe(sessionId, filePaths) {
+    if (!sessionId || !filePaths || filePaths.length === 0)
+        return;
+    try {
+        const serves = loadHintServes(sessionId);
+        const now = Date.now() / 1000;
+        const capped = filePaths.slice(0, HINT_SERVE_MAX_PATHS);
+        let changed = false;
+        for (const rawPath of capped) {
+            const fp = rawPath.trim();
+            if (!fp)
+                continue;
+            // Only insert if no existing uncredited entry for this path.
+            if (serves[fp] && !serves[fp].credited)
+                continue;
+            // If previously credited, skip (can't resurrect).
+            if (serves[fp] && serves[fp].credited)
+                continue;
+            serves[fp] = { filePath: fp, servedAt: now, credited: false };
+            changed = true;
+        }
+        if (changed)
+            saveHintServes(sessionId, serves);
+    }
+    catch {
+        // Best-effort: never break the hint injection.
+    }
+}
+/**
+ * Check if filePath was hinted to this session within the freshness window
+ * and not yet credited. If so, mark it credited and return true (caller logs
+ * the savings event). Returns false in all other cases. Credit is permanent:
+ * once marked, re-reads of the same file can never re-credit.
+ *
+ * Mirrors Python SessionStore.claim_hint_follow().
+ */
+function claimHintFollow(sessionId, filePath) {
+    if (!sessionId || !filePath)
+        return false;
+    try {
+        const serves = loadHintServes(sessionId);
+        const entry = serves[filePath];
+        if (!entry || entry.credited)
+            return false;
+        const ageSecs = Date.now() / 1000 - entry.servedAt;
+        if (ageSecs > HINT_FOLLOW_MAX_AGE_SECONDS)
+            return false;
+        // Mark credited and persist before returning true.
+        serves[filePath] = { ...entry, credited: true };
+        saveHintServes(sessionId, serves);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -361,7 +563,7 @@ function handleReadBefore(event) {
         try {
             const stat = fs.statSync(filePath);
             mtime = stat.mtimeMs / 1000;
-            tokensEst = Math.max(1, Math.floor(stat.size / 4));
+            tokensEst = (0, token_estimate_1.estimateTokensFromBytes)(stat.size);
         }
         catch {
             return null;
@@ -369,6 +571,13 @@ function handleReadBefore(event) {
         cache.files[filePath] = { mtime, offset, limit, tokensEst, readCount: 1, lastAccess: Date.now() / 1000, digest: "" };
         saveCache(agentId, sessionId, cache);
         logDecision("allow", filePath, "first_read", sessionId);
+        // U-G: check if this first read fulfils a prior hint serve.
+        try {
+            if (claimHintFollow(sessionId, filePath)) {
+                logSavingsEvent("hint_followed", HINT_FOLLOW_TOKEN_CREDIT, sessionId, `hint->read: ${path.basename(filePath)}`);
+            }
+        }
+        catch { /* best-effort */ }
         // v5 Delta Mode: seed the memory-only content cache so a follow-up
         // read from the SAME session can be served as a diff. Only activates
         // when the feature is on, the file fits the 50KB budget, and the

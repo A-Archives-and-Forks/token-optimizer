@@ -49,6 +49,7 @@ exports.pruneOldEvents = pruneOldEvents;
 const fs = __importStar(require("fs"));
 const os = __importStar(require("os"));
 const path = __importStar(require("path"));
+const token_estimate_1 = require("./token-estimate");
 const HOME = process.env.HOME ?? process.env.USERPROFILE ?? os.homedir();
 const TELEMETRY_DIR = path.join(HOME, ".openclaw", "token-optimizer");
 const TELEMETRY_PATH = path.join(TELEMETRY_DIR, "compression-events.jsonl");
@@ -66,10 +67,9 @@ function ensureDir() {
     }
 }
 function estimateTokens(text) {
-    if (!text)
-        return 0;
-    // Same bytes/4 proxy the Python side uses.
-    return Math.floor(Buffer.byteLength(text, "utf8") / 4);
+    // Calibrated estimator shared with the Python side (3.3 chars/tok + CJK),
+    // replacing the old bytes/4 proxy that undercounts ~15-20%.
+    return (0, token_estimate_1.estimateTokens)(text);
 }
 /**
  * Append one compression event to the telemetry log. Never throws —

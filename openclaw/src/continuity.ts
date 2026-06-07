@@ -487,6 +487,51 @@ function _safeSlice(str: string, maxChars: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// U-G: Extract hinted file paths from a checkpoint's content (serve side)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract file paths from the "## File Changes" section of an OpenClaw
+ * checkpoint markdown. Returns up to 25 absolute-looking paths (containing
+ * a path separator), de-duplicated. Used by U-G recordHintServe.
+ *
+ * Best-effort: returns an empty array on any parse failure.
+ */
+export function extractHintedPaths(checkpointContent: string): string[] {
+  try {
+    const paths: string[] = [];
+    const lines = checkpointContent.split("\n");
+    let inFileChanges = false;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed === "## File Changes") {
+        inFileChanges = true;
+        continue;
+      }
+      if (inFileChanges) {
+        // A new heading ends the section.
+        if (trimmed.startsWith("##")) break;
+        if (trimmed.startsWith("- ")) {
+          const candidate = trimmed.slice(2).trim();
+          // Accept only ABSOLUTE filesystem paths (POSIX "/..." or Windows
+          // "C:\..."). Excludes URLs (https://...) and relative/freeform text,
+          // and matches the canonical path.resolve() form the read side claims
+          // against, so a hinted path can actually be followed.
+          const isAbsolute = candidate.startsWith("/") || /^[A-Za-z]:[\\/]/.test(candidate);
+          if (candidate && isAbsolute && !candidate.includes("://")) {
+            paths.push(candidate);
+            if (paths.length >= 25) break;
+          }
+        }
+      }
+    }
+    return [...new Set(paths)]; // de-duplicate
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Pending continuity hint storage
 //
 // When session:patch fires without an inject callback (the common case today),

@@ -47,6 +47,15 @@ from structure_map import (
     summarize_code_source,
 )
 
+try:
+    from token_estimate import estimate_tokens_from_bytes, estimate_tokens
+except ImportError:  # pragma: no cover - fallback keeps the hook resilient
+    def estimate_tokens_from_bytes(n_bytes):
+        return max(1, int(n_bytes) // 4) if n_bytes and n_bytes > 0 else 0
+
+    def estimate_tokens(text):
+        return max(1, len(text) // 4) if text else 0
+
 
 def _is_v5_delta_enabled():
     """Check if delta mode is enabled. Default ON in v5.1."""
@@ -76,6 +85,10 @@ DEFAULT_MODE = "soft_block"
 MIN_STRUCTURE_CONFIDENCE = 0.75
 MAX_CONSECUTIVE_DENIALS = 3
 REASON_ONLY_TOKENS_EST = 10
+# U-G3: conservative avoided-search credit when a proactive hint sends the agent
+# straight to a file (~2 exploratory reads of ~2500 tokens it didn't have to do
+# to locate it). Deliberately small -- lean understated, observed-once per file.
+_HINT_FOLLOW_AVOIDED_TOKENS = 5000
 STRICT_CONTEXT_CAPS = {
     "signatures": 350,
     "top_level": 500,
@@ -373,9 +386,74 @@ CREATE TABLE IF NOT EXISTS savings_events (
     tokens_saved INTEGER DEFAULT 0,
     cost_saved_usd REAL DEFAULT 0.0,
     session_id TEXT,
-    detail TEXT
+    session_uuid TEXT,
+    detail TEXT,
+    model TEXT,
+    unjoinable INTEGER DEFAULT 0
 );
 """
+
+import re as _re
+_UUID_PAT_RC = _re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    _re.IGNORECASE,
+)
+
+
+def _extract_session_uuid_rc(session_id: Optional[str]) -> tuple:
+    """Return (session_uuid, unjoinable) for the read_cache fast path.
+
+    A full Claude UUID (8-4-4-4-12 hex) is the JSONL stem and can be joined
+    directly on session_log.session_uuid. Short opaque agent_ids (<=20 chars,
+    no dashes) cannot be resolved and are flagged unjoinable=1 so the
+    aggregation layer never silently prices them at the Sonnet fallback.
+    """
+    if not session_id or session_id in ("unknown", "test-123", "perf_test", "regtest", "demo"):
+        return None, False
+    if _UUID_PAT_RC.match(session_id):
+        return session_id, False
+    if len(session_id) <= 20 and "-" not in session_id:
+        return None, True
+    return None, False
+
+
+# Process-local: once the savings_events columns are confirmed present we skip
+# the per-write PRAGMA introspection. Fresh tables get all columns from the
+# schema; the ALTERs only matter for pre-v5.10 tables, so one verification per
+# process is enough. (Worst case across mixed old/new DBs in one process: a stale
+# skip -- acceptable for a measurement path, and executescript already creates
+# new tables fully-formed.)
+_savings_columns_verified = False
+
+
+def _ensure_savings_columns(conn: sqlite3.Connection) -> None:
+    """Idempotent migration: ensure model, session_uuid, and unjoinable columns exist.
+
+    The shipped schema declares all three, but pre-existing tables created before
+    v5.10 lack session_uuid and unjoinable. Runs the PRAGMA once per process, then
+    short-circuits on subsequent calls in the hot savings-write path.
+    """
+    global _savings_columns_verified
+    if _savings_columns_verified:
+        return
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(savings_events)")}
+        if "model" not in cols:
+            conn.execute("ALTER TABLE savings_events ADD COLUMN model TEXT")
+        if "session_uuid" not in cols:
+            conn.execute("ALTER TABLE savings_events ADD COLUMN session_uuid TEXT")
+        if "unjoinable" not in cols:
+            conn.execute("ALTER TABLE savings_events ADD COLUMN unjoinable INTEGER DEFAULT 0")
+        else:
+            # All present and no ALTER needed -> safe to skip future introspection.
+            _savings_columns_verified = True
+    except Exception:
+        pass
+
+
+def _ensure_savings_model_column(conn: sqlite3.Connection) -> None:
+    """Backward-compat alias for _ensure_savings_columns (used in tests)."""
+    _ensure_savings_columns(conn)
 
 
 def _log_savings_event(event_type: str, tokens_saved: int, session_id: str, detail: str) -> None:
@@ -388,19 +466,30 @@ def _log_savings_event(event_type: str, tokens_saved: int, session_id: str, deta
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.executescript(_SAVINGS_SCHEMA)
-        # Price at active session model. Import lazily to avoid circular imports
-        # and keep this hook fast when measure.py isn't already loaded.
+        _ensure_savings_columns(conn)
+        # U1: derive the stable UUID join key before calling measure imports.
+        session_uuid, unjoinable = _extract_session_uuid_rc(session_id)
+        # Resolve the event's REAL model from its session and price at that model's
+        # rate -- never a flat default. Persisting `model` makes the row repriceable
+        # later. Import lazily (measure isn't always loaded in the hook fast path).
+        model = None
         cost_per_mtok = 3.0
         try:
-            from measure import _estimate_compression_cost_per_mtok  # type: ignore
-            cost_per_mtok = _estimate_compression_cost_per_mtok()
+            from measure import (  # type: ignore
+                _estimate_compression_cost_per_mtok,
+                _resolve_session_model,
+            )
+            model = _resolve_session_model(session_id)
+            cost_per_mtok = _estimate_compression_cost_per_mtok(model)
         except Exception:
             pass
         cost_saved = tokens_saved * cost_per_mtok / 1_000_000
         conn.execute(
-            "INSERT INTO savings_events (timestamp, event_type, tokens_saved, cost_saved_usd, session_id, detail) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (datetime.now().isoformat(), event_type, tokens_saved, cost_saved, session_id, detail),
+            "INSERT INTO savings_events "
+            "(timestamp, event_type, tokens_saved, cost_saved_usd, session_id, session_uuid, detail, model, unjoinable) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (datetime.now().isoformat(), event_type, tokens_saved, cost_saved,
+             session_id, session_uuid, detail, model, 1 if unjoinable else 0),
         )
         conn.commit()
     except Exception:
@@ -485,7 +574,7 @@ def handle_read(hook_input: dict[str, Any], mode: str, quiet: bool) -> None:
         # convention. Guarded: a missing/unreadable file just records zero.
         ignore_tokens_est = 0
         try:
-            ignore_tokens_est = max(1, os.stat(file_path).st_size // 4)
+            ignore_tokens_est = estimate_tokens_from_bytes(os.stat(file_path).st_size)
         except OSError:
             ignore_tokens_est = 0
         _log_decision(
@@ -573,6 +662,22 @@ def handle_read(hook_input: dict[str, Any], mode: str, quiet: bool) -> None:
     store = _make_store(session_id)
     if store is None:
         return
+
+    # U-G3: if a proactive prior-session hint surfaced this exact file to this
+    # session, the agent reading it is observed evidence the hint spared an
+    # exploratory search to locate it. Credit once (claim_hint_follow flips the
+    # credited flag) with a conservative avoided-search estimate. Best-effort.
+    try:
+        if store.claim_hint_follow(file_path):
+            _log_savings_event(
+                "hint_followed",
+                _HINT_FOLLOW_AVOIDED_TOKENS,
+                session_id,
+                f"hint->read: {os.path.basename(file_path)}",
+            )
+    except Exception:
+        pass
+
     try:
         entry = store.get_file_entry(file_path)
     except Exception:
@@ -584,7 +689,7 @@ def handle_read(hook_input: dict[str, Any], mode: str, quiet: bool) -> None:
         except OSError:
             return
 
-        tokens_est = max(1, stat.st_size // 4) if stat.st_size else 0
+        tokens_est = estimate_tokens_from_bytes(stat.st_size)
         entry = {
             "mtime_ns": stat.st_mtime_ns,
             "size_bytes": stat.st_size,
@@ -710,8 +815,8 @@ def handle_read(hook_input: dict[str, Any], mode: str, quiet: bool) -> None:
                             if len(new_content.encode("utf-8", errors="replace")) <= MAX_CONTENT_CACHE_BYTES:
                                 store.upsert_cached_content(file_path, new_content, new_hash)
 
-                            old_tokens = max(1, current_stat.st_size // 4)
-                            delta_tokens = len(delta_text.encode("utf-8", errors="replace")) // 4
+                            old_tokens = estimate_tokens_from_bytes(current_stat.st_size)
+                            delta_tokens = estimate_tokens(delta_text)
                             net_saved = max(0, old_tokens - delta_tokens)
 
                             _log_decision(
@@ -782,7 +887,7 @@ def handle_read(hook_input: dict[str, Any], mode: str, quiet: bool) -> None:
             if len(ranges_seen) > 20:
                 ranges_seen = ranges_seen[-20:]
             entry["ranges_seen"] = ranges_seen
-        entry["tokens_est"] = max(1, current_stat.st_size // 4) if current_stat.st_size else 0
+        entry["tokens_est"] = estimate_tokens_from_bytes(current_stat.st_size)
         entry["read_count"] = int(entry.get("read_count", 0) or 0) + 1
         entry["last_access"] = time.time()
         if delta_enabled and offset == 0 and limit == 0 and not entry.get("cached_content"):
@@ -1010,7 +1115,11 @@ def handle_clear(session_id: str, quiet: bool) -> None:
 
     if session_id and session_id != "all":
         store = _make_store(session_id)
-        store.clear_file_entries()
+        if store is not None:
+            try:
+                store.clear_file_entries()
+            finally:
+                store.close()
         cp = _cache_path(session_id)
         if cp.exists():
             cp.unlink()

@@ -206,11 +206,21 @@ def is_structure_supported_file(file_path: str | os.PathLike[str]) -> bool:
 
 
 def estimate_tokens(text: str) -> int:
-    """Estimate tokens using a conservative 4 chars/token ratio."""
+    """Estimate tokens via the shared calibrated estimator (U-F).
+
+    Kept as a thin wrapper so existing call sites keep importing
+    ``structure_map.estimate_tokens`` unchanged, while the calibration
+    constant lives in one place (``token_estimate``). Falls back to the legacy
+    4 chars/token ratio only if the shared module is unavailable.
+    """
 
     if not text:
         return 0
-    return max(1, ceil(len(text) / 4))
+    try:
+        from token_estimate import estimate_tokens as _shared
+        return _shared(text)
+    except ImportError:
+        return max(1, ceil(len(text) / 4))
 
 
 def summarize_python_file(

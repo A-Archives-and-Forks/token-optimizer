@@ -3511,12 +3511,23 @@ var DB = (function() {
     // what you're actually getting (realized routing + estimated loop prevention); cache-drop
     // and output-waste are OPPORTUNITY (avoidable waste TO does not yet prevent), not here. ----
     var mce = s.mcp_cap_estimated || {}, ce = s.contamination_exit || {}, hr = s.handover_rerun || {};
+    var rs = s.retrieval_serve || {};
+    var hf = s.hint_followed || {};
+    // Avoided-search: prefer the deterministic observed hint->read measure
+    // (hint_followed); fall back to the cohort estimate only before any hint has
+    // fired, so the two are never summed (no double-count).
+    var hfHasData = (Number(hf.events) || 0) > 0;
+    var avoidedSearchMo = hfHasData ? mo(hf.cost_saved_usd) : mo(rs.cost_saved_usd);
+    var avoidedSearchN  = hfHasData ? (Number(hf.events) || 0) : (Number(rs.served_sessions) || 0);
+    var avoidedSearchUnit = hfHasData ? 'hints used' : 'served';
     var structMo  = mo(sd.cost_saved_usd);
     var runtimeMo = Math.max(0, mo(s.total_cost_usd) - structMo) + mo(unc.cost_saved_usd) + mo(mce.cost_saved_usd);
     // behavioral holds every estimated behavioral item (routing + loops + the cohort
-    // estimators), so pillars + estimated always reconcile to gettingMo even once
-    // contamination_exit / handover_rerun populate.
-    var behavMo   = mo(mr.realized_cost_usd) + mo(beh.cost_saved_usd) + mo(ce.cost_saved_usd) + mo(hr.cost_saved_usd);
+    // estimators + avoided-search), so the pillars (struct + runtime + behavioral)
+    // always reconcile exactly to gettingMo (measured + estimated). Every estItems
+    // entry maps to exactly one pillar: loops/sub-agent/mcp_cap -> runtime;
+    // heeded/handover/avoided-search -> behavioral.
+    var behavMo   = mo(mr.realized_cost_usd) + mo(beh.cost_saved_usd) + mo(ce.cost_saved_usd) + mo(hr.cost_saved_usd) + avoidedSearchMo;
     // ---- trust tiers: measured / estimated / opportunity. Opportunity NEVER folds into the headline. ----
     // Measured = billable events we metered (runtime compression + realized model routing).
     var measuredMo = mo(s.total_cost_usd) + mo(mr.realized_cost_usd);
@@ -3527,7 +3538,8 @@ var DB = (function() {
       { label: 'sub-agent runtime',              amt: mo(unc.cost_saved_usd), n: Number(unc.subagent_dispatches) || 0, unit: 'dispatches' },
       { label: 'MCP output cap',                 amt: mo(mce.cost_saved_usd), n: Number(mce.events) || 0,             unit: 'capped results' },
       { label: 'avoided rework (heeded nudges)', amt: mo(ce.cost_saved_usd),  n: Number(ce.heeded_sessions) || 0,     unit: 'heeded', conf: ce.confidence },
-      { label: 'continuity handover',            amt: mo(hr.cost_saved_usd),  n: Number(hr.restored_sessions) || 0,    unit: 'restored', conf: hr.confidence }
+      { label: 'continuity handover',            amt: mo(hr.cost_saved_usd),  n: Number(hr.restored_sessions) || 0,    unit: 'restored', conf: hr.confidence },
+      { label: 'avoided search (hints)',         amt: avoidedSearchMo,        n: avoidedSearchN,                       unit: avoidedSearchUnit, conf: hfHasData ? 'observed' : rs.confidence }
     ].filter(function(it){ return it.amt > 0 || it.conf; });
     var estimatedMo = estItems.reduce(function(a, b){ return a + b.amt; }, 0);
     // What you're getting = measured + estimated (both real value; estimated shown split-out, never hidden).

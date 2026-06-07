@@ -478,6 +478,27 @@ export const TokenOptimizerPlugin: Plugin = async (
                   `${match.content}\n` +
                   `</token_optimizer_restored_context>`,
               );
+              // U-B: credit the avoided working-set reconstruction.
+              // Option A floor path: estimate from full checkpoint byte size
+              // (rawBytes, before truncation) at 3.3 chars/tok, capped at 200K.
+              // This is the same floor formula as Python's compact_restore path:
+              //   floor_tokens = int(cp_size / CHARS_PER_TOKEN)  [Python uses 4.0]
+              // but we use the calibrated 3.3 (U-F constant) per the spec.
+              // Best-effort: wrapped in try/catch so it NEVER breaks the inject.
+              try {
+                const CHARS_PER_TOKEN = 3.3;
+                const CHECKPOINT_RECOVERY_TOKEN_CAP = 200_000;
+                const floor = Math.max(1, Math.ceil(match.rawBytes / CHARS_PER_TOKEN));
+                const credited = Math.min(CHECKPOINT_RECOVERY_TOKEN_CAP, floor);
+                getTrendsStore().logSavingsEvent(
+                  "checkpoint_restore",
+                  credited,
+                  input.sessionID,
+                  `restored from ${match.mode}`,
+                );
+              } catch {
+                // Never break the inject over savings tracking
+              }
             }
           }
         }

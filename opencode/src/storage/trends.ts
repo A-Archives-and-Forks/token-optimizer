@@ -24,6 +24,24 @@ CREATE TABLE IF NOT EXISTS session_log (
 );
 `;
 
+const SAVINGS_EVENTS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS savings_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  tokens_saved INTEGER DEFAULT 0,
+  cost_saved_usd REAL DEFAULT 0.0,
+  session_id TEXT,
+  detail TEXT,
+  model TEXT
+);
+`;
+
+// Sonnet input rate ($/M tokens) used as fallback when the active model is
+// unknown at savings-log time (e.g. checkpoint inject fires before the first
+// assistant message arrives). Matches Python's _log_savings_event fallback.
+const SONNET_INPUT_RATE_PER_MTOK = 3.0;
+
 export interface SessionTrendData {
   sessionId: string;
   project: string | null;
@@ -59,8 +77,50 @@ export class TrendsStore {
       this.db.exec("PRAGMA journal_mode=WAL");
       this.db.exec("PRAGMA busy_timeout=3000");
       this.db.exec(TRENDS_SCHEMA);
+      this.db.exec(SAVINGS_EVENTS_SCHEMA);
     }
     return this.db;
+  }
+
+  /**
+   * Log a realized-savings event to the savings_events table.
+   *
+   * This is the TypeScript equivalent of Python's `_log_savings_event`.
+   * Model is not known at checkpoint-inject time, so cost_saved_usd is
+   * priced at the Sonnet input fallback rate — same behaviour as Python's
+   * resolver when the session model cannot be determined.
+   *
+   * Guards:
+   *   - tokensSaved <= 0  → no-op (never credit zero or negative)
+   *   - Any exception     → silently swallowed (must never break the caller)
+   */
+  logSavingsEvent(
+    eventType: string,
+    tokensSaved: number,
+    sessionId: string | null,
+    detail: string | null,
+    model: string | null = null,
+  ): void {
+    if (tokensSaved <= 0) return;
+    try {
+      const db = this.connect();
+      const costSavedUsd = (tokensSaved * SONNET_INPUT_RATE_PER_MTOK) / 1_000_000;
+      db.run(
+        `INSERT INTO savings_events (timestamp, event_type, tokens_saved, cost_saved_usd, session_id, detail, model)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          new Date().toISOString(),
+          eventType,
+          tokensSaved,
+          costSavedUsd,
+          sessionId ?? null,
+          detail ?? null,
+          model ?? null,
+        ],
+      );
+    } catch {
+      // Best-effort: never crash the caller over savings tracking
+    }
   }
 
   close(): void {

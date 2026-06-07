@@ -121,9 +121,10 @@ def _context_window(model: str) -> int:
 def _estimate_fill_from_history(conversation_history: list[Any]) -> int:
     """Rough token estimate from conversation_history when tally is empty.
 
-    We count total characters across all message content strings and divide by 4
-    (the standard rough char-per-token ratio).  This is purely a fallback for
-    the first turn before post_api_request has accumulated any real usage.
+    We count total characters across all message content strings and divide by
+    the calibrated ~3.3 chars-per-token ratio (matching token_estimate.py, vs the
+    old 4 which undercounts ~15-20%).  This is purely a fallback for the first
+    turn before post_api_request has accumulated any real usage.
     """
     chars = 0
     for msg in (conversation_history or []):
@@ -136,7 +137,7 @@ def _estimate_fill_from_history(conversation_history: list[Any]) -> int:
             for part in content:
                 if isinstance(part, dict):
                     chars += len(str(part.get("text") or ""))
-    return chars // 4
+    return int(chars / 3.3)
 
 
 def _quality_grade(fill_ratio: float, message_count: int, model: str = "", ctx_win: int = 0) -> str:

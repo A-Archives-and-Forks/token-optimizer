@@ -55,6 +55,7 @@ Object.defineProperty(exports, "extractCostlyPrompts", { enumerable: true, get: 
 const savings_1 = require("./savings");
 const smart_compact_1 = require("./smart-compact");
 const read_cache_1 = require("./read-cache");
+const token_estimate_1 = require("./token-estimate");
 const models_1 = require("./models");
 const dashboard_1 = require("./dashboard");
 const coach_1 = require("./coach");
@@ -354,6 +355,19 @@ exports.default = definePluginEntry({
             if (checkpoint && session.inject) {
                 session.inject(checkpoint);
                 api.logger.info(`[token-optimizer] Checkpoint restored for session ${session.sessionId}`);
+                // T4 (U-B): credit the avoided reconstruction.
+                // Floor = checkpoint content byte size / 3.3 (calibrated estimator).
+                // Active = sum of tokensEst for files read >=2x this session (working set).
+                // credited = min(200 000, max(floor, active)).
+                try {
+                    const floorTokens = (0, token_estimate_1.estimateTokensFromBytes)(Buffer.byteLength(checkpoint, "utf-8"));
+                    const activeTokens = (0, read_cache_1.getActiveReadTokens)("default", session.sessionId);
+                    const credited = Math.min(200_000, Math.max(floorTokens, activeTokens));
+                    if (credited > 0) {
+                        (0, read_cache_1.logSavingsEvent)("checkpoint_restore", credited, session.sessionId, "restored from compact");
+                    }
+                }
+                catch { /* best-effort: never break inject */ }
             }
             // Fallback continuity injection: if a cross-session hint was matched on
             // first session:patch but couldn't be injected then (no inject callback),
@@ -398,6 +412,16 @@ exports.default = definePluginEntry({
                         const candidate = (0, continuity_1.findBestContinuityCheckpoint)(promptText, event.sessionId, process.cwd());
                         if (candidate) {
                             const hint = (0, continuity_1.buildContinuityHint)(candidate);
+                            // T5 (U-G) serve side: record which files this hint surfaced so a
+                            // later Read of one can claim the avoided-search credit. Best-effort:
+                            // never let this bookkeeping break the hint itself.
+                            try {
+                                const hintedPaths = (0, continuity_1.extractHintedPaths)(candidate.content);
+                                if (hintedPaths.length > 0) {
+                                    (0, read_cache_1.recordHintServe)(event.sessionId, hintedPaths);
+                                }
+                            }
+                            catch { /* best-effort */ }
                             if (typeof event.inject === "function") {
                                 // Best case: gateway forwards an inject callback on session:patch.
                                 event.inject(hint);

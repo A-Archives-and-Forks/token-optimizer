@@ -11,6 +11,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { estimateTokens as sharedEstimateTokens } from "./token-estimate";
 
 export interface CompressionEvent {
   timestamp: string;
@@ -61,9 +62,9 @@ function ensureDir(): void {
 }
 
 function estimateTokens(text: string): number {
-  if (!text) return 0;
-  // Same bytes/4 proxy the Python side uses.
-  return Math.floor(Buffer.byteLength(text, "utf8") / 4);
+  // Calibrated estimator shared with the Python side (3.3 chars/tok + CJK),
+  // replacing the old bytes/4 proxy that undercounts ~15-20%.
+  return sharedEstimateTokens(text);
 }
 
 export interface LogCompressionEventInput {

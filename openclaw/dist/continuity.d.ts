@@ -86,6 +86,14 @@ export declare function findBestContinuityCheckpoint(promptText: string, current
  */
 export declare function buildContinuityHint(candidate: ContinuityCandidate): string;
 /**
+ * Extract file paths from the "## File Changes" section of an OpenClaw
+ * checkpoint markdown. Returns up to 25 absolute-looking paths (containing
+ * a path separator), de-duplicated. Used by U-G recordHintServe.
+ *
+ * Best-effort: returns an empty array on any parse failure.
+ */
+export declare function extractHintedPaths(checkpointContent: string): string[];
+/**
  * Persist a continuity hint for a session so it can be injected at the next
  * available inject point (typically session:compact:after).
  */

@@ -43,6 +43,9 @@ export interface CheckpointMatch {
   score: number;
   sessionId: string;
   mode: string;
+  /** Byte length of the full checkpoint content before truncation.
+   *  Used as the floor input to the checkpoint_restore savings estimate. */
+  rawBytes: number;
 }
 
 function safeSlice(str: string, maxChars: number): string {
@@ -71,6 +74,10 @@ export function findBestCheckpoint(
         score,
         sessionId: cp.session_id,
         mode: cp.mode,
+        // Preserve the full byte length BEFORE truncation so the caller can
+        // compute a checkpoint_restore floor estimate from the real checkpoint
+        // size rather than the (possibly truncated) injected excerpt.
+        rawBytes: Buffer.byteLength(cp.content, "utf8"),
       };
     }
   }

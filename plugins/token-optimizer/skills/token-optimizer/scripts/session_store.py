@@ -105,6 +105,12 @@ CREATE TABLE IF NOT EXISTS activity_log (
     timestamp REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS hint_serves (
+    file_path TEXT PRIMARY KEY,
+    served_at REAL NOT NULL,
+    credited INTEGER NOT NULL DEFAULT 0
+);
+
 """
 
 
@@ -426,6 +432,82 @@ class SessionStore:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_active_read_tokens(
+        self, limit: int = 25, min_read_count: int = 2,
+    ) -> int:
+        """Sum tokens_est of the session's active (repeatedly-read) files.
+
+        This is the working set a checkpoint restore lets a resumed session skip
+        re-reading -- the grounded basis for the avoided-reconstruction credit
+        (U-B), in place of the compressed checkpoint's own byte size.
+        """
+        conn = self._connect()
+        rows = conn.execute(
+            """SELECT COALESCE(tokens_est, 0) AS t
+               FROM file_reads
+               WHERE read_count >= ?
+               ORDER BY last_access DESC
+               LIMIT ?""",
+            (min_read_count, limit),
+        ).fetchall()
+        return int(sum(int(r["t"] or 0) for r in rows))
+
+    # ----- hint_serves (U-G: per-hint avoided-search measurement) -----
+
+    def record_hint_serve(self, file_paths) -> None:
+        """Record that a proactive prior-session hint surfaced these files to
+        this session. A later read of one of them is observed evidence the hint
+        spared an exploratory search (credited once via claim_hint_follow)."""
+        paths = [str(p).strip() for p in (file_paths or []) if str(p or "").strip()]
+        if not paths:
+            return
+        # Defensive cap independent of the call site (which already slices to ~5):
+        # a hint never legitimately surfaces dozens of files, so bound the write.
+        paths = paths[:25]
+        conn = self._connect()
+        now = time.time()
+        conn.executemany(
+            """INSERT INTO hint_serves (file_path, served_at, credited)
+               VALUES (?, ?, 0)
+               ON CONFLICT(file_path) DO NOTHING""",
+            [(p, now) for p in paths],
+        )
+        conn.commit()
+
+    # Only credit a hint follow when the read happens within this window of the
+    # hint being served. Beyond it, a read of the same file is more likely a
+    # coincidence than the hint doing its job -- keeps the avoided-search credit
+    # causally honest (and conservative).
+    HINT_FOLLOW_MAX_AGE_SECONDS = 4 * 60 * 60
+
+    def claim_hint_follow(self, file_path: str, max_age_seconds: float = HINT_FOLLOW_MAX_AGE_SECONDS) -> bool:
+        """If file_path was hinted to this session recently and not yet credited,
+        mark it credited and return True (caller logs the avoided-search saving
+        once). Returns False otherwise. Idempotent: a path is credited at most
+        once, and only within max_age_seconds of the serve.
+
+        This runs on every Read hook, so the common case (no matching uncredited
+        hint) takes only a cheap indexed SELECT and never acquires a write lock.
+        """
+        if not file_path:
+            return False
+        conn = self._connect()
+        fresh_after = time.time() - max(0.0, max_age_seconds)
+        hit = conn.execute(
+            "SELECT 1 FROM hint_serves "
+            "WHERE file_path = ? AND credited = 0 AND served_at >= ? LIMIT 1",
+            (str(file_path), fresh_after),
+        ).fetchone()
+        if not hit:
+            return False
+        cur = conn.execute(
+            "UPDATE hint_serves SET credited = 1 "
+            "WHERE file_path = ? AND credited = 0 AND served_at >= ?",
+            (str(file_path), fresh_after),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
     def get_high_value_outputs(
         self, min_tokens: int = 500, limit: int = 5,

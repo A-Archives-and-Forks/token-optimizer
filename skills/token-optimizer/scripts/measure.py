@@ -7357,7 +7357,8 @@ CREATE TABLE IF NOT EXISTS session_log (
     collected_at TEXT,
     quality_score REAL,
     quality_grade TEXT,
-    stale_waste_tokens INTEGER DEFAULT 0
+    stale_waste_tokens INTEGER DEFAULT 0,
+    session_uuid TEXT
 );
 
 CREATE TABLE IF NOT EXISTS daily_stats (
@@ -7400,14 +7401,17 @@ CREATE TABLE IF NOT EXISTS savings_events (
     tokens_saved INTEGER DEFAULT 0,
     cost_saved_usd REAL DEFAULT 0.0,
     session_id TEXT,
+    session_uuid TEXT,
     detail TEXT,
-    model TEXT
+    model TEXT,
+    unjoinable INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS compression_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
     session_id TEXT,
+    session_uuid TEXT,
     feature TEXT NOT NULL,
     command_pattern TEXT,
     original_tokens INTEGER DEFAULT 0,
@@ -7415,7 +7419,8 @@ CREATE TABLE IF NOT EXISTS compression_events (
     compression_ratio REAL DEFAULT 0.0,
     quality_preserved INTEGER DEFAULT 1,
     verified INTEGER DEFAULT 0,
-    detail TEXT
+    detail TEXT,
+    model TEXT
 );
 """
 
@@ -7458,8 +7463,38 @@ def _init_trends_db():
         # never summed into realized savings). Defaults 0 for pre-existing rows.
         if "stale_waste_tokens" not in cols:
             conn.execute("ALTER TABLE session_log ADD COLUMN stale_waste_tokens INTEGER DEFAULT 0")
+        # U1: stable UUID-keyed join column so savings/compression events can
+        # join to their originating session without LIKE-scanning jsonl_path.
+        # The session UUID is the JSONL file stem (the Claude session UUID).
+        if "session_uuid" not in cols:
+            conn.execute("ALTER TABLE session_log ADD COLUMN session_uuid TEXT")
         conn.commit()
     except sqlite3.Error:
+        pass
+    # U1: backfill session_uuid from jsonl_path basename stem for existing rows,
+    # then create an index so joins are O(log n) instead of full-table LIKE scans.
+    # Done in Python (not a single SQL UPDATE) because SQLite lacks a basename
+    # function and the path separator can vary on Windows.
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_log_uuid ON session_log (session_uuid)"
+        )
+        rows = conn.execute(
+            "SELECT id, jsonl_path FROM session_log "
+            "WHERE session_uuid IS NULL AND jsonl_path IS NOT NULL"
+        ).fetchall()
+        if rows:
+            updates = []
+            for row_id, jpath in rows:
+                stem = Path(jpath).stem  # strips directory and .jsonl suffix
+                if stem and stem != "unknown":
+                    updates.append((stem, row_id))
+            if updates:
+                conn.executemany(
+                    "UPDATE session_log SET session_uuid = ? WHERE id = ?", updates
+                )
+        conn.commit()
+    except (sqlite3.Error, OSError, ValueError):
         pass
     # Migrate: add quality columns to daily_stats for existing DBs
     try:
@@ -7478,8 +7513,56 @@ def _init_trends_db():
         se_cols = {r[1] for r in conn.execute("PRAGMA table_info(savings_events)").fetchall()}
         if "model" not in se_cols:
             conn.execute("ALTER TABLE savings_events ADD COLUMN model TEXT")
+        # U1: session_uuid + unjoinable columns for direct session joins (no LIKE scan).
+        # session_uuid = the Claude session UUID (= JSONL basename stem).
+        # unjoinable = 1 when session_id is a short agent_id that cannot be resolved.
+        if "session_uuid" not in se_cols:
+            conn.execute("ALTER TABLE savings_events ADD COLUMN session_uuid TEXT")
+        if "unjoinable" not in se_cols:
+            conn.execute("ALTER TABLE savings_events ADD COLUMN unjoinable INTEGER DEFAULT 0")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_savings_events_uuid "
+            "ON savings_events (session_uuid)"
+        )
         conn.commit()
     except sqlite3.Error:
+        pass
+    # U1: backfill session_uuid on savings_events from session_id where it looks
+    # like a UUID (8-4-4-4-12 hex pattern). Short agent_ids (<=17 chars without
+    # dashes) are flagged unjoinable=1 rather than silently treated as Sonnet.
+    try:
+        import re as _re
+        _UUID_PAT = _re.compile(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            _re.IGNORECASE,
+        )
+        rows = conn.execute(
+            "SELECT id, session_id FROM savings_events "
+            "WHERE session_uuid IS NULL AND session_id IS NOT NULL"
+        ).fetchall()
+        if rows:
+            uuid_updates = []
+            unjoinable_updates = []
+            for row_id, sid in rows:
+                if sid and _UUID_PAT.match(sid):
+                    uuid_updates.append((sid, row_id))
+                elif sid and len(sid) <= 20 and "-" not in sid and sid not in (
+                    "unknown", "test-123", "perf_test", "regtest", "demo"
+                ):
+                    # Short opaque hex agent_id — cannot be resolved to a session_log row
+                    unjoinable_updates.append((row_id,))
+            if uuid_updates:
+                conn.executemany(
+                    "UPDATE savings_events SET session_uuid = ? WHERE id = ?",
+                    uuid_updates,
+                )
+            if unjoinable_updates:
+                conn.executemany(
+                    "UPDATE savings_events SET unjoinable = 1 WHERE id = ?",
+                    unjoinable_updates,
+                )
+        conn.commit()
+    except (sqlite3.Error, OSError):
         pass
     # Migrate: ensure compression_events table exists for upgrades from v4.x
     try:
@@ -7491,6 +7574,7 @@ def _init_trends_db():
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
                     session_id TEXT,
+                    session_uuid TEXT,
                     feature TEXT NOT NULL,
                     command_pattern TEXT,
                     original_tokens INTEGER DEFAULT 0,
@@ -7498,12 +7582,53 @@ def _init_trends_db():
                     compression_ratio REAL DEFAULT 0.0,
                     quality_preserved INTEGER DEFAULT 1,
                     verified INTEGER DEFAULT 0,
-                    detail TEXT
+                    detail TEXT,
+                    model TEXT
                 );
             """)
             conn.commit()
         except sqlite3.Error:
             pass
+    # U1: idempotent migrations for session_uuid + model on compression_events.
+    # These columns enable per-event session joins and correct model attribution.
+    try:
+        ce_cols = {r[1] for r in conn.execute("PRAGMA table_info(compression_events)").fetchall()}
+        if "session_uuid" not in ce_cols:
+            conn.execute("ALTER TABLE compression_events ADD COLUMN session_uuid TEXT")
+        if "model" not in ce_cols:
+            conn.execute("ALTER TABLE compression_events ADD COLUMN model TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_compression_events_uuid "
+            "ON compression_events (session_uuid)"
+        )
+        conn.commit()
+    except sqlite3.Error:
+        pass
+    # U1: backfill session_uuid on compression_events from session_id where UUID pattern.
+    try:
+        import re as _re
+        _UUID_PAT2 = _re.compile(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            _re.IGNORECASE,
+        )
+        ce_rows = conn.execute(
+            "SELECT id, session_id FROM compression_events "
+            "WHERE session_uuid IS NULL AND session_id IS NOT NULL"
+        ).fetchall()
+        if ce_rows:
+            ce_updates = [
+                (sid, row_id)
+                for row_id, sid in ce_rows
+                if sid and _UUID_PAT2.match(sid)
+            ]
+            if ce_updates:
+                conn.executemany(
+                    "UPDATE compression_events SET session_uuid = ? WHERE id = ?",
+                    ce_updates,
+                )
+        conn.commit()
+    except (sqlite3.Error, OSError):
+        pass
     return conn
 
 
@@ -7604,15 +7729,54 @@ def _backfill_session_metrics(conn, days=30, limit=5000):
     return updated
 
 
+def _extract_session_uuid(session_id):
+    """Return (session_uuid, unjoinable) for a session_id string.
+
+    A valid Claude session UUID has the 8-4-4-4-12 hex pattern and maps to a
+    JSONL file basename. Short opaque hex agent_ids (<=20 chars, no dashes,
+    no UUID pattern) cannot be resolved to a session_log row; they are flagged
+    unjoinable=1 so callers never silently price them at the Sonnet fallback.
+
+    Returns:
+      (uuid_str, False) — session_id IS a UUID and is safe to join on.
+      (None, True)      — short agent_id, cannot join.
+      (None, False)     — empty/unknown/test id, not an error, just no UUID.
+    """
+    import re as _re
+    _UUID_PAT = _re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        _re.IGNORECASE,
+    )
+    if not session_id or session_id in ("unknown", "test-123", "perf_test", "regtest", "demo"):
+        return None, False
+    if _UUID_PAT.match(session_id):
+        return session_id, False
+    # Short opaque hex without dashes (17-char agent_ids from Claude Code)
+    if len(session_id) <= 20 and "-" not in session_id:
+        return None, True
+    return None, False
+
+
 def _log_savings_event(event_type, tokens_saved, session_id=None, detail=None, model=None):
     """Log a savings event to the trends database.
 
     Cost is calculated at the session's actual model rate. Resolution order:
     explicit `model` arg → session JSONL (via session_id) → CLAUDE_MODEL env →
     trends DB dominant → Sonnet fallback. See `_resolve_session_model`.
+
+    U1: also writes session_uuid (the Claude UUID = JSONL stem) so aggregation
+    joins directly on session_log.session_uuid rather than LIKE-scanning
+    jsonl_path. Agent_ids that cannot be joined are flagged unjoinable=1 so
+    the reprice logic skips them instead of silently attributing them to Sonnet.
     """
     try:
-        # Calculate cost saved using input token rate for the active model
+        # Derive the stable join key before opening the DB connection.
+        session_uuid, unjoinable = _extract_session_uuid(session_id)
+
+        # Calculate cost saved using input token rate for the active model.
+        # Unjoinable rows still get priced via env/recent fallback so the stored
+        # cost_saved_usd is a reasonable estimate; the unjoinable flag tells the
+        # aggregation layer not to use the stored model for reprice attribution.
         tier = _load_pricing_tier()
         tier_data = PRICING_TIERS.get(tier, PRICING_TIERS["anthropic"])
         if model:
@@ -7626,9 +7790,11 @@ def _log_savings_event(event_type, tokens_saved, session_id=None, detail=None, m
         conn = _init_trends_db()
         try:
             conn.execute(
-                "INSERT INTO savings_events (timestamp, event_type, tokens_saved, cost_saved_usd, session_id, detail, model) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (datetime.now().isoformat(), event_type, tokens_saved, cost_saved, session_id, detail, normalized),
+                "INSERT INTO savings_events "
+                "(timestamp, event_type, tokens_saved, cost_saved_usd, session_id, session_uuid, detail, model, unjoinable) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (datetime.now().isoformat(), event_type, tokens_saved, cost_saved,
+                 session_id, session_uuid, detail, normalized, 1 if unjoinable else 0),
             )
             conn.commit()
         finally:
@@ -7651,6 +7817,10 @@ def _log_compression_event(feature, original_text="", compressed_text="",
 
     Uses bytes/4 proxy for token estimation (closer to BPE than word count).
     Never crashes the caller -- all errors silently caught.
+
+    U1: writes session_uuid (the stable join key) and resolves + stores model
+    at event-time so _get_merged_savings can reprice at the session's real
+    model rate instead of the current dashboard session model (anachronistic).
     """
     try:
         original_tokens = _estimate_tokens(original_text)
@@ -7659,18 +7829,22 @@ def _log_compression_event(feature, original_text="", compressed_text="",
         if original_tokens > 0:
             ratio = round(1.0 - compressed_tokens / original_tokens, 4)
 
+        # U1: derive stable join key and resolve event-time model.
+        session_uuid, _ = _extract_session_uuid(session_id)
+        resolved_model = _resolve_session_model(session_id)
+
         conn = _init_trends_db()
         try:
             conn.execute(
                 "INSERT INTO compression_events "
-                "(timestamp, session_id, feature, command_pattern, original_tokens, "
-                "compressed_tokens, compression_ratio, quality_preserved, verified, detail) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (datetime.now().isoformat(), session_id, feature, command_pattern,
+                "(timestamp, session_id, session_uuid, feature, command_pattern, original_tokens, "
+                "compressed_tokens, compression_ratio, quality_preserved, verified, detail, model) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (datetime.now().isoformat(), session_id, session_uuid, feature, command_pattern,
                  original_tokens, compressed_tokens, ratio,
                  1 if quality_preserved else 0,
                  1 if verified else 0,
-                 detail),
+                 detail, resolved_model),
             )
             conn.commit()
         finally:
@@ -7680,40 +7854,88 @@ def _log_compression_event(feature, original_text="", compressed_text="",
 
 
 def _get_compression_summary(days=30):
-    """Query compression events and return a summary dict."""
+    """Query compression events and return a summary dict.
+
+    U1: if compression_events rows carry a stored model (written at event-time
+    via the session join), compute cost_saved_usd from per-row token * model_rate
+    instead of multiplying the aggregate token count by the CURRENT session's
+    model rate (which is anachronistic for historical rows). Falls back to the
+    old per-call rate for rows whose model is NULL.
+    """
     try:
         conn = _init_trends_db()
         try:
             cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+            # Pull model alongside aggregates so we can reprice by event-time model.
+            # NULLs land as None in Python; fallback handled below.
             rows = conn.execute(
                 "SELECT feature, COUNT(*) as cnt, "
                 "SUM(original_tokens) as orig, SUM(compressed_tokens) as comp, "
                 "AVG(compression_ratio) as avg_ratio, "
                 "SUM(CASE WHEN quality_preserved = 1 THEN 1 ELSE 0 END) as quality_ok, "
-                "SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END) as verified_cnt "
+                "SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END) as verified_cnt, "
+                "model "
                 "FROM compression_events WHERE timestamp >= ? "
-                "GROUP BY feature ORDER BY orig DESC",
+                "GROUP BY feature, model ORDER BY orig DESC",
                 (cutoff,),
             ).fetchall()
         finally:
             conn.close()
 
-        by_feature = {}
+        # Merge rows with the same feature (may appear once per model after the
+        # GROUP BY feature, model). Accumulate cost using per-row model rate.
+        by_feature: dict = {}
         total_original = 0
         total_compressed = 0
         total_events = 0
-        for feature, cnt, orig, comp, avg_ratio, quality_ok, verified_cnt in rows:
-            by_feature[feature] = {
-                "events": cnt,
-                "original_tokens": orig or 0,
-                "compressed_tokens": comp or 0,
-                "avg_ratio": round(avg_ratio or 0.0, 4),
-                "tokens_saved": (orig or 0) - (comp or 0),
-                "quality_preserved_pct": round(100 * (quality_ok or 0) / max(cnt, 1), 1),
-                "verified_pct": round(100 * (verified_cnt or 0) / max(cnt, 1), 1),
-            }
-            total_original += orig or 0
-            total_compressed += comp or 0
+        fallback_rate = _estimate_compression_cost_per_mtok()
+        tier = _load_pricing_tier()
+        tier_data = PRICING_TIERS.get(tier, PRICING_TIERS["anthropic"])
+
+        for feature, cnt, orig, comp, avg_ratio, quality_ok, verified_cnt, model in rows:
+            orig = orig or 0
+            comp = comp or 0
+            cnt = cnt or 0
+            # Per-model rate: use stored model if available, else current-session fallback.
+            if model:
+                norm_m = _normalize_model_name(model) or "sonnet"
+                rate = (
+                    tier_data["claude_models"]
+                    .get(norm_m, tier_data["claude_models"].get("sonnet", {}))
+                    .get("input", fallback_rate)
+                )
+            else:
+                rate = fallback_rate
+            tokens_saved = orig - comp
+            cost_saved = round(tokens_saved * rate / 1_000_000, 6)
+
+            if feature in by_feature:
+                # Merge with existing entry for this feature (multi-model rows)
+                entry = by_feature[feature]
+                entry["events"] += cnt
+                entry["original_tokens"] += orig
+                entry["compressed_tokens"] += comp
+                entry["tokens_saved"] += tokens_saved
+                entry["cost_saved_usd"] = round(entry["cost_saved_usd"] + cost_saved, 6)
+                # avg_ratio and quality_pcts are approximate after merging; acceptable.
+                entry["quality_preserved_pct"] = round(
+                    (entry["quality_preserved_pct"] * (entry["events"] - cnt) + 100 * (quality_ok or 0))
+                    / max(entry["events"], 1),
+                    1,
+                )
+            else:
+                by_feature[feature] = {
+                    "events": cnt,
+                    "original_tokens": orig,
+                    "compressed_tokens": comp,
+                    "avg_ratio": round(avg_ratio or 0.0, 4),
+                    "tokens_saved": tokens_saved,
+                    "cost_saved_usd": cost_saved,
+                    "quality_preserved_pct": round(100 * (quality_ok or 0) / max(cnt, 1), 1),
+                    "verified_pct": round(100 * (verified_cnt or 0) / max(cnt, 1), 1),
+                }
+            total_original += orig
+            total_compressed += comp
             total_events += cnt
 
         overall_ratio = round(1.0 - total_compressed / max(total_original, 1), 4)
@@ -7781,6 +8003,17 @@ def _get_savings_summary(days=30):
             total_cost -= float(mcp_cap_est.get("cost_saved_usd", 0.0) or 0.0)
             total_events -= int(mcp_cap_est.get("events", 0) or 0)
 
+        # U-G: hint_followed is a DETERMINISTICALLY-TRIGGERED event (a proactive
+        # hint surfaced a file and the agent then read it) but its avoided-search
+        # MAGNITUDE is a conservative estimate. The trigger is observed; the size
+        # is not metered. So it belongs in the estimated tier, never the realized
+        # counted total. Relocate it exactly like mcp_cap.
+        hint_followed_est = by_category.pop("hint_followed", None)
+        if hint_followed_est:
+            total_tokens -= int(hint_followed_est.get("tokens_saved", 0) or 0)
+            total_cost -= float(hint_followed_est.get("cost_saved_usd", 0.0) or 0.0)
+            total_events -= int(hint_followed_est.get("events", 0) or 0)
+
         # B6: net tool-archive re-expansions out of the tool_archive credit. A
         # re-popped result didn't stay collapsed, so its eager credit is reversed
         # (floored at 0). tool_archive_reexpand is a DEBIT, never its own savings
@@ -7819,6 +8052,9 @@ def _get_savings_summary(days=30):
             "one_time_setup": one_time,
             # A3: MCP-cap estimate, relocated to the estimated tier (not realized).
             "mcp_cap_estimated": mcp_cap_est,
+            # U-G: observed-trigger / estimated-magnitude avoided-search from
+            # proactive hints. Estimated tier, never in the realized total.
+            "hint_followed_estimated": hint_followed_est,
         }
     except Exception:
         return {
@@ -7830,6 +8066,7 @@ def _get_savings_summary(days=30):
             "period_days": days,
             "one_time_setup": None,
             "mcp_cap_estimated": None,
+            "hint_followed_estimated": None,
         }
 
 
@@ -10178,7 +10415,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.10.0"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.10.1"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DAEMON_RUNTIME = detect_runtime()
 _DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else ("hermes" if _DAEMON_RUNTIME == "hermes" else "claude")
@@ -15799,6 +16036,39 @@ def compact_capture(transcript_path=None, session_id=None, trigger="auto", cwd=N
     return str(checkpoint_path)
 
 
+# U-B: cap on credited checkpoint-restore recovery, so a pathological working
+# set can never inflate the realized number. ~a large-but-bounded context.
+_CHECKPOINT_RECOVERY_TOKEN_CAP = 200_000
+
+
+def _checkpoint_restore_recovery_tokens(sid_safe, floor_tokens):
+    """Avoided-reconstruction tokens credited for a checkpoint restore (U-B).
+
+    The old proxy credited the COMPRESSED checkpoint's byte size, which badly
+    under-counts the value: a restore lets the resumed session skip re-reading
+    its active working set. Credit the sum of that working set's token estimates
+    (files read >=2x this session), floored at the legacy file-size estimate so
+    we never regress, and capped so a runaway set can't inflate the number.
+    Falls back to the floor on any error or when the store is unavailable.
+    """
+    floor = max(0, int(floor_tokens or 0))
+    try:
+        from session_store import SessionStore
+    except ImportError:
+        return floor
+    if not sid_safe:
+        return floor
+    try:
+        store = SessionStore(sid_safe)
+        try:
+            active = int(store.get_active_read_tokens())
+        finally:
+            store.close()
+    except Exception:
+        return floor
+    return min(_CHECKPOINT_RECOVERY_TOKEN_CAP, max(floor, active))
+
+
 def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_only=False):
     """Restore context after compaction or for a new session.
 
@@ -15935,10 +16205,19 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
             label = f"[Token Optimizer] Post-compaction context recovery (from {trigger_label} checkpoint):"
             _print_checkpoint_body(best_cp["path"], label)
             _print_intel_digest(sid_safe)
-            # Log savings: estimate recovered tokens from checkpoint size
+            # Log savings: credit the avoided reconstruction (the active working
+            # set the resume skips re-reading), floored at the legacy
+            # checkpoint-file-size estimate so we never regress (U-B).
             try:
                 cp_size = best_cp["path"].stat().st_size
-                est_tokens_recovered = int(cp_size / CHARS_PER_TOKEN)
+                # Calibrated floor (U-F: ~3.3 chars/tok), consistent with the TS
+                # ports and the rest of the estimator surface, not the legacy 4.0.
+                try:
+                    from token_estimate import estimate_tokens_from_bytes
+                    floor_tokens = estimate_tokens_from_bytes(cp_size)
+                except ImportError:
+                    floor_tokens = int(cp_size / CHARS_PER_TOKEN)
+                est_tokens_recovered = _checkpoint_restore_recovery_tokens(sid_safe, floor_tokens)
                 if est_tokens_recovered > 0:
                     _log_savings_event("checkpoint_restore", est_tokens_recovered,
                                        session_id=sid_safe, detail=f"restored from {trigger_label}")
@@ -16084,11 +16363,15 @@ def _continuity_prompt_hint(prompt_text="", session_id=None, cwd=None, max_age_m
     if decisions:
         safe_decisions = [_safe_recovered_scalar(d, 120) for d in decisions[:3]]
         lines.append("- Decisions: " + "; ".join(repr(d) for d in safe_decisions if d))
+    hinted_paths = []
     if modified:
         paths = []
         for item in modified[:5]:
             if isinstance(item, dict):
-                paths.append(str(item.get("path") or ""))
+                p = str(item.get("path") or "")
+                paths.append(p)
+                if p:
+                    hinted_paths.append(p)
         if paths:
             lines.append("- Files: " + ", ".join(repr(_safe_recovered_scalar(p, 140)) for p in paths))
     if archives:
@@ -16105,6 +16388,20 @@ def _continuity_prompt_hint(prompt_text="", session_id=None, cwd=None, max_age_m
         "briefly tell the user you found a relevant prior session (mention its topic / "
         "checkpoint date) so the recovery is transparent, not silent."
     )
+    # U-G2: record the files this hint surfaced to the CURRENT session so a later
+    # read of one of them is observed evidence the hint spared an exploratory
+    # search (credited once by read_cache via claim_hint_follow). Best-effort:
+    # never let measurement bookkeeping break the hint itself.
+    if sid_safe and hinted_paths:
+        try:
+            from session_store import SessionStore
+            store = SessionStore(sid_safe)
+            try:
+                store.record_hint_serve(hinted_paths)
+            finally:
+                store.close()
+        except Exception:
+            pass
     return "\n".join(lines)
 
 
@@ -19326,6 +19623,11 @@ def _estimate_behavioral_savings(days=30):
 
 _CONTAMINATION_COHORT_MIN = _int_env("TOKEN_OPTIMIZER_COHORT_MIN", 3)
 
+# U-D: conservative per-avoided-read token estimate and a per-session cap so the
+# avoided-search estimate stays grounded and can never run away.
+_AVG_EXPLORATORY_READ_TOKENS = _int_env("TOKEN_OPTIMIZER_AVG_READ_TOKENS", 2500)
+_RETRIEVAL_AVOIDED_READS_CAP = _int_env("TOKEN_OPTIMIZER_AVOIDED_READS_CAP", 8)
+
 
 def _estimate_contamination_exit_savings(days=30):
     """B4: empirical avoided-rework from heeding a low-quality nudge (tier 2).
@@ -19469,6 +19771,98 @@ def _estimate_handover_rerun_savings(days=30):
             "restored_sessions": n_restored,
             "baseline_sessions": n_baseline,
             "delta_tokens_per_session": int(delta),
+            "confidence": confidence,
+            "evidence": "estimated",
+        }
+    except Exception:
+        return zero
+
+
+def _estimate_retrieval_serve_savings(days=30):
+    """U-D: avoided exploratory search when a TO retrieval / continuity serve
+    points the model straight at the right context (ESTIMATED tier).
+
+    The user's example: a proactive hint or an archived-result serve sends an
+    agent directly to the answer instead of grep-diving through many files. That
+    avoided search is real tokens, but it is a counterfactual ("would have
+    searched"), so it lives in the estimated tier, never the hard counted total.
+
+    Method (mirrors the accepted B7 cohort approach): the served cohort is
+    sessions that received a TO retrieval/continuity serve (a checkpoint_restore
+    or tool_archive savings event); the baseline cohort is sessions without one.
+    Compare Read-tool counts (session_log.tool_calls_json): a session steered to
+    the answer does fewer exploratory reads. The per-session read delta x a
+    conservative average-read-token estimate is the avoided search. Distinct from
+    B7 handover_rerun, which measures avoided *stale re-reads*; this measures
+    avoided *exploratory first reads*. Capped per session, sample-gated, labelled
+    estimated, never summed into realized. Selection bias is possible (served
+    sessions may differ), so it is shown with its cohort sizes, not as a hard
+    number. Never raises.
+    """
+    zero = {"tokens_saved": 0, "cost_saved_usd": 0.0, "served_sessions": 0,
+            "baseline_sessions": 0, "avoided_reads_per_session": 0,
+            "confidence": "insufficient", "evidence": "estimated"}
+    try:
+        if not TRENDS_DB.exists():
+            return zero
+        cutoff_dt = datetime.now() - timedelta(days=days)
+        conn = _init_trends_db()
+        try:
+            served = conn.execute(
+                "SELECT DISTINCT session_uuid, session_id FROM savings_events "
+                "WHERE event_type IN ('checkpoint_restore','tool_archive') "
+                "AND timestamp >= ?",
+                (cutoff_dt.isoformat(),),
+            ).fetchall()
+            sl = conn.execute(
+                "SELECT jsonl_path, tool_calls_json FROM session_log "
+                "WHERE date >= ? AND tool_calls_json IS NOT NULL",
+                (cutoff_dt.strftime("%Y-%m-%d"),),
+            ).fetchall()
+        finally:
+            conn.close()
+        # reads_by_sid is keyed by the JSONL stem (= session UUID), so the served
+        # cohort must be matched by session_uuid (the U1 join key), not the raw
+        # session_id -- many savings rows carry short agent-ids that never match a
+        # UUID stem, which would misclassify served sessions as baseline and
+        # OVER-state the avoided-read delta. Include both keys to be safe.
+        served_ids = set()
+        for su, si in served:
+            if su:
+                served_ids.add(su)
+            if si:
+                served_ids.add(si)
+        reads_by_sid = {}
+        for path, tj in sl:
+            try:
+                sid = Path(path).stem
+                calls = json.loads(tj)
+                reads_by_sid[sid] = int(calls.get("Read", 0) or 0)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        if not reads_by_sid:
+            return zero
+        served_vals = [r for s, r in reads_by_sid.items() if s in served_ids]
+        baseline_vals = [r for s, r in reads_by_sid.items() if s not in served_ids]
+        n_served, n_baseline = len(served_vals), len(baseline_vals)
+        if n_served < _CONTAMINATION_COHORT_MIN or n_baseline < _CONTAMINATION_COHORT_MIN:
+            z = dict(zero)
+            z["served_sessions"], z["baseline_sessions"] = n_served, n_baseline
+            return z
+        avg_served = sum(served_vals) / n_served
+        avg_baseline = sum(baseline_vals) / n_baseline
+        # Avoided reads per served session, conservatively capped.
+        avoided = min(max(0.0, avg_baseline - avg_served), float(_RETRIEVAL_AVOIDED_READS_CAP))
+        est_tokens = int(avoided * n_served * _AVG_EXPLORATORY_READ_TOKENS)
+        smaller = min(n_served, n_baseline)
+        confidence = "high" if smaller >= 15 else "medium" if smaller >= 5 else "low"
+        cost_per_mtok = _estimate_compression_cost_per_mtok()
+        return {
+            "tokens_saved": est_tokens,
+            "cost_saved_usd": round(est_tokens * cost_per_mtok / 1_000_000, 4),
+            "served_sessions": n_served,
+            "baseline_sessions": n_baseline,
+            "avoided_reads_per_session": round(avoided, 2),
             "confidence": confidence,
             "evidence": "estimated",
         }
@@ -20521,7 +20915,10 @@ def _get_merged_savings(days=30):
     total_cost = float(savings.get("total_cost_usd", 0.0) or 0.0)
     total_events = int(savings.get("total_events", 0) or 0)
 
-    cost_per_mtok = _estimate_compression_cost_per_mtok()
+    # U1: fallback rate only used for rows that pre-date the model column (NULL model).
+    # For rows with a stored model (written at event-time via session join), the cost
+    # is already priced correctly by _get_compression_summary's per-row rate.
+    fallback_cost_per_mtok = _estimate_compression_cost_per_mtok()
 
     for feature, fdata in compression.get("by_feature", {}).items():
         if feature not in _V5_COMPRESSION_CATEGORIES:
@@ -20532,7 +20929,12 @@ def _get_merged_savings(days=30):
         events = int(fdata.get("events", 0) or 0)
         if tokens_saved <= 0 and events <= 0:
             continue
-        cost_saved = round(tokens_saved * cost_per_mtok / 1_000_000, 4)
+        # Prefer cost_saved_usd from _get_compression_summary (per-model pricing);
+        # fall back to the current-session rate for legacy NULL-model rows.
+        if "cost_saved_usd" in fdata and fdata["cost_saved_usd"] is not None:
+            cost_saved = round(float(fdata["cost_saved_usd"]), 4)
+        else:
+            cost_saved = round(tokens_saved * fallback_cost_per_mtok / 1_000_000, 4)
         by_category[feature] = {
             "events": events,
             "tokens_saved": tokens_saved,
@@ -20574,6 +20976,7 @@ def _get_merged_savings(days=30):
     behavioral = _estimate_behavioral_savings(days=days)
     contamination_exit = _estimate_contamination_exit_savings(days=days)
     handover_rerun = _estimate_handover_rerun_savings(days=days)
+    retrieval_serve = _estimate_retrieval_serve_savings(days=days)
     model_routing = _compute_model_routing_savings(days=days)
     output_waste = _estimate_output_waste(days=days)
     cache_drop = _estimate_cache_drop_savings(days=days)
@@ -20604,6 +21007,10 @@ def _get_merged_savings(days=30):
         "contamination_exit": contamination_exit,
         # B7: handover/continuity avoided-rework (estimated tier, same method).
         "handover_rerun": handover_rerun,
+        # U-D: avoided exploratory search when a retrieval/continuity serve points
+        # the model straight at the answer (estimated tier, cohort-grounded, capped).
+        # Never summed into the realized counted total.
+        "retrieval_serve": retrieval_serve,
         # THE headline before/after transformation: current activity priced at the
         # user's pre-TO per-session weight + mix vs actual. Comprehensive (volume +
         # structural + routing + sub-agents). Estimated tier, counterfactual, grounded
@@ -20621,6 +21028,9 @@ def _get_merged_savings(days=30):
         "one_time_setup": savings.get("one_time_setup"),
         # A3: MCP-cap estimate lives in the estimated tier, never realized.
         "mcp_cap_estimated": savings.get("mcp_cap_estimated"),
+        # U-G: deterministically-triggered avoided-search from proactive hints
+        # (observed hint->read), estimated magnitude. Estimated tier, never realized.
+        "hint_followed": savings.get("hint_followed_estimated"),
     }
 
 
