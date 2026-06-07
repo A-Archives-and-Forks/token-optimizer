@@ -111,6 +111,50 @@ HOME = Path.home()
 RUNTIME_DIR = runtime_home()
 CLAUDE_DIR = claude_home()
 
+# Commands that scan or MUTATE the Claude Code setup (~/.claude). When this skill
+# is invoked from inside OpenCode (which loads ~/.claude/skills by default),
+# running these against ~/.claude is wrong — see the OpenCode guardrail in
+# __main__ and _opencode_audit_notice() below (issue #57).
+#
+# Two groups, both blocked under OpenCode:
+#   - scan/report:   report, quick, doctor, skill, mcp, plugin-cleanup
+#   - write/install: these touch SETTINGS_PATH (~/.claude/settings.json) or
+#     CLAUDE_DIR/CLAUDE.md directly (NOT RUNTIME_DIR), so the RUNTIME_DIR
+#     redirection does not protect them. ensure-health is additionally guarded
+#     at its source (run_ensure_health) since it can be reached as a hook.
+_OPENCODE_CLAUDE_TARGET_CMDS = frozenset(
+    {
+        # scan / report
+        "report", "quick", "doctor", "skill", "mcp", "plugin-cleanup",
+        # write / install (mutate ~/.claude/settings.json or CLAUDE.md)
+        "ensure-health", "setup-hook", "setup-all-hooks",
+        "cleanup-duplicate-hooks", "setup-daemon", "setup-quality-bar",
+        "setup-smart-compact", "inject-routing", "inject-coach",
+        "setup-coach-injection", "check-staleness",
+    }
+)
+
+
+def _opencode_audit_notice() -> None:
+    """Explain why the Claude audit does not run under OpenCode, and where to go.
+
+    Printed instead of scanning/mutating ~/.claude when OpenCode is detected.
+    """
+    print("Token Optimizer — OpenCode runtime detected.")
+    print()
+    print("This audit targets a Claude Code / Codex setup (it scans ~/.claude), so it")
+    print("will not run here and will not modify ~/.claude or your OpenCode config.")
+    print()
+    print("On OpenCode, Token Optimizer runs automatically as a plugin:")
+    print("  - Live context-quality, savings, and continuity tracking via session hooks")
+    print("  - Dashboard / status: run the `token_dashboard` or `token_status` tool")
+    print()
+    print("Install or verify the OpenCode plugin:")
+    print('  opencode.json -> "plugin": ["token-optimizer-opencode"]')
+    print("  or drop the build into ~/.config/opencode/plugins/")
+    print()
+    print("To force this skill onto a specific runtime, set TOKEN_OPTIMIZER_RUNTIME.")
+
 # Sentinel file written inside an archived symlinked skill, recording the
 # original link target so restore can recreate the symlink (issue #48). A dir
 # holds EITHER SKILL.md (real skill) XOR this marker (symlinked skill).
@@ -4630,6 +4674,12 @@ def plugin_cleanup(dry_run=False, quiet=False):
 
     actions_taken = []
 
+    # Defense-in-depth (issue #57): under OpenCode, do not touch ~/.claude.
+    if detect_runtime() == "opencode":
+        if not quiet:
+            print("  Skipped: OpenCode runtime detected; not modifying ~/.claude.")
+        return actions_taken
+
     # --- Report 1: Stale cache version dirs (report only, never delete) ---
     registry = CLAUDE_DIR / "plugins" / "installed_plugins.json"
     cache_dir = CLAUDE_DIR / "plugins" / "cache"
@@ -4801,6 +4851,13 @@ def _manage_skill(action, name):
 def _manage_skill_locked(action, name):
     import shutil
 
+    # Defense-in-depth (issue #57): never mutate ~/.claude/skills when running
+    # under OpenCode, even if reached outside the CLI dispatch guard (e.g. the
+    # dashboard /api/v5/toggle path).
+    if detect_runtime() == "opencode":
+        print("  [!] Refusing to modify ~/.claude skills under the OpenCode runtime.")
+        return False
+
     # Validate name: prevent path traversal
     if not isinstance(name, str) or not name or "/" in name or "\\" in name or name in (".", "..") or "\0" in name:
         print(f"  [!] Invalid skill name: {name}")
@@ -4900,6 +4957,13 @@ def _manage_skill_locked(action, name):
 
 def _manage_mcp(action, name):
     """Disable or enable an MCP server by moving between mcpServers and _disabledMcpServers."""
+    # Defense-in-depth (issue #57): never mutate ~/.claude/settings.json under
+    # OpenCode, even when reached outside the CLI dispatch guard (e.g. the
+    # dashboard /api/mcp/{enable,disable} HTTP path), mirroring _manage_skill_locked.
+    if detect_runtime() == "opencode":
+        print("  [!] Refusing to modify ~/.claude settings under the OpenCode runtime.")
+        return False
+
     settings, _ = _read_settings_json()
     if not settings:
         print("  settings.json not found or empty")
@@ -10415,7 +10479,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.10.1"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.10.2"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DAEMON_RUNTIME = detect_runtime()
 _DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else ("hermes" if _DAEMON_RUNTIME == "hermes" else "claude")
@@ -21540,6 +21604,13 @@ def run_ensure_health():
     bad env var removal) run first so they are guaranteed to complete
     even if a later task exhausts the wall-clock budget.
     """
+    # OpenCode guardrail (issue #57), defense-in-depth: every Claude write below
+    # is gated on `not _is_codex`, so under OpenCode they would all fire against
+    # ~/.claude. The CLI dispatch already blocks `ensure-health` under OpenCode;
+    # this early return also covers any non-CLI caller (e.g. a future hook).
+    if detect_runtime() == "opencode":
+        return
+
     _is_codex = detect_runtime() == "codex"
     # Preserve session transcripts: set cleanupPeriodDays if not configured.
     # Claude Code only: writes to ~/.claude/settings.json.
@@ -21979,6 +22050,17 @@ if __name__ == "__main__":
             _filtered_args.append(args[i])
             i += 1
     args = _filtered_args
+
+    # --- OpenCode guardrail (issue #57) -----------------------------------
+    # OpenCode loads ~/.claude/skills by default, so it can invoke this skill
+    # even though the user is working in OpenCode, not Claude Code. The Claude
+    # audit/fix commands below scan and (for skill/mcp/plugin-cleanup) MUTATE
+    # ~/.claude — the wrong target in that situation. Redirect those to a safe
+    # notice instead of touching ~/.claude. Runtime-data commands are unaffected:
+    # they use RUNTIME_DIR, which now resolves to OpenCode's data dir.
+    if detect_runtime() == "opencode" and (not args or args[0] in _OPENCODE_CLAUDE_TARGET_CMDS):
+        _opencode_audit_notice()
+        sys.exit(0)
 
     if not args or args[0] == "report":
         full_report()

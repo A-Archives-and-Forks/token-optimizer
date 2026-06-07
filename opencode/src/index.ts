@@ -330,6 +330,21 @@ export const TokenOptimizerPlugin: Plugin = async (
       token_dashboard: createDashboardTool(() => dataDir, flushAllLiveSessions),
     },
 
+    // Tag every shell execution with the active runtime so that any Token
+    // Optimizer code reached through a shell (e.g. the Claude Code skill that
+    // OpenCode auto-loads from ~/.claude/skills) reliably detects OpenCode and
+    // never scans or mutates ~/.claude (issue #57). We only add our own marker
+    // and leave the rest of the environment untouched.
+    async "shell.env"(_input, output) {
+      try {
+        if (!output.env.TOKEN_OPTIMIZER_RUNTIME) {
+          output.env.TOKEN_OPTIMIZER_RUNTIME = "opencode";
+        }
+      } catch (err) {
+        console.warn("[Token Optimizer] shell.env hook error:", err);
+      }
+    },
+
     async "chat.message"(input, output) {
       try {
         const state = getSession(input.sessionID);

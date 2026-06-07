@@ -1,10 +1,15 @@
-"""Runtime home detection shared by Claude Code, Codex, and Hermes adapters.
+"""Runtime home detection shared by Claude Code, Codex, Hermes, and OpenCode adapters.
 
 This module keeps runtime integration deliberately simple:
 
-- Claude Code stays the default runtime unless Codex or Hermes is clearly indicated.
+- Claude Code stays the default runtime unless another runtime is clearly indicated.
 - Codex activates when CODEX_HOME is set or TOKEN_OPTIMIZER_RUNTIME=codex.
 - Hermes activates when HERMES_HOME is set or TOKEN_OPTIMIZER_RUNTIME=hermes.
+- OpenCode activates when an OPENCODE_* env signal or an opencode ancestor process
+  is detected, or TOKEN_OPTIMIZER_RUNTIME=opencode. OpenCode loads ~/.claude/skills
+  by default, so this skill can be invoked from inside OpenCode; detecting it keeps
+  the skill from scanning/mutating ~/.claude when the user is actually in OpenCode
+  (issue #57).
 - Callers can keep legacy variable names while resolving to the correct home.
 
 The goal is to let Token Optimizer share one Python core while platform
@@ -22,10 +27,26 @@ _RUNTIME_OVERRIDE = "TOKEN_OPTIMIZER_RUNTIME"
 _RUNTIME_CLAUDE = "claude"
 _RUNTIME_CODEX = "codex"
 _RUNTIME_HERMES = "hermes"
-_VALID_RUNTIMES = frozenset({_RUNTIME_CLAUDE, _RUNTIME_CODEX, _RUNTIME_HERMES})
+_RUNTIME_OPENCODE = "opencode"
+_VALID_RUNTIMES = frozenset(
+    {_RUNTIME_CLAUDE, _RUNTIME_CODEX, _RUNTIME_HERMES, _RUNTIME_OPENCODE}
+)
 _CLAUDE_PLUGIN_ENVS = ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA")
 _CODEX_HOME_ENV = "CODEX_HOME"
 _HERMES_HOME_ENV = "HERMES_HOME"
+# OpenCode launch/config env vars. Their presence in this process's environment
+# is a strong signal we were spawned from within OpenCode. These are OpenCode's
+# own documented variables (config/data/bin/client), not anything we set.
+_OPENCODE_ENV_SIGNALS = (
+    "OPENCODE_BIN",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_DATA_DIR",
+    "OPENCODE_CONFIG",
+    "OPENCODE_CLIENT",
+)
+# Set to a truthy value to skip the (cheap, best-effort) process-tree scan used
+# as a fallback OpenCode signal. Useful in tests/CI and locked-down sandboxes.
+_PROC_SCAN_DISABLE_ENV = "TOKEN_OPTIMIZER_NO_PROC_SCAN"
 
 
 def _home_root() -> Path:
@@ -62,6 +83,72 @@ def _safe_home_from_env(env_var: str, fallback: Path) -> Path:
     return result  # type: ignore[return-value]
 
 
+def _opencode_env_signal() -> bool:
+    """True when an OpenCode launch/config env var is present in this process."""
+    return any(os.environ.get(var) for var in _OPENCODE_ENV_SIGNALS)
+
+
+def _opencode_in_process_tree() -> bool:
+    """Best-effort: is an ``opencode`` binary an ancestor of this process?
+
+    Used only as a fallback signal when OpenCode runs this skill via its default
+    ~/.claude/skills loading and exports no identifying env var. A single ``ps``
+    call is parsed in memory and the parent chain is walked from this PID upward.
+
+    Never raises and never blocks for long: disabled on Windows, behind a short
+    timeout, and skippable via TOKEN_OPTIMIZER_NO_PROC_SCAN.
+    """
+    if os.environ.get(_PROC_SCAN_DISABLE_ENV, "").strip():
+        return False
+    if sys.platform.startswith("win"):
+        return False
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["ps", "-Ao", "pid=,ppid=,comm="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if proc.returncode != 0:
+            return False
+        parents: dict[int, int] = {}
+        names: dict[int, str] = {}
+        for line in proc.stdout.splitlines():
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            try:
+                pid, ppid = int(parts[0]), int(parts[1])
+            except ValueError:
+                continue
+            parents[pid] = ppid
+            names[pid] = parts[2]
+        pid = os.getpid()
+        seen: set[int] = set()
+        depth = 0
+        while pid and pid > 1 and pid not in seen and depth < 40:
+            seen.add(pid)
+            depth += 1
+            # Exact basename match, not a substring: an unrelated binary like
+            # "my-opencode-helper" or a repo dir named "opencode" in argv must
+            # not flip a genuine Claude Code session into OpenCode mode. The real
+            # OpenCode CLI runs as `opencode` (or opencode.exe on Windows).
+            comm = os.path.basename(names.get(pid, "")).lower()
+            if comm in ("opencode", "opencode.exe"):
+                return True
+            pid = parents.get(pid, 0)
+        return False
+    except Exception:
+        return False
+
+
+def _opencode_signal() -> bool:
+    """True when either an env signal or an opencode ancestor process is found."""
+    return _opencode_env_signal() or _opencode_in_process_tree()
+
+
 @functools.lru_cache(maxsize=None)
 def detect_runtime() -> str:
     """Return the active runtime name.
@@ -71,7 +158,13 @@ def detect_runtime() -> str:
       2. Claude plugin env vars imply Claude Code
       3. CODEX_HOME implies Codex
       4. HERMES_HOME implies Hermes
-      5. Default to Claude Code for backward compatibility
+      5. OpenCode env signal or opencode ancestor process implies OpenCode
+      6. Default to Claude Code for backward compatibility
+
+    Genuine Claude Code, Codex, and Hermes invocations all short-circuit before
+    the OpenCode check (steps 2-4), so adding OpenCode detection cannot change
+    how those runtimes are detected. The process-tree scan in step 5 only runs
+    when none of those env signals are present.
     """
     override = os.environ.get(_RUNTIME_OVERRIDE, "").strip().lower()
     if override in _VALID_RUNTIMES:
@@ -85,6 +178,9 @@ def detect_runtime() -> str:
 
     if os.environ.get(_HERMES_HOME_ENV):
         return _RUNTIME_HERMES
+
+    if _opencode_signal():
+        return _RUNTIME_OPENCODE
 
     return _RUNTIME_CLAUDE
 
@@ -104,6 +200,40 @@ def hermes_home() -> Path:
     return _safe_home_from_env(_HERMES_HOME_ENV, Path.home() / ".hermes")
 
 
+def _xdg_base(env_var: str, default_rel: str) -> Path:
+    """Resolve an XDG base dir, falling back to ~/<default_rel>.
+
+    Honors an absolute XDG_* override; otherwise uses the home-relative default.
+    """
+    raw = os.environ.get(env_var, "").strip()
+    if raw:
+        candidate = Path(raw).expanduser()
+        if candidate.is_absolute():
+            return candidate
+    return Path.home() / default_rel
+
+
+def opencode_config_home() -> Path:
+    """Return OpenCode's config directory (~/.config/opencode by default).
+
+    Honors OPENCODE_CONFIG_DIR when it points at a safe directory under home,
+    else XDG_CONFIG_HOME/opencode, else ~/.config/opencode.
+    """
+    default = _xdg_base("XDG_CONFIG_HOME", ".config") / "opencode"
+    return _safe_home_from_env("OPENCODE_CONFIG_DIR", default)
+
+
+def opencode_data_home() -> Path:
+    """Return OpenCode's data directory (~/.local/share/opencode by default).
+
+    Honors OPENCODE_DATA_DIR when it points at a safe directory under home,
+    else XDG_DATA_HOME/opencode, else ~/.local/share/opencode. This is where
+    Token Optimizer's own data would live under OpenCode — never ~/.claude.
+    """
+    default = _xdg_base("XDG_DATA_HOME", ".local/share") / "opencode"
+    return _safe_home_from_env("OPENCODE_DATA_DIR", default)
+
+
 def runtime_home() -> Path:
     """Return the home directory used by the active runtime."""
     runtime = detect_runtime()
@@ -114,12 +244,15 @@ def runtime_home() -> Path:
     if runtime == _RUNTIME_HERMES:
         return hermes_home()
 
+    if runtime == _RUNTIME_OPENCODE:
+        return opencode_data_home()
+
     return claude_home()
 
 
 def plugin_data_env_vars() -> tuple[str, ...]:
     """Return plugin-data env vars in runtime-specific priority order."""
-    if detect_runtime() in (_RUNTIME_CODEX, _RUNTIME_HERMES):
+    if detect_runtime() in (_RUNTIME_CODEX, _RUNTIME_HERMES, _RUNTIME_OPENCODE):
         return ("TOKEN_OPTIMIZER_PLUGIN_DATA",)
     return ("CLAUDE_PLUGIN_DATA", "TOKEN_OPTIMIZER_PLUGIN_DATA")
 
@@ -131,4 +264,6 @@ def runtime_name_for_humans() -> str:
         return "Codex"
     if runtime == _RUNTIME_HERMES:
         return "Hermes"
+    if runtime == _RUNTIME_OPENCODE:
+        return "OpenCode"
     return "Claude Code"

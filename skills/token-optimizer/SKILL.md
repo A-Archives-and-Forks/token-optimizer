@@ -18,6 +18,18 @@ If `TOKEN_OPTIMIZER_RUNTIME=codex` or Codex environment is detected, read `refer
 
 ---
 
+## OpenCode Runtime
+
+OpenCode loads `~/.claude/skills` by default, so it can invoke this skill even though you are working in OpenCode, not Claude Code. If OpenCode is detected — `TOKEN_OPTIMIZER_RUNTIME=opencode`, any `OPENCODE_*` environment variable, or you are running inside OpenCode — **STOP** and read `references/opencode-workflow.md`. Do **not** run the Claude Code phases below: they scan and modify `~/.claude`, which is the wrong target when the user is in OpenCode (issue #57).
+
+Quick check before Phase 0:
+```bash
+python3 "$MEASURE_PY" report 2>/dev/null | head -1
+# If it prints "Token Optimizer — OpenCode runtime detected.", follow references/opencode-workflow.md and stop.
+```
+
+---
+
 ## Phase 0: Initialize (Claude Code)
 
 Resolve measure.py path:
