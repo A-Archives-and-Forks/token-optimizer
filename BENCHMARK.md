@@ -4,6 +4,19 @@ This benchmark measures five compounding layers of token savings against real se
 
 **Reproducibility note.** The numbers below come from the author's single-user corpus (1,885 quality-scored sessions over 30 days). Your results will differ based on your usage patterns, model mix, and session length. Every measurement tool is included in the repo so you can regenerate these tables against your own data. See [Running the Benchmarks](#running-the-benchmarks) for instructions.
 
+## Summary
+
+All pricing uses Opus 4 rates ($5/MTok input, $25/MTok output, $0.50/MTok cache-read), which reflects the real-world model mix in this corpus (95% top-tier baseline).
+
+| What's counted | 30-day savings | How it's measured |
+|---|---|---|
+| Output compression + context eviction | $17.51 | Measured: before/after token delta on 908 production events |
+| Model routing | $56.95 | Measured: cost difference from downgrading routable turns |
+| Structural waste cleanup | $105.36 | Opportunity: savings if audit recommendations are applied |
+| **Total (all layers applied)** | **$179.82** | Measured + opportunity combined |
+
+Per working session (50 turns, 15 tool outputs, 1 compaction), the compound savings across all layers come to **$5.02**. At 30 working sessions per month, that is roughly **$150/month**. Lighter sessions save less; heavier sessions save more. The per-layer breakdowns below show exactly where each dollar comes from.
+
 ## Corpus
 
 | | Count |
@@ -44,7 +57,7 @@ The 65% cache-hit rate is the observed average across 1,885 sessions. In practic
 
 Token Optimizer compresses tool outputs through pattern-matched compressor families, not generic summarization. Two distinct mechanisms are at work: compression (shrinking output while preserving information) and context eviction (removing output entirely and storing it locally for on-demand retrieval). Both reduce context window usage, but they work differently.
 
-### Fixture suite: 62 curated test cases
+### Fixture suite: 57 curated test cases
 
 | Category | Fixtures | What's tested |
 |---|---|---|
@@ -133,7 +146,7 @@ Output compression saves on the response side. Model routing saves on the reques
 | Baseline top-tier model share | 95% |
 | Current top-tier model share | 64.7% |
 | Routable fraction of turns | 30% |
-| Realized routing cost | $56.95 |
+| Realized routing savings | $56.95 |
 | Potential (if fully routed) | $30.01 |
 
 Token Optimizer identifies turns where a cheaper model would produce identical results through 11 anti-pattern detectors. It also fires quality nudges to prevent context degradation before it causes retries.
@@ -148,9 +161,11 @@ When a session compacts or a new session starts on the same project, context is 
 
 **Progressive checkpoints.** Throughout a session, Token Optimizer captures structured checkpoints to local SQLite: key decisions made, errors encountered, file context accumulated, and agent state. These are lightweight snapshots, not full context dumps.
 
-**Checkpoint restore.** When a new session starts or the context window compacts, Token Optimizer keyword-matches against stored checkpoints and injects the relevant ones. The model picks up where it left off instead of re-reading files and re-discovering decisions. Production data: 12 checkpoint restores recovered 410,503 tokens of context (30 days).
+**Checkpoint restore.** When a new session starts or the context window compacts, Token Optimizer keyword-matches against stored checkpoints and injects the relevant ones. The model picks up where it left off instead of re-reading files and re-discovering decisions.
 
-**Tool result archive with on-demand retrieval.** Large tool outputs are replaced in-context with a ~50-token stub. The full output is stored locally in SQLite. If the model needs the original data, it calls `expand` to retrieve it. This keeps the context window lean without losing information. Production data: 306 archive events removed 3,252,146 tokens from context (30 days).
+**Tool result archive with on-demand retrieval.** Large tool outputs are replaced in-context with a ~50-token stub. The full output is stored locally in SQLite. If the model needs the original data, it calls `expand` to retrieve it. This keeps the context window lean without losing information.
+
+The token counts for checkpoint restore and tool archive are reported in Layer 2 (context eviction). They appear here because the mechanism is session continuity, but the savings are not double-counted.
 
 **Loop detection.** Token Optimizer detects when the model is repeating the same work (re-reading files it just read, retrying failed commands with no changes). It intervenes to break the loop. Production data: 50 loop detections prevented 60,987 tokens of waste (30 days).
 
@@ -204,21 +219,6 @@ Token Optimizer scores every session on 6 signals: stale reads, bloated results,
 | D | 619 | Poor: heavy bloat, likely retries or loops |
 
 These grades are tracked over time so users can see whether their habits (and Token Optimizer's interventions) are improving session efficiency.
-
-## Comparison: What Other Benchmarks Measure
-
-| | Token Optimizer | context-mode | RTK | Headroom |
-|---|---|---|---|---|
-| **Fixtures / scenarios** | 62 | 21 | N/A | N/A |
-| **Historical corpus replay** | 1,885 quality-scored + 5,814 backfill | None | None | None |
-| **Quality preservation check** | must-preserve + must-not-contain per fixture | None | None | None |
-| **Dollar cost analysis** | Per-session, per-model, per-feature | None | Token counts only | None |
-| **Session-level measurement** | Full multi-turn session | Individual outputs | Individual outputs | Individual outputs |
-| **Structural overhead audit** | Per-component breakdown | None | None | None |
-| **Model routing analysis** | 11 detectors, cost simulation | None | None | None |
-| **Continuity measurement** | Checkpoint restore tokens | None | None | None |
-| **Behavioral waste prevention** | Loop detection, quality scoring | None | None | None |
-| **Cache safety verification** | Never modifies existing prefix | Not measured | Not measured | Not measured |
 
 ## Running the Benchmarks
 
