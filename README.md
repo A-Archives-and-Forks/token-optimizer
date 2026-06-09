@@ -58,12 +58,12 @@ Install the plugin. Most of it runs automatically from that point:
 | | What | How |
 |---|---|---|
 | **Once** | Run `/token-optimizer` after install | Scans your setup, finds waste, fixes it for you |
-| **Automatic** | Compression, context transfer, quality scoring, loop detection, checkpoint/restore | Runs in the background on every session, no action needed |
-| **Automatic** | Dashboard | Updates after every session with tokens, dollars, turns, quality grades |
-| **When you want** | `/token-coach` | Analyzes your last 30 days of sessions, tells you where you're efficient and where you're not, helps plan new projects for minimal waste |
+| **Automatic** | Everything else | Smart Compaction (checkpoints before, restores after), active compression, quality scoring, loop detection, read deduplication, model routing nudges, and more. Runs in the background every session |
+| **Automatic** | Dashboard | Updates after every session with tokens, dollars, quality grades, session history |
+| **When you want** | `/token-coach` | Analyzes 30 days of your session history. Shows where you're efficient and where you're not, helps plan new projects for minimal waste |
 | **When you want** | `/token-optimizer quick` | 10-second health check: context fill, quality score, top issues |
 
-That's it. Install, run the audit once, everything else just works.
+Install, run the audit once, everything else just works.
 
 ## Install
 
