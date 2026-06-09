@@ -294,6 +294,8 @@ Token Optimizer runs as an external process. It doesn't inject always-on instruc
 
 ### How it compares
 
+> Full benchmark methodology, compound savings analysis, and corpus replay results: **[BENCHMARK.md](BENCHMARK.md)**
+
 |  | Token Optimizer | Headroom | RTK | context-mode | `/context` |
 |---|---|---|---|---|---|
 | **Tool output compression** | 🟢 30+ CLI families, credential-safe, toggleable | 🟢 6 algorithms incl. model-based | 🟢 100+ command filters | 🟢 Sandbox + summary | 🔴 |
