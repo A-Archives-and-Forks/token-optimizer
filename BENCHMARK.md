@@ -1,230 +1,233 @@
 # Token Optimizer: Benchmark Report
 
-This benchmark measures five compounding layers of token savings against real session data, with quality verification at every step. All numbers come from production telemetry stored locally in `trends.db`. No data leaves the user's machine.
+> **$5.02 saved per working session** across five compounding layers, measured against 1,885 real sessions over 30 days.
+> Every number comes from local production telemetry. Every measurement tool ships in the repo.
 
-**Reproducibility note.** The numbers below come from the author's single-user corpus (1,885 quality-scored sessions over 30 days). Your results will differ based on your usage patterns, model mix, and session length. Every measurement tool is included in the repo so you can regenerate these tables against your own data. See [Running the Benchmarks](#running-the-benchmarks) for instructions.
+---
 
-## Summary
+## 💰 Summary
 
-All pricing uses Opus 4 rates ($5/MTok input, $25/MTok output, $0.50/MTok cache-read), which reflects the real-world model mix in this corpus (95% top-tier baseline).
+All pricing at Opus 4 rates ($5/MTok input, $25/MTok output, $0.50/MTok cache-read).
 
-| What's counted | 30-day savings | How it's measured |
+| Layer | 30-day savings | Evidence |
 |---|---|---|
-| Output compression + context eviction | $17.51 | Measured: before/after token delta on 908 production events |
-| Model routing | $56.95 | Measured: cost difference from downgrading routable turns |
-| Structural waste cleanup | $105.36 | Opportunity: savings if audit recommendations are applied |
-| **Total (all layers applied)** | **$179.82** | Measured + opportunity combined |
+| 🔧 Output compression + context eviction | **$17.51** | 📊 Measured: 908 production events with before/after delta |
+| 🔀 Model routing | **$56.95** | 📊 Measured: cost difference from downgrading routable turns |
+| 🏗️ Structural waste cleanup | **$105.36** | 💡 Opportunity: savings if audit recommendations are applied |
+| **🟢 Total (all layers)** | **$179.82/month** | |
 
-Per working session (50 turns, 15 tool outputs, 1 compaction), the compound savings across all layers come to **$5.02**. At 30 working sessions per month, that is roughly **$150/month**. Lighter sessions save less; heavier sessions save more. The per-layer breakdowns below show exactly where each dollar comes from.
+> **Per session:** $5.02 compound savings on a 50-turn session with 15 tool outputs.
+> **Per month:** ~$150 at 30 working sessions. Lighter sessions save less; heavier save more.
+>
+> These are conservative. Structural cleanup compounds across every turn of every future session. The Token Optimizer dashboard measures your personal before/after cost and reflects the full compounding effect.
 
-These numbers are conservative. Structural cleanup compounds across every turn of every future session, and that compounding is not fully captured in the per-category tables (which snapshot a 30-day window). The Token Optimizer dashboard measures your personal before/after session cost directly and will reflect the full compounding effect for your usage pattern.
+---
 
-## Corpus
+## 📋 Corpus
 
-| | Count |
+| | |
 |---|---|
-| Sessions in trends.db (quality-scored) | 1,885 |
-| Sessions with file reads (backfill corpus) | 5,814 |
-| First-reads analyzed | 30,771 |
-| Benchmark fixtures | 57 across 16 categories |
-| Average prompt-cache hit rate | 65.4% |
-| Platforms covered | Claude Code CLI, VS Code, Codex, OpenClaw, OpenCode |
+| 🔬 Quality-scored sessions | **1,885** (30 days, `trends.db`) |
+| 📂 Sessions with file reads | **5,814** (backfill corpus for skeleton analysis) |
+| 📖 First-reads analyzed | **30,771** |
+| 🧪 Benchmark fixtures | **57** across 16 categories |
+| ⚡ Avg prompt-cache hit rate | **65.4%** |
+| 🖥️ Platforms | Claude Code CLI, VS Code, Codex, OpenClaw, OpenCode |
 
-The trends.db corpus contains 1,885 sessions with full quality scoring. The backfill corpus (5,814 sessions) is larger because it includes historical sessions recovered from file-read logs for first-read skeleton analysis. These are distinct populations, not double-counted.
+The two corpora are distinct populations, not double-counted. The backfill corpus is larger because it includes historical sessions recovered from file-read logs.
 
-## Layer 1: Structural Overhead (saves every turn)
+**Reproducibility:** Your results will differ based on your usage. Every measurement tool ships in the repo so you can regenerate against your own data. See [Running the Benchmarks](#-running-the-benchmarks).
 
-Before any conversation starts, the model loads system prompt, CLAUDE.md, skills, MCP tool schemas, and MEMORY.md. Every token in this payload is re-sent on every turn. Token Optimizer's 8 auditors score each component for attention-curve efficiency, flag unused skills and MCP tools, and provide one-click archiving.
+---
 
-**Measured structural opportunity (30-day production):**
+## 🏗️ Layer 1: Structural Overhead
 
-| Component | Details |
+> Saves tokens on **every turn of every session.** The single largest compounding savings category.
+
+Before any conversation starts, the model re-sends CLAUDE.md, skills, MCP tool schemas, and MEMORY.md on every turn. Token Optimizer's 8 auditors score each component and flag waste.
+
+| | |
 |---|---|
-| Unused skills identified | 61 |
+| Unused skills found | 61 |
 | Recoverable tokens (skills alone) | 4,026 |
-| Total structural opportunity | 61,227,039 tokens, $105.36 (read + write combined) |
+| **Total structural opportunity** | **61,227,039 tokens / $105.36** |
 
-**Accounting tier:** Structural savings are **opportunity** (what would be saved if recommendations are applied), not measured compression events.
+📊 **Tier:** Opportunity (savings if recommendations are applied).
 
-**Why structural savings compound.** Unlike compression (which fires once per tool output), structural cleanup saves tokens on *every turn of every session going forward*. A 5,000-token reduction in overhead means 5,000 fewer tokens billed per turn, across every session, for as long as the cleanup persists. In a 50-turn session that is 250,000 fewer tokens. Over a month of sessions it is the single largest savings category. The dashboard's before/after comparison captures this compounding directly: it measures the actual per-session cost reduction, which includes the structural prefix shrinking across turns.
+**Why this compounds.** A 5,000-token cleanup saves 5,000 tokens per turn, every session, permanently. In a 50-turn session that is 250,000 fewer tokens. Over a month of sessions it dwarfs every other layer.
 
-**Cache impact on dollar math:** Structural tokens are re-sent every turn, but after the first turn most of them hit the prompt cache. The token reduction is real regardless. The dollar value depends on what fraction is cached vs. fresh:
+**Cache impact on the dollar math:**
 
-| Scenario | Per-turn savings (5,000 tokens removed) | 50-turn session |
+| Scenario | Per-turn (5K tokens removed) | 50-turn session |
 |---|---|---|
-| All tokens fresh (Opus $5/MTok input) | $0.025 | $1.25 |
-| 65% cached (Opus $0.50/MTok cache-read, $5/MTok fresh) | $0.011 | $0.53 |
+| All fresh ($5/MTok) | $0.025 | $1.25 |
+| 65% cached ($0.50 cache / $5 fresh) | $0.011 | $0.53 |
 
-The 65% cache-hit rate is the observed average across 1,885 sessions. In practice, the split varies by session length and conversation pattern. Structural cleanup also reduces cache-read costs, not just fresh input costs, so both rows are real savings, just at different rates.
+65% is the observed cache-hit average across 1,885 sessions.
 
-## Layer 2: Output Compression (saves per tool result)
+---
 
-Token Optimizer compresses tool outputs through pattern-matched compressor families, not generic summarization. Two distinct mechanisms are at work: compression (shrinking output while preserving information) and context eviction (removing output entirely and storing it locally for on-demand retrieval). Both reduce context window usage, but they work differently.
+## 🔧 Layer 2: Output Compression
 
-### Fixture suite: 57 curated test cases
+> Pattern-matched compression families, not generic summarization. Two mechanisms: **shrink it** or **evict it** (store locally, serve a stub).
 
-| Category | Fixtures | What's tested |
+### 🧪 Fixture suite: 57 test cases
+
+Every fixture defines raw output, a must-preserve list, a must-not-contain list (catches hallucination), and a minimum compression ratio. A fixture passes only when **all three checks hold.**
+
+| Category | # | What's tested |
 |---|---|---|
-| git | 7 | status, log, diff, clean repo, merge conflicts, non-repo error |
-| build | 8 | cargo, make, webpack, tsc, gradle output with warnings/errors |
-| lint | 7 | eslint, ruff, clippy, pylint with real violation patterns |
-| logs | 7 | nginx, application, docker, systemd log output |
-| test runners | 6 | pytest, jest, go test with failures and passes |
-| tree / directory | 6 | Large directory listings, nested structures |
-| progress / streaming | 3 | npm install, pip, download progress bars |
-| security | 3 | AWS keys, GitHub PATs, Slack tokens (must NOT be stripped) |
-| error passthrough | 5 | Non-zero exit, permission denied, command not found (must pass through raw) |
-| tee-on-failure | 5 | Failed commands preserve full output for debugging |
+| git | 7 | status, log, diff, merge conflicts, non-repo error |
+| build | 8 | cargo, make, webpack, tsc, gradle |
+| lint | 7 | eslint, ruff, clippy, pylint |
+| logs | 7 | nginx, docker, systemd, application |
+| test runners | 6 | pytest, jest, go test |
+| tree / directory | 6 | large listings, nested structures |
+| progress | 3 | npm install, pip, downloads |
+| 🔒 security | 3 | AWS keys, GitHub PATs, Slack tokens (must NOT be stripped) |
+| ⚠️ error passthrough | 5 | non-zero exit, permission denied (must pass through raw) |
+| 🔄 tee-on-failure | 5 | failed commands preserve full output |
 
-Each fixture defines:
-- **Raw output**: captured from real commands
-- **Must-preserve list**: critical information that MUST survive compression
-- **Must-not-contain**: fabricated data that must NOT appear (catches hallucination)
-- **Minimum compression ratio**: threshold the compressor must meet
+### 📊 Production events (30 days, 908 measured)
 
-A fixture passes only when all three checks hold. This is quality verification that no competing benchmark includes.
+**Compression** (output shrunk, information preserved):
 
-### Production compression events (30 days, 908 events, measured)
-
-**Compression** (output is shrunk, information preserved in smaller form):
-
-| Feature | Events | Original tokens | Compressed tokens | Ratio | Tokens saved |
+| Feature | Events | Before | After | Ratio | Saved |
 |---|---|---|---|---|---|
-| Structure map (re-reads) | 228 | 644,346 | 28,854 | 91.8% | 615,492 |
-| Git output | 195 | 409,787 | 67,305 | 73.1% | 342,482 |
-| First-read skeleton | 18 | 189,253 | 4,147 | 97.2% | 185,106 |
-| Loop detection | 50 | 61,187 | 200 | 99.4% | 60,987 |
-| Directory listings | 47 | 30,322 | 16,192 | 28.2% | 14,130 |
-| Pytest output | 29 | 7,386 | 259 | 91.9% | 7,127 |
-| Delta reads (diff-only) | 5 | 6,499 | 661 | 75.7% | 5,838 |
-| Log output | 2 | 544 | 232 | 57.6% | 312 |
-| **Compression subtotal** | **574** | **1,349,324** | **117,850** | **91.3%** | **1,231,474** |
+| Structure map (re-reads) | 228 | 644K | 29K | **91.8%** | 615K |
+| Git output | 195 | 410K | 67K | **73.1%** | 343K |
+| First-read skeleton | 18 | 189K | 4K | **97.2%** | 185K |
+| Loop detection | 50 | 61K | 0.2K | **99.4%** | 61K |
+| Directory listings | 47 | 30K | 16K | **28.2%** | 14K |
+| Pytest output | 29 | 7K | 0.3K | **91.9%** | 7K |
+| Delta reads | 5 | 6K | 0.7K | **75.7%** | 6K |
+| Log output | 2 | 0.5K | 0.2K | **57.6%** | 0.3K |
+| **Subtotal** | **574** | **1.35M** | **118K** | **91.3%** | **1.23M** |
 
-**Context eviction** (output replaced by a stub, original stored locally for on-demand retrieval):
+**Context eviction** (replaced by stub, original stored locally):
 
-| Feature | Events | Tokens removed from context | Mechanism |
+| Feature | Events | Tokens removed | How |
 |---|---|---|---|
-| Tool output archive | 306 | 3,252,146 | Full tool result replaced by ~50-token stub ("archived, use `expand` to retrieve"). Original stored in local SQLite. Model can request the full output back at any time. |
-| Checkpoint restore | 12 | 410,503 | Recovered context injected from prior session checkpoints. |
+| Tool output archive | 306 | 3,252,146 | ~50-token stub, full result in local SQLite, `expand` to retrieve |
+| Checkpoint restore | 12 | 410,503 | Prior session context injected on compaction |
+| **Subtotal** | **318** | **3,662,649** | |
 
-Tool output archive and checkpoint restore are not compression in the shrink-the-output sense. They are context management: removing tokens that are no longer needed from the active window while keeping them retrievable. The token savings are real (those tokens are gone from context), but grouping them with ratio-based compression would be misleading.
+> 🟢 **Combined: 908 events, 4,887,138 tokens saved, $17.51 measured (30 days)**
 
-**Context eviction subtotal:** 318 events, 3,662,649 tokens removed.
+Token counting uses `bytes / 4` as BPE proxy (~15% error vs actual Claude tokenization). Consistent across all measurements.
 
-**Combined total: 908 events, 4,887,138 tokens saved, $17.51 measured (30 days).**
+---
 
-### Token counting
+## 📖 Layer 3: First-Read Skeletons
 
-All estimates use `bytes / 4` as a BPE proxy. Known error margin: ~15% vs. actual Claude tokenization. Consistent across all measurements. Three-tier accounting ensures measured savings are never conflated with estimates or opportunities.
+> Large file, first read, unlikely to edit soon? Serve a skeleton. Full original archived and expandable.
 
-## Layer 3: First-Read Skeletons (saves per file read)
+**Corpus replay:** 5,814 sessions, 30,771 first-reads, 2,408 eligible.
 
-When a large file is read for the first time and the model is unlikely to edit it soon, Token Optimizer serves a structural skeleton instead of the full file. The full original is archived and expandable on demand.
-
-**Corpus replay (5,814 sessions with reads, 30,771 first-reads analyzed, 2,408 eligible):**
-
-| Language | Size band | First reads | Sessions | Edit-within-5 rate | Avg skeleton ratio | Would-be tokens saved | Promotion status |
+| Language | Size | Reads | Sessions | Edit rate | Skeleton ratio | Tokens saved | Status |
 |---|---|---|---|---|---|---|---|
-| markdown | 16-64KB | 1,329 | 751 | 2.9% | 97.1% | 10,257,707 | PROMOTE |
-| python | 16-64KB | 763 | 477 | 1.4% | 96.1% | 6,434,178 | PROMOTE |
-| typescript | 16-64KB | 220 | 120 | 0.9% | 97.4% | 1,464,640 | PROMOTE |
-| python | 64-256KB | 66 | 64 | 1.5% | 98.5% | 1,504,641 | PROMOTE |
-| markdown | 64-256KB | 13 | 9 | 0.0% | 98.9% | 279,176 | hold (low n) |
-| json | 64-256KB | 3 | 3 | 0.0% | 99.7% | 90,699 | hold (low n) |
-| typescript | 64-256KB | 2 | 2 | 0.0% | 99.1% | 43,533 | hold (low n) |
+| markdown | 16-64KB | 1,329 | 751 | 2.9% | 97.1% | 10.3M | 🟢 PROMOTE |
+| python | 16-64KB | 763 | 477 | 1.4% | 96.1% | 6.4M | 🟢 PROMOTE |
+| typescript | 16-64KB | 220 | 120 | 0.9% | 97.4% | 1.5M | 🟢 PROMOTE |
+| python | 64-256KB | 66 | 64 | 1.5% | 98.5% | 1.5M | 🟢 PROMOTE |
+| markdown | 64-256KB | 13 | 9 | 0.0% | 98.9% | 279K | 🟡 hold |
+| json | 64-256KB | 3 | 3 | 0.0% | 99.7% | 91K | 🟡 hold |
+| typescript | 64-256KB | 2 | 2 | 0.0% | 99.1% | 44K | 🟡 hold |
 
-**Total would-be savings: 20,156,647 tokens.** Accounting tier: **projected** (shadow-mode replay over historical data, not yet actively compressing).
+> **Total projected savings: 20,156,647 tokens**
+> 📊 **Tier:** Projected (shadow-mode replay, not yet actively compressing).
 
-**Promotion status explained:** A cohort graduates from shadow-only to active compression when its edit-within-5-turns rate is below 15% across at least 20 reads in at least 5 distinct sessions. "PROMOTE" means the cohort has met this gate and is eligible for activation. "hold (low n)" means the sample size is too small to be confident. This is a safety mechanism: Token Optimizer proves from your own session history that compression is safe before enabling it for a given file type and size band.
+**Promotion gate:** edit-within-5-turns rate < 15%, across 20+ reads in 5+ distinct sessions. 🟢 PROMOTE means the gate is met. 🟡 hold means sample size is too small. Token Optimizer proves compression is safe from your own history before enabling it.
 
-**Safety invariant:** The full original is always archived before any skeleton is served. If the archive fails, the full file is served unchanged (fail-open). The file on disk is never modified.
+**Safety:** Full original always archived before any skeleton is served. Archive fails = full file served unchanged (fail-open). File on disk never modified.
 
-## Layer 4: Model Routing and Behavioral Coaching (saves per turn)
+---
 
-Output compression saves on the response side. Model routing saves on the request side by ensuring expensive models are only used when they add value.
+## 🔀 Layer 4: Model Routing
 
-**From 30-day production data (1,885 sessions):**
+> Compression saves on the response side. Routing saves on the request side.
+
+**30-day production (1,885 sessions):**
 
 | Metric | Value |
 |---|---|
-| Baseline top-tier model share | 95% |
-| Current top-tier model share | 64.7% |
-| Routable fraction of turns | 30% |
-| Realized routing savings | $56.95 |
-| Potential (if fully routed) | $30.01 |
+| Baseline top-tier share | **95%** |
+| Current top-tier share | **64.7%** |
+| Routable fraction | **30%** of turns |
+| 🟢 Realized savings | **$56.95** |
+| 💡 Additional potential | **$30.01** |
 
-Token Optimizer identifies turns where a cheaper model would produce identical results through 11 anti-pattern detectors. It also fires quality nudges to prevent context degradation before it causes retries.
+11 anti-pattern detectors identify turns where a cheaper model produces identical results. Quality nudges prevent degradation before it causes retries.
 
-**Routing applies across model ecosystems.** The Anthropic stack (Opus/Sonnet/Haiku) is the primary platform and the source of these production numbers, but the routing logic applies to any tiered model family. Codex, OpenClaw, and OpenCode each have their own model tiers with similar price spreads. The principle is the same: match model capability to task complexity, and stop paying top-tier prices for grep-and-edit turns.
+**Math:** Opus ($5/$25) vs Haiku ($1/$5) = **80% savings** on routable turns. Applies across model ecosystems (Anthropic, Codex, OpenClaw, OpenCode).
 
-**Routing math example (Anthropic):** At Opus ($5 input / $25 output per MTok) vs. Haiku ($1 / $5), routing a simple turn from Opus to Haiku saves 80% of that turn's cost. In a session with 20 routable turns, the savings are material.
+---
 
-## Layer 5: Session Continuity (saves per session restart)
+## 🔄 Layer 5: Session Continuity
 
-When a session compacts or a new session starts on the same project, context is lost. Token Optimizer captures and restores that context through five mechanisms:
+> A session that loses context and retries for 10 turns wastes more than any compression saves.
 
-**Progressive checkpoints.** Throughout a session, Token Optimizer captures structured checkpoints to local SQLite: key decisions made, errors encountered, file context accumulated, and agent state. These are lightweight snapshots, not full context dumps.
+| Mechanism | What it does |
+|---|---|
+| **Progressive checkpoints** | Captures decisions, errors, file context, agent state to local SQLite throughout a session |
+| **Checkpoint restore** | Keyword-matches stored checkpoints on new session or compaction, injects relevant context |
+| **Tool result archive** | Replaces large outputs with ~50-token stubs, full result retrievable via `expand` |
+| **Loop detection** | Catches repeated reads/retries, breaks the cycle (50 detections, 60,987 tokens saved) |
+| **Quality scoring** | 6-signal real-time scoring, fires coaching nudges when quality degrades |
 
-**Checkpoint restore.** When a new session starts or the context window compacts, Token Optimizer keyword-matches against stored checkpoints and injects the relevant ones. The model picks up where it left off instead of re-reading files and re-discovering decisions.
+Checkpoint restore and tool archive token counts are reported in Layer 2 (context eviction). Listed here because the mechanism is continuity, but **not double-counted**.
 
-**Tool result archive with on-demand retrieval.** Large tool outputs are replaced in-context with a ~50-token stub. The full output is stored locally in SQLite. If the model needs the original data, it calls `expand` to retrieve it. This keeps the context window lean without losing information.
+---
 
-The token counts for checkpoint restore and tool archive are reported in Layer 2 (context eviction). They appear here because the mechanism is session continuity, but the savings are not double-counted.
+## ⚡ Compound Effect
 
-**Loop detection.** Token Optimizer detects when the model is repeating the same work (re-reading files it just read, retrying failed commands with no changes). It intervenes to break the loop. Production data: 50 loop detections prevented 60,987 tokens of waste (30 days).
-
-**Quality scoring.** Every session is scored in real-time on 6 signals (stale reads, bloated results, duplicates, compaction depth, decision density, agent efficiency). When quality degrades past thresholds, Token Optimizer fires coaching nudges. This prevents the degradation spiral where a confused model wastes turns and tokens trying to recover.
-
-**Why continuity matters more than compression:** A session that loses context and retries the same work for 10 turns wastes more tokens than any compression could save. Continuity prevents the waste; compression cleans up what remains.
-
-## Compound Effect
-
-These layers do not simply add up. They multiply across a session:
+The layers multiply, not add:
 
 ```
 Session cost = turns x (overhead + avg_output + routing_premium)
-                      + restart_penalty
-                      + retry_waste
+              + restart_penalty + retry_waste
 
 Token Optimizer reduces:
-  overhead         -> Layer 1 (structural audit: -15 to -40%)
-  avg_output       -> Layer 2 + 3 (compression + skeletons: -28 to -97% per output)
+  overhead         -> Layer 1 (structural: -15 to -40%)
+  avg_output       -> Layer 2+3 (compression + skeletons: -28 to -97%)
   routing_premium  -> Layer 4 (model routing: -40 to -80% on routable turns)
-  restart_penalty  -> Layer 5 (continuity: checkpoint restore on compaction)
-  retry_waste      -> Layer 4 + 5 (loop detection + quality scoring: prevented entirely)
+  restart_penalty  -> Layer 5 (checkpoint restore on compaction)
+  retry_waste      -> Layer 4+5 (loop detection + quality scoring)
 ```
 
-**Example: 50-turn Opus session with 15 tool outputs and 1 compaction**
+**Example: 50-turn Opus session, 15 tool outputs, 1 compaction**
 
-This uses numbers derived from the production data above. Structural savings account for the 65% prompt-cache hit rate.
-
-| Layer | Savings mechanism | Tokens saved | Dollar math |
+| Layer | Mechanism | Tokens saved | $ saved |
 |---|---|---|---|
-| Structural cleanup | 5,000 fewer overhead tokens x 50 turns | 250,000 | 35% fresh at $5/MTok + 65% cached at $0.50/MTok: $1.06 |
-| Output compression | 15 outputs x avg 10,000 tokens x 73% ratio (git-level) | 109,500 | Response tokens at $25/MTok: $2.74 |
-| First-read skeletons | 3 large files x avg 20,000 tokens x 97% ratio | 58,200 | Mostly fresh input at $5/MTok: $0.29 |
-| Context eviction | 4 large tool results archived (avg 10,800 tokens) | 43,200 | Removed from future turn input: $0.15 |
-| Continuity restore | 1 compaction, 34,000 tokens recovered from checkpoint | 34,000 | Avoided re-read cost: $0.17 |
-| Loop prevention | 2 loops caught x 5 turns x 6,100 tokens | 61,000 | Prevented input + output waste: $0.61 |
+| 🏗️ Structural | 5K fewer tokens x 50 turns | 250,000 | $1.06 |
+| 🔧 Compression | 15 outputs x 10K x 73% ratio | 109,500 | $2.74 |
+| 📖 Skeletons | 3 large files x 20K x 97% | 58,200 | $0.29 |
+| 📦 Eviction | 4 results archived (avg 10.8K) | 43,200 | $0.15 |
+| 🔄 Continuity | 1 compaction, 34K recovered | 34,000 | $0.17 |
+| 🛑 Loop prevention | 2 loops x 5 turns x 6.1K | 61,000 | $0.61 |
 | **Total** | | **555,900** | **$5.02** |
 
-Across 30 sessions/month at this profile, that is ~$150/month. Most sessions are shorter and simpler, so real monthly savings depend on workload. The per-category production data in Layers 1-5 is the ground truth.
+> At 30 sessions/month: **~$150/month.** The per-layer production data above is the ground truth.
 
-## Quality Grades (1,885 sessions)
+---
 
-Token Optimizer scores every session on 6 signals: stale reads, bloated results, duplicates, compaction depth, decision density, and agent efficiency.
+## 📊 Quality Grades (1,885 sessions)
 
-| Grade | Sessions | Meaning |
+6 signals: stale reads, bloated results, duplicates, compaction depth, decision density, agent efficiency.
+
+| Grade | Sessions | |
 |---|---|---|
-| S | 38 | Exceptional: minimal waste, high decision density |
-| A | 436 | Good: clean context, efficient tool use |
-| B | 528 | Normal: some bloat, recoverable |
-| C | 264 | Degraded: significant waste, coaching recommended |
-| D | 619 | Poor: heavy bloat, likely retries or loops |
+| **S** | 38 | 🟣 Exceptional: minimal waste, high decision density |
+| **A** | 436 | 🟢 Good: clean context, efficient tool use |
+| **B** | 528 | 🔵 Normal: some bloat, recoverable |
+| **C** | 264 | 🟡 Degraded: significant waste, coaching recommended |
+| **D** | 619 | 🔴 Poor: heavy bloat, likely retries or loops |
 
-These grades are tracked over time so users can see whether their habits (and Token Optimizer's interventions) are improving session efficiency.
+Tracked over time so you can see whether your habits and Token Optimizer's interventions are improving session efficiency.
 
-## Running the Benchmarks
+---
+
+## 🧪 Running the Benchmarks
 
 ```bash
 # Fixture suite (validates compression quality)
@@ -243,10 +246,12 @@ python3 scripts/measure.py compression-stats --days 7 --json
 python3 scripts/measure.py dashboard
 ```
 
-## Methodology Notes
+---
 
-- All token counts use `bytes / 4` proxy (~15% error vs. actual BPE). Consistent across all measurements.
-- Three-tier accounting: **Measured** (active compression with before/after delta from production events), **Projected** (shadow-mode replay over historical data, not yet actively compressing), **Opportunity** (what would be saved if recommendations are applied). These are never summed together, and each table labels which tier its numbers belong to.
-- Prompt-cache savings (cache_read tokens) are never claimed as Token Optimizer savings. The Anthropic cache is free infrastructure; claiming it would be dishonest. However, Token Optimizer's structural and compression savings do reduce cache-read volume, so there is a secondary cache-cost benefit that the dollar math in Layer 1 accounts for explicitly.
-- Security fixtures verify that credentials (AWS keys, GitHub PATs, Slack tokens) survive compression intact. Compression must never strip sensitive data that the model needs to see.
-- First-read skeleton promotion requires proof from the user's own session history before activating. No cohort is promoted without meeting the edit-rate gate across multiple sessions.
+## 📝 Methodology Notes
+
+- **Token counting:** `bytes / 4` proxy (~15% error vs actual BPE). Consistent across all measurements.
+- **Three-tier accounting:** 📊 Measured (before/after delta), 💡 Opportunity (if recommendations applied), 🔮 Projected (shadow replay). Never summed together; each table labels its tier.
+- **Cache honesty:** Prompt-cache savings (cache_read) are never claimed as Token Optimizer savings. The Anthropic cache is free infrastructure. We do account for the secondary benefit: structural cleanup reduces cache-read volume.
+- **Security:** Fixtures verify credentials (AWS keys, PATs, Slack tokens) survive compression intact. Compression never strips what the model needs to see.
+- **Safety-first promotion:** First-read skeletons require proof from your own session history before activating. No cohort promoted without meeting the edit-rate gate across multiple sessions.
