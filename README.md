@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.9.3-green" alt="Version 5.9.3"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.10.3-green" alt="Version 5.10.3"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/github/release-date/alexgreensh/token-optimizer?label=last%20release&color=blue" alt="Last Release"></a>
   <a href="https://github.com/alexgreensh/token-optimizer"><img src="https://img.shields.io/badge/Claude_Code-Plugin-blueviolet" alt="Claude Code Plugin"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/tree/main/openclaw"><img src="https://img.shields.io/badge/OpenClaw-v2.4.6-brightgreen" alt="OpenClaw v2.4.6"></a>
@@ -16,7 +16,7 @@
   <img src="https://img.shields.io/badge/saves%20real%20%24-every%20session-2ea043" alt="Saves real dollars every session">
   <img src="https://img.shields.io/badge/live%20dashboard-tokens%20%2B%20%24%20%2B%20turns-8B5CF6?logo=chartdotjs&logoColor=white" alt="Live dashboard">
   <img src="https://img.shields.io/badge/quality%20score-v6%20dual--score-blue" alt="Quality score v6 dual-score">
-  <img src="https://img.shields.io/badge/tests-257-brightgreen" alt="257 Tests">
+  <img src="https://img.shields.io/badge/tests-572-brightgreen" alt="572 Tests">
 </p>
 <p align="center">
   <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Zero Dependencies">
@@ -44,7 +44,7 @@ They compress command output, which covers 15-25% of your context on a good day.
 Token Optimizer covers all of it, keeps your work alive across compactions, measures whether the optimization actually helped, and gives you a <strong>live dashboard</strong> that shows every token, every dollar, and every turn, auto-updated after every session. Runs fully local. Zero baseline context overhead. Zero runtime dependencies.
 </p>
 <p align="center">
-Works on <strong>Claude Code</strong>, <strong>OpenCode</strong>, <strong>OpenClaw</strong>, and <strong>Codex</strong> today. Windsurf, Cursor, and more on the way.
+Works on <strong>Claude Code</strong> (CLI and VS Code), <strong>OpenCode</strong>, <strong>OpenClaw</strong>, <strong>Codex</strong>, and <strong>Hermes</strong> today. Windsurf, Cursor, and more on the way.
 </p>
 
 <p align="center">
@@ -105,7 +105,7 @@ rm -rf "$tmp"
 
 This verifies `install.sh` before executing it. The installer then resolves the latest GitHub release tag, checks out that tag, and verifies every installed runtime file against that release's checksums. If you're offline or behind a restrictive proxy, set `TOKEN_OPTIMIZER_SKIP_VERIFY=1` before running.
 
-Works on Claude Code, [OpenCode](#opencode), and [OpenClaw](#openclaw). Each platform has its own native plugin (Python for Claude Code, TypeScript for OpenCode and OpenClaw). No bridging, no shared runtime, zero cross-platform dependencies.
+Works on Claude Code (CLI and VS Code), [OpenCode](#opencode), [OpenClaw](#openclaw), [Codex](#codex), and [Hermes](#hermes). Each platform has its own native plugin. No bridging, no shared runtime, zero cross-platform dependencies.
 
 </details>
 
@@ -350,9 +350,9 @@ No. Pure Python stdlib on Claude Code and Codex. TypeScript with zero runtime de
 <details>
 <summary>🧰 <strong>Which platforms does it support?</strong></summary>
 
-Claude Code, OpenCode, OpenClaw, and Codex today, with native support for each. Codex uses a Python adapter for chat-first status, coaching, dashboard refresh, and fleet scans.
+Claude Code (CLI and VS Code), OpenCode, OpenClaw, Codex, and Hermes today, with native support for each. Codex uses a Python adapter for chat-first status, coaching, dashboard refresh, and fleet scans. Hermes reads from its own `~/.hermes/state.db`.
 
-Windsurf and Cursor are next on the roadmap. Codex has parity on the core audit, coaching, dashboard, cost tracking, continuity, and fleet flows; a few Claude-specific invisible substitution hooks are represented as Codex-safe equivalents or explicit upstream gaps.
+Windsurf and Cursor are next on the roadmap.
 </details>
 
 <details>
@@ -735,29 +735,36 @@ Hover help on every column explains `Cache`, `TTL`, `Pacing`, `Cache R`, and `Ca
 
 ## How It Compares
 
-| Capability | Token Optimizer | `/context` | context-mode | Proxy compressors |
-|---|---|---|---|---|
-| Structural waste audit | Deep, per-component | Summary only | No | No |
-| Quality degradation tracking | v6 dual-score with grades | Capacity % only | No | No |
-| Compaction survival | Progressive checkpoints, restore, plus tool output digest | No | Session guide only | No |
-| Runtime output compression | 16 CLI handlers, credential-safe, individually toggleable | No | Yes | Yes, always-on (cannot disable) |
-| Measures if compression actually helped | Yes, local telemetry with before/after tokens | No | No | No |
-| Read deduplication and smart diff on re-reads | Yes | No | No | No |
-| Behavioral coaching and model routing | 11 detectors, cost-ranked subagent breakdown | Basic suggestions | No | No |
-| CLAUDE.md and MEMORY.md structural health | 8 auditors plus attention-curve scoring | No | No | No |
-| Fleet-level waste detection across agents | Yes | No | No | No |
-| Zero baseline context overhead | Yes, external process | Adds ~200 tokens | MCP overhead | Injects instructions into context |
-| Zero runtime dependencies | Yes, pure stdlib | N/A | Varies | External binary |
-| Zero telemetry | Yes | Yes | Varies | Opt-out telemetry |
-| Works across platforms | Claude Code, OpenCode, OpenClaw, and Codex (Windsurf and Cursor coming) | Claude Code only | Several platforms | Several platforms |
+|  | Token Optimizer | Headroom | RTK | context-mode | `/context` |
+|---|---|---|---|---|---|
+| **Tool output compression** | 🟢 30+ CLI families, credential-safe, toggleable | 🟢 6 algorithms incl. model-based | 🟢 100+ command filters | 🟢 Sandbox + summary | 🔴 |
+| **First-read file skeletons** | 🟢 Shadow-validated, fail-open, full original retrievable | 🔴 | 🔴 | 🔴 | 🔴 |
+| **Tabular/JSON compression** | 🟢 Value-preserving columnar | 🟢 SmartCrusher | 🔴 | 🟡 Generic summary | 🔴 |
+| **Read dedup and delta diffs** | 🟢 Re-reads serve diff only | 🔴 | 🔴 | 🔴 | 🔴 |
+| **Compaction survival** | 🟢 Progressive checkpoints, restore, tool output digest | 🔴 | 🔴 | 🟡 Session guide only | 🔴 |
+| **Conversation history** | 🟢 Progressive checkpoints + compaction restore | 🔴 Doesn't touch it | 🔴 Doesn't touch it | 🟡 Session guide | 🔴 |
+| **Model routing and behavioral coaching** | 🟢 11 detectors, subagent cost breakdown, anti-patterns | 🔴 | 🔴 | 🔴 | 🟡 Basic suggestions |
+| **Loop and spin detection** | 🟢 Catches behavioral loops before they burn | 🔴 | 🔴 | 🔴 | 🔴 |
+| **Context quality scoring** | 🟢 6-signal dual-score with grades | 🔴 | 🔴 | 🔴 | 🟡 Capacity % only |
+| **Structural waste audit** | 🟢 Deep per-component (CLAUDE.md, skills, MCP, memory) | 🔴 | 🔴 | 🔴 | 🟡 Summary only |
+| **CLAUDE.md and MEMORY.md health** | 🟢 8 auditors + attention-curve scoring | 🔴 | 🔴 | 🔴 | 🔴 |
+| **Measures if compression helped** | 🟢 Local telemetry, before/after tokens, dollar savings | 🔴 | 🟡 `rtk gain` (token counts only) | 🔴 | 🔴 |
+| **Fleet-level cross-agent analysis** | 🟢 | 🔴 | 🔴 | 🔴 | 🔴 |
+| **Cache-safe** | 🟢 Never modifies existing context prefix | 🟡 Proxy mode rewrites in-flight | 🟢 Pre-shell only | 🟡 MCP overhead | 🟢 |
+| **Zero baseline context overhead** | 🟢 External process, no context injection | 🔴 Injects instructions | 🟢 Shell-level only | 🔴 MCP server overhead | 🟢 Native |
+| **Zero runtime dependencies** | 🟢 Pure stdlib (Python/TypeScript) | 🟡 Python + Rust + optional model | 🟢 Single Rust binary | 🟡 SQLite adapter required | 🟢 N/A |
+| **Zero telemetry** | 🟢 | 🟢 | 🟡 Opt-in | 🟡 Varies | 🟢 |
+| **Multi-platform** | 🟢 Claude Code, VS Code, Codex, OpenClaw, OpenCode, Hermes | 🟢 Claude Code, Cursor, Codex, Aider, Copilot | 🟢 14 integrations | 🟢 15 integrations | 🔴 Claude Code only |
 
-A few notes on the compression column: proxy tools quote big compression ratios on the commands they handle best, like `git status` or `tree`. Those numbers are real for those specific commands, but they cover only 15-25% of what you're actually burning. Everything else (configs, skills, memory, compaction loss) stays untouched. And most proxy compressors inject their own instructions into your context, which costs tokens on the way in.
+### Reading the claims
 
-Token Optimizer handles the same runtime output with 30+ command families (git, pytest, lint, logs, tree, docker progress, package listings, JS/TS/Go builds, cypress/playwright/mocha/karma test runners), plus the other 75-85% that proxies don't touch, plus measurement so you can see whether any of it actually helped on your sessions.
+Every tool in this space quotes compression ratios on its best-case inputs. Headroom's "60-95%" is measured on repetitive JSON arrays. RTK's "60-90%" is on commands like `git status` and `tree`. context-mode's "98%" is on raw Playwright snapshots. Those numbers are real for those specific inputs, but they only cover tool outputs, which represent roughly 15-25% of what you actually burn in a long coding session. The rest (conversation history, system prompts, skills, memory, compaction loss) goes untouched.
 
-### A word on cache safety
+Token Optimizer compresses tool outputs too, but also covers the other 75-85%: structural waste, read deduplication, model routing, behavioral coaching, compaction survival, and context quality. And it measures whether the compression actually helped on your real sessions, not on cherry-picked benchmarks.
 
-Some tools claim to reduce tokens by modifying or removing blocks already in your conversation. That breaks the prompt cache. When the stable prefix changes, every subsequent turn re-sends the full prefix at uncached input rates instead of the heavily discounted cache-read rate. The "savings" from removing a few thousand tokens easily get wiped out by the cache invalidation cost on the next 50 messages.
+### Cache safety matters more than compression ratios
+
+Some tools reduce tokens by modifying or removing blocks already in your conversation. That breaks the prompt cache. When the stable prefix changes, every subsequent turn re-sends the full prefix at uncached input rates instead of the heavily discounted cache-read rate. The "savings" from removing a few thousand tokens can get wiped out by cache invalidation cost on the next 50 messages.
 
 Token Optimizer never modifies content already in your context. Structural optimization runs between sessions. Active Compression works on new content entering your window, or on the compaction boundary. Your cache prefix stays intact.
 
@@ -877,22 +884,18 @@ python3 measure.py plugin-cleanup   # Detect duplicate skills and archive local/
 
 ## VS Code Users
 
-Using Claude Code in the VS Code extension? Most of Token Optimizer works identically:
+Using Claude Code in the VS Code extension? Token Optimizer works with full feature parity:
 
 | Feature | CLI | VS Code Extension |
 |---------|-----|-------------------|
-| Smart Compaction (checkpoint + restore) | Works | Works |
-| Quality tracking + session data | Works | Works |
-| All hooks (SessionEnd, PreCompact, etc.) | Works | Works |
-| Dashboard (localhost:24842/token-optimizer) | Works | Works |
-| Status line (quality bar in terminal) | Works | Not available |
+| Smart Compaction (checkpoint + restore) | 🟢 | 🟢 |
+| Quality tracking + session data | 🟢 | 🟢 |
+| All hooks (SessionEnd, PreCompact, etc.) | 🟢 | 🟢 |
+| Dashboard (localhost:24842/token-optimizer) | 🟢 | 🟢 |
+| Active Compression (v5) | 🟢 | 🟢 |
+| Status line (quality bar) | 🟢 | 🟢 |
 
-**The status line is CLI-only.** The VS Code extension doesn't support Claude Code's `statusLine` setting. This is a Claude Code limitation, not a Token Optimizer limitation.
-
-**Best options for VS Code:**
-- **Dashboard**: Bookmark `http://localhost:24842/token-optimizer` for always-current analytics. Run `python3 measure.py setup-daemon` to enable auto-refresh after every session.
-- **Integrated terminal**: Run `claude` in VS Code's built-in terminal to get the full CLI experience, including the quality bar.
-- **VS Code extension**: On the roadmap. [Follow #3](https://github.com/alexgreensh/token-optimizer/issues/3) for updates.
+Install the same way (plugin marketplace), and everything works. Bookmark `http://localhost:24842/token-optimizer` for the dashboard, or run `python3 measure.py setup-daemon` to enable auto-refresh after every session.
 
 > **Note on `--bare` mode**: Running Claude Code with the `--bare` flag (for scripted/CI usage) skips all hooks and plugin sync. Token Optimizer's Smart Compaction, quality tracking, and session data collection require hooks and won't activate in `--bare` mode. This is expected. `--bare` is designed for lightweight scripted calls.
 
