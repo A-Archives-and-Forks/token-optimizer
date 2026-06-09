@@ -96,6 +96,7 @@ from runtime_env import claude_home, detect_runtime, runtime_home, runtime_name_
 import codex_io
 import codex_session
 import codex_state
+import copilot_session
 import hermes_session
 
 try:
@@ -122,7 +123,7 @@ CLAUDE_DIR = claude_home()
 #     CLAUDE_DIR/CLAUDE.md directly (NOT RUNTIME_DIR), so the RUNTIME_DIR
 #     redirection does not protect them. ensure-health is additionally guarded
 #     at its source (run_ensure_health) since it can be reached as a hook.
-_OPENCODE_CLAUDE_TARGET_CMDS = frozenset(
+_CLAUDE_TARGET_CMDS = frozenset(
     {
         # scan / report
         "report", "quick", "doctor", "skill", "mcp", "plugin-cleanup",
@@ -131,8 +132,62 @@ _OPENCODE_CLAUDE_TARGET_CMDS = frozenset(
         "cleanup-duplicate-hooks", "setup-daemon", "setup-quality-bar",
         "setup-smart-compact", "inject-routing", "inject-coach",
         "setup-coach-injection", "check-staleness",
+        # The dashboard daemon serves Claude-targeted data and derives its
+        # port/label identity from the runtime ternaries, which default to
+        # Claude for unknown runtimes — wrong identity under a foreign host.
+        "dashboard",
     }
 )
+# Back-compat alias (pre-Copilot name).
+_OPENCODE_CLAUDE_TARGET_CMDS = _CLAUDE_TARGET_CMDS
+
+# Runtimes that must never scan or mutate the Claude Code setup (~/.claude).
+# OpenCode (issue #57) and GitHub Copilot can both end up invoking this skill
+# (OpenCode loads ~/.claude/skills by default; Copilot via direct invocation
+# from a Copilot session). The Claude-targeting commands above are blocked for
+# all of them; runtime-data commands are unaffected because RUNTIME_DIR
+# resolves to the foreign runtime's own home.
+_FOREIGN_RUNTIMES = frozenset({"opencode", "copilot"})
+
+
+def _is_foreign_runtime() -> bool:
+    """True when running under a runtime whose audit target is NOT ~/.claude."""
+    return detect_runtime() in _FOREIGN_RUNTIMES
+
+
+def _copilot_audit_notice() -> None:
+    """Explain why the Claude audit does not run under Copilot, and where to go."""
+    print("Token Optimizer — GitHub Copilot runtime detected.")
+    print()
+    print("This audit targets a Claude Code / Codex setup (it scans ~/.claude), so it")
+    print("will not run here and will not modify ~/.claude or your Copilot config.")
+    print()
+    print("On GitHub Copilot, use the Copilot-native commands instead:")
+    print("  measure.py copilot-summary   — session cost/quality summary")
+    print("  measure.py copilot-rollup    — collect sessions into trends")
+    print("  measure.py copilot-doctor    — readiness + hook capability probe")
+    print("  measure.py copilot-install   — wire Token Optimizer into ~/.copilot")
+    print()
+    print("To force this skill onto a specific runtime, set TOKEN_OPTIMIZER_RUNTIME.")
+
+
+def _foreign_audit_notice() -> None:
+    """Route to the right per-runtime notice for blocked Claude-target commands.
+
+    Dispatch is table-driven so adding a foreign runtime means one entry here
+    plus _FOREIGN_RUNTIMES — never a fall-through to another runtime's notice.
+    """
+    notices = {
+        "opencode": _opencode_audit_notice,
+        "copilot": _copilot_audit_notice,
+    }
+    handler = notices.get(detect_runtime())
+    if handler is not None:
+        handler()
+    else:  # future foreign runtime without a notice yet: generic, never wrong
+        print(f"Token Optimizer — {runtime_name_for_humans()} runtime detected.")
+        print("Claude-targeting commands are disabled here; they scan/modify ~/.claude.")
+        print("Set TOKEN_OPTIMIZER_RUNTIME to force a specific runtime.")
 
 
 def _opencode_audit_notice() -> None:
@@ -189,6 +244,11 @@ def _use_codex_session_adapter(filepath=None):
 def _use_hermes_session_adapter():
     """True when sessions should be loaded from the Hermes state.db adapter."""
     return detect_runtime() == "hermes"
+
+
+def _use_copilot_session_adapter():
+    """True when sessions should be loaded from the Copilot adapters."""
+    return detect_runtime() == "copilot"
 
 # Tokens per skill frontmatter (loaded at startup)
 TOKENS_PER_SKILL_APPROX = 100
@@ -4032,6 +4092,8 @@ def _collect_hook_status_for_dashboard():
         return _collect_codex_hook_status_for_dashboard()
     if detect_runtime() == "hermes":
         return _collect_hermes_hook_status_for_dashboard()
+    if detect_runtime() == "copilot":
+        return _collect_copilot_hook_status_for_dashboard()
 
     settings, _ = _read_settings_json()
 
@@ -4132,6 +4194,63 @@ def _collect_codex_hook_status_for_dashboard():
             "description": "On Codex Stop, collects sessions, regenerates the dashboard, and saves a checkpoint for continuity.",
             "install_cmd": base + " --profile quiet",
             "uninstall_cmd": base + " --uninstall",
+        },
+    }
+
+
+def _collect_copilot_hook_status_for_dashboard():
+    """Hook status for the dashboard toggle panel under the Copilot runtime.
+
+    Mirrors the Codex/Hermes collectors. copilot_doctor uses lowercase
+    statuses ("ok"/"warn"/"fail") and check names from copilot_doctor.py.
+    """
+    import copilot_doctor  # noqa: PLC0415
+
+    mp_cmd = shlex.quote(str(Path(__file__).resolve()))
+    checks = copilot_doctor.run_checks()
+    by_name = {check["name"]: check for check in checks}
+
+    def _ok(name):
+        return by_name.get(name, {}).get("status") == "ok"
+
+    install_cmd = f"TOKEN_OPTIMIZER_RUNTIME=copilot python3 {mp_cmd} copilot-install"
+    doctor_cmd = f"TOKEN_OPTIMIZER_RUNTIME=copilot python3 {mp_cmd} copilot-doctor"
+
+    return {
+        "copilot_hooks": {
+            "installed": _ok("TO hook config"),
+            "partial": by_name.get("TO hook config", {}).get("status") == "warn",
+            "label": "Copilot CLI Hooks",
+            "description": "Wires Token Optimizer into ~/.copilot/hooks/: sessionStart continuity restore, preToolUse bash compression (capability-gated), postToolUse crash-recovery tally + nudges, stop-time rollup.",
+            "install_cmd": install_cmd,
+            "uninstall_cmd": f"TOKEN_OPTIMIZER_RUNTIME=copilot python3 {mp_cmd} copilot-uninstall",
+        },
+        "copilot_capabilities": {
+            "installed": _ok("capabilities"),
+            "partial": any(
+                by_name.get(n, {}).get("status") == "warn"
+                for n in ("capabilities", "capabilities freshness", "capability matrix age")
+            ),
+            "label": "Hook Capability Matrix",
+            "description": "Per-CLI-version map of which Copilot hook powers actually work (upstream fields break release to release). Engine features auto-gate on it; reseeds when the CLI version changes.",
+            "install_cmd": install_cmd,
+            "uninstall_cmd": doctor_cmd,
+        },
+        "copilot_cli_data": {
+            "installed": _ok("CLI session data"),
+            "partial": by_name.get("CLI session data", {}).get("status") == "warn",
+            "label": "Copilot CLI Sessions",
+            "description": "Reads ~/.copilot/session-state/ for per-session token totals, compactions, and tool activity. Crash-killed sessions are recovered from partial data.",
+            "install_cmd": doctor_cmd,
+            "uninstall_cmd": doctor_cmd,
+        },
+        "copilot_vscode_data": {
+            "installed": _ok("VS Code debug-logs") or _ok("VS Code OTel DB"),
+            "partial": by_name.get("VS Code data plane", {}).get("status") == "warn",
+            "label": "VS Code Copilot Data",
+            "description": "Per-request AI-credit cost from Copilot Chat debug logs (authoritative), or the OTel trace DB as fallback. One active source at a time — never summed.",
+            "install_cmd": doctor_cmd,
+            "uninstall_cmd": doctor_cmd,
         },
     }
 
@@ -4682,10 +4801,11 @@ def plugin_cleanup(dry_run=False, quiet=False):
 
     actions_taken = []
 
-    # Defense-in-depth (issue #57): under OpenCode, do not touch ~/.claude.
-    if detect_runtime() == "opencode":
+    # Defense-in-depth (issue #57): under a foreign runtime (OpenCode, Copilot),
+    # do not touch ~/.claude.
+    if _is_foreign_runtime():
         if not quiet:
-            print("  Skipped: OpenCode runtime detected; not modifying ~/.claude.")
+            print(f"  Skipped: {runtime_name_for_humans()} runtime detected; not modifying ~/.claude.")
         return actions_taken
 
     # --- Report 1: Stale cache version dirs (report only, never delete) ---
@@ -4860,10 +4980,10 @@ def _manage_skill_locked(action, name):
     import shutil
 
     # Defense-in-depth (issue #57): never mutate ~/.claude/skills when running
-    # under OpenCode, even if reached outside the CLI dispatch guard (e.g. the
-    # dashboard /api/v5/toggle path).
-    if detect_runtime() == "opencode":
-        print("  [!] Refusing to modify ~/.claude skills under the OpenCode runtime.")
+    # under a foreign runtime (OpenCode, Copilot), even if reached outside the
+    # CLI dispatch guard (e.g. the dashboard /api/v5/toggle path).
+    if _is_foreign_runtime():
+        print(f"  [!] Refusing to modify ~/.claude skills under the {runtime_name_for_humans()} runtime.")
         return False
 
     # Validate name: prevent path traversal
@@ -4966,10 +5086,11 @@ def _manage_skill_locked(action, name):
 def _manage_mcp(action, name):
     """Disable or enable an MCP server by moving between mcpServers and _disabledMcpServers."""
     # Defense-in-depth (issue #57): never mutate ~/.claude/settings.json under
-    # OpenCode, even when reached outside the CLI dispatch guard (e.g. the
-    # dashboard /api/mcp/{enable,disable} HTTP path), mirroring _manage_skill_locked.
-    if detect_runtime() == "opencode":
-        print("  [!] Refusing to modify ~/.claude settings under the OpenCode runtime.")
+    # a foreign runtime (OpenCode, Copilot), even when reached outside the CLI
+    # dispatch guard (e.g. the dashboard /api/mcp/{enable,disable} HTTP path),
+    # mirroring _manage_skill_locked.
+    if _is_foreign_runtime():
+        print(f"  [!] Refusing to modify ~/.claude settings under the {runtime_name_for_humans()} runtime.")
         return False
 
     settings, _ = _read_settings_json()
@@ -7748,6 +7869,23 @@ def _init_trends_db():
         # The session UUID is the JSONL file stem (the Claude session UUID).
         if "session_uuid" not in cols:
             conn.execute("ALTER TABLE session_log ADD COLUMN session_uuid TEXT")
+        # Copilot cost is platform-reported (AI credits / premium requests) and
+        # CANNOT be re-derived from token counts the way Claude/Codex cost is,
+        # so it must be persisted. Also carry the source discriminator + plane
+        # so the credits-led dashboard keeps CLI and VS Code sessions distinct.
+        if "cost_usd" not in cols:
+            conn.execute("ALTER TABLE session_log ADD COLUMN cost_usd REAL")
+        if "cost_source" not in cols:
+            conn.execute("ALTER TABLE session_log ADD COLUMN cost_source TEXT")
+        if "credits" not in cols:
+            conn.execute("ALTER TABLE session_log ADD COLUMN credits REAL")
+        if "platform" not in cols:
+            conn.execute("ALTER TABLE session_log ADD COLUMN platform TEXT")
+        # Marks a session whose totals are partial (crashed / still-active at
+        # rollup time). Lets a later rollup UPGRADE the row once real shutdown
+        # totals arrive, instead of INSERT-OR-IGNORE freezing the partial data.
+        if "incomplete" not in cols:
+            conn.execute("ALTER TABLE session_log ADD COLUMN incomplete INTEGER DEFAULT 0")
         conn.commit()
     except sqlite3.Error:
         pass
@@ -8767,6 +8905,324 @@ def _collect_hermes_sessions(days=90, quiet=False, rebuild=False):
     return new_count
 
 
+def _write_copilot_restore_context(sessions, quiet=False):
+    """Maintain the continuity file the sessionStart hook injects.
+
+    Summarizes the most recent completed CLI session so a new Copilot session
+    starts grounded. Capped well under the bridge's 16KB read limit.
+    """
+    try:
+        from runtime_env import copilot_home as _ch  # noqa: PLC0415
+
+        cli = [s for s in sessions if s.get("token_source") == "copilot_cli_events"]
+        if not cli:
+            return
+        # Prefer sessions with a real timestamp; only fall back to a dated-None
+        # session when none have one (sort key keeps real ts ahead of None).
+        latest = max(cli, key=lambda s: (s.get("first_ts") is not None, s.get("first_ts") or ""))
+
+        def _clean(value):
+            # These come from Copilot's reverse-engineered event stream and are
+            # injected verbatim into the model's context — strip newlines/control
+            # chars and cap length so a crafted topic/cwd can't inject directives.
+            text = str(value or "")
+            text = "".join(ch for ch in text if ch == " " or ch.isprintable())
+            return text[:200]
+
+        lines = ["[Token Optimizer] Continuity from your previous Copilot session:"]
+        if latest.get("topic"):
+            lines.append(f"- Topic: {_clean(latest['topic'])}")
+        if latest.get("cwd"):
+            lines.append(f"- Working dir: {_clean(latest['cwd'])}")
+        lines.append(
+            f"- Model: {_clean(latest.get('model', 'unknown'))}; "
+            f"{latest.get('total_input_tokens', 0):,} in / "
+            f"{latest.get('total_output_tokens', 0):,} out tokens"
+        )
+        if latest.get("incomplete"):
+            lines.append("- NOTE: that session ended without a clean shutdown (crash/kill).")
+        path = _ch() / "token-optimizer" / "restore-context.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # mkstemp + replace: an interrupted write or a cross-device replace
+        # never leaves an orphan tmp file behind.
+        import tempfile  # noqa: PLC0415
+
+        fd, tmp_name = tempfile.mkstemp(prefix=".restore-context.", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+            os.replace(tmp_name, str(path))
+        except OSError:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    except Exception as exc:
+        if not quiet:
+            print(f"[Token Optimizer] restore-context update skipped: {exc}")
+
+
+def _copilot_summary():
+    """Credits-led session summary for GitHub Copilot (CLI + VS Code planes).
+
+    Cost leads (plan A3): Copilot ships its own fill indicators, but since the
+    June 2026 AI-Credits billing switch nothing answers "what did this cost me".
+    """
+    import copilot_state as _cps  # noqa: PLC0415
+
+    try:
+        import copilot_vscode as _cpv  # noqa: PLC0415
+    except ImportError:
+        _cpv = None
+
+    planes = (
+        ("Copilot CLI", list(_cps.read_all_sessions())),
+        ("VS Code Copilot", list(_cpv.read_sessions()) if _cpv is not None else []),
+    )
+
+    print("Token Optimizer — GitHub Copilot summary")
+    any_data = False
+    for label, raw_sessions in planes:
+        normalized = [s for s in (copilot_session.normalize_session(r) for r in raw_sessions) if s]
+        if not normalized:
+            continue
+        any_data = True
+        total_cost = sum(s.get("cost_usd") or 0.0 for s in normalized)
+        credits = sum(s.get("credits") or 0.0 for s in normalized if s.get("credits"))
+        total_in = sum(s.get("total_input_tokens", 0) for s in normalized)
+        total_out = sum(s.get("total_output_tokens", 0) for s in normalized)
+        incomplete = sum(1 for s in normalized if s.get("incomplete"))
+        estimated = sum(1 for s in normalized if s.get("estimated"))
+        models = {}
+        for s in normalized:
+            for m, v in (s.get("model_usage") or {}).items():
+                models[m] = models.get(m, 0) + v
+        top_models = sorted(models.items(), key=lambda kv: -kv[1])[:3]
+
+        print()
+        print(f"  {label}: {len(normalized)} session(s)")
+        if credits:
+            print(f"    AI credits: {credits:,.2f}  (~${total_cost:,.2f})")
+        elif total_cost:
+            print(f"    Cost: ~${total_cost:,.2f} (premium requests)")
+        else:
+            print("    Cost: no billing data recorded by Copilot for these sessions")
+        print(f"    Tokens: {total_in:,} in / {total_out:,} out")
+        if top_models:
+            print("    Models: " + ", ".join(f"{m} ({v:,})" for m, v in top_models))
+        if incomplete:
+            print(f"    {incomplete} session(s) ended without clean shutdown (partial data)")
+        if estimated:
+            print(f"    {estimated} session(s) use estimated token counts (~est.)")
+    if not any_data:
+        print()
+        print("  No Copilot sessions found yet.")
+        print("  CLI: run a `copilot` session. VS Code: enable the two")
+        print('  "github.copilot.chat.agentDebugLog" settings for per-request cost.')
+    print()
+    print("  Full trends: measure.py copilot-rollup, then the dashboard.")
+
+
+def _collect_copilot_sessions(days=90, quiet=False, rebuild=False):
+    """Collect Copilot sessions (CLI + VS Code planes) into the trends DB.
+
+    Mirrors _collect_hermes_sessions. The two planes are separate session
+    populations with distinct dedup keys — never merged, never summed
+    (plan KTD10/C6). Idempotent via the jsonl_path dedup column.
+
+    TODO(dedup): the 28-column INSERT here and in _collect_hermes_sessions is
+    copy-paste; extract _insert_normalized_session() on the next touch to
+    either collector (date resolution + dedup-key stay platform-specific).
+    """
+    import copilot_state as _cps  # noqa: PLC0415
+
+    try:
+        import copilot_vscode as _cpv  # noqa: PLC0415
+    except ImportError:
+        _cpv = None
+
+    try:
+        conn = _init_trends_db()
+    except sqlite3.DatabaseError:
+        # Corrupt trends.db (disk error, partial write): quarantine it and
+        # start fresh rather than crashing the silent stop-hook rollup.
+        if TRENDS_DB.exists():
+            try:
+                stamp = int(datetime.now().timestamp())
+                TRENDS_DB.rename(TRENDS_DB.with_suffix(f".db.corrupt.{stamp}"))
+            except OSError:
+                pass
+        conn = _init_trends_db()
+    try:
+        if rebuild:
+            if not quiet:
+                print("[Token Optimizer] Rebuilding Copilot trends DB...")
+            conn.execute("PRAGMA user_version = 3")
+            # Scope the wipe to Copilot rows ONLY — session_log is shared with
+            # Claude/Codex/Hermes/OpenCode. An unscoped DELETE would nuke every
+            # runtime's history. Aggregates are fully recomputed from the
+            # surviving session_log rows below.
+            conn.execute("DELETE FROM session_log WHERE jsonl_path LIKE 'copilot:%'")
+            conn.commit()
+
+        try:
+            raw_sessions = list(_cps.read_all_sessions())
+        except Exception as exc:
+            if not quiet:
+                print(f"[Token Optimizer] Copilot CLI scan failed: {exc}")
+            raw_sessions = []
+        if _cpv is not None:
+            try:
+                raw_sessions.extend(_cpv.read_sessions())
+            except Exception as exc:
+                if not quiet:
+                    print(f"[Token Optimizer] VS Code Copilot scan skipped: {exc}")
+
+        cutoff = datetime.now().timestamp() - days * 86400
+        new_count = 0
+        normalized = []
+        for raw in raw_sessions:
+            parsed = copilot_session.normalize_session(raw)
+            if not parsed:
+                continue
+            normalized.append(parsed)
+
+            slug = parsed.get("slug") or ""
+            if not slug:
+                continue
+            dedup_key = f"copilot:{slug}"
+            is_incomplete = 1 if parsed.get("incomplete") else 0
+            if _is_file_collected(conn, dedup_key):
+                # Already recorded — but if the stored row was partial (the
+                # session was still active / crashed when first rolled up) and
+                # we now have COMPLETE totals, upgrade it in place. Otherwise
+                # leave it (INSERT-OR-IGNORE semantics).
+                if not is_incomplete:
+                    try:
+                        existing = conn.execute(
+                            "SELECT incomplete FROM session_log WHERE jsonl_path = ?",
+                            (dedup_key,),
+                        ).fetchone()
+                    except sqlite3.Error:
+                        existing = None
+                    if existing is not None and existing[0]:
+                        try:
+                            conn.execute(
+                                """UPDATE session_log SET
+                                     input_tokens=?, output_tokens=?, message_count=?,
+                                     api_calls=?, cache_hit_rate=?, cache_create_1h_tokens=?,
+                                     duration_minutes=?, quality_score=?, quality_grade=?,
+                                     cost_usd=?, cost_source=?, credits=?, incomplete=0
+                                   WHERE jsonl_path=? AND incomplete=1""",
+                                (
+                                    parsed["total_input_tokens"], parsed["total_output_tokens"],
+                                    parsed["message_count"], parsed.get("api_calls", 0),
+                                    parsed["cache_hit_rate"], parsed.get("total_cache_create_1h", 0),
+                                    parsed["duration_minutes"], parsed.get("quality_score", 0),
+                                    parsed.get("quality_grade", "F"), parsed.get("cost_usd", 0.0),
+                                    parsed.get("cost_source"), parsed.get("credits"), dedup_key,
+                                ),
+                            )
+                            new_count += 1  # an upgrade is meaningful progress
+                        except sqlite3.Error as exc:
+                            if not quiet:
+                                print(f"[Token Optimizer] could not upgrade a Copilot session: {exc}")
+                continue
+
+            first_ts = parsed.get("first_ts")
+            date = None
+            if first_ts:
+                try:
+                    dt = datetime.fromisoformat(first_ts)
+                    if dt.timestamp() < cutoff:
+                        continue
+                    # first_ts is UTC (+00:00); convert to local before taking
+                    # the calendar day so it buckets like the JSONL collectors
+                    # (which use local mtime) — otherwise a late-evening session
+                    # lands on the wrong day in non-UTC zones.
+                    date = dt.astimezone().strftime("%Y-%m-%d")
+                except (TypeError, ValueError):
+                    date = None
+            if date is None:
+                date = datetime.now().strftime("%Y-%m-%d")
+            project_name = str(parsed.get("cwd") or "copilot")
+
+            try:
+                cur = conn.execute(
+                    """INSERT OR IGNORE INTO session_log
+                       (jsonl_path, date, project, duration_minutes, input_tokens,
+                        output_tokens, message_count, api_calls, cache_hit_rate,
+                        cache_create_1h_tokens, cache_create_5m_tokens, cache_ttl_scanned,
+                        avg_call_gap_seconds, max_call_gap_seconds, p95_call_gap_seconds,
+                        skills_json, subagents_json, tool_calls_json, model_usage_json,
+                        all_model_usage_json, model_usage_breakdown_json, version, slug, topic, collected_at,
+                        quality_score, quality_grade, stale_waste_tokens,
+                        cost_usd, cost_source, credits, platform, incomplete)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        dedup_key, date, project_name,
+                        parsed["duration_minutes"],
+                        parsed["total_input_tokens"],
+                        parsed["total_output_tokens"],
+                        parsed["message_count"],
+                        parsed.get("api_calls", 0),
+                        parsed["cache_hit_rate"],
+                        parsed.get("total_cache_create_1h", 0),
+                        parsed.get("total_cache_create_5m", 0),
+                        1,
+                        parsed.get("avg_call_gap_seconds"),
+                        parsed.get("max_call_gap_seconds"),
+                        parsed.get("p95_call_gap_seconds"),
+                        json.dumps(parsed.get("skills_used", {})),
+                        json.dumps(parsed.get("subagents_used", {})),
+                        json.dumps(parsed.get("tool_calls", {})),
+                        json.dumps(parsed.get("model_usage", {})),
+                        # all_model_usage_json must stay {model: int} — the
+                        # aggregate rebuilder sums it as model_daily totals.
+                        json.dumps(parsed.get("model_usage", {})),
+                        json.dumps(parsed.get("model_usage_breakdown", {})),
+                        parsed.get("version"),
+                        parsed.get("slug"),
+                        parsed.get("topic"),
+                        datetime.now().isoformat(),
+                        parsed.get("quality_score", 0),
+                        parsed.get("quality_grade", "F"),
+                        0,
+                        # Copilot cost is platform-reported, not token-derived.
+                        parsed.get("cost_usd", 0.0),
+                        parsed.get("cost_source"),
+                        parsed.get("credits"),
+                        parsed.get("token_source"),
+                        is_incomplete,
+                    ),
+                )
+            except sqlite3.Error as exc:
+                # One malformed session must never abort the whole rollup — it
+                # runs quiet from the stop hook, so a single bad row would
+                # silently drop every other session in the batch.
+                if not quiet:
+                    print(f"[Token Optimizer] skipped a Copilot session: {exc}")
+                continue
+            if cur.rowcount != 1:
+                continue
+            new_count += 1
+
+        if new_count > 0:
+            _rebuild_aggregate_tables(conn)
+        conn.commit()
+        conn.execute("PRAGMA user_version = 3")
+        conn.commit()
+    finally:
+        conn.close()
+
+    _write_copilot_restore_context(normalized, quiet=quiet)
+
+    if not quiet:
+        print(f"[Token Optimizer] Collected {new_count} new Copilot sessions.")
+    return new_count
+
+
 def collect_sessions(days=90, quiet=False, rebuild=False):
     """Parse new JSONL files and insert into SQLite. Zero token cost.
 
@@ -8776,6 +9232,9 @@ def collect_sessions(days=90, quiet=False, rebuild=False):
     """
     if _use_hermes_session_adapter():
         return _collect_hermes_sessions(days=days, quiet=quiet, rebuild=rebuild)
+
+    if _use_copilot_session_adapter():
+        return _collect_copilot_sessions(days=days, quiet=quiet, rebuild=rebuild)
 
     conn = _init_trends_db()
 
@@ -10844,25 +11303,31 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.10.4"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.0"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+# Per-runtime daemon identity. Each runtime gets a distinct port + label so a
+# dashboard under one runtime never collides with another's. Copilot uses 24845
+# (matching copilot_doctor.DAEMON_PORT); the `dashboard` command is also blocked
+# for foreign runtimes in _CLAUDE_TARGET_CMDS, so this is defense-in-depth.
 _DAEMON_RUNTIME = detect_runtime()
-_DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else ("hermes" if _DAEMON_RUNTIME == "hermes" else "claude")
+_DAEMON_SUFFIX_BY_RUNTIME = {"codex": "codex", "hermes": "hermes", "copilot": "copilot"}
+_DAEMON_PORT_BY_RUNTIME = {"codex": 24843, "hermes": 24844, "copilot": 24845}
+_DAEMON_RUNTIME_SUFFIX = _DAEMON_SUFFIX_BY_RUNTIME.get(_DAEMON_RUNTIME, "claude")
 DAEMON_LABEL = (
-    "com.token-optimizer.codex-dashboard" if _DAEMON_RUNTIME == "codex"
-    else ("com.token-optimizer.hermes-dashboard" if _DAEMON_RUNTIME == "hermes"
-          else "com.token-optimizer.dashboard")
+    f"com.token-optimizer.{_DAEMON_RUNTIME_SUFFIX}-dashboard"
+    if _DAEMON_RUNTIME_SUFFIX != "claude"
+    else "com.token-optimizer.dashboard"
 )
-DAEMON_PORT = 24843 if _DAEMON_RUNTIME == "codex" else (24844 if _DAEMON_RUNTIME == "hermes" else 24842)
+DAEMON_PORT = _DAEMON_PORT_BY_RUNTIME.get(_DAEMON_RUNTIME, 24842)
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 PLIST_PATH = LAUNCH_AGENTS_DIR / f"{DAEMON_LABEL}.plist"
 DAEMON_LOG_DIR = SNAPSHOT_DIR / "logs"
 DAEMON_TOKEN_PATH = SNAPSHOT_DIR / "daemon-token"  # 0600, per-install CSRF secret
 DAEMON_THRASH_BREADCRUMB = SNAPSHOT_DIR / ".daemon-thrash"  # adv-005 tombstone
 DAEMON_IDENTITY_MAGIC = (
-    "token-optimizer-codex-dashboard-v1" if _DAEMON_RUNTIME == "codex"
-    else ("token-optimizer-hermes-dashboard-v1" if _DAEMON_RUNTIME == "hermes"
-          else "token-optimizer-dashboard-v1")
+    f"token-optimizer-{_DAEMON_RUNTIME_SUFFIX}-dashboard-v1"
+    if _DAEMON_RUNTIME_SUFFIX != "claude"
+    else "token-optimizer-dashboard-v1"
 )
 
 
@@ -22447,16 +22912,20 @@ def run_ensure_health():
     bad env var removal) run first so they are guaranteed to complete
     even if a later task exhausts the wall-clock budget.
     """
-    # OpenCode guardrail (issue #57), defense-in-depth: every Claude write below
-    # is gated on `not _is_codex`, so under OpenCode they would all fire against
-    # ~/.claude. The CLI dispatch already blocks `ensure-health` under OpenCode;
-    # this early return also covers any non-CLI caller (e.g. a future hook).
-    if detect_runtime() == "opencode":
+    # Foreign-runtime guardrail (issue #57), defense-in-depth: every Claude
+    # write below is gated on `not _is_codex`, so under OpenCode or Copilot
+    # they would all fire against ~/.claude. The CLI dispatch already blocks
+    # `ensure-health` for foreign runtimes; this early return also covers any
+    # non-CLI caller (e.g. the Copilot sessionStart hook bridge).
+    if _is_foreign_runtime():
         return
 
     _is_codex = detect_runtime() == "codex"
     _is_hermes = detect_runtime() == "hermes"
-    _is_claude = not _is_codex and not _is_hermes
+    # Positive identity, never a catch-all negation: foreign runtimes
+    # (opencode, copilot) returned above, but if that guard is ever bypassed
+    # they must not be treated as Claude and have ~/.claude written.
+    _is_claude = detect_runtime() == "claude"
     # Preserve session transcripts: set cleanupPeriodDays if not configured.
     # Claude Code only: writes to ~/.claude/settings.json.
     # Codex and Hermes don't have this setting; their sessions persist by default.
@@ -22904,8 +23373,8 @@ if __name__ == "__main__":
     # ~/.claude — the wrong target in that situation. Redirect those to a safe
     # notice instead of touching ~/.claude. Runtime-data commands are unaffected:
     # they use RUNTIME_DIR, which now resolves to OpenCode's data dir.
-    if detect_runtime() == "opencode" and (not args or args[0] in _OPENCODE_CLAUDE_TARGET_CMDS):
-        _opencode_audit_notice()
+    if _is_foreign_runtime() and (not args or args[0] in _CLAUDE_TARGET_CMDS):
+        _foreign_audit_notice()
         sys.exit(0)
 
     if not args or args[0] == "report":
@@ -22931,6 +23400,25 @@ if __name__ == "__main__":
     elif args[0] == "codex-install":
         import codex_install
         sys.exit(codex_install.main(args[1:]))
+    elif args[0] == "copilot-doctor":
+        import copilot_doctor
+        sys.exit(copilot_doctor.main(args[1:]))
+    elif args[0] == "copilot-install":
+        import copilot_install
+        sys.exit(copilot_install.main(["install"] + args[1:]))
+    elif args[0] == "copilot-uninstall":
+        import copilot_install
+        sys.exit(copilot_install.main(["uninstall"] + args[1:]))
+    elif args[0] == "copilot-rollup":
+        # Ingest recent Copilot sessions (CLI + VS Code planes) into trends.db.
+        # Fired by the stop hook via copilot_hook_bridge.handle_stop(); extra
+        # flags are silently consumed (INSERT OR IGNORE keeps this idempotent).
+        quiet = "--quiet" in args or "-q" in args
+        _collect_copilot_sessions(days=90, quiet=quiet)
+        sys.exit(0)
+    elif args[0] == "copilot-summary":
+        _copilot_summary()
+        sys.exit(0)
     elif args[0] == "hermes-doctor":
         import hermes_doctor
         sys.exit(hermes_doctor.main(args[1:]))
@@ -24196,6 +24684,10 @@ if __name__ == "__main__":
         print("  python3 measure.py codex-install        # Install Codex hooks into a project")
         print("  python3 measure.py hermes-doctor         # Hermes adapter readiness check")
         print("  python3 measure.py hermes-install        # Install Hermes plugin into ~/.hermes/plugins/")
+        print("  python3 measure.py copilot-doctor        # GitHub Copilot readiness + hook capability check")
+        print("  python3 measure.py copilot-install       # Install Copilot hooks into ~/.copilot/hooks/")
+        print("  python3 measure.py copilot-summary       # Credits-led Copilot session summary")
+        print("  python3 measure.py copilot-rollup        # Ingest Copilot sessions into trends DB")
         print("  python3 measure.py codex-compact-prompt # Render/install Codex compact prompt")
         print("  python3 measure.py drift                # Drift report: compare against last snapshot")
         print("  python3 measure.py drift --json          # Machine-readable drift output")

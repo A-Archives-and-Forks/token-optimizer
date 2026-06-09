@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { ClaudePaths } from './paths';
-import { findActiveSession, ActiveSession } from './sessionResolver';
+import { findActiveSession, findActiveCopilotSession, ActiveSession } from './sessionResolver';
 import { JsonlTailer } from './jsonlTail';
 import { buildSnapshot, parseRateLimitsSidecar } from './cacheReader';
 import { estimateRateLimitsFromTranscripts } from './usageEstimator';
@@ -112,7 +112,9 @@ export class DataSource {
     let snap: Snapshot;
     try {
       snap = this.buildFromDisk(recomputeUsageEstimate);
-    } catch {
+    } catch (e) {
+      // FIX 3: Log the error instead of swallowing it silently.
+      console.error('[Token Optimizer] DataSource.refresh error:', e);
       snap = emptySnapshot();
     }
     this.onSnapshot(snap);
@@ -120,23 +122,32 @@ export class DataSource {
 
   private buildFromDisk(recomputeUsageEstimate: boolean): Snapshot {
     if (this.needsRescan) {
-      this.cachedSession = findActiveSession(this.paths.projectsDir, {
-        workspaceDir: this.workspaceDir(),
-      });
+      // Copilot mode: resolve via session-state dirs (by events.jsonl mtime).
+      // Claude mode: resolve via projects transcript dirs (by .jsonl mtime).
+      this.cachedSession = this.paths.sessionStateDir
+        ? findActiveCopilotSession(this.paths.sessionStateDir)
+        : findActiveSession(this.paths.projectsDir, {
+            workspaceDir: this.workspaceDir(),
+          });
       this.cachedEffort = this.readEffort();
       this.needsRescan = false;
     }
     const session = this.cachedSession;
 
+    // FIX 2: In copilot mode (sessionStateDir is set), the copilot events.jsonl is
+    // not in Claude JSONL format — the usage parser always returns null, so tailer
+    // reads are wasted.  Skip them and return null cleanly.
+    const isCopilotMode = !!this.paths.sessionStateDir;
+
     let jsonlTokens: number | null = null;
     let jsonlModel: string | null = null;
-    if (session) {
+    if (session && !isCopilotMode) {
       if (!this.tailer) this.tailer = new JsonlTailer(session.jsonlPath);
       else this.tailer.setPath(session.jsonlPath);
       const tail = this.tailer.read();
       jsonlTokens = tail.tokens;
       jsonlModel = tail.model;
-    } else {
+    } else if (!session) {
       // No session: drop the tailer so a future session starts from offset 0.
       this.tailer = undefined;
     }
@@ -144,13 +155,20 @@ export class DataSource {
     const nowMs = Date.now();
     const rateLimitsJson = readIfExists(this.paths.rateLimits);
     if (recomputeUsageEstimate) {
-      try {
-        this.cachedUsageEstimate = estimateRateLimitsFromTranscripts(this.paths.projectsDir, {
-          nowMs,
-          baseline: parseRateLimitsSidecar(rateLimitsJson, nowMs, this.getStaleAfterSeconds()),
-        });
-      } catch {
+      // FIX 2: In copilot mode there is no ~/.copilot/projects transcript dir,
+      // so estimateRateLimitsFromTranscripts would stat a non-existent path on
+      // every explicit refresh.  Skip it and leave the estimate as null.
+      if (isCopilotMode) {
         this.cachedUsageEstimate = null;
+      } else {
+        try {
+          this.cachedUsageEstimate = estimateRateLimitsFromTranscripts(this.paths.projectsDir, {
+            nowMs,
+            baseline: parseRateLimitsSidecar(rateLimitsJson, nowMs, this.getStaleAfterSeconds()),
+          });
+        } catch {
+          this.cachedUsageEstimate = null;
+        }
       }
     }
 

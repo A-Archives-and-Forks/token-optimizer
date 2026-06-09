@@ -1,4 +1,4 @@
-"""Runtime home detection shared by Claude Code, Codex, Hermes, and OpenCode adapters.
+"""Runtime home detection shared by Claude Code, Codex, Hermes, OpenCode, and Copilot adapters.
 
 This module keeps runtime integration deliberately simple:
 
@@ -10,6 +10,10 @@ This module keeps runtime integration deliberately simple:
   by default, so this skill can be invoked from inside OpenCode; detecting it keeps
   the skill from scanning/mutating ~/.claude when the user is actually in OpenCode
   (issue #57).
+- Copilot activates when COPILOT_HOME is set, a `copilot` ancestor process is
+  detected, or TOKEN_OPTIMIZER_RUNTIME=copilot. The Copilot hook bridge always
+  sets the explicit override; the other signals are a safety net so the skill
+  never scans/mutates ~/.claude while actually running under GitHub Copilot.
 - Callers can keep legacy variable names while resolving to the correct home.
 
 The goal is to let Token Optimizer share one Python core while platform
@@ -28,12 +32,14 @@ _RUNTIME_CLAUDE = "claude"
 _RUNTIME_CODEX = "codex"
 _RUNTIME_HERMES = "hermes"
 _RUNTIME_OPENCODE = "opencode"
+_RUNTIME_COPILOT = "copilot"
 _VALID_RUNTIMES = frozenset(
-    {_RUNTIME_CLAUDE, _RUNTIME_CODEX, _RUNTIME_HERMES, _RUNTIME_OPENCODE}
+    {_RUNTIME_CLAUDE, _RUNTIME_CODEX, _RUNTIME_HERMES, _RUNTIME_OPENCODE, _RUNTIME_COPILOT}
 )
 _CLAUDE_PLUGIN_ENVS = ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA")
 _CODEX_HOME_ENV = "CODEX_HOME"
 _HERMES_HOME_ENV = "HERMES_HOME"
+_COPILOT_HOME_ENV = "COPILOT_HOME"
 # OpenCode launch/config env vars. Their presence in this process's environment
 # is a strong signal we were spawned from within OpenCode. These are OpenCode's
 # own documented variables (config/data/bin/client), not anything we set.
@@ -88,12 +94,12 @@ def _opencode_env_signal() -> bool:
     return any(os.environ.get(var) for var in _OPENCODE_ENV_SIGNALS)
 
 
-def _opencode_in_process_tree() -> bool:
-    """Best-effort: is an ``opencode`` binary an ancestor of this process?
+def _ancestor_in_process_tree(basenames: frozenset) -> bool:
+    """Best-effort: is one of ``basenames`` an ancestor of this process?
 
-    Used only as a fallback signal when OpenCode runs this skill via its default
-    ~/.claude/skills loading and exports no identifying env var. A single ``ps``
-    call is parsed in memory and the parent chain is walked from this PID upward.
+    Used only as a fallback signal when a host CLI runs this skill without
+    exporting an identifying env var. A single ``ps`` call is parsed in memory
+    and the parent chain is walked from this PID upward.
 
     Never raises and never blocks for long: disabled on Windows, behind a short
     timeout, and skippable via TOKEN_OPTIMIZER_NO_PROC_SCAN.
@@ -133,10 +139,11 @@ def _opencode_in_process_tree() -> bool:
             depth += 1
             # Exact basename match, not a substring: an unrelated binary like
             # "my-opencode-helper" or a repo dir named "opencode" in argv must
-            # not flip a genuine Claude Code session into OpenCode mode. The real
-            # OpenCode CLI runs as `opencode` (or opencode.exe on Windows).
+            # not flip a genuine Claude Code session into another runtime's
+            # mode. The real CLIs run under their bare binary name (or
+            # name.exe on Windows).
             comm = os.path.basename(names.get(pid, "")).lower()
-            if comm in ("opencode", "opencode.exe"):
+            if comm in basenames:
                 return True
             pid = parents.get(pid, 0)
         return False
@@ -144,9 +151,31 @@ def _opencode_in_process_tree() -> bool:
         return False
 
 
+_OPENCODE_BASENAMES = frozenset({"opencode", "opencode.exe"})
+_COPILOT_BASENAMES = frozenset({"copilot", "copilot.exe"})
+
+
+def _opencode_in_process_tree() -> bool:
+    """Best-effort: is an ``opencode`` binary an ancestor of this process?"""
+    return _ancestor_in_process_tree(_OPENCODE_BASENAMES)
+
+
 def _opencode_signal() -> bool:
     """True when either an env signal or an opencode ancestor process is found."""
     return _opencode_env_signal() or _opencode_in_process_tree()
+
+
+def _copilot_signal() -> bool:
+    """True when COPILOT_HOME is set or a ``copilot`` ancestor process is found.
+
+    The Copilot hook bridge always sets TOKEN_OPTIMIZER_RUNTIME=copilot
+    explicitly; this signal is the safety net for direct invocations from
+    inside a Copilot CLI session (issue #57 class of bugs: never let an
+    unrecognized host fall through to the Claude default and write ~/.claude).
+    """
+    if os.environ.get(_COPILOT_HOME_ENV):
+        return True
+    return _ancestor_in_process_tree(_COPILOT_BASENAMES)
 
 
 @functools.lru_cache(maxsize=None)
@@ -159,12 +188,13 @@ def detect_runtime() -> str:
       3. CODEX_HOME implies Codex
       4. HERMES_HOME implies Hermes
       5. OpenCode env signal or opencode ancestor process implies OpenCode
-      6. Default to Claude Code for backward compatibility
+      6. COPILOT_HOME or a copilot ancestor process implies Copilot
+      7. Default to Claude Code for backward compatibility
 
     Genuine Claude Code, Codex, and Hermes invocations all short-circuit before
-    the OpenCode check (steps 2-4), so adding OpenCode detection cannot change
-    how those runtimes are detected. The process-tree scan in step 5 only runs
-    when none of those env signals are present.
+    the OpenCode and Copilot checks (steps 2-4), so adding those detections
+    cannot change how the earlier runtimes are detected. The process-tree scans
+    in steps 5-6 only run when none of those env signals are present.
     """
     override = os.environ.get(_RUNTIME_OVERRIDE, "").strip().lower()
     if override in _VALID_RUNTIMES:
@@ -182,6 +212,9 @@ def detect_runtime() -> str:
     if _opencode_signal():
         return _RUNTIME_OPENCODE
 
+    if _copilot_signal():
+        return _RUNTIME_COPILOT
+
     return _RUNTIME_CLAUDE
 
 
@@ -198,6 +231,16 @@ def codex_home() -> Path:
 def hermes_home() -> Path:
     """Return Hermes's home directory, safely honoring HERMES_HOME when valid."""
     return _safe_home_from_env(_HERMES_HOME_ENV, Path.home() / ".hermes")
+
+
+def copilot_home() -> Path:
+    """Return GitHub Copilot CLI's home directory (~/.copilot by default).
+
+    Honors COPILOT_HOME when it points at a safe directory under the user
+    home. This is where Token Optimizer's own Copilot data lives
+    (~/.copilot/token-optimizer/) — never ~/.claude.
+    """
+    return _safe_home_from_env(_COPILOT_HOME_ENV, Path.home() / ".copilot")
 
 
 def _xdg_base(env_var: str, default_rel: str) -> Path:
@@ -247,12 +290,15 @@ def runtime_home() -> Path:
     if runtime == _RUNTIME_OPENCODE:
         return opencode_data_home()
 
+    if runtime == _RUNTIME_COPILOT:
+        return copilot_home()
+
     return claude_home()
 
 
 def plugin_data_env_vars() -> tuple[str, ...]:
     """Return plugin-data env vars in runtime-specific priority order."""
-    if detect_runtime() in (_RUNTIME_CODEX, _RUNTIME_HERMES, _RUNTIME_OPENCODE):
+    if detect_runtime() in (_RUNTIME_CODEX, _RUNTIME_HERMES, _RUNTIME_OPENCODE, _RUNTIME_COPILOT):
         return ("TOKEN_OPTIMIZER_PLUGIN_DATA",)
     return ("CLAUDE_PLUGIN_DATA", "TOKEN_OPTIMIZER_PLUGIN_DATA")
 
@@ -266,4 +312,6 @@ def runtime_name_for_humans() -> str:
         return "Hermes"
     if runtime == _RUNTIME_OPENCODE:
         return "OpenCode"
+    if runtime == _RUNTIME_COPILOT:
+        return "GitHub Copilot"
     return "Claude Code"

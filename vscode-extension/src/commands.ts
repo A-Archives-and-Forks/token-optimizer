@@ -7,7 +7,9 @@ import { ClaudePaths } from './paths';
 const DAEMON_URL = 'http://localhost:24842/token-optimizer';
 
 export interface CommandDeps {
-  paths: ClaudePaths;
+  // FIX 1: Accept a getter so openDashboard always resolves paths lazily,
+  // picking up any runtime switch that happened after activation.
+  getPaths: () => ClaudePaths;
   onConfigChanged: () => void; // re-read from disk + re-render immediately
 }
 
@@ -16,7 +18,7 @@ export function registerCommands(
   deps: CommandDeps
 ): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand('tokenOptimizer.openDashboard', () => openDashboard(deps.paths)),
+    vscode.commands.registerCommand('tokenOptimizer.openDashboard', () => openDashboard(deps.getPaths())),
     vscode.commands.registerCommand('tokenOptimizer.refresh', () => deps.onConfigChanged())
   );
 }
@@ -44,6 +46,8 @@ function daemonAlive(): Promise<boolean> {
     req.on('error', () => resolve(false));
     req.on('timeout', () => {
       req.destroy();
+      // FIX 4: Suppress the unhandled error event that fires after destroy().
+      req.on('error', () => {});
       resolve(false);
     });
   });

@@ -37,6 +37,16 @@
     "configuration": {
       "title": "Token Optimizer",
       "properties": {
+        "tokenOptimizer.runtime": {
+          "type": "string",
+          "enum": ["claude", "copilot"],
+          "enumDescriptions": [
+            "Read cache files written by the Claude Code Token Optimizer plugin (~/.claude/token-optimizer/).",
+            "Read cache files written by the GitHub Copilot Token Optimizer install (~/.copilot/token-optimizer/). Requires a Copilot Token Optimizer installation."
+          ],
+          "default": "claude",
+          "markdownDescription": "Which AI coding assistant runtime to read Token Optimizer cache data from. Change this if you use Token Optimizer with GitHub Copilot instead of (or in addition to) Claude Code. Changing this setting takes effect immediately without reloading VS Code."
+        },
         "tokenOptimizer.staleAfterSeconds": {
           "type": "number",
           "default": 180,

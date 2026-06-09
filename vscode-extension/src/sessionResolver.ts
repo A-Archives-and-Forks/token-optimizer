@@ -6,6 +6,9 @@
 // recently written). So when the window has a workspace folder, we scope to the
 // transcript dir(s) for that folder (and any subfolder cwd), and only fall back
 // to global-most-recent when no folder is open.
+//
+// Copilot mode: each session lives at <sessionStateDir>/<id>/events.jsonl.
+// The active session is the one whose events.jsonl was most recently modified.
 import * as fs from 'fs';
 import * as path from 'path';
 import { sanitizeSessionId, encodeProjectDir } from './paths';
@@ -55,6 +58,46 @@ export function findActiveSession(
 
   // No workspace folder open — best effort: globally most-recent.
   return newestSessionIn(projectsDir, dirs.filter((d) => d.isDirectory()));
+}
+
+// ---------------------------------------------------------------------------
+// Copilot session resolver
+// ---------------------------------------------------------------------------
+// Copilot Token Optimizer stores session state at:
+//   ~/.copilot/session-state/<session-id>/events.jsonl
+//
+// The "active" session is the directory whose events.jsonl was most recently
+// modified. If the sessionStateDir does not exist, or is empty, returns null
+// (same contract as findActiveSession). The jsonlPath is set to events.jsonl
+// so callers can tail it via JsonlTailer; if the file doesn't exist yet, the
+// tailer's graceful stat-failure path handles it.
+export function findActiveCopilotSession(sessionStateDir: string): ActiveSession | null {
+  let dirs: fs.Dirent[];
+  try {
+    dirs = fs.readdirSync(sessionStateDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  let best: ActiveSession | null = null;
+  for (const dir of dirs) {
+    if (!dir.isDirectory()) continue;
+    const eventsPath = path.join(sessionStateDir, dir.name, 'events.jsonl');
+    let mtimeMs: number;
+    try {
+      mtimeMs = fs.statSync(eventsPath).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (!best || mtimeMs > best.mtimeMs) {
+      best = {
+        sessionId: sanitizeSessionId(dir.name),
+        jsonlPath: eventsPath,
+        mtimeMs,
+      };
+    }
+  }
+  return best;
 }
 
 function newestSessionIn(projectsDir: string, dirs: fs.Dirent[]): ActiveSession | null {

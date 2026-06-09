@@ -56,7 +56,29 @@ or in VS Code: Extensions → `...` → **Install from VSIX**.
 
 Works in VS Code, Cursor, and Windsurf.
 
+## GitHub Copilot mode
+
+If you run Token Optimizer with GitHub Copilot instead of (or alongside) Claude Code, set:
+
+```json
+"tokenOptimizer.runtime": "copilot"
+```
+
+The extension will read cache files from `~/.copilot/token-optimizer/` and resolve the
+active session from `~/.copilot/session-state/<id>/events.jsonl` (most-recently-modified
+directory wins). All status-bar items, quality scores, and usage-limit display work the
+same way — only the source directory changes.
+
+The setting takes effect immediately without reloading VS Code.
+
+| Setting | Values | Default |
+|---|---|---|
+| `tokenOptimizer.runtime` | `"claude"` · `"copilot"` | `"claude"` |
+
 ## Requires
 
 [Token Optimizer](https://github.com/alexgreensh/token-optimizer) installed in Claude Code
 (it writes the data this extension reads).
+
+For Copilot mode, a GitHub Copilot Token Optimizer installation at `~/.copilot/token-optimizer/`
+is required.

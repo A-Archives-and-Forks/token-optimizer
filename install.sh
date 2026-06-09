@@ -175,12 +175,63 @@ install_hermes() {
     exit 0
 }
 
-# Route --opencode / --hermes before the Claude Code prerequisite checks
-# (OpenCode needs bun; Hermes needs python3, not the Claude Code plugin env).
+install_copilot() {
+    command -v python3 &>/dev/null || fail "python3 not found. Token Optimizer for GitHub Copilot needs Python 3."
+
+    local script_dir measure_py
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    measure_py="${script_dir}/skills/token-optimizer/scripts/measure.py"
+
+    if [ ! -f "$measure_py" ] && [ -d "${script_dir}/.git" ]; then
+        warn "skills/ not in this checkout. Adding it to sparse-checkout..."
+        git -C "$script_dir" sparse-checkout add skills/ copilot/ 2>/dev/null || true
+        git -C "$script_dir" pull --ff-only 2>/dev/null || true
+    fi
+    [ -f "$measure_py" ] || fail "measure.py not found. Clone the full repo: git clone ${REPO_HTTPS}"
+
+    if [ -d "${script_dir}/.git" ]; then
+        local c_sha
+        c_sha="$(git -C "$script_dir" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+        info "Installing from commit ${c_sha}"
+    else
+        warn "Not a git checkout — cannot verify source provenance."
+    fi
+
+    # Forward only recognized flags after --copilot (an unknown flag like
+    # --hermes would otherwise reach argparse and fail the install with a
+    # confusing "invalid choice" error).
+    local extra=()
+    for a in "$@"; do
+        case "$a" in
+            --dry-run) extra+=("$a") ;;
+        esac
+    done
+
+    info "Installing Token Optimizer into GitHub Copilot CLI (~/.copilot/)..."
+    if ! TOKEN_OPTIMIZER_RUNTIME=copilot python3 "$measure_py" copilot-install "${extra[@]}"; then
+        fail "Copilot install failed."
+    fi
+
+    echo ""
+    printf "${BOLD}${GREEN}Token Optimizer for GitHub Copilot installed (beta)!${NC}\n"
+    echo ""
+    echo "  Hooks:    ~/.copilot/hooks/token-optimizer.json (loaded by the Copilot CLI)"
+    echo "  Verify:   TOKEN_OPTIMIZER_RUNTIME=copilot python3 ${measure_py} copilot-doctor"
+    echo "  Summary:  TOKEN_OPTIMIZER_RUNTIME=copilot python3 ${measure_py} copilot-summary"
+    echo "  VS Code:  enable both github.copilot.chat.agentDebugLog settings for per-request credit costs"
+    echo "  Re-run this command after a git pull to update."
+    echo ""
+    exit 0
+}
+
+# Route --opencode / --hermes / --copilot before the Claude Code prerequisite
+# checks (OpenCode needs bun; Hermes and Copilot need python3, not the Claude
+# Code plugin env).
 for arg in "$@"; do
     case "$arg" in
         --opencode) install_opencode ;;
         --hermes) install_hermes "$@" ;;
+        --copilot) install_copilot "$@" ;;
     esac
 done
 

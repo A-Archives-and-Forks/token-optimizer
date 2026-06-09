@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.10.4-green" alt="Version 5.10.3"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/badge/version-5.11.0-green" alt="Version 5.11.0"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/github/release-date/alexgreensh/token-optimizer?label=last%20release&color=blue" alt="Last Release"></a>
   <a href="https://github.com/alexgreensh/token-optimizer"><img src="https://img.shields.io/badge/Claude_Code-Plugin-blueviolet" alt="Claude Code Plugin"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/tree/main/openclaw"><img src="https://img.shields.io/badge/OpenClaw-v2.4.6-brightgreen" alt="OpenClaw v2.4.6"></a>
@@ -44,7 +44,7 @@ They compress command output, which covers 15-25% of your context on a good day.
 Token Optimizer covers all of it, keeps your work alive across compactions, measures whether the optimization actually helped, and gives you a <strong>live dashboard</strong> that shows every token, every dollar, and every turn, auto-updated after every session. Runs fully local. Zero baseline context overhead. Zero runtime dependencies.
 </p>
 <p align="center">
-Works on <strong>Claude Code</strong> (CLI and VS Code), <strong>OpenCode</strong>, <strong>OpenClaw</strong>, <strong>Codex</strong>, and <strong>Hermes</strong> today. Windsurf, Cursor, and more on the way.
+Works on <strong>Claude Code</strong> (CLI and VS Code), <strong>OpenCode</strong>, <strong>OpenClaw</strong>, <strong>Codex</strong>, <strong>Hermes</strong>, and <strong>GitHub Copilot</strong> (CLI and VS Code, beta) today. Windsurf, Cursor, and more on the way.
 </p>
 
 <p align="center">
@@ -119,7 +119,7 @@ rm -rf "$tmp"
 
 This verifies `install.sh` before executing it. The installer then resolves the latest GitHub release tag, checks out that tag, and verifies every installed runtime file against that release's checksums. If you're offline or behind a restrictive proxy, set `TOKEN_OPTIMIZER_SKIP_VERIFY=1` before running.
 
-Works on Claude Code (CLI and VS Code), [OpenCode](#opencode), [OpenClaw](#openclaw), [Codex](#codex), and [Hermes](#hermes). Each platform has its own native plugin. No bridging, no shared runtime, zero cross-platform dependencies.
+Works on Claude Code (CLI and VS Code), [OpenCode](#opencode), [OpenClaw](#openclaw), [Codex](#codex), [Hermes](#hermes), and GitHub Copilot (CLI and VS Code, beta — see `docs/copilot.md`). Each platform has its own native plugin. No bridging, no shared runtime, zero cross-platform dependencies.
 
 </details>
 
@@ -227,6 +227,35 @@ Inside Hermes:
 - A short context nudge appears automatically before a turn once context fills past ~70%
 
 See [`hermes/README.md`](hermes/README.md) for full docs.
+
+</details>
+
+<details>
+<summary><h3>GitHub Copilot</h3></summary>
+
+> **Beta.** Token Optimizer for **GitHub Copilot** — both the **CLI** and **VS Code**. Copilot now bills in AI Credits and nothing in the product answers "what is this session costing me." This adapter does, using Copilot's own cost figures (per-request `copilotUsageNanoAiu` in VS Code, premium-request totals on the CLI) — never a re-derived pricing table. Per-session cost and tokens, context-quality scoring, capability-gated context savers, before/after savings, and the shared dashboard.
+
+Native Python, read-only access to Copilot's own data, no telemetry, no dependencies. The CLI and VS Code surfaces are separate session populations — never merged, never summed.
+
+```bash
+git clone https://github.com/alexgreensh/token-optimizer.git
+token-optimizer/install.sh --copilot
+```
+
+Verify the install:
+
+```bash
+token-optimizer/install.sh --copilot --dry-run   # preview
+TOKEN_OPTIMIZER_RUNTIME=copilot python3 token-optimizer/skills/token-optimizer/scripts/measure.py copilot-doctor
+```
+
+Using Copilot:
+- `copilot-summary` — credits-led cost + token summary for recent sessions
+- `copilot-doctor` — per-source readiness + hook capability check
+- User-level CLI hooks (`~/.copilot/hooks/`) add bash output compression and session-start continuity restore, each gated on what your installed Copilot CLI version actually supports
+- For VS Code per-request credit costs, enable both `github.copilot.chat.agentDebugLog` settings (they log full prompt text to disk, so the switch is yours)
+
+Copilot CLI ships weekly and its hook fields break and regress between releases, so every engine feature is gated on a per-version capability map and auto-activates when upstream support lands. See [`copilot/README.md`](copilot/README.md) and [`docs/copilot.md`](docs/copilot.md) for full docs and the honest feature-by-feature status.
 
 </details>
 
@@ -390,18 +419,20 @@ No. Pure Python stdlib on Claude Code and Codex. TypeScript with zero runtime de
 <details>
 <summary>🧰 <strong>Which platforms does it support?</strong></summary>
 
-Claude Code (CLI and VS Code), OpenCode, OpenClaw, Codex, and Hermes today, with native support for each.
+Claude Code (CLI and VS Code), OpenCode, OpenClaw, Codex, Hermes, and GitHub Copilot (beta) today, with native support for each.
 
 **What each platform gets:**
 
-| Capability | Claude Code / Codex | OpenClaw | OpenCode | Hermes |
-|---|---|---|---|---|
-| Quality scoring | 7 signals (dual composite) | 7 signals (two-stage) | 7 signals (MRCR curves) | 3 signals (delegated) |
-| Output compression | 🟢 Full | 🟢 Native TS | Platform-native | 🟢 Via Python delegation |
-| Continuity + checkpoints | 🟢 | 🟢 | 🟢 | 🟢 |
-| Dashboard + savings | 🟢 | 🟢 | 🟢 | 🟢 (via bridge) |
+| Capability | Claude Code / Codex | OpenClaw | OpenCode | Hermes | Copilot (beta) |
+|---|---|---|---|---|---|
+| Quality scoring | 7 signals (dual composite) | 7 signals (two-stage) | 7 signals (MRCR curves) | 3 signals (delegated) | 3 signals (session-level) |
+| Output compression | 🟢 Full | 🟢 Native TS | Platform-native | 🟢 Via Python delegation | 🟡 Capability-gated per CLI version |
+| Continuity + checkpoints | 🟢 | 🟢 | 🟢 | 🟢 | 🟡 Session-start restore |
+| Dashboard + savings | 🟢 | 🟢 | 🟢 | 🟢 (via bridge) | 🟢 Credits-led (cost pass-through) |
 
 Quality signal counts differ because each platform targets a different measurement context: Claude Code/Codex measures session-level telemetry, OpenClaw measures run-level outcomes, OpenCode does file-level analysis with per-model degradation curves. The grade scale (S/A/B/C/D/F) is identical everywhere.
+
+Copilot runs in beta with honesty built in: several Copilot CLI hook powers change between weekly upstream releases, so every engine feature is gated on a per-version capability map and auto-activates when upstream support lands. The full feature-by-feature status, including what Copilot does not yet expose to companions (per-request CLI token data, compaction steering), lives in `docs/copilot.md`.
 
 Windsurf and Cursor are next on the roadmap.
 </details>
