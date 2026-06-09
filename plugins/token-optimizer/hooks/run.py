@@ -18,6 +18,7 @@ block the user's tool call.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -28,6 +29,60 @@ from pathlib import Path
 # so later imports don't explode with confusing SyntaxError noise.
 if sys.version_info < (3, 9):
     sys.exit(0)
+
+
+def _check_consent() -> bool:
+    """Return True if consent is given or assumed. Fail-open on any error."""
+    try:
+        home = Path.home()
+
+        # Resolve config path from env (set by Claude Code before hook invocation)
+        plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA", "")
+        if plugin_data:
+            pd = Path(plugin_data).resolve()
+            if not str(pd).startswith(str(home)):
+                return True  # Path outside home = skip (fail-open)
+            config_path = pd / "config" / "config.json"
+        else:
+            # Legacy / Codex fallback
+            codex_home = os.environ.get("CODEX_HOME", "")
+            if codex_home:
+                ch = Path(codex_home).resolve()
+                if not str(ch).startswith(str(home)):
+                    return True
+                config_path = ch / "token-optimizer" / "config.json"
+            else:
+                config_path = home / ".claude" / "token-optimizer" / "config.json"
+
+        if not config_path.exists() or config_path.is_symlink():
+            return True  # No config or symlink = fail-open
+
+        with open(config_path) as f:
+            config = json.load(f)
+
+        if config.get("enterprise_consent_shown"):
+            return True
+
+        # Backward compat backfill: existing users who saw v5 welcome have implicitly consented
+        if config.get("v5_welcome_shown"):
+            config["enterprise_consent_shown"] = True
+            # Atomic write (tempfile + os.replace)
+            import tempfile
+            fd, tmp = tempfile.mkstemp(dir=str(config_path.parent), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as tf:
+                    json.dump(config, tf, indent=2)
+                os.replace(tmp, str(config_path))
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            return True
+
+        return False  # No consent and no v5_welcome_shown = skip data collection
+    except Exception:
+        return True  # Fail-open: never block on errors
 
 
 def main() -> int:
@@ -62,6 +117,16 @@ def main() -> int:
     # Use the interpreter that ran this wrapper so we inherit the correct
     # Python across macOS/Linux/Windows without relying on PATH.
     cmd = [sys.executable, str(script_path), *script_args]
+
+    # Consent gate: skip data collection until acknowledged.
+    # EXEMPT: ensure-health and consent commands bootstrap the consent flag itself.
+    # Blocking them creates a deadlock (config.json exists without flags -> ensure-health
+    # can't run -> flags never written -> plugin permanently inert).
+    exempt_commands = {"ensure-health", "consent", "v5"}
+    is_exempt = any(arg in exempt_commands for arg in script_args[:2])
+    if not is_exempt and not _check_consent():
+        return 0
+
     proc = None
     try:
         proc = subprocess.Popen(cmd)

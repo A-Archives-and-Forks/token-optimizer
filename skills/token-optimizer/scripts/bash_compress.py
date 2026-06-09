@@ -27,33 +27,34 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Token/credential preservation patterns (scanned PRE-compression)
 # ---------------------------------------------------------------------------
-
-_TOKEN_PATTERNS = [
-    re.compile(r"AKIA[0-9A-Z]{16}"),                     # AWS access key
-    re.compile(r"sk-[a-zA-Z0-9]{20,}"),                   # OpenAI / Anthropic
-    re.compile(r"sk-ant-[a-zA-Z0-9\-]{20,}"),             # Anthropic specific
-    re.compile(r"ghp_[a-zA-Z0-9]{36}"),                   # GitHub PAT (classic)
-    re.compile(r"gho_[a-zA-Z0-9]{36}"),                   # GitHub OAuth
-    re.compile(r"ghs_[a-zA-Z0-9]{36}"),                   # GitHub server-to-server
-    re.compile(r"ghr_[a-zA-Z0-9]{36}"),                   # GitHub refresh
-    re.compile(r"github_pat_[a-zA-Z0-9_]{80,}"),          # GitHub fine-grained PAT
-    re.compile(r"npm_[a-zA-Z0-9]{36}"),                   # npm token
-    re.compile(r"xoxb-[0-9]+-[a-zA-Z0-9]+"),              # Slack bot token
-    re.compile(r"xoxp-[0-9]+-[a-zA-Z0-9]+"),              # Slack user token
-    re.compile(r"xoxa-[0-9]+-[a-zA-Z0-9]+"),              # Slack app token
-    re.compile(r"sk_live_[a-zA-Z0-9]{24,}"),              # Stripe live
-    re.compile(r"rk_live_[a-zA-Z0-9]{24,}"),              # Stripe restricted
-    re.compile(r"hf_[a-zA-Z0-9]{34}"),                    # HuggingFace
-    re.compile(r"Bearer\s+[a-zA-Z0-9\-._~+/]+=*", re.I),  # Generic Bearer
-    # v5.1 additions — raised by security review, common in bash compression
-    # input families (docker, lint, build, logs).
-    re.compile(r"AIza[0-9A-Za-z_\-]{35}"),                # Google API key
-    re.compile(r"ya29\.[0-9A-Za-z_\-]{20,}"),             # Google OAuth access token
-    re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),  # JWT
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),    # PEM private key header
-    re.compile(r"(?:postgres|postgresql|mysql|mongodb|mongodb\+srv|redis)://[^:\s/]+:[^@\s]+@", re.I),  # DB URI with password
-    re.compile(r"https?://[^:\s/@]+:[^@\s]+@", re.I),      # HTTP(S) basic auth in URL (registry/proxy creds)
-]
+try:
+    from credential_patterns import PATTERNS_ONLY as _TOKEN_PATTERNS
+except ImportError:
+    # Standalone execution or import failure: inline minimal set
+    _TOKEN_PATTERNS = [
+        re.compile(r"AKIA[0-9A-Z]{16}"),
+        re.compile(r"sk-[a-zA-Z0-9]{20,}"),
+        re.compile(r"sk-ant-[a-zA-Z0-9\-]{20,}"),
+        re.compile(r"ghp_[a-zA-Z0-9]{36}"),
+        re.compile(r"gho_[a-zA-Z0-9]{36}"),
+        re.compile(r"ghs_[a-zA-Z0-9]{36}"),
+        re.compile(r"ghr_[a-zA-Z0-9]{36}"),
+        re.compile(r"github_pat_[a-zA-Z0-9_]{80,}"),
+        re.compile(r"npm_[a-zA-Z0-9]{36}"),
+        re.compile(r"xoxb-[0-9]+-[a-zA-Z0-9]+"),
+        re.compile(r"xoxp-[0-9]+-[a-zA-Z0-9]+"),
+        re.compile(r"xoxa-[0-9]+-[a-zA-Z0-9]+"),
+        re.compile(r"sk_live_[a-zA-Z0-9]{24,}"),
+        re.compile(r"rk_live_[a-zA-Z0-9]{24,}"),
+        re.compile(r"hf_[a-zA-Z0-9]{34}"),
+        re.compile(r"Bearer\s+[a-zA-Z0-9\-._~+/]+=*", re.I),
+        re.compile(r"AIza[0-9A-Za-z_\-]{35}"),
+        re.compile(r"ya29\.[0-9A-Za-z_\-]{20,}"),
+        re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+        re.compile(r"(?:postgres|postgresql|mysql|mongodb|mongodb\+srv|redis)://[^:\s/]+:[^@\s]+@", re.I),
+        re.compile(r"https?://[^:\s/@]+:[^@\s]+@", re.I),
+    ]
 
 # ANSI escape code patterns.
 #

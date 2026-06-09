@@ -40,6 +40,11 @@ except ImportError:
     SessionStore = None  # type: ignore[assignment,misc]
     cleanup_old_stores = None  # type: ignore[assignment]
 
+try:
+    from credential_patterns import redact_credentials as _redact_creds
+except ImportError:
+    _redact_creds = None
+
 from structure_map import (
     StructureMapResult,
     detect_structure_language,
@@ -1024,9 +1029,10 @@ def handle_read(hook_input: dict[str, Any], mode: str, quiet: bool) -> None:
                     fc = Path(file_path).read_text(encoding="utf-8", errors="replace")
                     delta_content = fc  # reusable in-process even if too big to persist
                     if len(fc.encode("utf-8", errors="replace")) <= MAX_CONTENT_CACHE_BYTES:
-                        entry["cached_content"] = fc
+                        safe_fc = _redact_creds(fc) if _redact_creds else fc
+                        entry["cached_content"] = safe_fc
                         entry["content_hash"] = content_hash(fc)
-                        store.upsert_cached_content(file_path, fc, content_hash(fc))
+                        store.upsert_cached_content(file_path, safe_fc, content_hash(fc))
             except Exception:
                 pass
         _reset_replacement_state(entry)
@@ -1228,9 +1234,10 @@ def handle_read(hook_input: dict[str, Any], mode: str, quiet: bool) -> None:
                 if is_delta_eligible(file_path):
                     fc = Path(file_path).read_text(encoding="utf-8", errors="replace")
                     if len(fc.encode("utf-8", errors="replace")) <= MAX_CONTENT_CACHE_BYTES:
-                        entry["cached_content"] = fc
+                        safe_fc = _redact_creds(fc) if _redact_creds else fc
+                        entry["cached_content"] = safe_fc
                         entry["content_hash"] = content_hash(fc)
-                        store.upsert_cached_content(file_path, fc, content_hash(fc))
+                        store.upsert_cached_content(file_path, safe_fc, content_hash(fc))
             except Exception:
                 pass
         _reset_replacement_state(entry)

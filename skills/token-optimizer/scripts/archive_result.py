@@ -30,6 +30,10 @@ from pathlib import Path
 import hashlib
 import time
 
+try:
+    from credential_patterns import redact_credentials as _redact_creds_shared
+except ImportError:
+    _redact_creds_shared = None
 from bash_compress import _TOKEN_PATTERNS
 from hook_io import read_stdin_hook_input
 from plugin_env import resolve_snapshot_dir
@@ -111,11 +115,15 @@ def _archive_dir_for_session(session_id: str) -> Path:
 
 
 def _redact_credentials(text: str) -> str:
-    """Replace credential-matching substrings with [REDACTED] before archiving.
+    """Replace credential-matching substrings before archiving.
 
-    Uses _TOKEN_PATTERNS from bash_compress — the same patterns that guard
-    compression output — so both surfaces share one canonical allowlist.
+    Prefers credential_patterns.redact_credentials (labeled placeholders like
+    [CREDENTIAL REDACTED: AWS access key]). Falls back to _TOKEN_PATTERNS
+    from bash_compress with generic [REDACTED] if the shared module is
+    unavailable.
     """
+    if _redact_creds_shared is not None:
+        return _redact_creds_shared(text)
     for pattern in _TOKEN_PATTERNS:
         text = pattern.sub("[REDACTED]", text)
     return text

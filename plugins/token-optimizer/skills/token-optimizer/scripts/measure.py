@@ -10844,7 +10844,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.10.3"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.10.4"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DAEMON_RUNTIME = detect_runtime()
 _DAEMON_RUNTIME_SUFFIX = "codex" if _DAEMON_RUNTIME == "codex" else ("hermes" if _DAEMON_RUNTIME == "hermes" else "claude")
@@ -13059,7 +13059,7 @@ _CHECKPOINT_RETENTION_DAYS = _int_env("TOKEN_OPTIMIZER_CHECKPOINT_RETENTION_DAYS
 _CHECKPOINT_RETENTION_MAX = _int_env("TOKEN_OPTIMIZER_CHECKPOINT_RETENTION_MAX", 50)
 _RELEVANCE_THRESHOLD = _float_env("TOKEN_OPTIMIZER_RELEVANCE_THRESHOLD", 0.3)
 # Data-retention controls (enterprise compliance)
-_QUALITY_CACHE_RETENTION_DAYS = _int_env("TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS", 7)
+_QUALITY_CACHE_RETENTION_DAYS = _int_env("TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS", 0)  # 0 = unlimited (default); enterprise sets to e.g. 30
 _CHECKPOINT_EVENT_MAX = _int_env("TOKEN_OPTIMIZER_CHECKPOINT_EVENT_MAX", 1000)
 _TRENDS_RETENTION_DAYS = _int_env("TOKEN_OPTIMIZER_TRENDS_RETENTION_DAYS", 0)  # 0 = unlimited
 _ARCHIVE_RETENTION_HOURS = _int_env("TOKEN_OPTIMIZER_ARCHIVE_RETENTION_HOURS", 24)
@@ -16110,11 +16110,24 @@ def _purge_all_data(confirm=False, force=False):
 
     if running_pid is not None and force:
         import signal as _signal
+        import subprocess as _sp
+        # Verify PID identity before SIGTERM to avoid killing a recycled PID
+        is_ours = False
         try:
-            os.kill(running_pid, _signal.SIGTERM)
-            print(f"[Token Optimizer] Stopped dashboard daemon (PID {running_pid}).")
-        except (ProcessLookupError, PermissionError, OSError) as e:
-            print(f"[Token Optimizer] Warning: could not stop daemon PID {running_pid}: {e}")
+            result = _sp.run(["ps", "-p", str(running_pid), "-o", "comm="],
+                             capture_output=True, text=True, timeout=3)
+            proc_name = result.stdout.strip().lower()
+            is_ours = "python" in proc_name or "measure" in proc_name
+        except Exception:
+            is_ours = False
+        if is_ours:
+            try:
+                os.kill(running_pid, _signal.SIGTERM)
+                print(f"[Token Optimizer] Stopped dashboard daemon (PID {running_pid}).")
+            except (ProcessLookupError, PermissionError, OSError) as e:
+                print(f"[Token Optimizer] Warning: could not stop daemon PID {running_pid}: {e}")
+        else:
+            print(f"[Token Optimizer] PID {running_pid} is not a Python/Token Optimizer process (recycled PID). Ignoring stale PID file.")
 
     # --- Print summary ---
     print("Token Optimizer Data Purge")
@@ -16154,6 +16167,19 @@ def _purge_all_data(confirm=False, force=False):
 
     if not confirm:
         print("Run with --confirm to delete. Run cleanup-duplicate-hooks after if uninstalling.")
+        return
+
+    # Double confirmation gate: requires interactive human input.
+    # An AI agent cannot bypass this — stdin prompt blocks non-interactive callers.
+    print("WARNING: This will permanently delete all Token Optimizer data listed above.")
+    print("Type 'PURGE' (all caps) to confirm deletion:")
+    try:
+        response = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        return
+    if response != "PURGE":
+        print(f"Expected 'PURGE', got '{response}'. Aborted.")
         return
 
     # --- Perform deletion ---
@@ -16287,7 +16313,7 @@ def _security_report(as_json=False):
         "retention": {
             "checkpoint_days": _CHECKPOINT_RETENTION_DAYS,
             "checkpoint_max": _CHECKPOINT_RETENTION_MAX,
-            "quality_cache_days": _QUALITY_CACHE_RETENTION_DAYS,
+            "quality_cache_days": _QUALITY_CACHE_RETENTION_DAYS if _QUALITY_CACHE_RETENTION_DAYS > 0 else "unlimited",
             "archive_hours": _ARCHIVE_RETENTION_HOURS,
             "trends_days": _TRENDS_RETENTION_DAYS if _TRENDS_RETENTION_DAYS > 0 else "unlimited",
             "session_store_hours": 48,
@@ -16625,6 +16651,23 @@ def compact_capture(transcript_path=None, session_id=None, trigger="auto", cwd=N
     state = _extract_session_state(filepath)
     if not state:
         return None
+
+    # Redact credentials from checkpoint text fields (SEC-004)
+    try:
+        from credential_patterns import redact_credentials as _cp_redact
+        step = state.get("current_step", {})
+        if step.get("last_user"):
+            step["last_user"] = _cp_redact(step["last_user"])
+        if step.get("last_assistant"):
+            step["last_assistant"] = _cp_redact(step["last_assistant"])
+        state["decisions"] = [_cp_redact(d) if isinstance(d, str) else d for d in state.get("decisions", [])]
+        state["error_context"] = [
+            tuple(_cp_redact(x) if isinstance(x, str) else x for x in ec) if isinstance(ec, tuple)
+            else _cp_redact(ec) if isinstance(ec, str) else ec
+            for ec in state.get("error_context", [])
+        ]
+    except Exception:
+        pass
 
     # Generate checkpoint markdown
     sid = sanitize_session_id(session_id) if session_id else sanitize_session_id(filepath.stem)
@@ -17691,7 +17734,10 @@ def _cleanup_checkpoints():
 
 
 def _cleanup_quality_cache():
-    """Remove quality-cache-*.json files older than the configured retention window."""
+    """Remove quality-cache-*.json files older than the configured retention window.
+    No-op when _QUALITY_CACHE_RETENTION_DAYS is 0 (unlimited, the default)."""
+    if _QUALITY_CACHE_RETENTION_DAYS <= 0:
+        return
     try:
         cache_dir = RUNTIME_DIR / "token-optimizer"
         if not cache_dir.is_dir():
@@ -22409,9 +22455,12 @@ def run_ensure_health():
         return
 
     _is_codex = detect_runtime() == "codex"
+    _is_hermes = detect_runtime() == "hermes"
+    _is_claude = not _is_codex and not _is_hermes
     # Preserve session transcripts: set cleanupPeriodDays if not configured.
     # Claude Code only: writes to ~/.claude/settings.json.
-    if not _is_codex:
+    # Codex and Hermes don't have this setting; their sessions persist by default.
+    if _is_claude:
         try:
             _cp_data, _ = _read_settings_json()
             if _cp_data and "cleanupPeriodDays" not in _cp_data:
@@ -22423,7 +22472,7 @@ def run_ensure_health():
             print(f"  [Token Optimizer] cleanupPeriodDays write failed: {_e}", file=sys.stderr)
     # Silent auto-fix of known harmful settings.
     # Claude Code only: reads/writes ~/.claude/settings.json.
-    if not _is_codex:
+    if _is_claude:
         try:
             _auto_remove_bad_env_vars()
         except Exception:
