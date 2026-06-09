@@ -17,6 +17,8 @@ All pricing uses Opus 4 rates ($5/MTok input, $25/MTok output, $0.50/MTok cache-
 
 Per working session (50 turns, 15 tool outputs, 1 compaction), the compound savings across all layers come to **$5.02**. At 30 working sessions per month, that is roughly **$150/month**. Lighter sessions save less; heavier sessions save more. The per-layer breakdowns below show exactly where each dollar comes from.
 
+These numbers are conservative. Structural cleanup compounds across every turn of every future session, and that compounding is not fully captured in the per-category tables (which snapshot a 30-day window). The Token Optimizer dashboard measures your personal before/after session cost directly and will reflect the full compounding effect for your usage pattern.
+
 ## Corpus
 
 | | Count |
@@ -43,6 +45,8 @@ Before any conversation starts, the model loads system prompt, CLAUDE.md, skills
 | Total structural opportunity | 61,227,039 tokens, $105.36 (read + write combined) |
 
 **Accounting tier:** Structural savings are **opportunity** (what would be saved if recommendations are applied), not measured compression events.
+
+**Why structural savings compound.** Unlike compression (which fires once per tool output), structural cleanup saves tokens on *every turn of every session going forward*. A 5,000-token reduction in overhead means 5,000 fewer tokens billed per turn, across every session, for as long as the cleanup persists. In a 50-turn session that is 250,000 fewer tokens. Over a month of sessions it is the single largest savings category. The dashboard's before/after comparison captures this compounding directly: it measures the actual per-session cost reduction, which includes the structural prefix shrinking across turns.
 
 **Cache impact on dollar math:** Structural tokens are re-sent every turn, but after the first turn most of them hit the prompt cache. The token reduction is real regardless. The dollar value depends on what fraction is cached vs. fresh:
 
