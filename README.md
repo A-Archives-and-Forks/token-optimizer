@@ -51,6 +51,20 @@ Works on <strong>Claude Code</strong> (CLI and VS Code), <strong>OpenCode</stron
   <img src="skills/token-optimizer/assets/hero-terminal.svg" alt="Token Optimizer Quick Scan" width="800">
 </p>
 
+## TL;DR
+
+Install the plugin. Most of it runs automatically from that point:
+
+| | What | How |
+|---|---|---|
+| **Once** | Run `/token-optimizer` after install | Scans your setup, finds waste, fixes it for you |
+| **Automatic** | Compression, context transfer, quality scoring, loop detection, checkpoint/restore | Runs in the background on every session, no action needed |
+| **Automatic** | Dashboard | Updates after every session with tokens, dollars, turns, quality grades |
+| **When you want** | `/token-coach` | Analyzes your last 30 days of sessions, tells you where you're efficient and where you're not, helps plan new projects for minimal waste |
+| **When you want** | `/token-optimizer quick` | 10-second health check: context fill, quality score, top issues |
+
+That's it. Install, run the audit once, everything else just works.
+
 ## Install
 
 **Recommended on every platform (macOS, Linux, Windows):**
@@ -302,7 +316,7 @@ Token Optimizer runs as an external process. It doesn't inject always-on instruc
 | **Zero telemetry** | 🟢 | 🟢 | 🟡 Opt-in | 🟡 Varies | 🟢 |
 | **Multi-platform** | 🟢 Claude Code, VS Code, Codex, OpenClaw, OpenCode, Hermes | 🟢 Claude Code, Cursor, Codex, Aider, Copilot | 🟢 14 integrations | 🟢 15 integrations | 🔴 Claude Code only |
 
-> Full benchmark methodology, compound savings analysis, and corpus replay results: **[BENCHMARK.md](BENCHMARK.md)**
+> Run `python3 scripts/benchmark.py` for the fixture suite (62 tests across 10 categories with quality verification) and `python3 scripts/compression_backfill.py` for historical corpus replay.
 
 ---
 
