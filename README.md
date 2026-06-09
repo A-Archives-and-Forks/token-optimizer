@@ -390,7 +390,18 @@ No. Pure Python stdlib on Claude Code and Codex. TypeScript with zero runtime de
 <details>
 <summary>🧰 <strong>Which platforms does it support?</strong></summary>
 
-Claude Code (CLI and VS Code), OpenCode, OpenClaw, Codex, and Hermes today, with native support for each. Codex uses a Python adapter for chat-first status, coaching, dashboard refresh, and fleet scans. Hermes reads from its own `~/.hermes/state.db`.
+Claude Code (CLI and VS Code), OpenCode, OpenClaw, Codex, and Hermes today, with native support for each.
+
+**What each platform gets:**
+
+| Capability | Claude Code / Codex | OpenClaw | OpenCode | Hermes |
+|---|---|---|---|---|
+| Quality scoring | 5 signals | 7 signals (two-stage) | 7 signals (MRCR curves) | 3 signals (delegated) |
+| Output compression | 🟢 Full | 🟢 Native TS | Platform-native | 🟢 Via Python delegation |
+| Continuity + checkpoints | 🟢 | 🟢 | 🟢 | 🟢 |
+| Dashboard + savings | 🟢 | 🟢 | 🟢 | 🟢 (via bridge) |
+
+Quality signal counts differ because each platform targets a different measurement context: Claude Code/Codex measures session-level telemetry, OpenClaw measures run-level outcomes, OpenCode does file-level analysis with per-model degradation curves. The grade scale (S/A/B/C/D/F) is identical everywhere.
 
 Windsurf and Cursor are next on the roadmap.
 </details>

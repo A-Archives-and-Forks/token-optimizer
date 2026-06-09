@@ -36,6 +36,8 @@ All pricing at Opus 4 rates ($5/MTok input, $25/MTok output, $0.50/MTok cache-re
 
 The two corpora are distinct populations, not double-counted. The backfill corpus is larger because it includes historical sessions recovered from file-read logs.
 
+**Data source:** The production numbers in this benchmark come primarily from Claude Code CLI sessions (the author's primary platform). Quality scoring, dashboard, and savings tracking work on all supported platforms, but quality signal counts vary by platform (3 to 7 signals depending on the platform's measurement context). The grade scale (S/A/B/C/D/F) is consistent everywhere.
+
 **Reproducibility:** Your results will differ based on your usage. Every measurement tool ships in the repo so you can regenerate against your own data. See [Running the Benchmarks](#-running-the-benchmarks).
 
 ---
