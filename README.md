@@ -262,7 +262,7 @@ Throughout this README, whenever a feature mentions it's also visible on the das
 
 **Runtime waste**: verbose command output, oversized MCP results, and re-read files that flood your context mid-session. The slice proxy compressors handle.
 
-**Behavioral waste**: the habits that quietly burn tokens. Letting the cache expire, compacting too late, looping on a failing approach, running Opus where Haiku would do. Token Coach flags these and changes how you work.
+**Behavioral waste**: the habits that quietly burn tokens. Letting the cache expire, compacting too late, looping on a failing approach, running Opus where Haiku would do, switching models mid-session and killing your cache. Token Coach analyzes 30 days of your session history to surface patterns no single session reveals: quality trending down, sessions creeping longer, cache hit rates falling, cost per session climbing. It even distinguishes when a cache drop is caused by a model switch (expected) vs. a config change (fixable).
 
 Token Optimizer covers all three. And because it checkpoints your session before compaction fires and restores what the summary dropped, the savings stick instead of vanishing the moment auto-compact kicks in.
 
@@ -277,6 +277,32 @@ Token Optimizer runs as an external process. It doesn't inject always-on instruc
 ### `/context` shows the dashboard light. Token Optimizer opens the hood.
 
 `/context` tells you that your context is 73% full. Token Optimizer tells you which 12K are wasted on skills you never use, flags 47 orphaned MEMORY.md topic files Claude can't see, checkpoints your decisions before compaction destroys them, and gives you a quality score that tracks how much dumber your AI is getting as the session wears on.
+
+### How it compares
+
+|  | Token Optimizer | Headroom | RTK | context-mode | `/context` |
+|---|---|---|---|---|---|
+| **Tool output compression** | 🟢 30+ CLI families, credential-safe, toggleable | 🟢 6 algorithms incl. model-based | 🟢 100+ command filters | 🟢 Sandbox + summary | 🔴 |
+| **First-read file skeletons** | 🟢 Shadow-validated, fail-open, full original retrievable | 🔴 | 🔴 | 🔴 | 🔴 |
+| **Tabular/JSON compression** | 🟢 Value-preserving columnar | 🟢 SmartCrusher | 🔴 | 🟡 Generic summary | 🔴 |
+| **Read dedup and delta diffs** | 🟢 Re-reads serve diff only | 🔴 | 🔴 | 🔴 | 🔴 |
+| **Compaction survival** | 🟢 Progressive checkpoints, restore, tool output digest | 🔴 | 🔴 | 🟡 Session guide only | 🔴 |
+| **Conversation history** | 🟢 Progressive checkpoints + compaction restore | 🔴 | 🔴 | 🟡 Session guide | 🔴 |
+| **Model routing and behavioral coaching** | 🟢 11 detectors, subagent cost breakdown, anti-patterns | 🔴 | 🔴 | 🔴 | 🟡 Basic suggestions |
+| **Historical trend analysis** | 🟢 30-day trends, quality/cost/cache/duration correlation, model-switch detection | 🔴 | 🔴 | 🔴 | 🔴 |
+| **Loop and spin detection** | 🟢 Catches behavioral loops before they burn | 🔴 | 🔴 | 🔴 | 🔴 |
+| **Context quality scoring** | 🟢 6-signal dual-score with grades | 🔴 | 🔴 | 🔴 | 🟡 Capacity % only |
+| **Structural waste audit** | 🟢 Deep per-component (CLAUDE.md, skills, MCP, memory) | 🔴 | 🔴 | 🔴 | 🟡 Summary only |
+| **CLAUDE.md and MEMORY.md health** | 🟢 8 auditors + attention-curve scoring | 🔴 | 🔴 | 🔴 | 🔴 |
+| **Measures if compression helped** | 🟢 Local telemetry, before/after tokens, dollar savings | 🔴 | 🟡 `rtk gain` (token counts only) | 🔴 | 🔴 |
+| **Fleet-level cross-agent analysis** | 🟢 | 🔴 | 🔴 | 🔴 | 🔴 |
+| **Cache-safe** | 🟢 Never modifies existing context prefix | 🟡 Proxy mode rewrites in-flight | 🟢 Pre-shell only | 🟡 MCP overhead | 🟢 |
+| **Zero baseline context overhead** | 🟢 External process, no context injection | 🔴 Injects instructions | 🟢 Shell-level only | 🔴 MCP server overhead | 🟢 Native |
+| **Zero runtime dependencies** | 🟢 Pure stdlib (Python/TypeScript) | 🟡 Python + Rust + optional model | 🟢 Single Rust binary | 🟡 SQLite adapter required | 🟢 N/A |
+| **Zero telemetry** | 🟢 | 🟢 | 🟡 Opt-in | 🟡 Varies | 🟢 |
+| **Multi-platform** | 🟢 Claude Code, VS Code, Codex, OpenClaw, OpenCode, Hermes | 🟢 Claude Code, Cursor, Codex, Aider, Copilot | 🟢 14 integrations | 🟢 15 integrations | 🔴 Claude Code only |
+
+> Full benchmark methodology, compound savings analysis, and corpus replay results: **[BENCHMARK.md](BENCHMARK.md)**
 
 ---
 
@@ -655,9 +681,24 @@ Token Optimizer is not just reactive. It's also proactive.
 > /token-coach
 ```
 
-Tell it your goal. Get back specific, prioritized fixes with exact token savings. Detects 8 named anti-patterns (The Kitchen Sink, The Hoarder, The Monolith, and more) and recommends multi-agent design patterns that actually save context.
+Tell it your goal. Get back specific, prioritized fixes with exact token savings.
 
-**Building a new project?** Run `/token-coach` before writing your first `CLAUDE.md` or Codex `AGENTS.md`. Start with a clean, optimized setup instead of accumulating waste for months and fixing it later.
+Token Coach works at two levels. **Static analysis** audits your current setup: 8 named anti-patterns (The Kitchen Sink, The Hoarder, The Monolith, and more), multi-agent design patterns, structural bloat. **Historical analysis** reads 30 days of your session data and surfaces what no single session can show:
+
+| Pattern | What it detects |
+|---|---|
+| Quality drift | Average quality dropping week over week |
+| Session duration creep | Sessions getting longer, filling context faster |
+| Cache degradation | Cache hit rate falling (and whether model switches are the cause) |
+| Grade distribution | Too many D-grade sessions piling up |
+| Cost awareness | Cost per session climbing, with dollar-grounded routing advice |
+| Duration-quality correlation | Short sessions scoring higher, suggesting you should break up long ones |
+| Compression gap | Shadow-only savings far exceeding active compression (untapped opportunity) |
+| Model switching | Frequent mid-session model switches invalidating the prompt cache |
+
+Every insight is grounded in your actual numbers, not generic advice. "Your short sessions score 68 vs 60 for long ones" hits differently than "consider shorter sessions."
+
+**Building a new project?** Run `/token-coach` before writing your first `CLAUDE.md` or Codex `AGENTS.md`. Start clean instead of accumulating waste for months and fixing it later.
 
 ### Waste Detectors
 
@@ -722,7 +763,7 @@ Hover help on every column explains `Cache`, `TTL`, `Pacing`, `Cache R`, and `Ca
 | `kill-stale` | **"Clean up zombies."** Terminate headless sessions running 12+ hours. |
 | `git-context` | **"What files matter right now?"** Test companions, co-changed files, import chains for your current git diff. |
 | `trends` | **"What's actually being used?"** Skill adoption, model mix, overhead trajectory over time. |
-| `coach` | **"Where do I start?"** Health score with earned vs neutral signals. Detects anti-patterns. |
+| `coach` | **"Where do I start?"** Health score, 8 named anti-patterns, and 30-day historical trend analysis: quality drift, cost per session, cache degradation, model-switch impact, session duration correlation. |
 | `memory-review` | **"Is my MEMORY.md broken?"** Structural audit: orphaned files, broken links, invisible entries past line 200, duplicate rules. |
 | `dashboard` | **"Show me everything."** Interactive HTML dashboard with all analytics and health cards. |
 | `savings` | **"How much have I saved?"** Cumulative dollar savings from optimizations, checkpoint restores, and tool-output replacements. |
@@ -732,41 +773,6 @@ Hover help on every column explains `Cache`, `TTL`, `Pacing`, `Cache R`, and `Ca
 | `/token-optimizer` | **"Fix it for me."** Interactive audit with 6 parallel agents. Guided fixes with diffs and backups. |
 
 ---
-
-## How It Compares
-
-|  | Token Optimizer | Headroom | RTK | context-mode | `/context` |
-|---|---|---|---|---|---|
-| **Tool output compression** | 🟢 30+ CLI families, credential-safe, toggleable | 🟢 6 algorithms incl. model-based | 🟢 100+ command filters | 🟢 Sandbox + summary | 🔴 |
-| **First-read file skeletons** | 🟢 Shadow-validated, fail-open, full original retrievable | 🔴 | 🔴 | 🔴 | 🔴 |
-| **Tabular/JSON compression** | 🟢 Value-preserving columnar | 🟢 SmartCrusher | 🔴 | 🟡 Generic summary | 🔴 |
-| **Read dedup and delta diffs** | 🟢 Re-reads serve diff only | 🔴 | 🔴 | 🔴 | 🔴 |
-| **Compaction survival** | 🟢 Progressive checkpoints, restore, tool output digest | 🔴 | 🔴 | 🟡 Session guide only | 🔴 |
-| **Conversation history** | 🟢 Progressive checkpoints + compaction restore | 🔴 Doesn't touch it | 🔴 Doesn't touch it | 🟡 Session guide | 🔴 |
-| **Model routing and behavioral coaching** | 🟢 11 detectors, subagent cost breakdown, anti-patterns | 🔴 | 🔴 | 🔴 | 🟡 Basic suggestions |
-| **Loop and spin detection** | 🟢 Catches behavioral loops before they burn | 🔴 | 🔴 | 🔴 | 🔴 |
-| **Context quality scoring** | 🟢 6-signal dual-score with grades | 🔴 | 🔴 | 🔴 | 🟡 Capacity % only |
-| **Structural waste audit** | 🟢 Deep per-component (CLAUDE.md, skills, MCP, memory) | 🔴 | 🔴 | 🔴 | 🟡 Summary only |
-| **CLAUDE.md and MEMORY.md health** | 🟢 8 auditors + attention-curve scoring | 🔴 | 🔴 | 🔴 | 🔴 |
-| **Measures if compression helped** | 🟢 Local telemetry, before/after tokens, dollar savings | 🔴 | 🟡 `rtk gain` (token counts only) | 🔴 | 🔴 |
-| **Fleet-level cross-agent analysis** | 🟢 | 🔴 | 🔴 | 🔴 | 🔴 |
-| **Cache-safe** | 🟢 Never modifies existing context prefix | 🟡 Proxy mode rewrites in-flight | 🟢 Pre-shell only | 🟡 MCP overhead | 🟢 |
-| **Zero baseline context overhead** | 🟢 External process, no context injection | 🔴 Injects instructions | 🟢 Shell-level only | 🔴 MCP server overhead | 🟢 Native |
-| **Zero runtime dependencies** | 🟢 Pure stdlib (Python/TypeScript) | 🟡 Python + Rust + optional model | 🟢 Single Rust binary | 🟡 SQLite adapter required | 🟢 N/A |
-| **Zero telemetry** | 🟢 | 🟢 | 🟡 Opt-in | 🟡 Varies | 🟢 |
-| **Multi-platform** | 🟢 Claude Code, VS Code, Codex, OpenClaw, OpenCode, Hermes | 🟢 Claude Code, Cursor, Codex, Aider, Copilot | 🟢 14 integrations | 🟢 15 integrations | 🔴 Claude Code only |
-
-### Reading the claims
-
-Every tool in this space quotes compression ratios on its best-case inputs. Headroom's "60-95%" is measured on repetitive JSON arrays. RTK's "60-90%" is on commands like `git status` and `tree`. context-mode's "98%" is on raw Playwright snapshots. Those numbers are real for those specific inputs, but they only cover tool outputs, which represent roughly 15-25% of what you actually burn in a long coding session. The rest (conversation history, system prompts, skills, memory, compaction loss) goes untouched.
-
-Token Optimizer compresses tool outputs too, but also covers the other 75-85%: structural waste, read deduplication, model routing, behavioral coaching, compaction survival, and context quality. And it measures whether the compression actually helped on your real sessions, not on cherry-picked benchmarks.
-
-### Cache safety matters more than compression ratios
-
-Some tools reduce tokens by modifying or removing blocks already in your conversation. That breaks the prompt cache. When the stable prefix changes, every subsequent turn re-sends the full prefix at uncached input rates instead of the heavily discounted cache-read rate. The "savings" from removing a few thousand tokens can get wiped out by cache invalidation cost on the next 50 messages.
-
-Token Optimizer never modifies content already in your context. Structural optimization runs between sessions. Active Compression works on new content entering your window, or on the compaction boundary. Your cache prefix stays intact.
 
 ---
 

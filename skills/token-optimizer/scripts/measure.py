@@ -5351,6 +5351,19 @@ def _run_session_end_flush_worker(args):
                 compact_capture(trigger=flush_trigger, backfill_tools=True)
             except Exception:
                 pass
+            # Data-retention enforcement (enterprise compliance)
+            try:
+                _cleanup_quality_cache()
+            except Exception:
+                pass
+            try:
+                _rotate_checkpoint_events()
+            except Exception:
+                pass
+            try:
+                _prune_trends_db()
+            except Exception:
+                pass
     except _HookTimeout:
         pass
     finally:
@@ -6391,6 +6404,199 @@ def generate_coach_data(focus=None, components=None, trends=None):
     except ImportError:
         pass
 
+    # --- Historical Trend Analysis (from trends.db) ---
+    history = {}
+    if trends and trends.get("daily"):
+        daily = trends["daily"]
+        quality_trend = trends.get("quality_trend", [])
+
+        # Collect recent (7d) vs older sessions
+        recent_sessions = []
+        older_sessions = []
+        for i, d in enumerate(daily):
+            details = d.get("session_details", [])
+            if i < 7:
+                recent_sessions.extend(details)
+            else:
+                older_sessions.extend(details)
+
+        # 1. Quality trend: detect declining quality
+        if len(quality_trend) >= 10:
+            recent_7d = quality_trend[-7:]
+            prior = quality_trend[:-7]
+            if recent_7d and prior:
+                recent_avg_q = sum(d["avg_quality"] for d in recent_7d) / len(recent_7d)
+                prior_avg_q = sum(d["avg_quality"] for d in prior) / len(prior)
+                history["quality_recent_avg"] = round(recent_avg_q, 1)
+                history["quality_prior_avg"] = round(prior_avg_q, 1)
+                delta = prior_avg_q - recent_avg_q
+                if delta > 10:
+                    patterns_bad.append({
+                        "name": "Quality Declining",
+                        "severity": "high",
+                        "detail": f"Average quality dropped from {prior_avg_q:.0f} to {recent_avg_q:.0f} over the last week",
+                        "fix": "Check for new MCP servers, growing CLAUDE.md, or longer sessions causing context fill",
+                        "savings": "Quality recovery prevents retry waste (typically 5,000-20,000 tokens per failed turn)",
+                    })
+                    score -= 8
+                elif delta > 5:
+                    patterns_bad.append({
+                        "name": "Quality Drifting Down",
+                        "severity": "low",
+                        "detail": f"Quality trending from {prior_avg_q:.0f} to {recent_avg_q:.0f}",
+                        "fix": "Monitor for another week; consider proactive /compact in longer sessions",
+                        "savings": "Preventive",
+                    })
+                    score -= 3
+
+        # 2. Session duration creep
+        if recent_sessions and older_sessions:
+            recent_durs = [s.get("duration_minutes", 0) for s in recent_sessions if s.get("duration_minutes")]
+            older_durs = [s.get("duration_minutes", 0) for s in older_sessions if s.get("duration_minutes")]
+            if recent_durs and older_durs:
+                recent_avg_dur = sum(recent_durs) / len(recent_durs)
+                older_avg_dur = sum(older_durs) / len(older_durs)
+                history["duration_recent_avg"] = round(recent_avg_dur, 1)
+                history["duration_prior_avg"] = round(older_avg_dur, 1)
+                if recent_avg_dur > older_avg_dur * 1.5 and recent_avg_dur > 60:
+                    patterns_bad.append({
+                        "name": "Session Duration Creep",
+                        "severity": "medium",
+                        "detail": f"Sessions averaging {recent_avg_dur:.0f} min (was {older_avg_dur:.0f} min). Longer sessions fill context faster",
+                        "fix": "Use /compact proactively around the midpoint. Break large tasks into focused sessions",
+                        "savings": f"~{int(recent_avg_dur - older_avg_dur) * 200:,} fewer tokens of context bloat per session",
+                    })
+                    score -= 5
+
+        # 3. Cache hit rate degradation (model-switch aware)
+        multi_model_recent = sum(1 for s in recent_sessions if s.get("model_count", 1) > 1)
+        multi_model_pct = (multi_model_recent / len(recent_sessions) * 100) if recent_sessions else 0
+        history["multi_model_session_pct"] = round(multi_model_pct, 1)
+        if recent_sessions and older_sessions:
+            recent_chr = [s.get("cache_hit_rate", 0) for s in recent_sessions if s.get("cache_hit_rate") is not None]
+            older_chr = [s.get("cache_hit_rate", 0) for s in older_sessions if s.get("cache_hit_rate") is not None]
+            if recent_chr and older_chr:
+                recent_avg_chr = sum(recent_chr) / len(recent_chr)
+                older_avg_chr = sum(older_chr) / len(older_chr)
+                history["cache_hit_recent_avg"] = round(recent_avg_chr, 3)
+                history["cache_hit_prior_avg"] = round(older_avg_chr, 3)
+                if older_avg_chr - recent_avg_chr > 0.10 and older_avg_chr > 0.4:
+                    if multi_model_pct > 25:
+                        patterns_bad.append({
+                            "name": "Cache Hit Rate Dropping (Model Switches)",
+                            "severity": "low",
+                            "detail": f"Cache hit rate fell from {older_avg_chr:.0%} to {recent_avg_chr:.0%}, but {multi_model_pct:.0f}% of recent sessions switched models mid-session. Model switches invalidate the prompt cache (expected behavior)",
+                            "fix": "Pick one model per session when possible. Use /model at session start, not mid-conversation. Subagent model routing (Haiku/Sonnet) is fine, it runs in separate contexts",
+                            "savings": "Avoiding mid-session model switches can recover 10-20% cache hit rate",
+                        })
+                        score -= 2
+                    else:
+                        patterns_bad.append({
+                            "name": "Cache Hit Rate Dropping",
+                            "severity": "medium",
+                            "detail": f"Cache hit rate fell from {older_avg_chr:.0%} to {recent_avg_chr:.0%}. Lower cache = higher cost per turn",
+                            "fix": "Check for new MCP servers or CLAUDE.md changes that shift the stable prefix. Avoid tools that rewrite existing context",
+                            "savings": "Each 10% cache drop costs ~$0.50/session at Opus rates",
+                        })
+                        score -= 5
+
+        # 4. Grade distribution: too many low-grade sessions
+        all_grades = [s.get("quality_grade") for s in recent_sessions if s.get("quality_grade")]
+        if len(all_grades) >= 5:
+            d_or_worse = sum(1 for g in all_grades if g in ("D", "F"))
+            d_pct = d_or_worse / len(all_grades) * 100
+            history["grade_d_pct_recent"] = round(d_pct, 1)
+            history["grade_distribution"] = {}
+            for g in all_grades:
+                history["grade_distribution"][g] = history["grade_distribution"].get(g, 0) + 1
+            if d_pct > 50:
+                patterns_bad.append({
+                    "name": "Majority Low-Grade Sessions",
+                    "severity": "high",
+                    "detail": f"{d_pct:.0f}% of recent sessions scored D or below",
+                    "fix": "Run /token-optimizer for a full audit. Common causes: bloated tool outputs, stale reads, long sessions without compaction",
+                    "savings": "Improving average grade from D to B typically saves 15-30% of session cost",
+                })
+                score -= 8
+            elif d_pct > 30:
+                patterns_bad.append({
+                    "name": "Many Low-Grade Sessions",
+                    "severity": "medium",
+                    "detail": f"{d_pct:.0f}% of recent sessions scored D or below",
+                    "fix": "Focus on the longest sessions first. Quality degrades fastest after context passes 60%",
+                    "savings": "Each grade improvement saves ~5-10% per session",
+                })
+                score -= 4
+
+        # 5. Cost awareness
+        if trends.get("total_cost_usd"):
+            total_cost = trends["total_cost_usd"]
+            period = trends.get("period_days", 30)
+            session_count_t = trends.get("session_count", 1)
+            cost_per_session = total_cost / max(session_count_t, 1)
+            history["total_cost_usd"] = round(total_cost, 2)
+            history["cost_per_session_usd"] = round(cost_per_session, 4)
+            history["sessions_in_period"] = session_count_t
+            if cost_per_session > 2.0:
+                patterns_bad.append({
+                    "name": "High Cost Per Session",
+                    "severity": "medium",
+                    "detail": f"${cost_per_session:.2f}/session average (${total_cost:.2f} across {session_count_t} sessions in {period} days)",
+                    "fix": "Route simple tasks to Sonnet/Haiku. Use /compact in long sessions. Archive unused skills",
+                    "savings": f"~${cost_per_session * 0.3:.2f}/session with routing + compression",
+                })
+                score -= 3
+
+        # 6. Optimal session length hint (correlate duration with quality)
+        dur_quality_pairs = [
+            (s.get("duration_minutes", 0), s.get("quality_score", 0))
+            for s in recent_sessions
+            if s.get("duration_minutes") and s.get("quality_score")
+        ]
+        if len(dur_quality_pairs) >= 10:
+            short_sessions = [(d, q) for d, q in dur_quality_pairs if d < 60]
+            long_sessions = [(d, q) for d, q in dur_quality_pairs if d >= 120]
+            if short_sessions and long_sessions:
+                short_avg_q = sum(q for _, q in short_sessions) / len(short_sessions)
+                long_avg_q = sum(q for _, q in long_sessions) / len(long_sessions)
+                history["quality_short_sessions"] = round(short_avg_q, 1)
+                history["quality_long_sessions"] = round(long_avg_q, 1)
+                if short_avg_q - long_avg_q > 15:
+                    history["optimal_session_hint"] = "Sessions under 60 min score significantly higher. Consider breaking long tasks into focused sessions"
+
+        # 7. Compression effectiveness (savings being left on the table)
+        try:
+            coverage = _get_compression_coverage(days=30)
+            if coverage and coverage.get("available"):
+                measured_tiers = coverage.get("tiers", {}).get("measured", [])
+                opportunity_tiers = coverage.get("tiers", {}).get("opportunity", [])
+                measured_saved = sum(f.get("tokens_saved", 0) for f in measured_tiers)
+                opportunity_tokens = sum(f.get("tokens_saved", 0) for f in opportunity_tiers)
+                history["compression_measured_saved"] = measured_saved
+                history["compression_opportunity_tokens"] = opportunity_tokens
+                if opportunity_tokens > measured_saved * 2 and opportunity_tokens > 100_000:
+                    patterns_bad.append({
+                        "name": "Compression Opportunity Gap",
+                        "severity": "low",
+                        "detail": f"{opportunity_tokens:,} tokens of shadow-only savings vs {measured_saved:,} measured. Active compression could save more",
+                        "fix": "First-read skeletons and broader bash coverage can close this gap as cohorts promote",
+                        "savings": f"~{opportunity_tokens:,} additional tokens recoverable",
+                    })
+                    score -= 2
+        except Exception:
+            pass
+
+        # 8. Frequent model switching (independent of cache impact)
+        if multi_model_pct > 40 and len(recent_sessions) >= 5:
+            patterns_bad.append({
+                "name": "Frequent Model Switching",
+                "severity": "medium",
+                "detail": f"{multi_model_pct:.0f}% of recent sessions used multiple models. Each switch invalidates the prompt cache and can cause context quality drops",
+                "fix": "Set your preferred model at session start with /model. Route subagents to cheaper models via agent() opts instead of switching the main session model",
+                "savings": "Consistent model usage improves cache hit rate by 10-20% and avoids quality grade drops",
+            })
+            score -= 4
+
     # Clamp score
     score = max(0, min(100, score))
 
@@ -6423,6 +6629,7 @@ def generate_coach_data(focus=None, components=None, trends=None):
         "questions": questions,
         "health_score": score,
         "focus_area": focus,
+        "history": history,
     }
 
     # Add compaction timing guide when relevant
@@ -9028,6 +9235,7 @@ def _query_trends_db(conn, days):
             "cost_priced_tokens": session_priced_tokens,
             "cost_unpriced_tokens": session_unpriced_tokens,
             "model": _normalize_model_name(dom_model) or dom_model,
+            "model_count": len(mu) if mu else 1,
         }
         # Prefer stored quality score (persisted during collect), fall back to recomputation
         if sr["quality_score"] is not None:
@@ -12850,6 +13058,11 @@ _CHECKPOINT_MAX_FILES = _int_env("TOKEN_OPTIMIZER_CHECKPOINT_FILES", 10)
 _CHECKPOINT_RETENTION_DAYS = _int_env("TOKEN_OPTIMIZER_CHECKPOINT_RETENTION_DAYS", 7)
 _CHECKPOINT_RETENTION_MAX = _int_env("TOKEN_OPTIMIZER_CHECKPOINT_RETENTION_MAX", 50)
 _RELEVANCE_THRESHOLD = _float_env("TOKEN_OPTIMIZER_RELEVANCE_THRESHOLD", 0.3)
+# Data-retention controls (enterprise compliance)
+_QUALITY_CACHE_RETENTION_DAYS = _int_env("TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS", 7)
+_CHECKPOINT_EVENT_MAX = _int_env("TOKEN_OPTIMIZER_CHECKPOINT_EVENT_MAX", 1000)
+_TRENDS_RETENTION_DAYS = _int_env("TOKEN_OPTIMIZER_TRENDS_RETENTION_DAYS", 0)  # 0 = unlimited
+_ARCHIVE_RETENTION_HOURS = _int_env("TOKEN_OPTIMIZER_ARCHIVE_RETENTION_HOURS", 24)
 
 # Progressive checkpoint thresholds (% fill, fires once each per session)
 _PROGRESSIVE_BANDS = [20, 35, 50, 65, 80]
@@ -15752,8 +15965,8 @@ def archive_cleanup(session_id=None):
             print(f"[Tool Archive] No archive found for session {sid}.")
         return
 
-    # Clean up archives older than 24 hours
-    cutoff = time.time() - 86400
+    # Clean up archives older than the configured retention window
+    cutoff = time.time() - (_ARCHIVE_RETENTION_HOURS * 3600)
     for sd in list(archive_root.iterdir()):
         if sd.is_symlink() or not sd.is_dir():
             continue
@@ -15785,9 +15998,9 @@ def archive_cleanup(session_id=None):
             cleaned_chars += chars
 
     if cleaned:
-        print(f"[Tool Archive] Cleaned {cleaned} archived results ({cleaned_chars:,} chars) older than 24h.")
+        print(f"[Tool Archive] Cleaned {cleaned} archived results ({cleaned_chars:,} chars) older than {_ARCHIVE_RETENTION_HOURS}h.")
     else:
-        print("[Tool Archive] No stale archives to clean (all < 24h old).")
+        print(f"[Tool Archive] No stale archives to clean (all < {_ARCHIVE_RETENTION_HOURS}h old).")
 
     # Remove empty archive root if nothing left
     try:
@@ -15796,6 +16009,365 @@ def archive_cleanup(session_id=None):
             archive_root.rmdir()
     except OSError:
         pass
+
+
+def _purge_all_data(confirm=False, force=False):
+    """Delete all Token Optimizer local data across all supported platforms.
+
+    Enterprise compliance helper: one command removes every file Token Optimizer
+    owns.  Transcripts, settings.json, and hook registrations are never touched.
+
+    Dry-run by default; pass confirm=True to actually delete.
+    Pass force=True to stop a running dashboard daemon automatically.
+    """
+    import shutil
+    from runtime_env import (
+        claude_home as _ch,
+        codex_home as _codex,
+        hermes_home as _hermes,
+        opencode_data_home as _opencode,
+    )
+
+    def _dir_size_bytes(p):
+        """Return total size in bytes of all regular files under p."""
+        try:
+            return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        except OSError:
+            return 0
+
+    def _fmt_size(n):
+        if n >= 1_048_576:
+            return f"{n / 1_048_576:.1f} MB"
+        if n >= 1_024:
+            return f"{n / 1_024:.1f} KB"
+        return f"{n} B"
+
+    # --- Discover all candidate directories ---
+    # Each entry: (Path, human_label, [detail lines])
+    candidates = []
+
+    platform_homes = [
+        (_ch(),       "~/.claude"),
+        (_codex(),    "~/.codex"),
+        (_hermes(),   "~/.hermes"),
+        (_opencode(), "~/.local/share/opencode"),
+    ]
+
+    for home, label in platform_homes:
+        # Primary data directory
+        to_dir = home / "token-optimizer"
+        if to_dir.exists() and not to_dir.is_symlink():
+            details = []
+            try:
+                for child in sorted(to_dir.iterdir()):
+                    details.append(f"    - {child.name}")
+            except OSError:
+                pass
+            candidates.append((to_dir, f"{label}/token-optimizer/", details))
+
+        # Legacy backup directory
+        backup_dir = home / "_backups" / "token-optimizer"
+        if backup_dir.exists() and not backup_dir.is_symlink():
+            candidates.append((backup_dir, f"{label}/_backups/token-optimizer/", []))
+
+    # Plugin data directory (trends.db, session-store/, tool-archive/, dashboard, logs, daemon)
+    if _RESOLVED_PLUGIN_DATA is not None:
+        plugin_data = _RESOLVED_PLUGIN_DATA / "data"
+        if plugin_data.exists() and not plugin_data.is_symlink():
+            details = []
+            try:
+                for child in sorted(plugin_data.iterdir()):
+                    details.append(f"    - {child.name}")
+            except OSError:
+                pass
+            # Build a shortened display path relative to home
+            try:
+                display = "~/" + str(plugin_data.relative_to(Path.home()))
+            except ValueError:
+                display = str(plugin_data)
+            candidates.append((plugin_data, display + "/", details))
+
+    # --- Daemon guard ---
+    pid_file = DAEMON_LOG_DIR / "daemon.pid"
+    running_pid = None
+    if pid_file.exists():
+        try:
+            raw = pid_file.read_text(encoding="utf-8").strip()
+            candidate_pid = int(raw)
+            try:
+                os.kill(candidate_pid, 0)
+                running_pid = candidate_pid
+            except OSError:
+                pass  # process not alive; PID file is stale
+        except (OSError, ValueError):
+            pass
+
+    if running_pid is not None and not force:
+        print(f"WARNING: Dashboard daemon is running (PID {running_pid}). Stop it first with:")
+        print("  python3 measure.py kill-stale")
+        print("Or re-run with --force to stop it automatically.")
+        return
+
+    if running_pid is not None and force:
+        import signal as _signal
+        try:
+            os.kill(running_pid, _signal.SIGTERM)
+            print(f"[Token Optimizer] Stopped dashboard daemon (PID {running_pid}).")
+        except (ProcessLookupError, PermissionError, OSError) as e:
+            print(f"[Token Optimizer] Warning: could not stop daemon PID {running_pid}: {e}")
+
+    # --- Print summary ---
+    print("Token Optimizer Data Purge")
+    print("==========================")
+    print()
+
+    if not candidates:
+        print("Nothing found. Token Optimizer has no local data to remove.")
+        return
+
+    total_bytes = sum(_dir_size_bytes(p) for p, _, _ in candidates)
+
+    if confirm:
+        print(
+            f"Deleting {len(candidates)} director{'y' if len(candidates) == 1 else 'ies'}"
+            f" ({_fmt_size(total_bytes)} total):\n"
+        )
+    else:
+        print(
+            f"The following {'directory' if len(candidates) == 1 else 'directories'} will be deleted"
+            f" ({_fmt_size(total_bytes)} total):\n"
+        )
+
+    for path, label, details in candidates:
+        size = _dir_size_bytes(path)
+        print(f"  {label} ({_fmt_size(size)})")
+        for d in details[:8]:  # cap detail lines so output stays readable
+            print(d)
+        if len(details) > 8:
+            print(f"    ... and {len(details) - 8} more items")
+
+    print()
+    print("NOT deleted (belongs to host platform):")
+    print("  - Claude Code transcripts (~/.claude/projects/*/sessions/)")
+    print("  - settings.json hook registrations")
+    print()
+
+    if not confirm:
+        print("Run with --confirm to delete. Run cleanup-duplicate-hooks after if uninstalling.")
+        return
+
+    # --- Perform deletion ---
+    deleted = 0
+    errors = 0
+    for path, label, _ in candidates:
+        try:
+            if path.is_symlink():
+                print(f"  Skipped (symlink): {label}")
+                continue
+            shutil.rmtree(str(path))
+            print(f"  Deleted: {label}")
+            deleted += 1
+        except OSError as e:
+            print(f"  Error deleting {label}: {e}")
+            errors += 1
+
+    print()
+    if errors == 0:
+        print(
+            f"Purge complete. {deleted} director{'y' if deleted == 1 else 'ies'} removed"
+            f" ({_fmt_size(total_bytes)})."
+        )
+        print("Tip: Run 'python3 measure.py cleanup-duplicate-hooks' if you are uninstalling.")
+    else:
+        print(
+            f"Purge finished with {errors} error(s)."
+            f" {deleted} director{'y' if deleted == 1 else 'ies'} removed."
+        )
+
+
+# ========== Security Report ==========
+
+def _security_report(as_json=False):
+    """Generate a self-assessment security report for enterprise IT."""
+    from runtime_env import detect_runtime, runtime_name_for_humans
+    try:
+        from credential_patterns import CREDENTIAL_PATTERNS
+        cred_count = len(CREDENTIAL_PATTERNS)
+        cred_types = [label for label, _ in CREDENTIAL_PATTERNS]
+    except ImportError:
+        cred_count = 0
+        cred_types = []
+
+    runtime = detect_runtime()
+    runtime_label = runtime_name_for_humans()
+
+    def _dir_info(p):
+        if not p.exists() or p.is_symlink():
+            return {"exists": False, "size_bytes": 0, "permissions": None}
+        try:
+            size = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        except OSError:
+            size = 0
+        try:
+            perms = oct(p.stat().st_mode)[-3:]
+        except OSError:
+            perms = "???"
+        return {"exists": True, "size_bytes": size, "permissions": perms}
+
+    def _file_info(p):
+        if not p.exists() or p.is_symlink():
+            return {"exists": False, "size_bytes": 0, "permissions": None, "mtime": None}
+        try:
+            st = p.stat()
+            return {
+                "exists": True,
+                "size_bytes": st.st_size,
+                "permissions": oct(st.st_mode)[-3:],
+                "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(),
+            }
+        except OSError:
+            return {"exists": True, "size_bytes": 0, "permissions": "???", "mtime": None}
+
+    checkpoint_dir = RUNTIME_DIR / "token-optimizer" / "checkpoints"
+    quality_cache_dir = RUNTIME_DIR / "token-optimizer"
+    events_file = RUNTIME_DIR / "token-optimizer" / "checkpoint-events.jsonl"
+    config_file = CONFIG_DIR / "config.json"
+
+    stores = {
+        "trends_db": _file_info(SNAPSHOT_DIR / "trends.db"),
+        "session_store_dir": _dir_info(SNAPSHOT_DIR / "session-store"),
+        "tool_archive_dir": _dir_info(SNAPSHOT_DIR / "tool-archive"),
+        "checkpoint_dir": _dir_info(checkpoint_dir),
+        "quality_cache_dir": _dir_info(quality_cache_dir),
+        "dashboard_html": _file_info(SNAPSHOT_DIR / "dashboard.html"),
+        "daemon_token": _file_info(DAEMON_TOKEN_PATH),
+        "daemon_logs": _dir_info(DAEMON_LOG_DIR),
+        "config": _file_info(config_file),
+        "checkpoint_events": _file_info(events_file),
+    }
+
+    consent_shown = _read_config_flag("enterprise_consent_shown", False)
+    v5_shown = _read_config_flag("v5_welcome_shown", False)
+
+    hooks_json_path = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", "")) / "hooks" / "hooks.json" if os.environ.get("CLAUDE_PLUGIN_ROOT") else None
+    hooks_list = []
+    if hooks_json_path and hooks_json_path.exists():
+        try:
+            hooks_list = json.loads(hooks_json_path.read_text())
+        except Exception:
+            pass
+
+    cleanup_period = None
+    try:
+        settings_path = RUNTIME_DIR / "settings.json"
+        if settings_path.exists():
+            settings = json.loads(settings_path.read_text())
+            cleanup_period = settings.get("cleanupPeriodDays")
+    except Exception:
+        pass
+
+    daemon_pid = None
+    daemon_running = False
+    pid_file = DAEMON_LOG_DIR / "daemon.pid"
+    if pid_file.exists():
+        try:
+            daemon_pid = int(pid_file.read_text().strip())
+            os.kill(daemon_pid, 0)
+            daemon_running = True
+        except (ValueError, OSError):
+            pass
+
+    report = {
+        "report_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "token_optimizer_version": TOKEN_OPTIMIZER_VERSION,
+        "runtime": {"name": runtime, "label": runtime_label, "home": str(RUNTIME_DIR), "plugin_data": str(SNAPSHOT_DIR)},
+        "consent": {"enterprise_consent_shown": consent_shown, "v5_welcome_shown": v5_shown},
+        "data_stores": stores,
+        "retention": {
+            "checkpoint_days": _CHECKPOINT_RETENTION_DAYS,
+            "checkpoint_max": _CHECKPOINT_RETENTION_MAX,
+            "quality_cache_days": _QUALITY_CACHE_RETENTION_DAYS,
+            "archive_hours": _ARCHIVE_RETENTION_HOURS,
+            "trends_days": _TRENDS_RETENTION_DAYS if _TRENDS_RETENTION_DAYS > 0 else "unlimited",
+            "session_store_hours": 48,
+            "checkpoint_event_max": _CHECKPOINT_EVENT_MAX,
+        },
+        "credential_scanning": {"pattern_count": cred_count, "types": cred_types},
+        "hooks": {"count": len(hooks_list), "source": str(hooks_json_path) if hooks_json_path else None},
+        "dashboard": {"daemon_pid": daemon_pid, "daemon_running": daemon_running, "token_file_exists": DAEMON_TOKEN_PATH.exists(), "token_file_permissions": _file_info(DAEMON_TOKEN_PATH).get("permissions"), "bind_address": "127.0.0.1"},
+        "transcript_preservation": {"cleanup_period_days": cleanup_period, "note": "Intentional: preserves transcripts for trend analysis. Transcripts are host platform data."},
+    }
+
+    if as_json:
+        print(json.dumps(report, indent=2, default=str))
+        return
+
+    print(f"Token Optimizer Security Report")
+    print(f"{'=' * 40}")
+    print(f"Generated: {report['generated_at']}")
+    print(f"Version: {TOKEN_OPTIMIZER_VERSION}")
+    print()
+
+    print(f"1. RUNTIME ENVIRONMENT")
+    print(f"   Platform: {runtime_label} ({runtime})")
+    print(f"   Runtime home: {RUNTIME_DIR}")
+    print(f"   Plugin data: {SNAPSHOT_DIR}")
+    print()
+
+    print(f"2. CONSENT STATUS")
+    print(f"   Enterprise consent: {'GRANTED' if consent_shown else 'NOT GRANTED'}")
+    print(f"   V5 welcome shown: {'yes' if v5_shown else 'no'}")
+    print()
+
+    print(f"3. DATA STORES")
+    for name, info in stores.items():
+        status = "EXISTS" if info.get("exists") else "ABSENT"
+        perms = info.get("permissions", "N/A")
+        size = info.get("size_bytes", 0)
+        size_str = f"{size / 1024:.1f} KB" if size < 1048576 else f"{size / 1048576:.1f} MB"
+        print(f"   {name}: {status} | {perms} | {size_str}")
+    print()
+
+    print(f"4. RETENTION CONFIGURATION")
+    ret = report["retention"]
+    print(f"   Checkpoints: {ret['checkpoint_days']} days / max {ret['checkpoint_max']} files")
+    print(f"   Quality cache: {ret['quality_cache_days']} days")
+    print(f"   Tool archives: {ret['archive_hours']} hours")
+    print(f"   Trends DB: {ret['trends_days']}")
+    print(f"   Session stores: {ret['session_store_hours']} hours")
+    print(f"   Checkpoint events: max {ret['checkpoint_event_max']} entries")
+    print()
+
+    print(f"5. HOOK CONFIGURATION")
+    print(f"   Hooks registered: {len(hooks_list)}")
+    if hooks_json_path:
+        print(f"   Source: {hooks_json_path}")
+    print()
+
+    print(f"6. CREDENTIAL SCANNING")
+    print(f"   Active patterns: {cred_count}")
+    if cred_types:
+        for t in cred_types[:5]:
+            print(f"     - {t}")
+        if len(cred_types) > 5:
+            print(f"     ... and {len(cred_types) - 5} more")
+    print()
+
+    print(f"7. DASHBOARD SECURITY")
+    print(f"   Daemon running: {'yes (PID ' + str(daemon_pid) + ')' if daemon_running else 'no'}")
+    print(f"   Token file: {'exists' if DAEMON_TOKEN_PATH.exists() else 'absent'} | {_file_info(DAEMON_TOKEN_PATH).get('permissions', 'N/A')}")
+    print(f"   Bind address: 127.0.0.1 (loopback only)")
+    print()
+
+    print(f"8. TRANSCRIPT PRESERVATION")
+    print(f"   cleanupPeriodDays: {cleanup_period}")
+    print(f"   Note: Intentional for trend analysis. Transcripts are host platform data.")
+    print()
+
+    print(f"9. VERSION")
+    print(f"   Token Optimizer: {TOKEN_OPTIMIZER_VERSION}")
+    print(f"   Runtime: {runtime_label}")
 
 
 # ========== Smart Compaction System (v2.0) ==========
@@ -16241,8 +16813,10 @@ def compact_capture(transcript_path=None, session_id=None, trigger="auto", cwd=N
         # Sidecar is best-effort — never block on it.
         pass
 
-    # Cleanup old checkpoints
+    # Cleanup old checkpoints and rotate retention-controlled artifacts
     _cleanup_checkpoints()
+    _cleanup_quality_cache()
+    _rotate_checkpoint_events()
 
     return str(checkpoint_path)
 
@@ -17114,6 +17688,66 @@ def _cleanup_checkpoints():
                 removed += 1
             except OSError:
                 pass
+
+
+def _cleanup_quality_cache():
+    """Remove quality-cache-*.json files older than the configured retention window."""
+    try:
+        cache_dir = RUNTIME_DIR / "token-optimizer"
+        if not cache_dir.is_dir():
+            return
+        cutoff = time.time() - (_QUALITY_CACHE_RETENTION_DAYS * 86400)
+        for f in cache_dir.glob("quality-cache-*.json"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def _rotate_checkpoint_events():
+    """Keep only the last N entries in checkpoint-events.jsonl."""
+    try:
+        events_file = CHECKPOINT_EVENT_LOG
+        if not events_file.exists():
+            return
+        lines = events_file.read_text(encoding="utf-8").splitlines()
+        if len(lines) <= _CHECKPOINT_EVENT_MAX:
+            return
+        keep = lines[-_CHECKPOINT_EVENT_MAX:]
+        fd, tmp = tempfile.mkstemp(dir=str(events_file.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("\n".join(keep) + "\n")
+            os.replace(tmp, str(events_file))
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def _prune_trends_db():
+    """Remove session_log rows older than the retention threshold. No-op when unlimited (0)."""
+    if _TRENDS_RETENTION_DAYS <= 0:
+        return
+    try:
+        trends_path = SNAPSHOT_DIR / "trends.db"
+        if not trends_path.exists():
+            return
+        cutoff_iso = (datetime.now() - timedelta(days=_TRENDS_RETENTION_DAYS)).isoformat()
+        conn = sqlite3.connect(str(trends_path), timeout=5)
+        try:
+            conn.execute("DELETE FROM session_log WHERE timestamp < ?", (cutoff_iso,))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
 
 def _safe_checkpoint_file(cp_path):
@@ -18952,6 +19586,19 @@ def _show_v5_welcome():
     print("  Full docs: measure.py v5 info <feature>")
     print("  All your data stays 100% local on your machine.")
     print()
+    print("DATA NOTICE")
+    print("Token Optimizer stores the following data locally on your machine:")
+    print("  - Session metrics and trends (trends.db)")
+    print("  - Checkpoint snapshots with truncated conversation context")
+    print("  - Quality score cache")
+    print("  - Tool output archives (auto-deleted after 24h)")
+    print("  - Per-session file read cache (auto-deleted after 48h)")
+    print()
+    print("No data is transmitted externally. Zero network calls. Zero telemetry.")
+    print("Run 'measure.py consent --show' to check consent status.")
+    print("Run 'measure.py purge --confirm' to delete all Token Optimizer data.")
+    print()
+    _write_config_flag("enterprise_consent_shown", True)
 
 
 def _get_v5_feature_status():
@@ -22582,6 +23229,28 @@ if __name__ == "__main__":
         # No flag: print usage
         print("Usage: measure.py daemon-consent --get | --set yes|no|unset")
         sys.exit(1)
+    elif args[0] == "consent":
+        # Enterprise consent management
+        sub = args[1] if len(args) > 1 else "--show"
+        if sub == "--show":
+            shown = _read_config_flag("enterprise_consent_shown", False)
+            v5 = _read_config_flag("v5_welcome_shown", False)
+            print(f"Enterprise consent: {'granted' if shown else 'not yet granted'}")
+            print(f"V5 welcome shown: {'yes' if v5 else 'no'}")
+            if not shown and v5:
+                print("Note: v5 welcome was shown; consent will be backfilled on next hook invocation")
+        elif sub == "--reset":
+            _write_config_flag("enterprise_consent_shown", False)
+            print("Consent reset. Data notice will appear on next session start.")
+        elif sub == "--grant":
+            _write_config_flag("enterprise_consent_shown", True)
+            print("Consent granted.")
+        else:
+            print(f"Usage: consent [--show|--reset|--grant]", file=sys.stderr)
+            sys.exit(1)
+    elif args[0] == "security-report":
+        as_json = "--json" in args
+        _security_report(as_json=as_json)
     elif args[0] == "session-end-flush":
         # Single sequential entry point for the SessionEnd hook. Runs
         # collect -> dashboard -> compact-capture in one process so the
@@ -23425,6 +24094,11 @@ if __name__ == "__main__":
             sid = a
             break
         archive_cleanup(session_id=sid)
+    elif args[0] == "purge":
+        # Delete all Token Optimizer data (enterprise compliance / uninstall)
+        confirm = "--confirm" in args
+        force = "--force" in args
+        _purge_all_data(confirm=confirm, force=force)
     elif args[0] == "read-cache-clear":
         # Clear read cache (called by PreCompact hook or manually)
         sid = "all"
@@ -23558,9 +24232,17 @@ if __name__ == "__main__":
         print("  python3 measure.py expand --list --session SID            # List archived results for session")
         print("  python3 measure.py archive-cleanup                        # Clean archives older than 24h")
         print("  python3 measure.py archive-cleanup SESSION_ID             # Clean specific session archive")
+        print("  python3 measure.py purge                       # Dry-run: list all Token Optimizer data")
+        print("  python3 measure.py purge --confirm             # Delete all Token Optimizer data (compliance/uninstall)")
+        print("  python3 measure.py purge --confirm --force     # Also stop daemon automatically")
         print("  python3 measure.py setup-daemon            # Install persistent dashboard server (macOS)")
         print("  python3 measure.py setup-daemon --dry-run  # Show what would be installed")
         print("  python3 measure.py setup-daemon --uninstall # Remove dashboard daemon")
+        print("  python3 measure.py consent                  # Show enterprise consent status")
+        print("  python3 measure.py consent --grant          # Grant consent manually")
+        print("  python3 measure.py consent --reset          # Reset consent (will re-show data notice)")
+        print("  python3 measure.py security-report          # Enterprise security self-assessment")
+        print("  python3 measure.py security-report --json   # Machine-readable security report")
         print()
         print("  Global flags:")
         print("    --context-size N   Override context window size (e.g., --context-size 1000000)")

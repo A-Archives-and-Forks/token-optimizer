@@ -1,6 +1,9 @@
 ---
 name: token-coach
-description: Context window coach. Proactive guidance for token-efficient Claude Code or Codex projects, multi-agent systems, and skill architecture.
+description: |
+  Context window coach analyzing setup overhead, historical usage trends, and session habits.
+  Use when building something new and wanting token efficiency from the start, existing sessions feel sluggish or context fills too fast, designing multi-agent systems, or wanting a quick health check with real numbers.
+  Do NOT use for running the full audit and applying fixes (use /token-optimizer instead).
 ---
 
 # Token Coach: Plan Token-Efficient Before You Build
@@ -42,7 +45,19 @@ export TOKEN_OPTIMIZER_RUNTIME="$RUNTIME"
 ```bash
 python3 "$MEASURE_PY" coach --json
 ```
-Parse the JSON output. This gives you: snapshot (current measurements), detected patterns, coaching questions, and focus suggestions.
+Parse the JSON output. This gives you: snapshot (current measurements), detected patterns, coaching questions, focus suggestions, and **history** (trend data from past sessions).
+
+The `history` key contains (when trends.db has enough data):
+- `quality_recent_avg` / `quality_prior_avg` - 7-day vs older quality scores
+- `duration_recent_avg` / `duration_prior_avg` - session length trends (minutes)
+- `cache_hit_recent_avg` / `cache_hit_prior_avg` - prompt cache hit rate trends
+- `grade_d_pct_recent` / `grade_distribution` - recent grade breakdown
+- `total_cost_usd` / `cost_per_session_usd` / `sessions_in_period` - spend summary
+- `quality_short_sessions` / `quality_long_sessions` / `optimal_session_hint` - duration-quality correlation
+- `compression_measured_saved` / `compression_opportunity_tokens` - compression gap
+- `multi_model_session_pct` - percentage of recent sessions that switched models mid-session
+
+Historical patterns also appear in the `patterns_bad` array (e.g. "Quality Declining", "Session Duration Creep", "Cache Hit Rate Dropping", "Cache Hit Rate Dropping (Model Switches)", "Frequent Model Switching", "High Cost Per Session", "Compression Opportunity Gap").
 
 3. **Check context quality** (v2.0):
 ```bash
@@ -107,10 +122,17 @@ This is a CONVERSATION. Not a wall of text.
 
 1. Lead with the 1-2 most impactful findings from the coaching data
 2. If quality data is available and score < 70, lead with that instead: "Your current session quality is [X]/100. [Top issue] is eating [Y tokens]."
-3. Reference their actual numbers ("You have 47 skills costing ~4,700 tokens at startup")
-4. Ask a follow-up question. Don't dump everything at once.
-5. For agentic systems (option c): walk through their architecture step by step
-6. Use the coaching scripts for structure, but keep it natural
+3. If `history` data is available, weave in trend insights naturally:
+   - Quality trending down? Lead with that, it's more urgent than a static snapshot
+   - Cost data? Ground advice in dollars ("At $X.XX/session across Y sessions, routing alone could save $Z/month")
+   - Duration-quality correlation? "Your short sessions score X vs Y for long ones" is a concrete, actionable insight
+   - Grade distribution? "N% of your sessions scored D" hits harder than an abstract score
+   - Model switching? If multi_model_session_pct is high, explain: switching models mid-session invalidates the prompt cache. Set model at session start, not mid-conversation. Subagent routing to cheaper models is fine (separate context)
+   - Don't dump all history data at once. Pick the 1-2 most relevant trends for their intake choice
+4. Reference their actual numbers ("You have 47 skills costing ~4,700 tokens at startup")
+5. Ask a follow-up question. Don't dump everything at once.
+6. For agentic systems (option c): walk through their architecture step by step
+7. Use the coaching scripts for structure, but keep it natural
 
 For Codex specifically, translate all advice to native Codex concepts:
 - `AGENTS.md` instead of `CLAUDE.md`
