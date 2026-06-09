@@ -294,8 +294,6 @@ Token Optimizer runs as an external process. It doesn't inject always-on instruc
 
 ### How it compares
 
-> Full benchmark methodology, compound savings analysis, and corpus replay results: **[BENCHMARK.md](BENCHMARK.md)**
-
 |  | Token Optimizer | Headroom | RTK | context-mode | `/context` |
 |---|---|---|---|---|---|
 | **Tool output compression** | 🟢 30+ CLI families, credential-safe, toggleable | 🟢 6 algorithms incl. model-based | 🟢 100+ command filters | 🟢 Sandbox + summary | 🔴 |
@@ -318,7 +316,7 @@ Token Optimizer runs as an external process. It doesn't inject always-on instruc
 | **Zero telemetry** | 🟢 | 🟢 | 🟡 Opt-in | 🟡 Varies | 🟢 |
 | **Multi-platform** | 🟢 Claude Code, VS Code, Codex, OpenClaw, OpenCode, Hermes | 🟢 Claude Code, Cursor, Codex, Aider, Copilot | 🟢 14 integrations | 🟢 15 integrations | 🔴 Claude Code only |
 
-> Run `python3 scripts/benchmark.py` for the fixture suite (57 tests across 16 categories with quality verification) and `python3 scripts/compression_backfill.py` for historical corpus replay.
+Every claim in this table is tested against real sessions and a 57-fixture compression suite you can run yourself. **[See the full benchmark methodology and results.](BENCHMARK.md)**
 
 ---
 
