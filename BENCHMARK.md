@@ -2,6 +2,8 @@
 
 This benchmark measures five compounding layers of token savings against real session data, with quality verification at every step. All numbers come from production telemetry stored locally in `trends.db`. No data leaves the user's machine.
 
+**Reproducibility note.** The numbers below come from the author's single-user corpus (1,885 quality-scored sessions over 30 days). Your results will differ based on your usage patterns, model mix, and session length. Every measurement tool is included in the repo so you can regenerate these tables against your own data. See [Running the Benchmarks](#running-the-benchmarks) for instructions.
+
 ## Corpus
 
 | | Count |
@@ -9,7 +11,7 @@ This benchmark measures five compounding layers of token savings against real se
 | Sessions in trends.db (quality-scored) | 1,885 |
 | Sessions with file reads (backfill corpus) | 5,814 |
 | First-reads analyzed | 30,771 |
-| Benchmark fixtures | 62 across 10 categories |
+| Benchmark fixtures | 57 across 16 categories |
 | Average prompt-cache hit rate | 65.4% |
 | Platforms covered | Claude Code CLI, VS Code, Codex, OpenClaw, OpenCode |
 
