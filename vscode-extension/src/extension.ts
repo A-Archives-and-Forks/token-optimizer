@@ -14,7 +14,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const cfg = () => vscode.workspace.getConfiguration('tokenOptimizer');
   const staleAfter = () => cfg().get<number>('staleAfterSeconds', 180);
-  const runtime = () => cfg().get<string>('runtime', 'claude');
+  const runtime = () => cfg().get<string>('runtime', 'auto');
 
   let disposed = false;
 

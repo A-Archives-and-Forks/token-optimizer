@@ -2,6 +2,7 @@
 // dir so tests can point at a fixture by passing an explicit base.
 import * as os from 'os';
 import * as path from 'path';
+import * as fs from 'fs';
 
 export interface ClaudePaths {
   claudeDir: string;
@@ -57,16 +58,54 @@ export function resolveCopilotPaths(homeDir: string = os.homedir()): ClaudePaths
 }
 
 // The runtime setting value.  Matches tokenOptimizer.runtime in package.json.
-export type Runtime = 'claude' | 'copilot';
+export type Runtime = 'auto' | 'claude' | 'copilot';
+
+// Most-recent mtime (ms) of any file directly in `dir`, or 0 if the dir is
+// missing/empty/unreadable. Used as a cheap "was this runtime active recently"
+// signal. The token-optimizer cache dir is a small flat dir, so a single
+// readdir + stat pass is inexpensive and only runs at activation / config change.
+function mostRecentMtimeMs(dir: string): number {
+  try {
+    let max = 0;
+    for (const entry of fs.readdirSync(dir)) {
+      try {
+        const m = fs.statSync(path.join(dir, entry)).mtimeMs;
+        if (m > max) max = m;
+      } catch {
+        // unreadable entry — skip
+      }
+    }
+    return max;
+  } catch {
+    return 0; // dir absent or unreadable
+  }
+}
+
+// Auto-detect the active runtime so Copilot users don't have to flip a setting.
+// Compares the most recent write to each runtime's token-optimizer cache and
+// prefers Copilot ONLY when its cache exists and is strictly more recent than
+// Claude's. A pure-Copilot user (no Claude cache) gets Copilot; a pure-Claude
+// user or the no-data case falls back to Claude (the historical default); a
+// mixed user follows whichever runtime they used most recently.
+export function resolveAutoPaths(homeDir: string = os.homedir()): ClaudePaths {
+  const claudeCache = path.join(homeDir, '.claude', 'token-optimizer');
+  const copilotCache = path.join(homeDir, '.copilot', 'token-optimizer');
+  const copilotMs = mostRecentMtimeMs(copilotCache);
+  const claudeMs = mostRecentMtimeMs(claudeCache);
+  if (copilotMs > 0 && copilotMs > claudeMs) return resolveCopilotPaths(homeDir);
+  return resolvePaths(homeDir);
+}
 
 // Factory: pick the right paths object based on the runtime setting string.
-// Falls back to Claude paths for any unrecognized value.
+// 'claude' / 'copilot' are explicit overrides; 'auto' (the default) and any
+// unrecognized value resolve by detecting the most recently active runtime.
 export function resolvePathsForRuntime(
   runtime: string | undefined,
   homeDir: string = os.homedir()
 ): ClaudePaths {
   if (runtime === 'copilot') return resolveCopilotPaths(homeDir);
-  return resolvePaths(homeDir);
+  if (runtime === 'claude') return resolvePaths(homeDir);
+  return resolveAutoPaths(homeDir);
 }
 
 // Mirror measure.py's sanitize: strip anything outside [A-Za-z0-9_-] so a
