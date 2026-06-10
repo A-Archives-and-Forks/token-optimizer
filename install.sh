@@ -145,7 +145,7 @@ install_hermes() {
         git -C "$script_dir" sparse-checkout add skills/ hermes/ 2>/dev/null || true
         git -C "$script_dir" pull --ff-only 2>/dev/null || true
     fi
-    [ -f "$measure_py" ] || fail "measure.py not found. Clone the full repo: git clone ${REPO_HTTPS}"
+    [ -f "$measure_py" ] || fail "$(printf 'Run install.sh from inside a token-optimizer checkout, not on its own. From any folder:\n    git clone --depth 1 %s\n    cd token-optimizer\n    bash install.sh --hermes' "$REPO_HTTPS")"
 
     if [ -d "${script_dir}/.git" ]; then
         local h_sha
@@ -187,7 +187,7 @@ install_copilot() {
         git -C "$script_dir" sparse-checkout add skills/ copilot/ 2>/dev/null || true
         git -C "$script_dir" pull --ff-only 2>/dev/null || true
     fi
-    [ -f "$measure_py" ] || fail "measure.py not found. Clone the full repo: git clone ${REPO_HTTPS}"
+    [ -f "$measure_py" ] || fail "$(printf 'Run install.sh from inside a token-optimizer checkout, not on its own. From any folder:\n    git clone --depth 1 %s\n    cd token-optimizer\n    bash install.sh --copilot' "$REPO_HTTPS")"
 
     if [ -d "${script_dir}/.git" ]; then
         local c_sha

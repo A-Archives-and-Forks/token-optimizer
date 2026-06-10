@@ -238,16 +238,19 @@ See [`hermes/README.md`](hermes/README.md) for full docs.
 
 Native Python, read-only access to Copilot's own data, no telemetry, no dependencies. The CLI and VS Code surfaces are separate session populations — never merged, never summed.
 
+Run these three lines from **any folder** — the first downloads the repo into a new `token-optimizer/` folder, the second moves into it, the third installs:
+
 ```bash
-git clone https://github.com/alexgreensh/token-optimizer.git
-token-optimizer/install.sh --copilot
+git clone --depth 1 https://github.com/alexgreensh/token-optimizer.git
+cd token-optimizer
+bash install.sh --copilot
 ```
 
-Verify the install:
+Verify the install (run these from **inside** the `token-optimizer` folder you just `cd`'d into):
 
 ```bash
-token-optimizer/install.sh --copilot --dry-run   # preview
-TOKEN_OPTIMIZER_RUNTIME=copilot python3 token-optimizer/skills/token-optimizer/scripts/measure.py copilot-doctor
+bash install.sh --copilot --dry-run   # preview without writing anything
+TOKEN_OPTIMIZER_RUNTIME=copilot python3 skills/token-optimizer/scripts/measure.py copilot-doctor
 ```
 
 Using Copilot:

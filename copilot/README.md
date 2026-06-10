@@ -25,12 +25,15 @@ The two are **separate session populations** — never merged, never summed.
 
 ## Install
 
+Run these from **any folder**. The first line creates a `token-optimizer/` folder, the second moves into it, the third installs:
+
 ```bash
-git clone https://github.com/alexgreensh/token-optimizer.git
-token-optimizer/install.sh --copilot
+git clone --depth 1 https://github.com/alexgreensh/token-optimizer.git
+cd token-optimizer
+bash install.sh --copilot
 ```
 
-Preview without writing anything: `token-optimizer/install.sh --copilot --dry-run`.
+Preview without writing anything (from inside the `token-optimizer` folder): `bash install.sh --copilot --dry-run`.
 
 The installer writes **user-level** hooks to `~/.copilot/hooks/token-optimizer.json` and copies the adapter into `~/.copilot/token-optimizer/plugin/`. It never writes repo-level (`.github/hooks/`) hooks — those would affect your whole team without consent. The install is idempotent and removes only its own files on uninstall.
 
