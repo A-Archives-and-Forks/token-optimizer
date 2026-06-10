@@ -253,6 +253,14 @@ bash install.sh --copilot --dry-run   # preview without writing anything
 TOKEN_OPTIMIZER_RUNTIME=copilot python3 skills/token-optimizer/scripts/measure.py copilot-doctor
 ```
 
+**Already have Token Optimizer installed** (plugin or script install)? Skip the clone — and don't look for `install.sh` inside `~/.claude/skills/token-optimizer`, it only exists at the repo root. The installer module ships with the skill, so run it directly:
+
+```bash
+TOKEN_OPTIMIZER_RUNTIME=copilot python3 ~/.claude/skills/token-optimizer/scripts/measure.py copilot-install
+```
+
+Adjust the path if your `measure.py` lives elsewhere — any up-to-date copy works. Script installs can equivalently run `bash ~/.claude/token-optimizer/install.sh --copilot`.
+
 Using Copilot:
 - `copilot-summary` — credits-led cost + token summary for recent sessions
 - `copilot-doctor` — per-source readiness + hook capability check

@@ -35,6 +35,14 @@ bash install.sh --copilot
 
 Preview without writing anything (from inside the `token-optimizer` folder): `bash install.sh --copilot --dry-run`.
 
+**Already have Token Optimizer installed** (Claude Code plugin, script install, or a checkout under `~/.claude/skills/token-optimizer`)? Skip the clone — and don't look for `install.sh` inside the skill folder, it only exists at the repo root. The installer module ships with the skill, so run it directly:
+
+```bash
+TOKEN_OPTIMIZER_RUNTIME=copilot python3 ~/.claude/skills/token-optimizer/scripts/measure.py copilot-install
+```
+
+Adjust the path if your `measure.py` lives elsewhere — any up-to-date copy works. Script installs can equivalently run `bash ~/.claude/token-optimizer/install.sh --copilot`.
+
 The installer writes **user-level** hooks to `~/.copilot/hooks/token-optimizer.json` and copies the adapter into `~/.copilot/token-optimizer/plugin/`. It never writes repo-level (`.github/hooks/`) hooks — those would affect your whole team without consent. The install is idempotent and removes only its own files on uninstall.
 
 For VS Code per-request credit costs, enable both `github.copilot.chat.agentDebugLog` settings (these log full prompt text to disk, so the switch is yours to flip).

@@ -22,6 +22,20 @@ bash install.sh --copilot
 TOKEN_OPTIMIZER_RUNTIME=copilot python3 skills/token-optimizer/scripts/measure.py copilot-doctor
 ```
 
+**Already have Token Optimizer installed** (Claude Code plugin, script install,
+or a checkout under `~/.claude/skills/token-optimizer`)? You don't need a fresh
+clone, and you won't find `install.sh` inside the skill folder — it only exists
+at the repo root. Run the installer module you already have, directly:
+
+```bash
+TOKEN_OPTIMIZER_RUNTIME=copilot python3 ~/.claude/skills/token-optimizer/scripts/measure.py copilot-install
+TOKEN_OPTIMIZER_RUNTIME=copilot python3 ~/.claude/skills/token-optimizer/scripts/measure.py copilot-doctor
+```
+
+Adjust the path if your `measure.py` lives elsewhere — any up-to-date copy
+works. Script installs can equivalently run
+`bash ~/.claude/token-optimizer/install.sh --copilot`.
+
 This writes user-level hooks to `~/.copilot/hooks/token-optimizer.json` only.
 We deliberately never write `.github/hooks/` — repo-level hooks would affect
 your whole team without consent.
