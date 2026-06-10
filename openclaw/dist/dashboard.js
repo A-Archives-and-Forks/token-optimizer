@@ -337,6 +337,8 @@ function severityColor(s) {
     }
 }
 function modelColor(m) {
+    if (m.includes("fable"))
+        return "#e11d48";
     if (m.includes("opus"))
         return "#a855f7";
     if (m.includes("sonnet"))

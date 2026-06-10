@@ -42,6 +42,8 @@ def normalize_model_name(model_id: str) -> str | None:
     # Match OpenClaw behavior: provider-qualified IDs like openai/gpt-4o,
     # openrouter/openai/gpt-4o, or anthropic:claude-sonnet-4-6 should price as
     # their underlying model.
+    if "fable" in m:
+        return "fable"
     if "opus" in m:
         return "opus"
     if "sonnet" in m:

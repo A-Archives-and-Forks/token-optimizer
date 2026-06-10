@@ -1,5 +1,6 @@
 const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
-  // Anthropic (Opus/Sonnet 1M GA since March 13, 2026)
+  // Anthropic (Fable/Opus/Sonnet 1M GA since March 13, 2026)
+  fable: 1_000_000,
   opus: 1_000_000,
   sonnet: 1_000_000,
   haiku: 200_000,

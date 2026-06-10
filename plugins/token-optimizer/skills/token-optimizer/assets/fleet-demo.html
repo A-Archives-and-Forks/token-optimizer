@@ -377,6 +377,7 @@ h1, h2, h3, h4 { font-weight: 400; }
   margin-bottom: var(--s-2);
 }
 .model-segment { transition: width 0.5s; }
+.model-segment.fable { background: #e11d48; }
 .model-segment.opus { background: #a855f7; }
 .model-segment.sonnet { background: #3b82f6; }
 .model-segment.haiku { background: #22c55e; }
@@ -391,6 +392,7 @@ h1, h2, h3, h4 { font-weight: 400; }
 }
 .model-legend-item { display: flex; align-items: center; gap: 6px; }
 .model-legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+.model-legend-dot.fable { background: #e11d48; }
 .model-legend-dot.opus { background: #a855f7; }
 .model-legend-dot.sonnet { background: #3b82f6; }
 .model-legend-dot.haiku { background: #22c55e; }
@@ -832,7 +834,6 @@ document.querySelectorAll('.nav-item[data-view]').forEach(function(lnk) {
   var container = document.getElementById('model-mix-content');
   if (!container) return;
   var html = '';
-  var modelColors = { opus: '#a855f7', sonnet: '#3b82f6', haiku: '#22c55e' };
 
   for (var sys in modelData) {
     var models = modelData[sys];

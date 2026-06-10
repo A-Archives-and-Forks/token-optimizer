@@ -223,6 +223,8 @@ def _estimate_savings_cost_per_mtok() -> float:
         or os.environ.get("MODEL")
         or ""
     ).lower()
+    if "fable" in model:
+        return 10.0
     if "opus" in model:
         return 5.0
     if "haiku" in model:

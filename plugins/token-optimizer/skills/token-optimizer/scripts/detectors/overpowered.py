@@ -1,15 +1,41 @@
 """Overpowered model detector: expensive model used for simple tasks."""
 
 
-_TOP_TIER_MODELS = ("opus", "claude-opus")
+_TOP_TIER_MODELS = ("fable", "opus", "claude-opus")
 _SIMPLE_TOOLS = frozenset({"Read", "Glob", "Grep", "Edit", "Write", "Bash"})
+
+# v5.11.1: per-model input token rate ($/Mtok), kept self-contained per this
+# file's hot-path convention (no import of the pricing table). Sonnet's input
+# rate is 3.0; the savings ratio vs a top-tier model is 1 - (3.0 / input_rate).
+_INPUT_RATE = {"fable": 10.0, "opus": 5.0}
+
+
+def _dominant_top_tier(model_usage):
+    """Return (model_name, tokens) for the top-tier model with the most tokens.
+
+    model_name is a normalized key into _INPUT_RATE ("fable" or "opus"); the
+    display name returned is the raw model string for the evidence message.
+    """
+    best_raw = None
+    best_norm = "opus"
+    best_tokens = 0
+    for k, v in model_usage.items():
+        kl = k.lower()
+        if not any(t in kl for t in _TOP_TIER_MODELS):
+            continue
+        if v > best_tokens:
+            best_tokens = v
+            best_raw = k
+            best_norm = "fable" if "fable" in kl else "opus"
+    return best_raw, best_norm
 
 
 def detect_overpowered(session_data):
-    """Detect sessions where Opus was used for tasks that Sonnet could handle.
+    """Detect sessions where a top-tier model was used for tasks a cheaper model
+    could handle.
 
     Flags when: short output (<5K tokens per turn avg) + mostly simple tools
-    + Opus is the dominant model.
+    + a top-tier model (Fable/Opus) is dominant.
     """
     model_usage = session_data.get("model_usage", {})
     if not model_usage:
@@ -19,12 +45,12 @@ def detect_overpowered(session_data):
     if total_tokens == 0:
         return []
 
-    # Check Opus dominance
-    opus_tokens = sum(v for k, v in model_usage.items()
-                      if any(t in k.lower() for t in _TOP_TIER_MODELS))
-    opus_pct = opus_tokens / total_tokens
+    # Check top-tier dominance.
+    top_tier_tokens = sum(v for k, v in model_usage.items()
+                          if any(t in k.lower() for t in _TOP_TIER_MODELS))
+    top_tier_pct = top_tier_tokens / total_tokens
 
-    if opus_pct < 0.5:
+    if top_tier_pct < 0.5:
         return []
 
     # Check if work was simple: low output, mostly basic tools
@@ -41,18 +67,25 @@ def detect_overpowered(session_data):
     if avg_output_per_turn > 5000 or simple_pct < 0.7:
         return []
 
-    sonnet_savings = int(opus_tokens * 0.6)  # Sonnet is ~60% cheaper
+    # v5.11.1: model-aware savings. Fable's input rate (10.0) is twice Opus's
+    # (5.0), so dropping to Sonnet (3.0) saves a different fraction depending on
+    # which top-tier model was dominant.
+    dom_raw, dom_norm = _dominant_top_tier(model_usage)
+    dom_display = dom_raw or dom_norm
+    input_rate = _INPUT_RATE.get(dom_norm, 5.0)
+    savings_ratio = 1 - (3.0 / input_rate)
+    sonnet_savings = int(top_tier_tokens * savings_ratio)
     return [{
         "name": "overpowered",
         "confidence": 0.6,
         "evidence": (
-            f"{opus_pct:.0%} Opus usage, {avg_output_per_turn:.0f} avg output tokens/turn, "
+            f"{top_tier_pct:.0%} {dom_display} usage, {avg_output_per_turn:.0f} avg output tokens/turn, "
             f"{simple_pct:.0%} simple tool calls"
         ),
         "savings_tokens": sonnet_savings,
         "suggestion": (
-            f"This session used Opus for mostly simple edits and file reads. "
-            f"Sonnet would save ~{sonnet_savings:,} tokens (~60% cost reduction) "
+            f"This session used {dom_display} for mostly simple edits and file reads. "
+            f"Sonnet would save ~{sonnet_savings:,} tokens (~{savings_ratio:.0%} cost reduction) "
             "for equivalent quality on these tasks."
         ),
         "occurrence_count": 1,

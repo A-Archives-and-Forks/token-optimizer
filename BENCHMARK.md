@@ -7,7 +7,7 @@
 
 ## 💰 Summary
 
-All pricing at Opus 4 rates ($5/MTok input, $25/MTok output, $0.50/MTok cache-read).
+All pricing at Opus 4.8 rates ($5/MTok input, $25/MTok output, $0.50/MTok cache-read).
 
 | Layer | 30-day savings | Evidence |
 |---|---|---|
@@ -32,7 +32,7 @@ All pricing at Opus 4 rates ($5/MTok input, $25/MTok output, $0.50/MTok cache-re
 | 📖 First-reads analyzed | **30,771** |
 | 🧪 Benchmark fixtures | **57** across 10 categories |
 | ⚡ Avg prompt-cache hit rate | **65.4%** |
-| 🖥️ Platforms | Claude Code CLI, VS Code, Codex, OpenClaw, OpenCode, Hermes |
+| 🖥️ Platforms | Claude Code CLI, VS Code, Codex, Copilot, OpenClaw, OpenCode, Hermes |
 
 The two corpora are distinct populations, not double-counted. The backfill corpus is larger because it includes historical sessions recovered from file-read logs.
 
@@ -258,3 +258,8 @@ python3 scripts/measure.py dashboard
 - **Cache honesty:** Prompt-cache savings (cache_read) are never claimed as Token Optimizer savings. The Anthropic cache is free infrastructure. We do account for the secondary benefit: structural cleanup reduces cache-read volume.
 - **Security:** Fixtures verify credentials (AWS keys, PATs, Slack tokens) survive compression intact. Compression never strips what the model needs to see.
 - **Safety-first promotion:** First-read skeletons require proof from your own session history before activating. No cohort promoted without meeting the edit-rate gate across multiple sessions.
+
+### Known gaps
+
+- **Opus fast-mode cost is under-counted ~50%.** Claude Code v2.1.154 added a fast mode for Opus 4.8 billed at 2x the standard rate. Fast mode is not exposed in session JSONL, the statusline input, or settings.json (it surfaces only in the interactive `/model` picker and a VS Code indicator), so there is no reliable signal to detect it. Fast-mode sessions are priced at the standard 1x rate until the transcript exposes the mode; their real cost (and any routing-savings estimate involving them) is understated by roughly half.
+- **Claude Fable 5 cost now shows everywhere.** Sessions run on Claude Fable 5 before this version were recorded at $0 in the stored per-session cost column. From this version forward those sessions display their real cost, and trend views compute Fable cost at query time, so historical totals and trends reflect the true spend. The stored per-session cost column for the older rows is corrected in a future backfill; until then the trend/query-time figures are the authoritative ones for Fable.

@@ -117,8 +117,9 @@ SCHEMA_VERSION = "1"
 # ---------------------------------------------------------------------------
 
 DEFAULT_PRICING: dict[str, dict[str, float]] = {
-    # Claude (Opus 4.6 / Sonnet 4.6 / Haiku 4.5 pricing, verified 2026-05-30)
+    # Claude (Fable 5 / Opus 4.8 / Sonnet 4.6 / Haiku 4.5 pricing, verified 2026-05-30)
     # cache_write = 5-minute TTL (1.25x input); cache_write_1h = 1-hour TTL (2x input).
+    "fable":          {"input": 10.0/1e6, "output": 50.0/1e6, "cache_read": 1.0/1e6,  "cache_write": 12.5/1e6, "cache_write_1h": 20.0/1e6},
     "opus":           {"input": 5.0/1e6,  "output": 25.0/1e6, "cache_read": 0.5/1e6,  "cache_write": 6.25/1e6, "cache_write_1h": 10.0/1e6},
     "sonnet":         {"input": 3.0/1e6,  "output": 15.0/1e6, "cache_read": 0.3/1e6,  "cache_write": 3.75/1e6, "cache_write_1h": 6.0/1e6},
     "haiku":          {"input": 1.0/1e6,  "output": 5.0/1e6,  "cache_read": 0.1/1e6,  "cache_write": 1.25/1e6, "cache_write_1h": 2.0/1e6},
@@ -685,7 +686,7 @@ class ClaudeCodeAdapter(BaseAdapter):
 
         # Context window heuristic
         context_window = 200_000
-        if model in ("opus", "sonnet") or "1m" in dominant_model_raw.lower():
+        if model in ("fable", "opus", "sonnet") or "1m" in dominant_model_raw.lower():
             context_window = 1_000_000
 
         # input_tokens from API = uncached input only
@@ -1070,7 +1071,7 @@ class HeartbeatModelWaste(BaseDetector):
         if not heartbeat_runs:
             return findings
 
-        expensive_hb = [r for r in heartbeat_runs if r.model in ("opus", "sonnet")]
+        expensive_hb = [r for r in heartbeat_runs if r.model in ("fable", "opus", "sonnet")]
         if not expensive_hb:
             return findings
 
@@ -1088,6 +1089,12 @@ class HeartbeatModelWaste(BaseDetector):
         if savings < 0.10:
             return findings
 
+        # v5.11.1: derive the "# was:" comment from the actual expensive
+        # heartbeat models found, instead of the hardcoded "opus/sonnet" (which
+        # was wrong whenever the waste was, e.g., fable-only).
+        models_found = sorted({r.model for r in expensive_hb})
+        was_comment = "/".join(models_found) if models_found else "expensive model"
+
         findings.append(WasteFinding(
             system=system,
             waste_type=self.name,
@@ -1098,8 +1105,8 @@ class HeartbeatModelWaste(BaseDetector):
             monthly_waste_usd=savings,
             monthly_waste_tokens=sum(r.tokens.total for r in expensive_hb),
             recommendation=f"Route heartbeat/cron tasks to Haiku. Saves ~${savings:.2f}/month.",
-            fix_snippet='# In your agent config, set heartbeat model:\nmodel: "haiku"  # was: opus/sonnet',
-            evidence={"expensive_count": len(expensive_hb), "models_used": list({r.model for r in expensive_hb})},
+            fix_snippet=f'# In your agent config, set heartbeat model:\nmodel: "haiku"  # was: {was_comment}',
+            evidence={"expensive_count": len(expensive_hb), "models_used": models_found},
         ))
         return findings
 
@@ -2520,6 +2527,7 @@ h1, h2, h3, h4 {{ font-weight: 400; }}
   margin-bottom: var(--s-2);
 }}
 .model-segment {{ transition: width 0.5s; }}
+.model-segment.fable {{ background: #e11d48; }}
 .model-segment.opus {{ background: #a855f7; }}
 .model-segment.sonnet {{ background: #3b82f6; }}
 .model-segment.haiku {{ background: #22c55e; }}
@@ -2534,6 +2542,7 @@ h1, h2, h3, h4 {{ font-weight: 400; }}
 }}
 .model-legend-item {{ display: flex; align-items: center; gap: 6px; }}
 .model-legend-dot {{ width: 8px; height: 8px; border-radius: 2px; }}
+.model-legend-dot.fable {{ background: #e11d48; }}
 .model-legend-dot.opus {{ background: #a855f7; }}
 .model-legend-dot.sonnet {{ background: #3b82f6; }}
 .model-legend-dot.haiku {{ background: #22c55e; }}
@@ -2819,7 +2828,6 @@ document.querySelectorAll('.nav-item[data-view]').forEach(function(lnk) {{
   var container = document.getElementById('model-mix-content');
   if (!container) return;
   var html = '';
-  var modelColors = {{ opus: '#a855f7', sonnet: '#3b82f6', haiku: '#22c55e' }};
 
   for (var sys in modelData) {{
     var models = modelData[sys];

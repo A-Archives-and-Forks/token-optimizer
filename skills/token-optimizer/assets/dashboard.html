@@ -1101,6 +1101,7 @@ input:checked + .slider:before {
   transition: width 0.5s ease;
 }
 
+.model-segment.fable { background: linear-gradient(90deg, #fb7185, #e11d48); }
 .model-segment.opus { background: linear-gradient(90deg, #a78bfa, #7c3aed); }
 .model-segment.sonnet { background: linear-gradient(90deg, var(--c-accent-cyan), #0099cc); }
 .model-segment.haiku { background: linear-gradient(90deg, #34d399, #059669); }
@@ -1129,6 +1130,7 @@ input:checked + .slider:before {
   flex-shrink: 0;
 }
 
+.model-legend-dot.fable { background: #fb7185; }
 .model-legend-dot.opus { background: #a78bfa; }
 .model-legend-dot.sonnet { background: var(--c-accent-cyan); }
 .model-legend-dot.haiku { background: #34d399; }
@@ -3028,7 +3030,7 @@ var DB = (function() {
     // Model mix stacked bar
     var modelMix = t.model_mix || {};
     var modelTotal = 0;
-    var modelOrder = isCodex ? Object.keys(modelMix).sort(function(a, b) { return (modelMix[b] || 0) - (modelMix[a] || 0); }) : ['opus', 'sonnet', 'haiku'];
+    var modelOrder = isCodex ? Object.keys(modelMix).sort(function(a, b) { return (modelMix[b] || 0) - (modelMix[a] || 0); }) : ['fable', 'opus', 'sonnet', 'haiku'];
     var modelCount = 0;
     for (var mk in modelMix) { modelTotal += modelMix[mk]; modelCount++; }
 

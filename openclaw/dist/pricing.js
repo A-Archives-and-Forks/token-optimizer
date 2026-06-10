@@ -58,7 +58,7 @@ exports.PRICING_TIER_LABELS = {
 function tierMultiplier(tier, model) {
     if (tier !== "vertex-regional")
         return 1;
-    if (model === "opus" || model === "sonnet" || model === "haiku")
+    if (model === "fable" || model === "opus" || model === "sonnet" || model === "haiku")
         return 1.1;
     return 1;
 }
@@ -85,8 +85,9 @@ function loadPricingTier(openclawDir) {
 }
 /** Default pricing (USD per token). Verified May 30, 2026. */
 exports.DEFAULT_PRICING = {
-    // Anthropic Claude (1M context for Opus/Sonnet as of March 13, 2026)
+    // Anthropic Claude (1M context for Fable/Opus/Sonnet as of March 13, 2026)
     // cacheWrite = 5m-TTL (1.25x input); cacheWrite1h = 1h-TTL (2x input).
+    fable: { input: 10.0 / 1e6, output: 50.0 / 1e6, cacheRead: 1.0 / 1e6, cacheWrite: 12.5 / 1e6, cacheWrite1h: 20.0 / 1e6 },
     opus: { input: 5.0 / 1e6, output: 25.0 / 1e6, cacheRead: 0.5 / 1e6, cacheWrite: 6.25 / 1e6, cacheWrite1h: 10.0 / 1e6 },
     sonnet: { input: 3.0 / 1e6, output: 15.0 / 1e6, cacheRead: 0.3 / 1e6, cacheWrite: 3.75 / 1e6, cacheWrite1h: 6.0 / 1e6 },
     haiku: { input: 1.0 / 1e6, output: 5.0 / 1e6, cacheRead: 0.1 / 1e6, cacheWrite: 1.25 / 1e6, cacheWrite1h: 2.0 / 1e6 },
@@ -255,6 +256,8 @@ function normalizeModelName(modelId) {
     // openai/gpt-4o, openrouter/openai/gpt-4o, anthropic:claude-sonnet-4-6.
     const m = stripProviderPrefixes(modelId);
     // Anthropic
+    if (m.includes("fable"))
+        return "fable";
     if (m.includes("opus"))
         return "opus";
     if (m.includes("sonnet"))

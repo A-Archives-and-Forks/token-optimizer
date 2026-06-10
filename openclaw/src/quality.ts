@@ -106,7 +106,7 @@ export function contextWindowForModel(model: string): number {
   // Claude families. All haiku and all Claude 2.x/3.x are 200K; only Claude 4.x+
   // non-haiku is 1M GA (since March 2026). Match before the generic substring
   // loop so this rule is authoritative.
-  if (lower.includes("claude") || lower.includes("opus") || lower.includes("sonnet")) {
+  if (lower.includes("claude") || lower.includes("fable") || lower.includes("opus") || lower.includes("sonnet")) {
     if (lower.includes("haiku")) return 200_000;
     // Legacy generations never had 1M -- don't over-promote them.
     if (lower.includes("claude-2") || lower.includes("claude-3")) return 200_000;
