@@ -12,9 +12,13 @@ cost figures — never a re-derived pricing table.
 
 ## Install
 
+Run from any folder. The clone creates a `token-optimizer/` folder; `cd` into it before running the installer:
+
 ```bash
+git clone --depth 1 https://github.com/alexgreensh/token-optimizer.git
+cd token-optimizer
 bash install.sh --copilot
-# verify
+# verify (from inside the token-optimizer folder)
 TOKEN_OPTIMIZER_RUNTIME=copilot python3 skills/token-optimizer/scripts/measure.py copilot-doctor
 ```
 
