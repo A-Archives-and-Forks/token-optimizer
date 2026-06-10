@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.12
+
+- Add: GitHub Copilot runtime support. Set `tokenOptimizer.runtime` to `copilot` to point the status bar at a Copilot Token Optimizer install (`~/.copilot/token-optimizer/`).
+- Improve: data source and session resolver are runtime-aware; switching runtimes rebuilds the data source live.
+- Fix: surface read errors to the console instead of silently showing an empty status bar.
+
 ## 0.1.11
 
 - Fix: remove the long usage-limit disclaimer from the hover tooltip and panel.

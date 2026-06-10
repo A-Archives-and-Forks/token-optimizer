@@ -2,7 +2,7 @@
   "name": "token-optimizer-statusline",
   "displayName": "Token Optimizer",
   "description": "See your Claude Code context health, efficiency, and usage limits in the VS Code status bar.",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "publisher": "alexgreensh",
   "license": "PolyForm-Noncommercial-1.0.0",
   "icon": "icon.png",
@@ -15,10 +15,21 @@
     "directory": "vscode-extension"
   },
   "homepage": "https://github.com/alexgreensh/token-optimizer",
-  "categories": ["Other", "Visualization"],
-  "keywords": ["claude", "claude-code", "token", "context", "status bar"],
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "token",
+    "context",
+    "status bar"
+  ],
   "main": "./out/extension.js",
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "commands": [
       {
@@ -39,7 +50,10 @@
       "properties": {
         "tokenOptimizer.runtime": {
           "type": "string",
-          "enum": ["claude", "copilot"],
+          "enum": [
+            "claude",
+            "copilot"
+          ],
           "enumDescriptions": [
             "Read cache files written by the Claude Code Token Optimizer plugin (~/.claude/token-optimizer/).",
             "Read cache files written by the GitHub Copilot Token Optimizer install (~/.copilot/token-optimizer/). Requires a Copilot Token Optimizer installation."
