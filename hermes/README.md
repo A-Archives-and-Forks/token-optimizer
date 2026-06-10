@@ -24,7 +24,21 @@ token-optimizer/install.sh --hermes
 
 Preview without writing anything: `token-optimizer/install.sh --hermes --dry-run`. (Direct equivalent if you prefer: `python3 token-optimizer/skills/token-optimizer/scripts/measure.py hermes-install`.)
 
-The installer copies the `hermes/` payload into `~/.hermes/plugins/token-optimizer/`. Hermes auto-discovers plugins from that directory on startup. No additional activation step is needed.
+The installer copies the plugin payload (manifest plus the runtime modules it needs) into `~/.hermes/plugins/token-optimizer/`. Hermes discovers plugins from that directory, but user plugins must also be allow-listed in your Hermes config before they activate:
+
+```yaml
+plugins:
+  enabled:
+    - token-optimizer
+```
+
+Add that to `~/.hermes/config.yaml`, or let the installer do it for you with `--enable`:
+
+```bash
+python3 token-optimizer/skills/token-optimizer/scripts/measure.py hermes-install --enable
+```
+
+`--enable` is idempotent and backs up your config before touching it. If your config layout is unusual, the installer leaves it alone and prints the exact snippet to add manually.
 
 The install is idempotent: re-running replaces files in place without touching other Hermes plugins or state.
 
@@ -36,7 +50,7 @@ The install is idempotent: re-running replaces files in place without touching o
 python3 token-optimizer/skills/token-optimizer/scripts/measure.py hermes-doctor
 ```
 
-The doctor checks: HERMES_HOME resolution, plugin directory presence, required files (`plugin.yaml`, `__init__.py`), declared hooks, `state.db` readability, and dashboard port availability.
+The doctor checks: HERMES_HOME resolution, plugin directory presence, required files (manifest plus all runtime modules), declared hooks, a bridge smoke test (can the plugin reach `measure.py`?), the `plugins.enabled` activation entry, `state.db` readability, and dashboard port availability.
 
 **Uninstall:**
 
@@ -44,9 +58,11 @@ The doctor checks: HERMES_HOME resolution, plugin directory presence, required f
 token-optimizer/install.sh --hermes --uninstall
 ```
 
+After uninstalling, remove `- token-optimizer` from `plugins.enabled` in your Hermes config so Hermes does not log a missing-plugin warning on the next start.
+
 ## Usage Inside Hermes
 
-Once Hermes loads the plugin, no configuration is required. The hooks activate automatically.
+Once the plugin is installed and allow-listed in `plugins.enabled`, the hooks activate automatically on the next Hermes start. No further configuration is required.
 
 | Surface | How to use |
 |---------|-----------|

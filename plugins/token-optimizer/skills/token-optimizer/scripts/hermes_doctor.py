@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +21,24 @@ from runtime_env import detect_runtime, hermes_home, runtime_home
 DASHBOARD_PORT = 24844
 _PLUGIN_NAME = "token-optimizer"
 
+# #58: the plugin's __init__.py imports these three from its own directory, so
+# they MUST be present for /token-optimizer, the dashboard launcher, and rollups
+# to work. Earlier doctor only checked plugin.yaml + __init__.py and reported OK
+# on a broken (payload-only) install.
 REQUIRED_PLUGIN_FILES = (
     "plugin.yaml",
     "__init__.py",
+    "hermes_hook_bridge.py",
+    "hermes_state.py",
+    "hermes_session.py",
+    # v5.11.1 (#58): the installer always writes the measure-path locator when
+    # measure.py exists; its absence means a broken / payload-only install.
+    "measure-path",
 )
+
+# Hermes config: the plugin must be allow-listed under plugins.enabled.
+_CONFIG_NAMES = ("config.yaml", "config.yml")
+_ACTIVATION_SNIPPET = "plugins:\n  enabled:\n    - token-optimizer\n"
 
 EXPECTED_HOOKS = {
     "pre_llm_call",
@@ -196,6 +211,127 @@ def _plugin_yaml_checks() -> list[dict[str, str]]:
     return checks
 
 
+def _bridge_smoke_check() -> list[dict[str, str]]:
+    """Run the installed bridge's __main__ smoke test (#58).
+
+    hermes_hook_bridge.py's __main__ locates measure.py and exits 0 (OK) or 1
+    (WARN/not found). We invoke it as a subprocess to confirm the installed copy
+    can actually resolve measure.py via the measure-path locator.
+    """
+    import subprocess  # noqa: PLC0415
+
+    hermes_root = hermes_home()
+    plugin_dir = _plugin_install_dir(hermes_root)
+    bridge = plugin_dir / "hermes_hook_bridge.py"
+
+    if not bridge.exists():
+        return [_check(
+            "FAIL",
+            "Bridge smoke test",
+            f"{bridge} not found; re-run: python3 hermes_install.py",
+        )]
+
+    # v5.11.1 (#58): the installer copies a regular file. A symlink here means a
+    # tampered/relocated install -- FAIL before executing it (don't run code
+    # from an unexpected target).
+    if bridge.is_symlink():
+        return [_check(
+            "FAIL",
+            "Bridge smoke test",
+            f"{bridge} is a symlink; re-run hermes_install.py",
+        )]
+
+    try:
+        result = subprocess.run(
+            [sys.executable, str(bridge)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return [_check("WARN", "Bridge smoke test", f"could not run: {exc}")]
+
+    if result.returncode == 0:
+        return [_check("OK", "Bridge smoke test", (result.stdout or "").strip() or "bridge resolves measure.py")]
+    return [_check(
+        "FAIL",
+        "Bridge smoke test",
+        f"{(result.stdout or result.stderr or 'bridge could not locate measure.py').strip()}; "
+        "re-run: python3 hermes_install.py",
+    )]
+
+
+def _activation_check() -> list[dict[str, str]]:
+    """WARN if token-optimizer is not allow-listed under plugins.enabled (#58).
+
+    Hermes (v0.15.x) requires explicit allow-listing; directory presence is not
+    enough. Uses the same dual approach as _plugin_yaml_checks (PyYAML if
+    importable, else a conservative text scan).
+    """
+    hermes_root = hermes_home()
+    cfg = None
+    for name in _CONFIG_NAMES:
+        candidate = hermes_root / name
+        if candidate.exists():
+            cfg = candidate
+            break
+
+    snippet_hint = f"add to Hermes config:\n{_ACTIVATION_SNIPPET}"
+
+    if cfg is None:
+        return [_check(
+            "WARN",
+            "Plugin activation",
+            f"no Hermes config found in {hermes_root}; {snippet_hint}",
+        )]
+
+    try:
+        text = cfg.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [_check("WARN", "Plugin activation", f"could not read {cfg}: {exc}")]
+
+    enabled = False
+    try:
+        import yaml  # type: ignore[import]  # noqa: PLC0415
+        data = yaml.safe_load(text)
+        if isinstance(data, dict):
+            plugins = data.get("plugins")
+            if isinstance(plugins, dict):
+                listed = plugins.get("enabled")
+                if isinstance(listed, list):
+                    enabled = _PLUGIN_NAME in [str(x).strip() for x in listed]
+    except Exception:  # noqa: BLE001 — PyYAML absent or unparseable; fall back to text scan
+        enabled = _activation_text_scan(text)
+
+    if enabled:
+        # v5.11.1 (#58): use the full path, not just the basename, so the OK
+        # message is unambiguous about which config was checked.
+        return [_check("OK", "Plugin activation", f"token-optimizer allow-listed in {cfg}")]
+    return [_check(
+        "WARN",
+        "Plugin activation",
+        f"token-optimizer not under plugins.enabled in {cfg}; {snippet_hint}",
+    )]
+
+
+def _activation_text_scan(text: str) -> bool:
+    """Conservative scan for token-optimizer under plugins.enabled (no PyYAML).
+
+    Single source of truth lives in hermes_install._enabled_in_text (the
+    installer and doctor must agree on what "activated" means). The two
+    scripts always ship side by side, so the import cannot miss in a healthy
+    install; if it somehow does, report not-enabled (WARN) rather than crash.
+    """
+    try:
+        from hermes_install import _enabled_in_text  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 -- v5.11.1 (#58): any import failure
+        # (ImportError, but also a SyntaxError in a half-written install or a
+        # surprise at module top-level) must degrade to not-enabled, not crash
+        # the doctor.
+        return False
+    return _enabled_in_text(text)
+
+
 def _state_db_checks() -> list[dict[str, str]]:
     """Check readability of ~/.hermes/state.db."""
     checks: list[dict[str, str]] = []
@@ -281,6 +417,8 @@ def run_checks() -> list[dict[str, str]]:
     checks.extend(_skill_install_checks())
     checks.extend(_plugin_dir_checks())
     checks.extend(_plugin_yaml_checks())
+    checks.extend(_bridge_smoke_check())
+    checks.extend(_activation_check())
     checks.extend(_state_db_checks())
     checks.append(_dashboard_port_check())
     return checks

@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 _SCRIPTS_DIR = Path(__file__).parent.resolve()
 _MEASURE_PY = _SCRIPTS_DIR / "measure.py"
 
+# v5.X.Y (#58): the installer does NOT copy measure.py into the plugin dir
+# (version-drift risk). Instead it writes a one-line "measure-path" locator
+# next to this bridge, naming the canonical measure.py in the checkout. We read
+# it after the sibling check, before the hardcoded fallbacks.
+_MEASURE_LOCATOR = _SCRIPTS_DIR / "measure-path"
+
 # Fallback search paths if the primary location is missing (e.g. the bridge
 # is bundled into the install tree but measure.py is in the repo checkout).
 _FALLBACK_PATHS: list[Path] = [
@@ -49,7 +55,12 @@ _FALLBACK_PATHS: list[Path] = [
 ]
 
 
-_locate_measure_py_cache: Path | None | object = object()  # sentinel: not yet resolved
+_SENTINEL = object()  # "not yet resolved" marker for the locate cache
+_locate_measure_py_cache: Path | None | object = _SENTINEL
+
+# v5.11.1 (#58): emit the "measure.py not found - rollups paused" warning at
+# most once per process so a paused install doesn't spam the Hermes terminal.
+_rollup_missing_warned = False
 
 
 def _locate_measure_py() -> Path | None:
@@ -61,10 +72,26 @@ def _locate_measure_py() -> Path | None:
     """
     global _locate_measure_py_cache
     if isinstance(_locate_measure_py_cache, Path):
-        return _locate_measure_py_cache
+        # v5.11.1 (#58): verify the cached path still exists before returning it.
+        # A measure.py that was moved/deleted after first resolution would
+        # otherwise have us shell to a dead path forever; one cheap stat per
+        # call re-resolves it instead.
+        if _locate_measure_py_cache.is_file():
+            return _locate_measure_py_cache
+        _locate_measure_py_cache = _SENTINEL
     if _MEASURE_PY.is_file():
         _locate_measure_py_cache = _MEASURE_PY
         return _MEASURE_PY
+    # Locator file written by hermes_install.py (#58). Tolerate any read/parse
+    # failure — a missing or garbage locator must never raise here.
+    try:
+        if _MEASURE_LOCATOR.is_file():
+            located = Path(_MEASURE_LOCATOR.read_text(encoding="utf-8").strip())
+            if located.is_file():
+                _locate_measure_py_cache = located
+                return located
+    except (OSError, ValueError):
+        pass
     for candidate in _FALLBACK_PATHS:
         if candidate.is_file():
             _locate_measure_py_cache = candidate
@@ -132,6 +159,16 @@ def run_rollup(session_id: str = "", platform: str = "hermes", reason: str = "")
         return
     measure_py = _locate_measure_py()
     if measure_py is None:
+        # v5.11.1 (#58): a missing measure.py silently pauses rollups, which is
+        # easy to miss. Surface it once to stderr with a remediation pointer.
+        global _rollup_missing_warned
+        if not _rollup_missing_warned:
+            _rollup_missing_warned = True
+            print(
+                "[Token Optimizer] measure.py not found - rollups paused. "
+                "Run hermes-doctor to diagnose.",
+                file=sys.stderr,
+            )
         return
     cmd = [sys.executable, str(measure_py), "hermes-rollup", "--quiet",
            "--session", session_id]

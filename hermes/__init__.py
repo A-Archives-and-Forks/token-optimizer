@@ -18,16 +18,30 @@ After installation the full plugin directory layout is:
   ~/.hermes/plugins/token-optimizer/
       __init__.py          (this file)
       plugin.yaml
+      README.md
       hermes_hook_bridge.py
       hermes_state.py
       hermes_session.py
+      measure-path         (one-line locator → checkout's measure.py)
 
-The installer copies all five files into that directory.  At import time we
-add the plugin directory itself (``_PLUGIN_DIR``) to ``sys.path`` so the three
-sibling modules resolve correctly, whether the plugin is loaded from the
-install tree OR from the repo checkout (where scripts/ is the parent of all
-four files).  No Hermes modules are imported; we touch ``agent.usage_pricing``
-only for live per-call cost estimation, wrapped in try/except (fail-open).
+``hermes_install.py`` copies the hermes/ payload (this file, plugin.yaml,
+README.md) AND the three runtime modules above into that directory (#58: earlier
+installs copied only the payload, leaving the imports below broken). It does NOT
+copy measure.py itself — that would silently drift on update — and instead writes
+the ``measure-path`` locator naming the canonical measure.py in the checkout;
+hermes_hook_bridge reads it to shell into measure.py.
+
+At import time we add the plugin directory itself (``_PLUGIN_DIR``) to
+``sys.path`` so the three sibling modules resolve correctly, whether the plugin
+is loaded from the install tree OR from the repo checkout (where scripts/ is the
+parent of all four files).  No Hermes modules are imported; we touch
+``agent.usage_pricing`` only for live per-call cost estimation, wrapped in
+try/except (fail-open).
+
+Activation: Hermes (v0.15.x) does NOT auto-discover plugins by directory
+presence — the plugin must be allow-listed in the Hermes config under
+``plugins.enabled``. ``hermes_install.py --enable`` patches that automatically;
+otherwise the installer prints the snippet to add.
 """
 
 from __future__ import annotations
