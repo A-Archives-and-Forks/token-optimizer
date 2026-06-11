@@ -87,6 +87,34 @@ Tool Search (default since Jan 2026) reduced total MCP overhead by 85-96%.
 | Skill assigned to subagent | FULL SKILL.md at startup (not progressive) |
 | Agent Teams vs single agent | ~7x token usage (Anthropic docs) |
 
+## Cache-Expiry Waste — per provider (verified June 2026)
+
+Cache economics are model-AGNOSTIC: each provider has its own cache profile, so the detector resolves a session's model to a profile, not to Anthropic semantics. Two waste shapes: explicit-TTL re-WRITE (Anthropic) and automatic-discount COLLAPSE (OpenAI/Codex, Gemini, DeepSeek).
+
+| Provider / model family | Cache kind | Cached read | Effective TTL | User TTL knob |
+|---|---|---|---|---|
+| Anthropic API/SDK | explicit_ttl | 0.1x input | 5 min default | yes (`ttl:"1h"`, 2x write once) |
+| Claude Code | explicit_ttl | 0.1x input | 1 hour (platform default) | no (behavioral only) |
+| OpenAI / Codex | automatic_discount | 0.1x input | ~5-10 min (max ~1h) | policy only (`prompt_cache_retention="24h"`) |
+| Gemini 2.5+ | explicit_storage | ~0.1x input | implicit auto | yes (`cached_content` ttl, default 1h, +storage/hr) |
+| DeepSeek | automatic_discount | 0.1x input (1/10) | hours-to-days | no |
+| unknown / other | none | n/a | n/a | n/a (no cache economics) |
+
+Claude Code REQUESTS a 1-hour prompt cache (the platform default; the historical "silent downgrade to 5 minutes" was a bug fixed in v2.1.129). Empirically the cache survives sub-hour pauses, so the Claude Code detector counts only pauses LONGER than an hour. Raw Anthropic API/SDK/harness sessions (e.g. Hermes → Anthropic) keep the 5-minute default and the 1h-`cache_control` counterfactual.
+
+Detection: explicit_ttl = gap > effective TTL (Claude Code 1h; API/SDK 5min) AND next-turn cache_creation >= 50% of prior cached prefix. automatic_discount/explicit_storage = prior cached ratio >= 0.40, gap > TTL, next ratio < 0.10 with comparable prompt → lost cached tokens re-billed at full input vs cached rate. none = honest skip (counted, never waste).
+
+Verified remedies (per profile, exactly what the provider offers):
+- Claude Code: already holds a 1-hour cache; no setting extends it. Behavioral only — resume within the hour or batch related work; pauses longer than an hour re-write the prefix.
+- Anthropic API/SDK/agent harness: `cache_control {"type":"ephemeral","ttl":"1h"}` on stable prefixes.
+- OpenAI/Codex: keep prefix exact-match (>=1024 tok), resume within window; `prompt_cache_retention="24h"` for long-lived prefixes.
+- Gemini: explicit `cached_content` with user `ttl` (per-hour storage billed).
+- DeepSeek: automatic; keep prefixes stable while the on-disk cache is warm.
+
+Coverage gaps (not measurable, rendered explicitly): Hermes (per-session aggregates only, cache_read unreliable), OpenClaw/OpenCode (TS engines, no Python per-turn read path), Copilot (credits-billed, no per-turn cache detail).
+
+Surface: `measure.py cache-report [--days N] [--json]` — per-provider breakdown + coverage gaps. OPPORTUNITY-tier (observed waste, potential recovery); never counts toward realized savings.
+
 ## Community Pain Points (Feb-March 2026)
 
 1. No per-request token visibility (GitHub #29600, #30814)

@@ -3722,7 +3722,7 @@ var DB = (function() {
       parts.push('Let Token Optimizer route more of your routine work to lighter models. Recovers about ' + money(mo(mr.potential_cost_usd)) + '/mo.');
     }
     if (cdTokensMo > 0) {
-      parts.push('Compact before stepping away (or switch on the 1-hour cache). ' + (Number(cd.drop_sessions) || 0) + ' of your sessions idled past the cache window and re-wrote the prefix — about ' + cdTokensMo.toLocaleString() + ' tokens/mo.');
+      parts.push('Resume within the hour, or batch related work before stepping away. ' + (Number(cd.drop_sessions) || 0) + ' of your sessions idled past the cache window and re-wrote the prefix — about ' + cdTokensMo.toLocaleString() + ' tokens/mo.');
     }
     if ((Number(ow.cost_saved_usd) || 0) > 0) {
       parts.push('Favor targeted Edits over full-file Writes. About ' + (Number(ow.avoidable_writes) || 0) + ' of your Writes could have been Edits, worth about ' + money(mo(ow.cost_saved_usd)) + '/mo in output.');
@@ -3821,9 +3821,119 @@ var DB = (function() {
             'Currently <strong>' + (ready ? 'ready to promote' : 'still measuring') + '</strong>.' +
           '</div></div>';
       }
+      // WS2 runtime tripwire: per-cohort LIVE edit-rate + any auto-demotions.
+      var tw = cc.cohort_tripwire || {};
+      var twCohorts = tw.cohorts || [];
+      var twDemoted = tw.demoted || [];
+      if (twCohorts.length || twDemoted.length) {
+        ccHtml += '<div style="margin-top:var(--s-3);padding-top:var(--s-2);border-top:1px solid rgba(255,255,255,0.08);">' +
+          '<div style="font-weight:500;">Active cohort tripwire &mdash; live quality guard</div>' +
+          '<div style="font-size:13px;color:var(--c-text-dim);margin-top:2px;margin-bottom:4px;">' +
+            'Each promoted cohort’s live edit-after-skeleton rate. A cohort auto-demotes to measure-only if it crosses 15% (no flapping &mdash; re-promote is manual or by the next backfill).' +
+          '</div>';
+        twCohorts.forEach(function(c) {
+          var dem = !!c.demoted;
+          // T9: interpolated cohorts (promoted on a thin sample via an adjacent
+          // passing band) carry a higher exposure risk — label them so the
+          // edit-rate is read with that context.
+          var interp = c.basis === 'interpolated';
+          ccHtml += '<div style="display:flex;justify-content:space-between;gap:var(--s-3);padding:4px 0;' + (dem ? 'opacity:0.72;' : '') + '">' +
+            '<span>' + esc(String(c.language)) + ' &middot; ' + esc(String(c.band)) +
+              (interp ? ' <span title="Promoted on a thin sample because an adjacent size band of the same language passed the full gate. Higher exposure; tighter tripwire floor." style="font-size:11px;color:var(--c-text-dim);border:1px solid rgba(255,255,255,0.2);border-radius:4px;padding:1px 5px;">interpolated</span>' : '') +
+              (dem ? ' <span style="font-size:11px;color:var(--c-warn,#e6a23c);border:1px solid rgba(230,162,60,0.4);border-radius:4px;padding:1px 5px;">demoted</span>' : '') + '</span>' +
+            '<span style="font-family:var(--font-mono);color:var(--c-text-dim);">' +
+              (Number(c.skeletons) || 0) + ' reads &middot; ' + (Number(c.followups) || 0) + ' edits &middot; ' +
+              (Number(c.edit_rate_pct) || 0).toFixed(1) + '%</span>' +
+          '</div>';
+        });
+        if (twDemoted.length) {
+          var demStr = twDemoted.map(function(c) { return esc(String(c[0])) + ':' + esc(String(c[1])); }).join(', ');
+          ccHtml += '<div style="font-size:13px;color:var(--c-text-dim);margin-top:4px;">' +
+            'Demoted &rarr; measure-only: <span style="font-family:var(--font-mono);">' + demStr + '</span>. ' +
+            'Re-promote: <span style="font-family:var(--font-mono);">measure.py cohorts promote &lt;lang:band&gt;</span></div>';
+        }
+        ccHtml += '</div>';
+      }
       ccHtml += '</div>';
       html += ccHtml;
     }
+
+    // ---- Cache Health: TTL-expiry watchdog (opportunity tier). Observed
+    // waste + potential recovery; NEVER summed into the realized headline.
+    // Styled like the opportunity coverage block (dim + "shadow/opportunity"
+    // badge) so a would-be recovery can't be misread as realized savings. ----
+    var ch = data.cache_health || {};
+    var chHtml = '<div class="card wide" style="margin-top:var(--s-3);"><div class="card-header">' +
+      '<span>Cache health</span>' +
+      '<span class="label" style="border:1px solid rgba(255,255,255,0.12);border-radius:4px;padding:1px 5px;">opportunity &middot; not summed into savings</span>' +
+      '</div>';
+    if (ch.available) {
+      chHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:var(--s-3);margin-top:var(--s-2);">' +
+        '<div><div style="font-size:12px;color:var(--c-text-dim);">Cache hit rate</div>' +
+          '<div style="font-family:var(--font-mono);font-size:20px;">' + Math.round((Number(ch.overall_cache_hit_rate) || 0) * 100) + '%</div></div>' +
+        '<div><div style="font-size:12px;color:var(--c-text-dim);">Cache-expiry waste (' + (Number(ch.period_days) || 30) + 'd)</div>' +
+          '<div style="font-family:var(--font-mono);font-size:20px;">' + (Number(ch.wasted_tokens) || 0).toLocaleString() + ' tok</div>' +
+          '<div style="font-family:var(--font-mono);color:var(--c-text-dim);">$' + (Number(ch.wasted_cost_usd) || 0).toFixed(2) + '</div></div>' +
+        '<div><div style="font-size:12px;color:var(--c-text-dim);">Affected sessions</div>' +
+          '<div style="font-family:var(--font-mono);font-size:20px;">' + (Number(ch.affected_sessions) || 0) + '<span style="font-size:13px;color:var(--c-text-dim);"> / ' + (Number(ch.scanned_sessions) || 0) + '</span></div></div>' +
+        (Number(ch.would_be_savings_1h_usd) > 0 ?
+          '<div><div style="font-size:12px;color:var(--c-text-dim);" title="API/SDK sessions only: a 1-hour cache_control would avoid the repeat writes. Does not apply to Claude Code, which already holds a 1h cache.">Recoverable via 1h cache (API/SDK)</div>' +
+            '<div style="font-family:var(--font-mono);font-size:20px;color:var(--c-text-dim);">$' + (Number(ch.would_be_savings_1h_usd) || 0).toFixed(2) + '</div></div>' : '') +
+        (Number(ch.avoidable_behavioral_usd) > 0 ?
+          '<div><div style="font-size:12px;color:var(--c-text-dim);" title="Claude Code already holds a 1-hour cache. This is avoidable only behaviorally — by resuming within the hour or batching related work. No setting extends it.">Avoidable by resuming in-hour</div>' +
+            '<div style="font-family:var(--font-mono);font-size:20px;color:var(--c-text-dim);">$' + (Number(ch.avoidable_behavioral_usd) || 0).toFixed(2) + '</div></div>' : '') +
+      '</div>';
+      if (Number(ch.no_cache_economics_sessions) > 0) {
+        chHtml += '<div style="margin-top:var(--s-2);font-size:12px;color:var(--c-text-dim);">' +
+          (Number(ch.no_cache_economics_sessions)) + ' session(s) ran on models with no prompt cache (no cache economics to measure).</div>';
+      }
+      // Per-provider breakdown — cache economics differ by provider/model family.
+      var provs = ch.by_provider || [];
+      if (provs.length) {
+        chHtml += '<div style="margin-top:var(--s-3);"><div style="font-size:12px;color:var(--c-text-dim);margin-bottom:6px;">By provider</div>' +
+          '<table style="width:100%;border-collapse:collapse;font-size:12px;">' +
+          '<thead><tr style="color:var(--c-text-dim);text-align:left;">' +
+          '<th style="padding:4px 6px;">Provider</th><th style="padding:4px 6px;">Cache model</th>' +
+          '<th style="padding:4px 6px;">Sessions</th><th style="padding:4px 6px;">Affected</th>' +
+          '<th style="padding:4px 6px;">Waste $</th><th style="padding:4px 6px;" title="anthropic_api: avoidable via a 1h cache_control. claude_code: avoidable only by resuming within the hour (no setting extends it). automatic-discount: avoided by resuming within the cache window.">Avoidable $</th>' +
+          '<th style="padding:4px 6px;">Confidence</th></tr></thead><tbody>';
+        provs.forEach(function(p) {
+          chHtml += '<tr style="border-top:1px solid rgba(255,255,255,0.06);">' +
+            '<td style="padding:4px 6px;">' + esc(p.label || p.provider) + '</td>' +
+            '<td style="padding:4px 6px;font-family:var(--font-mono);">' + esc(p.cache_kind || '') + '</td>' +
+            '<td style="padding:4px 6px;font-family:var(--font-mono);">' + (Number(p.sessions) || 0) + '</td>' +
+            '<td style="padding:4px 6px;font-family:var(--font-mono);">' + (Number(p.affected_sessions) || 0) + '</td>' +
+            '<td style="padding:4px 6px;font-family:var(--font-mono);">$' + (Number(p.wasted_cost_usd) || 0).toFixed(2) + '</td>' +
+            '<td style="padding:4px 6px;font-family:var(--font-mono);color:var(--c-text-dim);" title="' + esc(p.recoverable_kind === 'avoidable_behavioral' ? 'avoidable only behaviorally (resume in-hour)' : (p.recoverable_kind === 'recoverable_1h' ? '1h cache_control counterfactual' : 'avoided by resuming within the cache window')) + '">$' + (Number(p.recoverable_usd) || 0).toFixed(2) + '</td>' +
+            '<td style="padding:4px 6px;"><span class="label" style="border:1px solid rgba(255,255,255,0.12);border-radius:4px;padding:0 4px;">' + esc(p.confidence || 'estimated') + '</span></td>' +
+            '</tr>';
+          if (p.remedy) {
+            chHtml += '<tr><td colspan="7" style="padding:0 6px 6px 6px;color:var(--c-text-dim);line-height:1.5;">' + esc(p.remedy) + '</td></tr>';
+          }
+        });
+        chHtml += '</tbody></table></div>';
+      }
+    } else {
+      chHtml += '<div style="margin-top:var(--s-2);font-size:13px;color:var(--c-text-dim);">' +
+        'No measurable sessions on this platform in the window.</div>';
+    }
+    if (ch.recommendation) {
+      chHtml += '<div style="margin-top:var(--s-3);padding-top:var(--s-2);border-top:1px solid rgba(255,255,255,0.08);font-size:13px;color:var(--c-text-dim);line-height:1.6;">' +
+        esc(ch.recommendation) + '</div>';
+    }
+    // Coverage gaps — platforms whose per-turn cache+timestamp data we cannot read.
+    var gaps = ch.coverage_gaps || [];
+    if (gaps.length) {
+      chHtml += '<div style="margin-top:var(--s-3);padding-top:var(--s-2);border-top:1px solid rgba(255,255,255,0.08);">' +
+        '<div style="font-size:12px;color:var(--c-text-dim);margin-bottom:6px;">Not measurable (documented coverage gaps)</div>';
+      gaps.forEach(function(g) {
+        chHtml += '<div style="font-size:12px;color:var(--c-text-dim);line-height:1.5;margin-bottom:4px;">' +
+          '<span style="font-family:var(--font-mono);color:var(--c-text-main);">' + esc(g.platform) + '</span> &mdash; ' + esc(g.reason) + '</div>';
+      });
+      chHtml += '</div>';
+    }
+    chHtml += '</div>';
+    html += chHtml;
 
     el.innerHTML = html;
   }
