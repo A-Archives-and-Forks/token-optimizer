@@ -226,7 +226,15 @@ SKILL_ARCHIVE_DIR_PREFIXES = ("skills-archived", "skills-deduped")
 # (v5.4.23+), else fall back to legacy paths for symlink/script installs.
 _RESOLVED_PLUGIN_DATA = resolve_plugin_data_dir()
 _PLUGIN_DATA = str(_RESOLVED_PLUGIN_DATA) if _RESOLVED_PLUGIN_DATA else None
-if _RESOLVED_PLUGIN_DATA is not None:
+# v5.11.1: TOKEN_OPTIMIZER_SNAPSHOT_DIR sandbox override (test isolation;
+# production no-op when unset). measure.py resolves SNAPSHOT_DIR independently of
+# plugin_env.resolve_snapshot_dir, so honor the same env knob here for parity
+# with archive_result/read_cache (which go through the shared resolver).
+_SNAPSHOT_DIR_OVERRIDE = os.environ.get("TOKEN_OPTIMIZER_SNAPSHOT_DIR", "").strip()
+if _SNAPSHOT_DIR_OVERRIDE:
+    SNAPSHOT_DIR = Path(_SNAPSHOT_DIR_OVERRIDE).expanduser()
+    _CONFIG_BASE = SNAPSHOT_DIR / "config"
+elif _RESOLVED_PLUGIN_DATA is not None:
     SNAPSHOT_DIR = _RESOLVED_PLUGIN_DATA / "data"
     _CONFIG_BASE = _RESOLVED_PLUGIN_DATA / "config"
 else:
@@ -379,6 +387,143 @@ GEMINI_LONG_CONTEXT_PRICING = {
     "gemini-3.1-pro-preview": {"input": 4.0, "cache_read": 0.40, "output": 18.0},
 }
 GEMINI_LONG_CONTEXT_INPUT_THRESHOLD = 200_000
+
+# ---------------------------------------------------------------------------
+# PROVIDER CACHE-PROFILE REGISTRY  (one source of truth for cache economics)
+# ---------------------------------------------------------------------------
+# Token Optimizer is model-AGNOSTIC. Cache economics differ by provider and are
+# NEVER hardcoded to Anthropic semantics. Each profile describes HOW a provider's
+# prompt cache works so the cache-TTL watchdog can resolve a session's model to
+# the right detection strategy and the right (verified) remedy.
+#
+# cache_kind:
+#   "explicit_ttl"        - user sets a TTL; expiry forces a re-WRITE that is
+#                           directly billable (Anthropic API). Cache-creation
+#                           tokens are reported per turn -> rewrite detection.
+#   "automatic_discount"  - cache is automatic, no creation event; cached reads
+#                           are discounted. Expiry shows up as a COLLAPSE in the
+#                           cached/prompt ratio between turns -> collapse detection.
+#   "explicit_storage"    - automatic discount PLUS an opt-in explicit cache with
+#                           a user TTL and per-hour storage pricing (Gemini).
+#   "none"                - the model has no prompt cache; prefix churn is free of
+#                           cache penalty. Honest "no cache economics" bucket.
+#
+# Verified 2026-06-11 against current public docs (see cache-ttl-stage2.md report
+# for citations). `confidence` is "verified" when every number was confirmed from
+# the provider's own docs, "estimated" otherwise (the output labels it).
+PROVIDER_CACHE_PROFILES = {
+    "anthropic_api": {
+        # Raw Anthropic API/SDK/agent-harness sessions (e.g. Hermes routing to
+        # Anthropic). The user CAN set cache_control ttl, so the 5-min default is
+        # the live boundary and the 1h-cache_control counterfactual is valid.
+        "label": "Anthropic (API / SDK / agent harness)",
+        "cache_kind": "explicit_ttl",
+        "effective_ttl_seconds": 300,      # 5-minute default TTL = detection boundary
+        "write_premium": 1.25,             # 5m write = 1.25x input
+        "extended_ttl_seconds": 3600,      # opt-in 1-hour TTL (cache_control)
+        "extended_write_premium": 2.0,     # 1h write = 2x input (once)
+        "cached_discount": 0.1,            # cache read = 0.1x input
+        "min_cacheable_tokens": 1024,
+        "remedy_key": "anthropic_api",
+        "recoverable_kind": "recoverable_1h",  # 1h-cache_control counterfactual valid
+        "confidence": "verified",
+    },
+    "claude_code": {
+        # Claude Code REQUESTS a 1-hour prompt cache TTL (the platform default;
+        # the historical "silent downgrade to 5 minutes" was a bug, fixed in
+        # v2.1.129). There is no user TTL knob. Empirically the cache survives
+        # sub-hour pauses, so the detection boundary is 1 hour, not 5 minutes.
+        # Waste is only the prefix re-writes that follow pauses LONGER than the
+        # hour — avoidable only behaviorally (resume within the hour / batch work),
+        # NOT via any setting. The 1h-cache_control counterfactual does NOT apply
+        # (Claude Code already holds a 1h cache).
+        "label": "Claude Code",
+        "cache_kind": "explicit_ttl",
+        "effective_ttl_seconds": 3600,     # platform holds 1h (no user knob) = boundary
+        "write_premium": 2.0,              # 1h write = 2x input
+        "cached_discount": 0.1,            # cache read = 0.1x input
+        "min_cacheable_tokens": 1024,
+        "remedy_key": "claude_code",
+        "recoverable_kind": "avoidable_behavioral",  # no 1h counterfactual; behavioral only
+        "confidence": "verified",
+    },
+    "openai": {
+        "label": "OpenAI / Codex (GPT-5.x, o-series)",
+        "cache_kind": "automatic_discount",
+        "effective_ttl_seconds": 300,      # 5-10min inactivity; use 5min floor
+        "max_ttl_seconds": 3600,           # max ~1 hour in_memory
+        "write_premium": 1.0,              # no cache-WRITE charge (automatic)
+        "extended_ttl_seconds": 86400,     # prompt_cache_retention="24h" knob
+        "cached_discount": 0.1,            # cached input = 0.1x (90% off)
+        "min_cacheable_tokens": 1024,      # exact-prefix match >=1024 tokens
+        "remedy_key": "openai",
+        "recoverable_kind": "recoverable_window",  # collapse avoided by resuming in window
+        "confidence": "verified",
+    },
+    "gemini": {
+        "label": "Google Gemini (2.5+)",
+        "cache_kind": "explicit_storage",
+        "effective_ttl_seconds": 300,      # implicit cache reuse window (approx)
+        "write_premium": 1.0,              # implicit caching: no write charge
+        # explicit_default_ttl_seconds: explicit cached_content TTL defaults to 1h
+        # (3600s) — kept for future use when explicit-cache detection lands.
+        "explicit_default_ttl_seconds": 3600,
+        "explicit_storage_priced": True,   # per-hour storage billing on explicit cache
+        "cached_discount": 0.1,            # ~75-90% off (derived per-model from rate card)
+        "min_cacheable_tokens": 1024,      # 1024 Flash / 2048 Pro
+        "remedy_key": "gemini",
+        "recoverable_kind": "recoverable_window",
+        "confidence": "verified",
+    },
+    "deepseek": {
+        "label": "DeepSeek (Context Caching on Disk)",
+        "cache_kind": "automatic_discount",
+        "effective_ttl_seconds": 3600,     # persists hours-to-days; conservative 1h
+        "write_premium": 1.0,              # automatic, no write charge
+        "cached_discount": 0.1,            # cache hit = 1/10 input (90% off)
+        "min_cacheable_tokens": 1,         # no documented minimum
+        "remedy_key": "deepseek",
+        "recoverable_kind": "recoverable_window",
+        "confidence": "verified",
+    },
+    "unknown": {
+        "label": "Unknown / no documented cache",
+        "cache_kind": "none",
+        "effective_ttl_seconds": None,
+        "write_premium": 1.0,
+        "cached_discount": None,
+        "min_cacheable_tokens": None,
+        "remedy_key": "none",
+        "recoverable_kind": "none",
+        "confidence": "verified",  # the honest "we make no claims" profile
+    },
+}
+
+
+def _resolve_cache_profile(model, runtime=None):
+    """Resolve a model id (+ runtime) to its provider cache profile.
+
+    Returns the (profile_key, profile_dict). Pure lookup, never raises.
+    Resolution: OpenAI/Gemini/DeepSeek model families first (provider-specific
+    rate cards already recognize these), then Claude (Claude Code vs raw API by
+    runtime), else the honest "unknown/none" profile.
+    """
+    if _normalize_openai_model_name(model):
+        return "openai", PROVIDER_CACHE_PROFILES["openai"]
+    if _normalize_gemini_model_name(model):
+        return "gemini", PROVIDER_CACHE_PROFILES["gemini"]
+    value = _strip_provider_prefixes(model) if model else ""
+    if value.startswith("deepseek"):
+        return "deepseek", PROVIDER_CACHE_PROFILES["deepseek"]
+    if _normalize_model_name(model) in ("fable", "opus", "sonnet", "haiku"):
+        if runtime == "claude":
+            # Claude Code: the platform requests a 1h cache (no user knob).
+            return "claude_code", PROVIDER_CACHE_PROFILES["claude_code"]
+        # Raw Anthropic API/SDK/harness session (e.g. Hermes -> Anthropic): the
+        # 5-min default applies and the user can set a 1h cache_control.
+        return "anthropic_api", PROVIDER_CACHE_PROFILES["anthropic_api"]
+    return "unknown", PROVIDER_CACHE_PROFILES["unknown"]
+
 
 _KNOWN_PROVIDER_PREFIXES = {
     "anthropic", "openai", "google", "gemini", "vertex", "bedrock",
@@ -3999,6 +4144,21 @@ def generate_dashboard(coord_path):
     except Exception:
         compression_coverage = {"available": False, "tiers": {}, "first_read_proxy": None}
 
+    # WS2 tripwire verdict for the coverage panel (per-cohort live edit-rate +
+    # auto-demotions). Read-only; never recomputes/demotes here. Fail-open.
+    try:
+        cohort_tripwire = _cohort_tripwire_state()
+    except Exception:
+        cohort_tripwire = {"cohorts": [], "demoted": []}
+    compression_coverage["cohort_tripwire"] = cohort_tripwire
+
+    # Cache-TTL watchdog (opportunity tier — observed waste, potential recovery).
+    # Standalone analysis; never reaches the realized savings headline. Fail-open.
+    try:
+        cache_health = _cache_ttl_waste_cached(days=30)
+    except Exception:
+        cache_health = {"available": False, "tier": "opportunity"}
+
     # Fall back to auto-recommendations if LLM plan is missing
     auto_plan_flag = False
     if not plan:
@@ -4023,6 +4183,7 @@ def generate_dashboard(coord_path):
         "hooks": hook_status,
         "savings": savings_data,
         "compression_coverage": compression_coverage,
+        "cache_health": cache_health,
         "auto_plan": auto_plan_flag,
         "generated_at": datetime.now().isoformat(),
         "version": TOKEN_OPTIMIZER_VERSION,
@@ -8030,6 +8191,13 @@ def _init_trends_db():
             "CREATE INDEX IF NOT EXISTS idx_compression_events_uuid "
             "ON compression_events (session_uuid)"
         )
+        # T6: the tripwire edit-rate query filters on (feature, tier); index it so
+        # the per-cohort skeleton/follow-up scans stay cheap as the table grows.
+        # Idempotent (IF NOT EXISTS) — safe on every init.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_compression_events_feature_tier "
+            "ON compression_events (feature, tier)"
+        )
         conn.commit()
     except sqlite3.Error:
         pass
@@ -8418,10 +8586,27 @@ _TIER_DISPLAY_NAMES = {
 _FEATURE_FIRST_READ_SKELETON = "first_read_skeleton"
 _FEATURE_FIRST_READ_EDIT_FOLLOWUP = "first_read_edit_followup"
 
+# C4: render the agent-result harm rate from the single source of truth
+# (archive_result._AGENT_RESULT_HARM_PCT) so this label never drifts from the
+# backfill number. Fail-open to a bare label if the import is unavailable.
+try:
+    from archive_result import _AGENT_RESULT_HARM_PCT as _AGENT_HARM_PCT
+    _AGENT_RESULT_LABEL = (
+        f"Agent/Task result (measure-only, harm {_AGENT_HARM_PCT:.0f}%)"
+    )
+except Exception:  # pragma: no cover
+    _AGENT_RESULT_LABEL = "Agent/Task result (measure-only)"
+
 _COVERAGE_FEATURE_LABELS = {
     "bash_generic": "Bash (unmatched output)",
     _FEATURE_FIRST_READ_SKELETON: "First-read skeleton",
     _FEATURE_FIRST_READ_EDIT_FOLLOWUP: "First-read edit follow-up",
+    # WS2 tripwire signal. NOT a _V5_COMPRESSION_CATEGORIES feature (0-token
+    # opportunity-tier marker), so it can never reach the realized headline.
+    "cohort_demoted": "Cohort auto-demoted (tripwire)",
+    # WS4 agent-result pool — measure-only opportunity (harm proxy failed the
+    # gate). NOT a headline category; surfaces the pool in coverage only.
+    "agent_result_skeleton": _AGENT_RESULT_LABEL,
 }
 
 # First-read shadow promotion gate (R9): a cohort graduates from shadow to active
@@ -8524,6 +8709,1260 @@ def _get_compression_coverage(days=30):
     for bucket in out["tiers"].values():
         bucket.sort(key=lambda e: e["events"], reverse=True)
     return out
+
+
+# ---------------------------------------------------------------------------
+# WS2: runtime quality TRIPWIRE for first-read active cohorts.
+#
+# The "no live shadow phase" directive replaces shadow validation with two
+# safety nets: (1) history-replay backfill validates a cohort BEFORE promotion;
+# (2) this tripwire watches the LIVE per-cohort edit-rate and auto-DEMOTES a
+# cohort to measure-only the moment its rolling edit-rate exceeds the gate. The
+# edit-rate is measured/measured: the count of active `first_read_skeleton`
+# (tier=measured) events per cohort vs the count of `first_read_edit_followup`
+# (tier=measured) events per cohort, over the last _TRIPWIRE_WINDOW events.
+#
+# Hysteresis (no flapping): the tripwire ONLY demotes. Re-promotion happens
+# exclusively via the explicit CLI (`measure.py cohorts promote ...`) or the next
+# backfill run, never automatically on the next-window dip. The demoted set is
+# persisted to a 0600 sidecar the hot-path read consults (mtime-gated), and a
+# `cohort_demoted` compression_events row (tier=opportunity, 0 tokens) is logged
+# once per (cohort) transition so it surfaces in compression-stats + dashboard.
+# ---------------------------------------------------------------------------
+
+# Mirror of read_cache.FIRST_READ_ACTIVE_COHORTS — the cohorts eligible for the
+# tripwire. Kept as literals here (the dashboard/CLI module must not import the
+# hot-path read hook). A drift test pins the two lists together.
+_FIRST_READ_ACTIVE_COHORTS = frozenset({
+    ("markdown", "16-64KB"),
+    ("python", "16-64KB"),
+    ("python", "64-256KB"),
+    ("typescript", "16-64KB"),
+    ("markdown", "64-256KB"),
+    ("typescript", "64-256KB"),
+})
+
+# Interpolated cohorts: promoted on a thin sample because the SAME language
+# already passed the full gate in an ADJACENT band (markdown/typescript 16-64KB
+# passed → their 64-256KB bands graduate). They carry a HIGHER exposure risk
+# (fewer historical reads) so the runtime tripwire judges them on a SMALLER
+# sample floor — a demotion can fire after just _TRIPWIRE_MIN_SAMPLES_INTERP
+# active skeletons instead of the full-gate floor. Mirror of read_cache's
+# interpolated tier; the drift test pins them together.
+_INTERPOLATED_COHORTS = frozenset({
+    ("markdown", "64-256KB"),
+    ("typescript", "64-256KB"),
+})
+
+_active_cohorts_drift_warned = False
+
+
+def _resolve_active_cohorts():
+    """The canonical active-cohort set, preferring read_cache's live constant.
+
+    C2: lazily import read_cache.FIRST_READ_ACTIVE_COHORTS (the hot-path source
+    of truth) so this CLI/dashboard module follows the read hook without a hard
+    import at module load. Falls back to the local mirror if the import fails,
+    and emits a one-line stderr drift warning (once) if the two ever disagree —
+    the drift test then fails loudly instead of the tripwire silently judging a
+    cohort the read hook no longer serves.
+    """
+    global _active_cohorts_drift_warned
+    try:
+        from read_cache import FIRST_READ_ACTIVE_COHORTS as _live
+        live = frozenset(_live)
+    except Exception:
+        return _FIRST_READ_ACTIVE_COHORTS
+    if live != _FIRST_READ_ACTIVE_COHORTS and not _active_cohorts_drift_warned:
+        _active_cohorts_drift_warned = True
+        try:
+            print(
+                "[Token Optimizer] WARNING: active-cohort drift between "
+                "measure._FIRST_READ_ACTIVE_COHORTS and "
+                "read_cache.FIRST_READ_ACTIVE_COHORTS; using the read-hook set.",
+                file=sys.stderr,
+            )
+        except Exception:
+            pass
+    return live
+
+
+_TRIPWIRE_SIDECAR_NAME = "cohort_tripwire.json"
+_TRIPWIRE_WINDOW = 50          # rolling window of recent active skeletons per cohort
+_TRIPWIRE_EDIT_RATE = 0.15     # demote above this (same gate as promotion)
+_TRIPWIRE_MIN_SAMPLES = 10     # full-gate cohorts: judge after this many active reads
+_TRIPWIRE_MIN_SAMPLES_INTERP = 5  # interpolated cohorts: tighter floor (thin sample)
+_TRIPWIRE_CACHE_TTL_SECONDS = 300
+_FEATURE_COHORT_DEMOTED = "cohort_demoted"
+_TRIPWIRE_LOCK_NAME = ".cohort_tripwire.lock"
+
+# Rate-limit the stderr demotion push signal (T8) to once per process per cohort.
+_tripwire_warned_cohorts: set = set()
+
+
+def _tripwire_min_samples(cohort) -> int:
+    """Sample floor before a cohort can be auto-demoted (T9).
+
+    Interpolated cohorts (thin historical sample) use the tighter floor so a bad
+    live signal surfaces faster; full-gate cohorts use the standard floor.
+    """
+    return (_TRIPWIRE_MIN_SAMPLES_INTERP if cohort in _INTERPOLATED_COHORTS
+            else _TRIPWIRE_MIN_SAMPLES)
+
+
+def _cohort_basis(cohort) -> str:
+    """'interpolated' (adjacent-band graduation) or 'full_gate' (T9 sidecar label)."""
+    return "interpolated" if cohort in _INTERPOLATED_COHORTS else "full_gate"
+
+
+def _cohort_from_pattern(pattern):
+    """Recover a (language, band) cohort from a `lang|band` command_pattern."""
+    if not pattern or "|" not in pattern:
+        return None
+    lang, band = pattern.split("|", 1)
+    lang, band = lang.strip(), band.strip()
+    if not lang or not band:
+        return None
+    return (lang, band)
+
+
+def _compute_cohort_edit_rates(conn, promoted_at=None):
+    """Per-cohort live edit-rate over the last _TRIPWIRE_WINDOW active skeletons.
+
+    Returns {(lang, band): {"skeletons": n, "followups": m, "edit_rate": r}} for
+    every active cohort that has at least one measured skeleton. The skeleton
+    window is bounded per cohort (most recent N) so an old run of bad edits ages
+    out.
+
+    Promote fence (T5 hysteresis hole): for any cohort with a `promoted_at`
+    timestamp, BOTH skeleton and follow-up events older than that promotion are
+    filtered out, so a re-promoted cohort is judged only on POST-promote history
+    and cannot immediately re-demote on the pre-promote edits that demoted it.
+
+    Follow-up window (T6): a global `timestamp >= oldest active-skeleton ts`
+    filter is pushed into SQL, then per-cohort follow-ups are bounded to
+    oldest(cohort skeleton ts) <= t <= newest(cohort skeleton ts) so an edit
+    attributed to an aged-out OR a not-yet-served skeleton can't inflate the rate.
+    """
+    promoted_at = promoted_at or {}
+
+    def _fence(cohort):
+        return promoted_at.get(f"{cohort[0]}|{cohort[1]}")
+
+    rates = {}
+    # Most-recent measured skeleton events per cohort (id DESC == recency).
+    sk_rows = conn.execute(
+        "SELECT command_pattern, timestamp FROM compression_events "
+        "WHERE feature = ? AND tier = 'measured' AND command_pattern LIKE '%|%' "
+        "ORDER BY id DESC",
+        (_FEATURE_FIRST_READ_SKELETON,),
+    ).fetchall()
+    per_cohort_ts = {}
+    for pattern, ts in sk_rows:
+        cohort = _cohort_from_pattern(pattern)
+        if cohort is None:
+            continue
+        fence = _fence(cohort)
+        if fence is not None and ts is not None and ts < fence:
+            continue  # pre-promote skeleton: fenced out (T5)
+        bucket = per_cohort_ts.setdefault(cohort, [])
+        if len(bucket) < _TRIPWIRE_WINDOW:
+            bucket.append(ts)
+    if not per_cohort_ts:
+        return rates
+
+    # T6: oldest in-window skeleton ts across ALL cohorts bounds the follow-up
+    # scan, so the query never reads follow-ups that predate every live window.
+    all_ts = [t for ts_list in per_cohort_ts.values() for t in ts_list if t is not None]
+    global_oldest = min(all_ts) if all_ts else None
+    if global_oldest is not None:
+        fu_rows = conn.execute(
+            "SELECT command_pattern, timestamp FROM compression_events "
+            "WHERE feature = ? AND tier = 'measured' AND command_pattern LIKE '%|%' "
+            "AND timestamp >= ?",
+            (_FEATURE_FIRST_READ_EDIT_FOLLOWUP, global_oldest),
+        ).fetchall()
+    else:
+        fu_rows = conn.execute(
+            "SELECT command_pattern, timestamp FROM compression_events "
+            "WHERE feature = ? AND tier = 'measured' AND command_pattern LIKE '%|%'",
+            (_FEATURE_FIRST_READ_EDIT_FOLLOWUP,),
+        ).fetchall()
+    followups = {}
+    for pattern, ts in fu_rows:
+        cohort = _cohort_from_pattern(pattern)
+        if cohort is None:
+            continue
+        fence = _fence(cohort)
+        if fence is not None and ts is not None and ts < fence:
+            continue  # pre-promote follow-up: fenced out (T5)
+        followups.setdefault(cohort, []).append(ts)
+
+    for cohort, ts_list in per_cohort_ts.items():
+        skeletons = len(ts_list)
+        # Window bounds: oldest skeleton ts (aged-out floor) and newest skeleton
+        # ts (a follow-up after the newest served skeleton cannot belong to it).
+        valid_ts = [t for t in ts_list if t is not None]
+        oldest = min(valid_ts) if valid_ts else None
+        newest = max(valid_ts) if valid_ts else None
+        fu = followups.get(cohort, [])
+        fu_in_window = sum(
+            1 for t in fu
+            if (oldest is None or t is None or t >= oldest)
+            and (newest is None or t is None or t <= newest)
+        )
+        # Cap follow-ups at the skeleton count (one edit per served skeleton).
+        fu_in_window = min(fu_in_window, skeletons)
+        edit_rate = (fu_in_window / skeletons) if skeletons else 0.0
+        rates[cohort] = {
+            "skeletons": skeletons,
+            "followups": fu_in_window,
+            "edit_rate": round(edit_rate, 4),
+            "basis": _cohort_basis(cohort),
+        }
+    return rates
+
+
+def _valid_tripwire_payload(data):
+    """Schema-check the tripwire sidecar (T1 parity with read_cache).
+
+    `demoted` must be a list of 2-element string pairs; `edit_rates`/`promoted_at`
+    (when present) dicts. Used to decide corrupt-vs-valid so a malformed sidecar
+    forces a recompute instead of being trusted.
+    """
+    if not isinstance(data, dict):
+        return False
+    demoted = data.get("demoted", [])
+    if not isinstance(demoted, list):
+        return False
+    for pair in demoted:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            return False
+        if not all(isinstance(x, str) for x in pair):
+            return False
+    if not isinstance(data.get("edit_rates", {}), dict):
+        return False
+    if not isinstance(data.get("promoted_at", {}), dict):
+        return False
+    return True
+
+
+def _read_tripwire_sidecar(return_corrupt=False):
+    """Load the demoted-cohort sidecar.
+
+    Returns the parsed dict, or {} when missing/unreadable. When the file EXISTS
+    but is corrupt/malformed and `return_corrupt=True`, returns the sentinel
+    string ``"__corrupt__"`` so the caller (evaluate_cohort_tripwire) can force a
+    fresh recompute rather than trust an unparseable verdict (T1). Default
+    behavior (return_corrupt=False) keeps the historical empty-dict fail-open for
+    read-only consumers (_cohort_tripwire_state / cohorts_promote).
+    """
+    path = SNAPSHOT_DIR / _TRIPWIRE_SIDECAR_NAME
+    try:
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return "__corrupt__" if return_corrupt else {}
+    if not _valid_tripwire_payload(data):
+        return "__corrupt__" if return_corrupt else {}
+    return data
+
+
+def _write_tripwire_sidecar(demoted, rates, promoted_at=None):
+    """Atomically write the demoted-cohort sidecar (0600).
+
+    `promoted_at` is a {lang|band: epoch_ts} map (T5 hysteresis fence): when a
+    cohort is re-promoted, its pre-promote skeleton/follow-up history is fenced
+    out of the live edit-rate so it cannot immediately re-demote. Each cohort
+    also carries its `basis` (full_gate|interpolated) for the dashboard label.
+    """
+    path = SNAPSHOT_DIR / _TRIPWIRE_SIDECAR_NAME
+    promoted_at = promoted_at or {}
+    record = {
+        "demoted": [list(c) for c in sorted(demoted)],
+        "edit_rates": {f"{c[0]}|{c[1]}": rates.get(c, {}) for c in rates},
+        "promoted_at": dict(promoted_at),
+        "basis": {f"{c[0]}|{c[1]}": _cohort_basis(c) for c in rates},
+        "_cached_ts": time.time(),
+    }
+    try:
+        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".cohort_tripwire.", suffix=".tmp", dir=str(SNAPSHOT_DIR))
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(record, fh)
+            os.replace(tmp_name, str(path))
+        except OSError:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        pass
+
+
+@contextmanager
+def _tripwire_lock():
+    """Advisory file lock serializing tripwire recompute+write (T4).
+
+    Mirrors _config_lock: a blocking flock with kernel auto-release on process
+    death and a no-op fallback on Windows. The Edit hook fires the evaluation
+    from many concurrent processes; without this, two interleaved
+    read-modify-write cycles could clobber each other's demotions or promoted_at
+    fence. The read-only fast path in evaluate_cohort_tripwire stays lock-free.
+    """
+    if not _HAS_FCNTL:
+        yield
+        return
+    lock_path = SNAPSHOT_DIR / _TRIPWIRE_LOCK_NAME
+    try:
+        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def evaluate_cohort_tripwire(force=False):
+    """Recompute per-cohort live edit-rates and auto-demote breaches.
+
+    Cheap, mtime-gated: returns the cached sidecar verdict unless it is older
+    than _TRIPWIRE_CACHE_TTL_SECONDS (or `force`). On a fresh compute, any active
+    cohort whose live edit-rate exceeds _TRIPWIRE_EDIT_RATE (with at least
+    _TRIPWIRE_MIN_SAMPLES active reads) is added to the demoted set. Demotions
+    are STICKY (hysteresis): a cohort already demoted stays demoted regardless of
+    a later dip — only the CLI promote / next backfill clears it. Each NEW
+    demotion logs one `cohort_demoted` event. Fail-open: returns {} on error.
+    """
+    # T1: read_corrupt distinguishes a malformed sidecar (force recompute) from a
+    # fresh valid one. A corrupt verdict must never satisfy the TTL fast path.
+    sidecar = _read_tripwire_sidecar(return_corrupt=True)
+    corrupt = sidecar == "__corrupt__"
+    if corrupt:
+        sidecar = {}
+    if not force and not corrupt:
+        try:
+            age = time.time() - float(sidecar.get("_cached_ts", 0))
+            if sidecar and age < _TRIPWIRE_CACHE_TTL_SECONDS:
+                return sidecar
+        except (TypeError, ValueError):
+            pass
+
+    # T4: serialize the recompute+write branch under a lightweight flock (mirrors
+    # _config_lock) so two concurrent Edit-hook evaluations can't interleave a
+    # read-modify-write on the sidecar. The fast path above stays lock-free.
+    with _tripwire_lock():
+        # Re-read INSIDE the lock: another process may have just recomputed.
+        sidecar = _read_tripwire_sidecar(return_corrupt=True)
+        if sidecar == "__corrupt__":
+            sidecar = {}
+        elif not force:
+            try:
+                age = time.time() - float(sidecar.get("_cached_ts", 0))
+                if sidecar and age < _TRIPWIRE_CACHE_TTL_SECONDS:
+                    return sidecar
+            except (TypeError, ValueError):
+                pass
+
+        prev_demoted = set(
+            tuple(c) for c in sidecar.get("demoted", [])
+            if isinstance(c, (list, tuple)) and len(c) == 2
+        )
+        promoted_at = sidecar.get("promoted_at", {})
+        if not isinstance(promoted_at, dict):
+            promoted_at = {}
+        try:
+            conn = _init_trends_db()
+            try:
+                rates = _compute_cohort_edit_rates(conn, promoted_at=promoted_at)
+            finally:
+                conn.close()
+        except Exception:
+            return sidecar or {}
+
+        demoted = set(prev_demoted)  # hysteresis: never un-demote here
+        newly_demoted = []
+        for cohort, r in rates.items():
+            if cohort in demoted:
+                continue
+            # T9: interpolated cohorts use a tighter sample floor.
+            if (
+                r["skeletons"] >= _tripwire_min_samples(cohort)
+                and r["edit_rate"] > _TRIPWIRE_EDIT_RATE
+            ):
+                demoted.add(cohort)
+                newly_demoted.append((cohort, r))
+
+        # Drop demotions for cohorts no longer in the active set (e.g. removed
+        # from FIRST_READ_ACTIVE_COHORTS) so the sidecar cannot pin a stale one.
+        active_cohorts = _resolve_active_cohorts()
+        demoted = {c for c in demoted if c in active_cohorts}
+
+        _write_tripwire_sidecar(demoted, rates, promoted_at=promoted_at)
+
+    for cohort, r in newly_demoted:
+        try:
+            _log_compression_event(
+                feature=_FEATURE_COHORT_DEMOTED,
+                original_text="",
+                compressed_text="",
+                command_pattern=f"{cohort[0]}|{cohort[1]}",
+                tier="opportunity",
+                verified=False,
+                quality_preserved=False,
+                detail=(
+                    f"auto-demoted: live edit-rate {r['edit_rate']*100:.1f}% "
+                    f"(> {_TRIPWIRE_EDIT_RATE*100:.0f}% gate) over "
+                    f"{r['skeletons']} active reads"
+                ),
+            )
+        except Exception:
+            pass
+        # T8: push one rate-limited warn line to stderr naming the cohort, its
+        # live edit rate, and the exact re-promote command. Operators watching
+        # hook stderr learn about a silent quality demotion immediately instead
+        # of only on the next compression-stats render.
+        key = f"{cohort[0]}|{cohort[1]}"
+        if key not in _tripwire_warned_cohorts:
+            _tripwire_warned_cohorts.add(key)
+            try:
+                print(
+                    f"[Token Optimizer] cohort auto-demoted to measure-only: "
+                    f"{cohort[0]}:{cohort[1]} (live edit-rate "
+                    f"{r['edit_rate']*100:.1f}% > {_TRIPWIRE_EDIT_RATE*100:.0f}% "
+                    f"gate). Re-promote: measure.py cohorts promote "
+                    f"{cohort[0]}:{cohort[1]}",
+                    file=sys.stderr,
+                )
+            except Exception:
+                pass
+
+    # T3: build the verdict from the in-memory demoted set + freshly-computed
+    # rates rather than re-reading the file. A concurrent writer (or our own
+    # not-yet-flushed page cache) could otherwise hand back a stale/ghost verdict.
+    return {
+        "demoted": [list(c) for c in sorted(demoted)],
+        "edit_rates": {f"{c[0]}|{c[1]}": rates.get(c, {}) for c in rates},
+        "promoted_at": dict(promoted_at),
+        "basis": {f"{c[0]}|{c[1]}": _cohort_basis(c) for c in rates},
+        "_cached_ts": time.time(),
+    }
+
+
+def _cohort_tripwire_state():
+    """Read-only tripwire view for compression-stats + the dashboard.
+
+    Returns {"cohorts": [...], "demoted": [[lang,band],...]}. Each cohort row
+    carries its live edit-rate and a `demoted` flag. Does NOT recompute or
+    demote — it reads the sidecar verdict (kept fresh by the Edit-hook
+    evaluation) plus the current edit-rates for display. Fail-open: empty on
+    error.
+    """
+    out = {"cohorts": [], "demoted": []}
+    sidecar = _read_tripwire_sidecar()
+    demoted = set(
+        tuple(c) for c in sidecar.get("demoted", [])
+        if isinstance(c, (list, tuple)) and len(c) == 2
+    )
+    promoted_at = sidecar.get("promoted_at", {})
+    if not isinstance(promoted_at, dict):
+        promoted_at = {}
+    out["demoted"] = [list(c) for c in sorted(demoted)]
+    try:
+        conn = _init_trends_db()
+        try:
+            rates = _compute_cohort_edit_rates(conn, promoted_at=promoted_at)
+        finally:
+            conn.close()
+    except Exception:
+        return out
+    for cohort, r in sorted(rates.items()):
+        out["cohorts"].append({
+            "language": cohort[0],
+            "band": cohort[1],
+            # T9: full_gate | interpolated, so the dashboard/CLI can flag the
+            # thinner-sample (higher-exposure) interpolated cohorts honestly.
+            "basis": r.get("basis", _cohort_basis(cohort)),
+            "skeletons": r["skeletons"],
+            "followups": r["followups"],
+            "edit_rate_pct": round(100 * r["edit_rate"], 1),
+            "demoted": cohort in demoted,
+        })
+    return out
+
+
+def cohorts_promote(cohort_args):
+    """CLI: clear a tripwire demotion for one or more `lang:band` cohorts.
+
+    The ONLY runtime path that re-promotes a demoted cohort (hysteresis). Returns
+    the count cleared. Unknown cohorts are ignored with a note.
+    """
+    sidecar = _read_tripwire_sidecar()
+    demoted = set(
+        tuple(c) for c in sidecar.get("demoted", [])
+        if isinstance(c, (list, tuple)) and len(c) == 2
+    )
+    promoted_at = sidecar.get("promoted_at", {})
+    if not isinstance(promoted_at, dict):
+        promoted_at = {}
+    promoted_at = dict(promoted_at)
+    cleared = 0
+    now = time.time()
+    for arg in cohort_args:
+        if ":" not in arg:
+            # T7: a malformed arg (missing the lang:band separator) is almost
+            # always a typo; warn rather than silently skip so the operator
+            # learns nothing was re-promoted.
+            print(f"  [warn] ignoring malformed cohort arg '{arg}' "
+                  "(expected lang:band, e.g. python:64-256KB)", file=sys.stderr)
+            continue
+        lang, band = arg.split(":", 1)
+        cohort = (lang.strip(), band.strip())
+        if cohort in demoted:
+            demoted.discard(cohort)
+            cleared += 1
+            # T5: stamp the promotion time so pre-promote skeleton/follow-up
+            # history is fenced out of the live edit-rate and the cohort cannot
+            # immediately re-demote on the very edits that demoted it.
+            promoted_at[f"{cohort[0]}|{cohort[1]}"] = now
+    if cleared:
+        rates = {}
+        try:
+            conn = _init_trends_db()
+            try:
+                rates = _compute_cohort_edit_rates(conn, promoted_at=promoted_at)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+        _write_tripwire_sidecar(demoted, rates, promoted_at=promoted_at)
+    return cleared
+
+
+# ---------------------------------------------------------------------------
+# Cache-TTL watchdog (opportunity tier — OBSERVED waste, POTENTIAL recovery).
+#
+# Anthropic dropped the *default* prompt-cache TTL from 60min to 5min in
+# March 2026. A session with a natural pause >5min between turns can silently
+# re-pay a cache WRITE on the same prefix instead of getting a cheap cache READ.
+# We detect that re-write pattern from the JSONL turn stream and quantify it.
+#
+# TIER DISCIPLINE: this signal is OPPORTUNITY tier. It is a standalone analysis
+# function — it does NOT write to compression_events and is NOT a
+# _V5_COMPRESSION_CATEGORIES feature, so it can never reach the realized
+# savings headline (_get_compression_summary / _get_merged_savings read only
+# compression_events rows where tier='measured'). No shared write path exists.
+# ---------------------------------------------------------------------------
+
+# The 5-minute default-TTL boundary, in seconds. A gap strictly greater than
+# this is assumed to have expired a 5m-TTL cache entry (Anthropic default since
+# March 2026). Strict `>` so an exact-300s gap counts as not-yet-expired.
+# Runtimes the Python cache-report engine can actually read per-turn cache +
+# timestamp data for (Claude JSONL, Codex rollouts). Referenced by BOTH the
+# runtime dispatch in _get_cache_ttl_waste AND _cache_coverage_gaps so wiring a
+# third platform here can never leave it listed as a coverage gap at the same
+# time. Add a runtime to this set and to the dispatch together.
+_CACHE_WIRED_RUNTIMES = frozenset({"claude", "codex"})
+
+# A turn's cache_creation must be at least this fraction of the previous turn's
+# total cached prefix (read + creation) to be classed as a re-WRITE of the same
+# prefix rather than incremental growth. Heuristic: JSONL does not expose the
+# cache key, so we use re-created volume as the prefix-rewrite proxy.
+_CACHE_REWRITE_PREFIX_FRACTION = 0.5
+
+# automatic_discount detection: a turn N counts as "had a healthy cache" when its
+# cached/prompt ratio is at least this high; the NEXT turn (after a gap > the
+# profile TTL) counts as a "collapse" when its cached/prompt ratio falls below the
+# collapse threshold while its prompt size stays comparable to turn N's prompt.
+_CACHE_COLLAPSE_HEALTHY_RATIO = 0.40
+_CACHE_COLLAPSE_THRESHOLD_RATIO = 0.10
+_CACHE_COLLAPSE_PROMPT_COMPARABLE_FRACTION = 0.5  # next prompt >= 50% of prev prompt
+
+
+def _input_and_cached_read_rates(model):
+    """Return (input_rate, cached_read_rate) per-MTok for OpenAI/Gemini/DeepSeek
+    automatic-discount models, or None if the model isn't a priced non-Claude one.
+
+    Used by the automatic_discount detector to price a cached-share collapse:
+    the lost cached tokens get re-billed at the full input rate instead of the
+    discounted cached rate.
+    """
+    key = _normalize_openai_model_name(model)
+    if key:
+        r = OPENAI_MODEL_PRICING[key]
+        return r["input"], r.get("cache_read", r["input"])
+    key = _normalize_gemini_model_name(model)
+    if key:
+        r = GEMINI_MODEL_PRICING[key]
+        return r["input"], r.get("cache_read", r["input"])
+    value = _strip_provider_prefixes(model) if model else ""
+    if value.startswith("deepseek"):
+        # DeepSeek cache hit = 1/10 input (90% off). No per-model card here;
+        # use the verified ratio against a nominal input rate proxy of 1.0 so the
+        # COST scales with the verified 0.9x delta regardless of absolute price.
+        return 1.0, 0.1
+    return None
+
+
+def _claude_rates_for_model(model, tier_data):
+    """Return the Claude rate-card dict for a model id, defaulting to sonnet.
+
+    Returns None for non-Claude models (OpenAI/Gemini) which have no
+    cache-WRITE rate and therefore cannot exhibit Anthropic-style TTL waste.
+    """
+    if _normalize_openai_model_name(model) or _normalize_gemini_model_name(model):
+        return None
+    normalized = _normalize_model_name(model) if model else None
+    claude_models = tier_data.get("claude_models", {})
+    if normalized and normalized in claude_models:
+        return claude_models[normalized]
+    return None
+
+
+def _get_cache_ttl_waste(days=30, collect_sessions=False):
+    """Detect prompt-cache waste caused by cache-expiry.
+
+    When `collect_sessions=True` (cache-report --verbose), the result gains a
+    `session_detail` list of per-affected-session rows
+    {session, gap_seconds, rewritten_tokens, est_cost_usd} so a disputed headline
+    number can be drilled into. The detail is NOT cached (it bloats the sidecar);
+    --verbose implies a fresh, uncached compute at the call site.
+
+    Walks each session's turn sequence and resolves the dominant model to a
+    provider cache profile. For explicit_ttl profiles, a turn pair whose gap
+    exceeds that profile's EFFECTIVE TTL and whose next turn re-WRITES a prefix
+    cached on the previous turn (cache_creation >= 50% of the previous turn's
+    cached volume) is classified as cache-expiry waste. The boundary is
+    per-profile: anthropic_api uses the live 5-min default; CLAUDE CODE uses
+    3600s — Claude Code requests a 1-hour cache (v2.1.129 fixed the silent
+    downgrade to 5 min) and empirically the prefix survives sub-hour pauses, so
+    only pauses longer than the hour count.
+
+    Returns an OPPORTUNITY-tier dict (never enters the realized headline):
+      {
+        "available": bool,
+        "tier": "opportunity",
+        "period_days": int,
+        "wasted_tokens": int,             # re-written/lost tokens after expiry
+        "wasted_cost_usd": float,         # write-premium actually paid vs a read
+        "would_be_savings_1h_usd": float, # 1h-cache_control counterfactual, valid
+                                          #   only for anthropic_api/window profiles
+        "avoidable_behavioral_usd": float,# Claude Code: avoidable ONLY by resuming
+                                          #   within the hour (no setting helps)
+        "affected_sessions": int,
+        "scanned_sessions": int,
+        "overall_cache_hit_rate": float,  # across all scanned sessions
+        "recommendation": str,            # platform-verified remedy text
+        "platform": str,
+      }
+    """
+    runtime = detect_runtime()
+    tier = _load_pricing_tier()
+    tier_data = PRICING_TIERS.get(tier, PRICING_TIERS["anthropic"])
+
+    # Per-provider accumulators, keyed by cache-profile key.
+    providers = {}  # key -> {label, cache_kind, confidence, remedy_key, sessions,
+                    #         affected, wasted_tokens, wasted_cost, recoverable}
+    no_cache_sessions = 0   # sessions on a cache_kind == "none" model (honest bucket)
+    scanned_sessions = 0
+    total_cache_read = 0
+    total_full_input = 0
+
+    def _prov(key, profile):
+        p = providers.get(key)
+        if p is None:
+            p = {
+                "provider": key,
+                "label": profile["label"],
+                "cache_kind": profile["cache_kind"],
+                "confidence": profile.get("confidence", "estimated"),
+                "remedy_key": profile["remedy_key"],
+                # W4: default to the CONSERVATIVE kind. A profile missing
+                # recoverable_kind must not book the aggressive recoverable_window
+                # / recoverable_1h accounting; avoidable_behavioral claims no
+                # cache_control counterfactual. Matches _detect_explicit_ttl's
+                # default so both ends agree on the safe interpretation.
+                "recoverable_kind": profile.get("recoverable_kind", "avoidable_behavioral"),
+                "sessions": 0,
+                "affected_sessions": 0,
+                "wasted_tokens": 0,
+                "wasted_cost_usd": 0.0,
+                "recoverable_usd": 0.0,
+            }
+            providers[key] = p
+        return p
+
+    base = {
+        "available": False,
+        "tier": "opportunity",
+        "period_days": days,
+        "wasted_tokens": 0,
+        "wasted_cost_usd": 0.0,
+        "would_be_savings_1h_usd": 0.0,
+        "avoidable_behavioral_usd": 0.0,
+        "affected_sessions": 0,
+        "scanned_sessions": 0,
+        "no_cache_economics_sessions": 0,
+        "overall_cache_hit_rate": 0.0,
+        "platform": runtime,
+        "by_provider": [],
+        "coverage_gaps": _cache_coverage_gaps(runtime),
+    }
+    session_detail = [] if collect_sessions else None  # W8 drill-down rows
+
+    # Resolve the session source for the active runtime. Claude reads Claude
+    # JSONL; Codex reads Codex rollouts (real cached_input_tokens + timestamps —
+    # see codex_session.parse_session_turns). Other platforms have no per-turn
+    # cache+timestamp source the Python engine can read; they are documented
+    # coverage gaps rendered from `coverage_gaps`.
+    parse_fn = None
+    if runtime not in _CACHE_WIRED_RUNTIMES:
+        files = []
+    elif runtime == "claude":
+        try:
+            files = [fp for fp, _m, _p in _find_all_jsonl_files(days)]
+        except Exception:
+            files = []
+        parse_fn = parse_session_turns
+    elif runtime == "codex":
+        try:
+            import codex_session
+            files = [fp for fp, _m, _p in codex_session.find_all_jsonl_files(days=days)]
+            parse_fn = codex_session.parse_session_turns
+        except Exception:
+            files = []
+    else:
+        files = []
+
+    if not files or parse_fn is None:
+        base["recommendation"] = _cache_remedy_text("none")
+        return base
+
+    for filepath in files:
+        try:
+            turns = parse_fn(filepath)
+        except Exception:
+            continue
+        if not turns:
+            continue
+        scanned_sessions += 1
+
+        # Resolve the session's dominant model -> cache profile.
+        model = _dominant_turn_model(turns)
+        prof_key, profile = _resolve_cache_profile(model, runtime=runtime)
+        kind = profile["cache_kind"]
+        prov = _prov(prof_key, profile)
+        prov["sessions"] += 1
+
+        # Track overall hit-rate across all scanned sessions (every cache_kind).
+        for turn in turns:
+            cr = int(turn.get("cache_read", 0) or 0)
+            cc = int(turn.get("cache_creation", 0) or 0)
+            total_cache_read += cr
+            total_full_input += cr + cc + int(turn.get("input_tokens", 0) or 0)
+
+        if kind == "none":
+            no_cache_sessions += 1
+            continue
+
+        detail_out = {} if collect_sessions else None
+        if kind == "explicit_ttl":
+            # W5: pass the already-resolved dominant model so the detector does
+            # not re-scan the turns for it.
+            sw_tokens, sw_cost, recoverable, had = _detect_explicit_ttl(
+                turns, tier_data, profile, dominant_model=model, detail_out=detail_out)
+        else:  # automatic_discount or explicit_storage
+            # W2: pass the dominant model so turns missing their own `model` fall
+            # back to it for rate lookup instead of being dropped.
+            sw_tokens, sw_cost, recoverable, had = _detect_automatic_collapse(
+                turns, profile, dominant_model=model, detail_out=detail_out)
+
+        if had:
+            prov["affected_sessions"] += 1
+            prov["wasted_tokens"] += sw_tokens
+            prov["wasted_cost_usd"] += sw_cost
+            prov["recoverable_usd"] += recoverable
+            if session_detail is not None:
+                session_detail.append({
+                    "session": Path(filepath).name,
+                    "gap_seconds": int((detail_out or {}).get("max_gap", 0)),
+                    "rewritten_tokens": int(sw_tokens),
+                    "est_cost_usd": round(sw_cost, 4),
+                })
+
+    overall_hit_rate = (total_cache_read / total_full_input) if total_full_input > 0 else 0.0
+
+    by_provider = []
+    total_waste_tokens = 0
+    total_waste_cost = 0.0
+    total_recoverable = 0.0          # 1h-cache_control counterfactual (anthropic_api/window)
+    total_avoidable_behavioral = 0.0  # claude_code: avoidable only by resuming in-hour
+    total_affected = 0
+    for key, p in sorted(providers.items(), key=lambda kv: -kv[1]["wasted_cost_usd"]):
+        total_waste_tokens += p["wasted_tokens"]
+        total_waste_cost += p["wasted_cost_usd"]
+        rec_kind = p.get("recoverable_kind", "avoidable_behavioral")  # W4: conservative default
+        if rec_kind == "avoidable_behavioral":
+            total_avoidable_behavioral += p["recoverable_usd"]
+        else:
+            total_recoverable += p["recoverable_usd"]
+        total_affected += p["affected_sessions"]
+        by_provider.append({
+            "provider": key,
+            "label": p["label"],
+            "cache_kind": p["cache_kind"],
+            "confidence": p["confidence"],
+            "recoverable_kind": rec_kind,
+            "sessions": p["sessions"],
+            "affected_sessions": p["affected_sessions"],
+            "wasted_tokens": int(p["wasted_tokens"]),
+            "wasted_cost_usd": round(p["wasted_cost_usd"], 4),
+            "recoverable_usd": round(p["recoverable_usd"], 4),
+            "remedy": _cache_remedy_text(p["remedy_key"]),
+        })
+
+    base.update({
+        "available": scanned_sessions > 0,
+        "wasted_tokens": int(total_waste_tokens),
+        "wasted_cost_usd": round(total_waste_cost, 4),
+        # Honest split: 1h-cache_control counterfactual (valid only for
+        # API/SDK/harness sessions) vs avoidable-only-behaviorally (Claude Code,
+        # which already holds a 1h cache; only a within-hour resume helps).
+        "would_be_savings_1h_usd": round(total_recoverable, 4),
+        "avoidable_behavioral_usd": round(total_avoidable_behavioral, 4),
+        "affected_sessions": total_affected,
+        "scanned_sessions": scanned_sessions,
+        "no_cache_economics_sessions": no_cache_sessions,
+        "overall_cache_hit_rate": round(overall_hit_rate, 4),
+        "by_provider": by_provider,
+    })
+    if session_detail is not None:
+        # W8: biggest-waste sessions first, so the disputed numbers are on top.
+        session_detail.sort(key=lambda r: -r["est_cost_usd"])
+        base["session_detail"] = session_detail
+    # Headline recommendation: the remedy for the biggest-waste provider, or the
+    # active runtime's default when no waste was found.
+    if by_provider and by_provider[0]["wasted_cost_usd"] > 0:
+        base["recommendation"] = by_provider[0]["remedy"]
+    else:
+        default_remedy = {"claude": "claude_code", "codex": "openai"}.get(runtime, "none")
+        base["recommendation"] = _cache_remedy_text(default_remedy)
+    return base
+
+
+# Sidecar result cache for the cache-health scan. The scan walks every JSONL /
+# rollout in the window (~4.4s on a 30-day machine) and runs inside interactive
+# dashboard renders, so the result is memoized to a 0600 sidecar with a 5-min
+# mtime gate (the same idiom as _current_overhead_tokens). The `days` parameter
+# is stored in the payload so a different window recomputes instead of returning
+# a mismatched cache.
+# W7: 15-minute TTL (was 5). The cold compute walks every JSONL/rollout in the
+# window — measured ~4.1s on a 30-day machine — and runs inside interactive
+# dashboard renders, so a longer TTL means that ~4s spike happens at most once
+# per 15 minutes instead of once per 5. The window is still well under any
+# session where the waste number would meaningfully change.
+_CACHE_HEALTH_CACHE_TTL_SECONDS = 900
+
+# Module-level in-process (mtime, payload) memo for the cache-health sidecar, the
+# same idiom read_cache._demoted_cohorts uses: a process that reads the sidecar
+# twice pays one stat the second time. Keyed implicitly by file identity (mtime);
+# the runtime/days guard below re-validates the payload contents.
+_cache_health_memo: "tuple[float, dict] | None" = None
+
+
+def _cache_ttl_waste_cached(days=30, fresh=False):
+    """`_get_cache_ttl_waste` with a 15-min sidecar cache (cache_health.json).
+
+    Returns the cached payload when the sidecar is younger than the TTL AND its
+    stored `days` AND `platform` (runtime) match the current call; otherwise
+    recomputes and rewrites the sidecar. The runtime is part of the hit
+    condition because a `cd` into a Codex project (or a runtime flip) changes the
+    session source — a sidecar computed under a different runtime would otherwise
+    be served as if it described the current one. `fresh=True` bypasses the read
+    (cache-report --fresh). Freshness uses the mtime idiom (module-level
+    (mtime, payload) memo) for consistency with _demoted_cohorts. Fail-open: any
+    cache I/O error falls through to a fresh compute.
+    """
+    global _cache_health_memo
+    cache_path = SNAPSHOT_DIR / "cache_health.json"
+    current_runtime = detect_runtime()
+
+    def _is_hit(payload):
+        try:
+            return (
+                int(payload.get("period_days", -1)) == int(days)
+                and payload.get("platform") == current_runtime
+                and (time.time() - float(payload.get("_cached_ts", 0)))
+                < _CACHE_HEALTH_CACHE_TTL_SECONDS
+            )
+        except (TypeError, ValueError):
+            return False
+
+    if not fresh:
+        try:
+            mtime = cache_path.stat().st_mtime
+            # In-process memo: same file version -> no re-read, no re-parse.
+            if _cache_health_memo is not None and _cache_health_memo[0] == mtime:
+                payload = _cache_health_memo[1]
+                if _is_hit(payload):
+                    return payload
+            else:
+                payload = json.loads(cache_path.read_text(encoding="utf-8"))
+                _cache_health_memo = (mtime, payload)
+                if _is_hit(payload):
+                    return payload
+        except (json.JSONDecodeError, OSError, ValueError, TypeError):
+            pass
+    result = _get_cache_ttl_waste(days=days)
+    try:
+        record = dict(result)
+        record["_cached_ts"] = time.time()
+        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        # mkstemp + replace: an interrupted write never leaves a half-written
+        # sidecar, and the 0600 mode is set before any content is visible.
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".cache_health.", suffix=".tmp", dir=str(SNAPSHOT_DIR))
+        try:
+            if hasattr(os, "fchmod"):  # POSIX only; mkstemp is already 0600
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                # W7: json.dump can raise ValueError (e.g. a non-serializable
+                # value or nan/inf with allow_nan path quirks), not just OSError;
+                # broaden the inner cleanup trigger to Exception so a serialize
+                # failure still unlinks the temp file instead of leaking it.
+                json.dump(record, fh)
+            os.replace(tmp_name, str(cache_path))
+            try:
+                _cache_health_memo = (os.stat(cache_path).st_mtime, record)
+            except OSError:
+                _cache_health_memo = None
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    except Exception:
+        # W7: the whole memoization layer is best-effort; any failure (I/O or
+        # serialize) just means this call returns the fresh result uncached.
+        pass
+    return result
+
+
+def _dominant_turn_model(turns):
+    """Most frequent non-empty model id across a session's turns."""
+    counts = {}
+    for t in turns:
+        m = t.get("model")
+        if m and not str(m).startswith("<"):
+            counts[m] = counts.get(m, 0) + 1
+    return max(counts, key=counts.get) if counts else None
+
+
+def _detect_explicit_ttl(turns, tier_data, profile, dominant_model=None, detail_out=None):
+    """explicit_ttl detector: a gap > the profile's EFFECTIVE TTL followed by a
+    re-WRITE of the prior cached prefix is cache-expiry waste.
+
+    The detection boundary is per-profile (`effective_ttl_seconds`):
+      - anthropic_api: 300s (the live 5-min default; the user CAN raise it).
+      - claude_code: 3600s. Claude Code REQUESTS a 1-hour cache (v2.1.129 fixed
+        the silent downgrade to 5 min), and empirically the prefix survives
+        sub-hour pauses, so only pauses LONGER than the hour count as waste.
+
+    The "recoverable" value depends on the profile's `recoverable_kind`:
+      - recoverable_1h (anthropic_api): the honest 1h-cache_control counterfactual
+        — banks the avoidable repeat-write cost minus the 2x-vs-1.25x premium on
+        the first (unavoidable) write, floored at 0.
+      - avoidable_behavioral (claude_code): there is NO setting to extend the
+        cache; the only lever is behavioral (resume within the hour / batch
+        related work). The avoidable value is the full waste delta a within-hour
+        resume would have spared (read at 0.1x instead of re-writing). No
+        first-write premium is netted (Claude Code already writes at 1h rates).
+
+    Returns (wasted_tokens, wasted_cost_usd, recoverable_usd, had_waste).
+    """
+    boundary = profile.get("effective_ttl_seconds")
+    # Default to the CONSERVATIVE kind: an unknown recoverable_kind must never
+    # inflate the recoverable claim (recoverable_1h is the most aggressive
+    # accounting). avoidable_behavioral books no 1h-cache_control counterfactual.
+    recoverable_kind = profile.get("recoverable_kind", "avoidable_behavioral")
+    # Only the recoverable_1h branch needs the repeat-write annuity + first-write
+    # accumulators; for any other kind they are computed and discarded, so gate
+    # their accumulation on that kind.
+    track_repeat_write = recoverable_kind == "recoverable_1h"
+    session_waste_tokens = 0
+    session_waste_cost = 0.0
+    session_repeat_write_cost = 0.0
+    first_write_tokens = 0
+    had = False
+
+    # Hoist the model->rate lookup out of the per-turn loop: the session is
+    # resolved to a single cache profile via its dominant model, so its rates are
+    # constant for the whole session. W5: the caller already resolved the
+    # dominant model (the same value used to pick this profile); reuse it instead
+    # of re-scanning every turn. Fall back to a local scan only if not supplied.
+    model = dominant_model if dominant_model is not None else _dominant_turn_model(turns)
+    rates = _claude_rates_for_model(model, tier_data)
+    if rates is None:
+        return 0, 0.0, 0.0, False
+    write_5m = rates.get("cache_write", rates.get("input", 3.0))
+    write_1h = rates.get("cache_write_1h", write_5m)
+    read_rate = rates.get("cache_read", rates.get("input", 3.0) * 0.1)
+    # No per-turn TTL split in the log: price the re-write at the profile's actual
+    # write rate. Claude Code holds a 1h cache (avoidable_behavioral -> write_1h);
+    # raw API/SDK runs at the 5m default (recoverable_1h -> write_5m).
+    default_write = write_1h if recoverable_kind == "avoidable_behavioral" else write_5m
+
+    prev = None
+    for turn in turns:
+        cc = int(turn.get("cache_creation", 0) or 0)
+        cc_1h = int(turn.get("cache_creation_1h", 0) or 0)
+        cc_5m = int(turn.get("cache_creation_5m", 0) or 0)
+        if track_repeat_write and cc > 0 and first_write_tokens == 0:
+            first_write_tokens = cc
+        if prev is not None:
+            gap = turn.get("gap_since_prev_seconds")
+            prev_cached = int(prev.get("cache_read", 0) or 0) + int(prev.get("cache_creation", 0) or 0)
+            if (
+                gap is not None
+                and boundary is not None
+                and gap > boundary
+                and prev_cached > 0
+                and cc >= _CACHE_REWRITE_PREFIX_FRACTION * prev_cached
+            ):
+                if cc_1h or cc_5m:
+                    split_1h = min(cc_1h, cc)
+                    split_5m = max(0, cc - split_1h)
+                    paid = (split_1h * write_1h + split_5m * write_5m) / 1e6
+                else:
+                    paid = cc * default_write / 1e6
+                avoided_read = cc * read_rate / 1e6
+                session_waste_tokens += cc
+                session_waste_cost += max(0.0, paid - avoided_read)
+                if track_repeat_write:
+                    session_repeat_write_cost += cc * write_5m / 1e6
+                had = True
+                if detail_out is not None and gap > detail_out.get("max_gap", 0):
+                    detail_out["max_gap"] = gap  # W8: widest waste-triggering gap
+        prev = turn
+
+    recoverable = 0.0
+    if had:
+        if recoverable_kind == "recoverable_1h":
+            # 1h-cache_control counterfactual (anthropic_api only): repeat writes
+            # avoided, less the 2x-vs-1.25x premium on the first write.
+            first_premium = 0.0
+            if first_write_tokens > 0:
+                first_premium = first_write_tokens * (write_1h - write_5m) / 1e6
+            recoverable = max(0.0, session_repeat_write_cost - first_premium)
+        else:
+            # avoidable_behavioral (claude_code): no TTL setting to buy back the
+            # waste; a within-the-hour resume would have spared the whole delta.
+            recoverable = session_waste_cost
+    return session_waste_tokens, session_waste_cost, recoverable, had
+
+
+def _detect_automatic_collapse(turns, profile, dominant_model=None, detail_out=None):
+    """automatic_discount / explicit_storage detector (OpenAI, Gemini, DeepSeek).
+
+    These providers never emit a cache-CREATION event; the cache is automatic and
+    cached reads are discounted. Expiry shows up as a COLLAPSE in the cached/prompt
+    ratio: turn N has a healthy cached ratio, the gap to turn N+1 exceeds the
+    profile TTL, and turn N+1's cached ratio collapses while its prompt size stays
+    comparable. The collapsed (lost) cached tokens are re-billed at the FULL input
+    rate instead of the discounted cached rate.
+
+    waste_cost = lost_cached_tokens * (input_rate - cached_rate).
+    For these providers the recoverable value EQUALS the waste cost (resuming
+    within the cache window would have avoided the full premium; there is no
+    extra-write premium to net out as in the explicit_ttl 1h counterfactual).
+
+    Returns (wasted_tokens, wasted_cost_usd, recoverable_usd, had_waste).
+    """
+    ttl = profile.get("effective_ttl_seconds") or 300
+    session_waste_tokens = 0
+    session_waste_cost = 0.0
+    had = False
+
+    prev = None
+    for turn in turns:
+        cr = int(turn.get("cache_read", 0) or 0)
+        inp = int(turn.get("input_tokens", 0) or 0)  # total billed input (incl. cached)
+        prompt = max(inp, cr)  # turn's prompt size (input_tokens already includes cached)
+        ratio = (cr / prompt) if prompt > 0 else 0.0
+        if prev is not None:
+            gap = turn.get("gap_since_prev_seconds")
+            # Codex turns carry timestamps but not a precomputed gap; derive it.
+            if gap is None:
+                gap = _gap_seconds(prev.get("timestamp"), turn.get("timestamp"))
+            prev_cr = int(prev.get("cache_read", 0) or 0)
+            prev_inp = int(prev.get("input_tokens", 0) or 0)
+            prev_prompt = max(prev_inp, prev_cr)
+            prev_ratio = (prev_cr / prev_prompt) if prev_prompt > 0 else 0.0
+            if (
+                gap is not None
+                and gap > ttl
+                and prev_ratio >= _CACHE_COLLAPSE_HEALTHY_RATIO
+                and ratio < _CACHE_COLLAPSE_THRESHOLD_RATIO
+                and prompt >= _CACHE_COLLAPSE_PROMPT_COMPARABLE_FRACTION * prev_prompt
+            ):
+                # Lost cached tokens = what WOULD have been cached at the prior
+                # healthy ratio but now reads as fresh input.
+                # W1: the recoverable cached prefix can never exceed what the
+                # PREVIOUS turn actually had cached (prev_cr). prev_ratio*prompt
+                # extrapolates the prior hit-rate onto this (possibly larger)
+                # turn, which can overstate the lost volume when the prompt grew;
+                # cap at the real prior cached volume so waste stays grounded.
+                lost = min(int(prev_ratio * prompt) - cr, prev_cr)
+                if lost > 0:
+                    # W2: turns may omit `model` (e.g. a tool-result-only turn);
+                    # fall back to the session's dominant model for rate lookup
+                    # so the rate is found instead of the pair being dropped.
+                    rr = _input_and_cached_read_rates(turn.get("model") or dominant_model)
+                    if rr is not None:
+                        input_rate, cached_rate = rr
+                        premium = lost * (input_rate - cached_rate) / 1e6
+                        session_waste_tokens += lost
+                        session_waste_cost += max(0.0, premium)
+                        had = True
+                        if detail_out is not None and gap > detail_out.get("max_gap", 0):
+                            detail_out["max_gap"] = gap  # W8: widest collapse gap
+        prev = turn
+
+    # For automatic-discount providers, recoverable == waste (no extra-write
+    # premium to net out; staying within the window avoids the whole delta).
+    return session_waste_tokens, session_waste_cost, session_waste_cost, had
+
+
+def _gap_seconds(ts_a, ts_b):
+    """Seconds between two ISO/epoch timestamps, or None if unparseable."""
+    def _parse(ts):
+        if ts is None:
+            return None
+        if isinstance(ts, (int, float)):
+            return float(ts)
+        s = str(ts).strip()
+        if not s:
+            return None
+        try:
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s)
+            # W3: a tz-NAIVE ISO timestamp would otherwise be interpreted in the
+            # host's LOCAL zone by .timestamp(), so two naive stamps compared
+            # across a DST shift (or on a non-UTC host) would yield a wrong gap.
+            # Force UTC for naive values; aware values keep their own offset.
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            try:
+                return float(s)
+            except ValueError:
+                return None
+    a = _parse(ts_a)
+    b = _parse(ts_b)
+    if a is None or b is None:
+        return None
+    return abs(b - a)
+
+
+def _cache_remedy_text(remedy_key):
+    """Return the verified, per-profile cache remedy text.
+
+    Verified 2026-06-11 against current public docs (Anthropic prompt-caching,
+    Claude Code CHANGELOG, OpenAI prompt-caching, Gemini context-caching,
+    DeepSeek context-caching). Each remedy reflects exactly what that provider
+    actually offers — no overclaiming.
+    """
+    remedies = {
+        "anthropic_api": (
+            'Anthropic API/SDK/agent harness: set cache_control '
+            '{"type":"ephemeral","ttl":"1h"} on stable prefixes. 1h write costs 2x '
+            "input once, then reads at 0.1x — cheaper than re-writing every 5min."
+        ),
+        "claude_code": (
+            "Claude Code already holds a 1-hour cache. Waste comes from pauses "
+            "longer than an hour: resuming within the hour keeps the prefix warm. "
+            "No setting can extend this further today."
+        ),
+        "openai": (
+            "OpenAI/Codex prompt caching is automatic (~5-10min inactivity, max ~1h) "
+            "with NO TTL knob below the policy level. Behavioral remedy: keep the "
+            "prompt PREFIX stable (exact-match, >=1024 tokens) and resume within the "
+            "window. For long-lived prefixes set prompt_cache_retention=\"24h\"."
+        ),
+        "gemini": (
+            "Gemini 2.5+ has automatic implicit caching (no knob). For long stable "
+            "contexts, use EXPLICIT context caching: create a cached_content resource "
+            "with a user-set ttl (default 1h) — note per-hour storage is billed for "
+            "the cached tokens, so size the TTL to your reuse pattern."
+        ),
+        "deepseek": (
+            "DeepSeek Context Caching on Disk is automatic (no knob); cache hits cost "
+            "1/10 of input. Keep prompt prefixes stable and reuse them promptly while "
+            "the on-disk cache is warm (it clears within hours-to-days of disuse)."
+        ),
+        "none": (
+            "This model has no prompt cache; prefix churn does not affect its cost. "
+            "There is no cache-TTL waste to remedy here."
+        ),
+    }
+    return remedies.get(remedy_key, remedies["none"])
+
+
+# Platforms whose per-turn cache+timestamp data the Python cache-report engine
+# CANNOT read, with the honest reason. Filtered at call time by both the active
+# runtime AND _CACHE_WIRED_RUNTIMES: a platform that becomes wired (added to
+# _CACHE_WIRED_RUNTIMES + the dispatch) is automatically dropped from the gap
+# list, so it can never be both measured and listed as a gap.
+_CACHE_COVERAGE_GAP_REASONS = {
+    "hermes": (
+        "Hermes state.db stores only per-SESSION aggregate cache tokens "
+        "(no per-turn cache+timestamp), and cache_read is documented "
+        "unreliable — cache-TTL/collapse waste cannot be measured."
+    ),
+    "openclaw": (
+        "OpenClaw is a TypeScript gateway with its own session store; the "
+        "Python engine has no per-turn cache+timestamp read path into it."
+    ),
+    "opencode": (
+        "OpenCode is a TypeScript plugin that persists only per-session cache "
+        "aggregates to its own trends DB (no per-turn cache+timestamp series "
+        "the Python engine can read)."
+    ),
+    "copilot": (
+        "GitHub Copilot is credits-billed and exposes no per-turn cache "
+        "detail (cached-token counts are not surfaced), so cache-TTL waste "
+        "cannot be computed — only credit consumption is visible."
+    ),
+}
+
+
+def _cache_coverage_gaps(runtime):
+    """Return the explicit not-measurable coverage-gap list (parity rule).
+
+    Each entry: {platform, measurable, reason}. Platforms whose per-turn cache +
+    timestamp data the Python engine cannot read are honestly listed here rather
+    than silently dropped. A platform that is wired for measurement
+    (_CACHE_WIRED_RUNTIMES) or is the active runtime is omitted — so a wired
+    platform can never be both measured and listed as a gap.
+    """
+    return [
+        {"platform": platform, "measurable": False, "reason": reason}
+        for platform, reason in _CACHE_COVERAGE_GAP_REASONS.items()
+        if platform != runtime and platform not in _CACHE_WIRED_RUNTIMES
+    ]
 
 
 def _get_savings_summary(days=30):
@@ -11309,7 +12748,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.1"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.2"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -24389,6 +25828,16 @@ if __name__ == "__main__":
                 except (json.JSONDecodeError, OSError):
                     pass
             score = quality_cache(throttle_seconds=throttle, warn_threshold=warn_threshold, quiet=quiet, session_jsonl=session_jsonl, force=force, pure_time_throttle=throttle_only)
+            # WS2 tripwire piggyback: the --throttle-only invocation fires on the
+            # PostToolUse Edit/Write path (where active first-read follow-ups are
+            # resolved), so this is the natural place to refresh the per-cohort
+            # live edit-rate verdict. It is mtime-gated to 5 min, so the common
+            # case is a single sidecar stat() — near-zero added hot-path cost.
+            if throttle_only:
+                try:
+                    evaluate_cohort_tripwire()
+                except Exception:
+                    pass
             if warn and score is not None and score < warn_threshold:
                 _emit_warn = True
                 try:
@@ -24495,6 +25944,39 @@ if __name__ == "__main__":
             print(f"[Error] Unknown v5 subcommand '{sub}'")
             print("  Usage: measure.py v5 [status|enable|disable|welcome|info] [feature]")
             sys.exit(1)
+    elif args[0] == "cohorts":
+        # First-read cohort tripwire control:
+        #   cohorts                       -> show live edit-rate + demotions
+        #   cohorts promote <lang:band..> -> clear a demotion (re-promote)
+        #   cohorts evaluate [--force]    -> recompute the verdict now
+        sub = args[1] if len(args) > 1 else "status"
+        if sub == "promote":
+            cleared = cohorts_promote(args[2:])
+            print(f"  Re-promoted {cleared} cohort(s)." if cleared
+                  else "  No matching demoted cohorts to promote.")
+        elif sub == "evaluate":
+            evaluate_cohort_tripwire(force="--force" in args)
+            state = _cohort_tripwire_state()
+            print(json.dumps(state, indent=2))
+        else:
+            state = _cohort_tripwire_state()
+            if "--json" in args:
+                print(json.dumps(state, indent=2))
+            else:
+                print("\n  First-read cohort tripwire")
+                print(f"  {'=' * 50}")
+                if not state["cohorts"]:
+                    print("  No active first-read cohort data yet.")
+                for c in state["cohorts"]:
+                    flag = "DEMOTED" if c["demoted"] else "active"
+                    print(f"    {c['language']:10s} {c['band']:10s} "
+                          f"reads: {c['skeletons']:>4d}  edits: {c['followups']:>3d}  "
+                          f"rate: {c['edit_rate_pct']:>5.1f}%  [{flag}]")
+                if state["demoted"]:
+                    print("\n  Demoted -> measure-only: "
+                          + ", ".join(f"{c[0]}:{c[1]}" for c in state["demoted"]))
+                    print("  Re-promote: measure.py cohorts promote <lang:band>")
+                print()
     elif args[0] == "compression-stats":
         output_json = "--json" in args
         days = 30
@@ -24506,8 +25988,11 @@ if __name__ == "__main__":
                     pass
         summary = _get_compression_summary(days=days)
         coverage = _get_compression_coverage(days=days)
+        tripwire = _cohort_tripwire_state()
         if output_json:
-            print(json.dumps({"summary": summary, "coverage": coverage}, indent=2))
+            print(json.dumps(
+                {"summary": summary, "coverage": coverage, "cohort_tripwire": tripwire},
+                indent=2))
         else:
             print(f"\n  Compression Stats ({days}d)")
             print(f"  {'=' * 50}")
@@ -24541,7 +26026,107 @@ if __name__ == "__main__":
                       f"edits after read: {proxy['edits_after_read']}  "
                       f"edit rate: {proxy['edit_rate_pct']:.1f}% "
                       f"(gate <{proxy['promotion_gate_pct']:.0f}% — {ready})")
+            # WS2 tripwire: per-cohort live edit-rate + any auto-demotions.
+            if tripwire.get("cohorts") or tripwire.get("demoted"):
+                print("\n  First-read cohort tripwire (live edit-rate, auto-demote):")
+                for c in tripwire.get("cohorts", []):
+                    flag = "DEMOTED" if c["demoted"] else "active"
+                    print(f"    {c['language']:10s} {c['band']:10s} "
+                          f"reads: {c['skeletons']:>4d}  edits: {c['followups']:>3d}  "
+                          f"rate: {c['edit_rate_pct']:>5.1f}%  [{flag}]")
+                if tripwire.get("demoted"):
+                    dem = ", ".join(f"{c[0]}:{c[1]}" for c in tripwire["demoted"])
+                    print(f"    demoted -> measure-only: {dem}")
+                    print("    re-promote via: measure.py cohorts promote <lang:band>")
             print()
+    elif args[0] == "cache-report":
+        # Cache-TTL watchdog (opportunity tier — observed waste, potential
+        # recovery; never enters the realized savings headline).
+        output_json = "--json" in args
+        fresh = "--fresh" in args
+        verbose = "--verbose" in args
+        days = 30
+        for i, a in enumerate(args):
+            if a == "--days" and i + 1 < len(args):
+                try:
+                    days = int(args[i + 1])
+                except ValueError:
+                    pass
+        # W6: clamp the window to a sane range. A 0/negative day count silently
+        # scans nothing; an absurd one walks the entire history. Clamp to
+        # [1, 365] and note any clamp on stderr so the number stays explainable.
+        if days < 1 or days > 365:
+            clamped = min(365, max(1, days))
+            print(f"[Token Optimizer] --days {days} out of range; "
+                  f"clamped to {clamped} (valid 1-365).", file=sys.stderr)
+            days = clamped
+        if verbose:
+            # W8: --verbose needs per-session detail, which is never cached
+            # (it bloats the sidecar), so always compute fresh + collect detail.
+            report = _get_cache_ttl_waste(days=days, collect_sessions=True)
+        else:
+            report = _cache_ttl_waste_cached(days=days, fresh=fresh)
+        # The sidecar bookkeeping key is internal; drop it from the user surface.
+        report = {k: v for k, v in report.items() if k != "_cached_ts"}
+        if output_json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(f"\n  Cache Health — TTL/cache-expiry watchdog ({days}d)")
+            print(f"  {'=' * 56}")
+            print(f"  Platform:            {report.get('platform', 'unknown')}")
+            if not report.get("available"):
+                print("  No measurable sessions found in window.")
+                print(f"\n  Recommendation:\n    {report.get('recommendation', '')}")
+            else:
+                print(f"  Sessions scanned:    {report['scanned_sessions']}")
+                print(f"  Overall cache hits:  {report['overall_cache_hit_rate']:.1%}")
+                print(f"  Affected sessions:   {report['affected_sessions']}")
+                print(f"  Cache-expiry waste:  {report['wasted_tokens']:,} tokens "
+                      f"(${report['wasted_cost_usd']:.2f} over {days}d)")
+                rec_1h = report.get('would_be_savings_1h_usd', 0.0)
+                avoid_beh = report.get('avoidable_behavioral_usd', 0.0)
+                if rec_1h:
+                    print(f"  Recoverable (1h):    ${rec_1h:.2f} "
+                          "(API/SDK cache_control counterfactual, opportunity)")
+                if avoid_beh:
+                    print(f"  Avoidable (behavioral): ${avoid_beh:.2f} "
+                          "(resume within the hour; no setting extends the cache)")
+                if not rec_1h and not avoid_beh:
+                    print("  Recoverable:         $0.00")
+                no_cache = report.get("no_cache_economics_sessions", 0)
+                if no_cache:
+                    print(f"  No cache economics:  {no_cache} session(s) on models with no prompt cache")
+                # Per-provider breakdown — cache economics differ by provider.
+                provs = report.get("by_provider", [])
+                if provs:
+                    print("\n  By provider (cache_kind | sessions | affected | waste $ | confidence):")
+                    for p in provs:
+                        print(f"    {p['label'][:34]:34s} {p['cache_kind']:18s} "
+                              f"{p['sessions']:4d} {p['affected_sessions']:4d}  "
+                              f"${p['wasted_cost_usd']:8.2f}  {p['confidence']}")
+                        print(f"        remedy: {p['remedy']}")
+                # W8: --verbose per-session drill-down for disputed numbers.
+                detail = report.get("session_detail") or []
+                if verbose:
+                    print("\n  Per-session detail (affected sessions, biggest waste first):")
+                    if not detail:
+                        print("    (no affected sessions in window)")
+                    else:
+                        print(f"    {'session':40s} {'gap(s)':>8s} "
+                              f"{'rewritten tok':>14s} {'est $':>9s}")
+                        for d in detail:
+                            print(f"    {d['session'][:40]:40s} {d['gap_seconds']:>8d} "
+                                  f"{d['rewritten_tokens']:>14,} ${d['est_cost_usd']:>8.2f}")
+                print(f"\n  Headline remedy:\n    {report['recommendation']}")
+            # Coverage gaps — platforms whose cache+timestamp data we cannot read.
+            gaps = report.get("coverage_gaps", [])
+            if gaps:
+                print("\n  Not measurable (documented coverage gaps):")
+                for g in gaps:
+                    print(f"    {g['platform']:10s} {g['reason']}")
+            print("\n  [opportunity tier — observed waste, potential recovery; "
+                  "NOT counted in realized savings]\n")
+        sys.exit(0)
     elif args[0] == "benchmark":
         # Run compression benchmark fixtures
         script_dir = Path(__file__).resolve().parent
