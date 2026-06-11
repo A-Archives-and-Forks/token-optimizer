@@ -110,11 +110,36 @@ def _is_first_read_active_enabled():
 # backfill showed an edit-within-5-turns rate well under the 15% gate with a
 # confident sample (>=20). Bands MUST match compression_backfill._size_band.
 # Reversible: drop a tuple here (or set TOKEN_OPTIMIZER_FIRST_READ_ACTIVE=0).
+#
+# Two tiers of promotion, both validated by the 2026-06-11 backfill on 6,009
+# sessions / 31,885 first-reads (edit-within-5-turns metric, first-read-per-file):
+#   * FULL-GATE cohorts (>=20 reads, >=5 sessions, edit-rate <15%):
+#       markdown/python/typescript 16-64KB, python 64-256KB.
+#   * INTERPOLATED cohorts: a low-sample cohort with ZERO observed edits in
+#     history graduates when the SAME language already passed the full gate in an
+#     ADJACENT size band. markdown 64-256KB (13 reads, 0% edits; markdown 16-64KB
+#     passed) and typescript 64-256KB (2 reads, 0% edits; typescript 16-64KB
+#     passed) qualify. This trades a thin sample for the strong language signal
+#     plus the always-recoverable `expand` safety net. New languages with no
+#     adjacent passing band (json/yaml/javascript) stay measure-only until they
+#     accumulate enough history or are promoted via `measure.py cohorts promote`.
 FIRST_READ_ACTIVE_COHORTS = frozenset({
     ("markdown", "16-64KB"),
     ("python", "16-64KB"),
     ("python", "64-256KB"),
     ("typescript", "16-64KB"),
+    ("markdown", "64-256KB"),    # interpolated (md 16-64KB passed, 0% edits)
+    ("typescript", "64-256KB"),  # interpolated (ts 16-64KB passed, 0% edits)
+})
+
+# Interpolated cohorts: a thin-sample subset of the active set, graduated on an
+# adjacent passing band rather than their own full gate. Tracked as a named
+# constant so measure/backfill can pin against it (drift test) and the dashboard
+# can flag the higher-exposure tier. Serving is identical (they ARE active); the
+# distinction only changes the runtime tripwire's sample floor in measure.py.
+_INTERPOLATED_COHORTS = frozenset({
+    ("markdown", "64-256KB"),
+    ("typescript", "64-256KB"),
 })
 
 
@@ -145,6 +170,107 @@ FIRST_READ_SHADOW_MIN_RATIO = 0.40
 # coverage view matches on these same strings (its own mirror constants).
 FEATURE_FIRST_READ_SKELETON = "first_read_skeleton"
 FEATURE_FIRST_READ_EDIT_FOLLOWUP = "first_read_edit_followup"
+
+# WS2 runtime tripwire: measure.py writes the set of auto-demoted cohorts here
+# when a cohort's live edit-rate exceeds the gate. The hot-path read consults it
+# so a demoted cohort falls back to shadow (measure-only) without a code change.
+# Cached in-process with an mtime gate so repeated reads in one process are free.
+_TRIPWIRE_SIDECAR_NAME = "cohort_tripwire.json"
+_demoted_cohorts_cache: "tuple[float, frozenset | _AllCohortsDemoted] | None" = None
+
+
+class _AllCohortsDemoted(frozenset):
+    """Sentinel meaning 'sidecar exists but is unreadable → demote everything'.
+
+    A frozenset subclass whose membership test is always True, so the hot-path
+    `cohort not in _demoted_cohorts()` short-circuits every active cohort back to
+    shadow (measure-only) for this call. Used ONLY for a sidecar that EXISTS but
+    is corrupt/malformed — fail-CLOSED on corruption. A MISSING sidecar stays
+    fail-open (empty frozenset) since "no sidecar yet" legitimately means "no
+    demotions computed yet", not "verdict lost".
+    """
+
+    __slots__ = ()
+
+    def __contains__(self, item) -> bool:  # type: ignore[override]
+        return True
+
+
+_ALL_COHORTS_DEMOTED = _AllCohortsDemoted()
+
+
+def _valid_tripwire_payload(data: Any) -> bool:
+    """Schema-validate the tripwire sidecar (T1 fail-closed-on-corruption).
+
+    `demoted` must be a list of 2-element string pairs; `edit_rates` (when
+    present) a dict. Anything else is treated as corruption.
+    """
+    if not isinstance(data, dict):
+        return False
+    demoted = data.get("demoted", [])
+    if not isinstance(demoted, list):
+        return False
+    for pair in demoted:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            return False
+        if not all(isinstance(x, str) for x in pair):
+            return False
+    rates = data.get("edit_rates", {})
+    if not isinstance(rates, dict):
+        return False
+    return True
+
+
+def _demoted_cohorts() -> "frozenset | _AllCohortsDemoted":
+    """Cohorts auto-demoted by the runtime tripwire (frozenset of (lang, band)).
+
+    Reads the `cohort_tripwire.json` sidecar maintained by measure.py.
+      * MISSING sidecar  -> empty frozenset (fail-OPEN: no demotions computed yet;
+        worst case is serving a skeleton the tripwire would later demote, which
+        the next edit-rate cycle re-resolves).
+      * CORRUPT/malformed sidecar that EXISTS -> _ALL_COHORTS_DEMOTED sentinel
+        (fail-CLOSED for corruption: every active cohort drops to shadow this
+        call rather than trusting a verdict we cannot parse).
+    TOCTOU-safe: a single open('rb') + os.fstat(fd) reads the mtime of the EXACT
+    bytes consumed (T2), so the cached verdict can never key off a different file
+    version than the one parsed. Mtime-gated so the hot path pays ~one open/fstat
+    per process.
+    """
+    global _demoted_cohorts_cache
+    try:
+        path = SNAPSHOT_DIR / _TRIPWIRE_SIDECAR_NAME
+        try:
+            fd = os.open(str(path), os.O_RDONLY)
+        except OSError:
+            return frozenset()  # missing -> fail-open
+        try:
+            st = os.fstat(fd)
+            mtime = st.st_mtime
+            if (
+                _demoted_cohorts_cache is not None
+                and _demoted_cohorts_cache[0] == mtime
+            ):
+                return _demoted_cohorts_cache[1]
+            raw = os.read(fd, st.st_size) if st.st_size else b""
+        finally:
+            os.close(fd)
+        try:
+            data = json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, UnicodeDecodeError):
+            _demoted_cohorts_cache = (mtime, _ALL_COHORTS_DEMOTED)
+            return _ALL_COHORTS_DEMOTED
+        if not _valid_tripwire_payload(data):
+            _demoted_cohorts_cache = (mtime, _ALL_COHORTS_DEMOTED)
+            return _ALL_COHORTS_DEMOTED
+        demoted = frozenset(
+            (str(c[0]), str(c[1])) for c in data.get("demoted", [])
+        )
+        _demoted_cohorts_cache = (mtime, demoted)
+        return demoted
+    except Exception:
+        # Any unexpected error after we KNOW the sidecar exists is treated as
+        # corruption (fail-closed); a pre-open OSError already returned fail-open.
+        return _ALL_COHORTS_DEMOTED
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -677,6 +803,7 @@ def _first_read_compress(
         if (
             _is_first_read_active_enabled()
             and cohort in FIRST_READ_ACTIVE_COHORTS
+            and cohort not in _demoted_cohorts()
             and result.replacement_text
         ):
             return _serve_first_read_skeleton(
@@ -696,6 +823,11 @@ def _first_read_compress(
             json.dumps({
                 "ts": time.time(),
                 "lang": language,
+                # v5.11.1 (T10): carry the size band so shadow follow-ups emit
+                # lang|band like active ones. _resolve_first_read_marker packs
+                # lang|band when present; older markers without it fall back to
+                # bare lang, so this is backward-compatible.
+                "band": _first_read_size_band(size),
                 "ratio": round(would_be_ratio, 4),
                 "resolved": 0,
             }),
@@ -765,14 +897,36 @@ def _serve_first_read_skeleton(
         f"{result.replacement_type} skeleton; full content available via expand or a ranged Read."
     )
 
+    # Arm the ACTIVE-mode edit-rate marker (WS2 tripwire). A subsequent edit to
+    # this same file means the served skeleton withheld content the model needed
+    # — the live quality signal the runtime tripwire watches per cohort. Distinct
+    # key from the shadow marker so the two edit-rates never cross-contaminate.
+    # Written BEFORE the measured event so a partial-write failure biases the
+    # edit-rate HIGH (safe / demotes), never low. Best-effort.
+    try:
+        band = _first_read_size_band(size)
+        store.set_meta(
+            f"active_fr:{file_path}",
+            json.dumps({
+                "ts": time.time(),
+                "lang": language,
+                "band": band,
+                "resolved": 0,
+            }),
+        )
+    except Exception:
+        pass
+
     # The original is archived, so the deny is now safe to emit. Side-channel
     # logging is best-effort and MUST NOT prevent _emit_pretool_response.
     try:
         from compression_log import log_compression_event
+        # command_pattern carries lang|band so the WS2 tripwire can compute a
+        # per-cohort live edit-rate (measured skeletons vs measured follow-ups).
         log_compression_event(
             feature=FEATURE_FIRST_READ_SKELETON,
             session_id=session_id,
-            command_pattern=language,
+            command_pattern=f"{language}|{_first_read_size_band(size)}",
             tier="measured",
             verified=True,
             quality_preserved=True,
@@ -834,8 +988,40 @@ def _resolve_first_read_shadow_on_edit(
     a conservative gate and human review before any active-mode flip — it must
     not auto-promote purely on this proxy.
     """
+    # Resolve BOTH the shadow marker (measure-only cohorts, opportunity tier) and
+    # the active marker (promoted cohorts, measured tier). The active follow-ups
+    # feed the WS2 runtime tripwire's per-cohort live edit-rate; a demotion fires
+    # when that rate exceeds the gate.
+    _resolve_first_read_marker(
+        store, f"shadow_fr:{file_path}", FEATURE_FIRST_READ_EDIT_FOLLOWUP,
+        "opportunity", session_id, language,
+        "shadow first-read followed by edit",
+    )
+    _resolve_first_read_marker(
+        store, f"active_fr:{file_path}", FEATURE_FIRST_READ_EDIT_FOLLOWUP,
+        "measured", session_id, language,
+        "active first-read skeleton followed by edit",
+    )
+
+
+def _resolve_first_read_marker(
+    store: "SessionStore",
+    marker_key: str,
+    feature: str,
+    tier: str,
+    session_id: str,
+    language: str,
+    detail: str,
+) -> None:
+    """Resolve one first-read ledger marker, emitting a follow-up event once.
+
+    Tier selects the cohort population: opportunity = shadow (measure-only)
+    cohorts, measured = active (promoted) cohorts watched by the tripwire. The
+    follow-up's command_pattern carries the marker's stored language|band so the
+    tripwire can attribute the edit to the exact (language, band) cohort.
+    """
     try:
-        raw = store.get_meta(f"shadow_fr:{file_path}")
+        raw = store.get_meta(marker_key)
         if not raw:
             return
         try:
@@ -843,26 +1029,31 @@ def _resolve_first_read_shadow_on_edit(
         except (json.JSONDecodeError, TypeError):
             # A corrupt marker would otherwise stay un-resolvable forever and
             # silently drop this file from the edit-rate numerator. Clear it.
-            store.set_meta(f"shadow_fr:{file_path}", "")
+            store.set_meta(marker_key, "")
             return
         if data.get("resolved"):
             return
+        band = data.get("band")
+        lang = data.get("lang") or language
+        # Pack lang|band so the tripwire can recover the cohort; fall back to bare
+        # lang for shadow markers (the opportunity proxy is language-agnostic).
+        pattern = f"{lang}|{band}" if band else lang
         from compression_log import log_compression_event
         log_compression_event(
-            feature=FEATURE_FIRST_READ_EDIT_FOLLOWUP,
+            feature=feature,
             session_id=session_id,
-            command_pattern=data.get("lang") or language,
-            tier="opportunity",
-            verified=False,
+            command_pattern=pattern,
+            tier=tier,
+            verified=(tier == "measured"),
             # The full file was needed right after the read — a skeleton would
             # have withheld content. That is the opposite of quality-preserving.
             quality_preserved=False,
-            detail="shadow first-read followed by edit",
+            detail=detail,
             original_tokens=0,
             compressed_tokens=0,
         )
         data["resolved"] = 1
-        store.set_meta(f"shadow_fr:{file_path}", json.dumps(data))
+        store.set_meta(marker_key, json.dumps(data))
     except Exception:
         pass
 

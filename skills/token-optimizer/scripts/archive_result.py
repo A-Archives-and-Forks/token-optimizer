@@ -55,6 +55,25 @@ _ARCHIVE_PREVIEW_SIZE = 1500    # chars: preview included in replacement output
 _ARCHIVE_MAX_SIZE = 5_242_880   # 5MB: truncate responses beyond this
 _STDIN_MAX_BYTES = _ARCHIVE_MAX_SIZE + 262_144  # 5MB response plus JSON overhead
 
+# WS4: Agent/Task result progressive disclosure — shipped MEASURE-ONLY.
+#
+# A head+tail+pointer treatment WOULD save ~74% of the agent-result pool, but the
+# 2026-06-11 history backfill measured a 39.1% harm proxy: in 39% of cases the
+# parent's NEXT assistant turn quotes (>=20-char verbatim) text from the
+# would-be-elided MIDDLE. Sub-agents put their findings in the middle (head =
+# preamble, tail = usage/continuation block), so an active replacement would lose
+# content the parent needs. Per Alex's exception clause the DATA decides: 39.1%
+# >> the 15% gate, so this ships measure-only. We log the would-be saving as an
+# OPPORTUNITY-tier event (never the realized headline) so the dashboard shows the
+# pool + the harm number; the full result is archived for `expand` either way.
+# Re-evaluate active only if a middle-preserving treatment lands a sub-15% proxy.
+_AGENT_RESULT_MIN_CHARS = 8 * 1024   # only measure sub-agent results > 8KB
+_AGENT_RESULT_HEAD_CHARS = 2000
+_AGENT_RESULT_TAIL_CHARS = 2000
+_AGENT_RESULT_TOOL_NAMES = frozenset({"Task", "Agent"})
+_FEATURE_AGENT_RESULT = "agent_result_skeleton"
+_AGENT_RESULT_HARM_PCT = 39.1        # from the 2026-06-11 backfill (surfaced)
+
 # Plugin-data-aware paths (env > installed_plugins.json > legacy)
 SNAPSHOT_DIR = resolve_snapshot_dir()
 TRENDS_DB = SNAPSHOT_DIR / "trends.db"
@@ -474,6 +493,38 @@ def archive_original(content: str, session_id: str | None, key: str,
         return None
 
 
+def _log_agent_result_opportunity(tool_response: str, session_id: str | None) -> None:
+    """Record a measure-only opportunity event for a large Agent/Task result.
+
+    The would-be saving is the head+tail+pointer treatment's delta. tier =
+    opportunity so it NEVER reaches the realized savings headline (agent_result_
+    skeleton is not a _V5_COMPRESSION_CATEGORIES feature). Uses the hot-path
+    compression_log writer (no measure.py import). Fail-open.
+    """
+    head = tool_response[:_AGENT_RESULT_HEAD_CHARS]
+    tail = (tool_response[-_AGENT_RESULT_TAIL_CHARS:]
+            if len(tool_response) > _AGENT_RESULT_TAIL_CHARS else "")
+    orig_tokens = int(len(tool_response) / CODE_CHARS_PER_TOKEN)
+    would_be_tokens = int(len(head + tail) / CODE_CHARS_PER_TOKEN)
+    if orig_tokens <= 0 or would_be_tokens >= orig_tokens:
+        return
+    try:
+        from compression_log import log_compression_event
+        log_compression_event(
+            feature=_FEATURE_AGENT_RESULT,
+            session_id=session_id,
+            command_pattern="agent",
+            tier="opportunity",
+            verified=False,
+            quality_preserved=False,  # 39.1% harm proxy: a skeleton WOULD elide value
+            detail=f"would-be head+tail; harm_proxy={_AGENT_RESULT_HARM_PCT}%",
+            original_tokens=orig_tokens,
+            compressed_tokens=would_be_tokens,
+        )
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Structure-aware MCP output compression
 # ---------------------------------------------------------------------------
@@ -740,6 +791,16 @@ def archive_result(quiet: bool = False) -> None:
 
     if not quiet:
         print(f"[Tool Archive] Archived {tool_name} result ({char_count:,} chars, ~{token_est:,} tokens): {tool_use_id}", file=sys.stderr)
+
+    # WS4: measure-only opportunity event for large Agent/Task results. We do NOT
+    # replace the output (the 39.1% harm proxy fails the gate), but we record the
+    # would-be saving so coverage/dashboard surface the pool. The full result is
+    # already archived above, so an `expand` path exists regardless. Fail-open.
+    if tool_name in _AGENT_RESULT_TOOL_NAMES and original_char_count >= _AGENT_RESULT_MIN_CHARS:
+        try:
+            _log_agent_result_opportunity(tool_response, session_id)
+        except Exception:
+            pass
 
     store = None
     try:

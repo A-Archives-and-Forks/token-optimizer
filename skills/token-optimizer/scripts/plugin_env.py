@@ -144,7 +144,17 @@ def resolve_plugin_data_dir() -> Path | None:
 
 
 def resolve_snapshot_dir() -> Path:
-    """Return the data directory for snapshots, caches, and decision logs."""
+    """Return the data directory for snapshots, caches, and decision logs.
+
+    v5.11.1: TOKEN_OPTIMIZER_SNAPSHOT_DIR overrides the resolved location when
+    set, so tests (and any sandboxed caller) can pin a private data dir without
+    monkeypatching every module that resolves SNAPSHOT_DIR independently
+    (measure/archive_result/read_cache each call this). Production no-op when
+    unset. Any module that imports this resolver therefore honors the sandbox.
+    """
+    override = os.environ.get("TOKEN_OPTIMIZER_SNAPSHOT_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
     plugin_data = resolve_plugin_data_dir()
     if plugin_data is not None:
         return plugin_data / "data"

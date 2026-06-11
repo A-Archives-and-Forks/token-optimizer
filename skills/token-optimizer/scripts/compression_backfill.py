@@ -55,6 +55,57 @@ PROMOTION_EDIT_RATE = 0.15
 PROMOTION_MIN_SAMPLES = 20
 PROMOTION_MIN_SESSIONS = 5  # spread across >=N distinct sessions, not one loop
 
+# Interpolated cohorts (F5 / T9): cohorts that graduate to active on a thin
+# sample because the SAME language already passed the full gate in an ADJACENT
+# size band. Mirrors read_cache._INTERPOLATED_COHORTS + measure._INTERPOLATED_
+# COHORTS. The backfill ASSERTS (assert_interpolated_cohorts_supported) that each
+# one's language really does have a passing adjacent band in the live report, so
+# an interpolated promotion can never rest on a language that itself never passed.
+_INTERPOLATED_COHORTS = frozenset({
+    ("markdown", "64-256KB"),
+    ("typescript", "64-256KB"),
+})
+# Adjacency in band space (ordered): a cohort's adjacent bands are its neighbors.
+_SIZE_BANDS_ORDERED = ("<16KB", "16-64KB", "64-256KB", "256KB-1MB", "1-2MB")
+
+
+def _adjacent_bands(band: str):
+    """Return the immediately-smaller and immediately-larger band names."""
+    try:
+        i = _SIZE_BANDS_ORDERED.index(band)
+    except ValueError:
+        return ()
+    out = []
+    if i > 0:
+        out.append(_SIZE_BANDS_ORDERED[i - 1])
+    if i < len(_SIZE_BANDS_ORDERED) - 1:
+        out.append(_SIZE_BANDS_ORDERED[i + 1])
+    return tuple(out)
+
+
+def assert_interpolated_cohorts_supported(report) -> list:
+    """F5: every interpolated cohort's language must pass in an ADJACENT band.
+
+    Scans the backfill report's cohort rows; for each interpolated cohort
+    (lang, band) verifies that (lang, adjacent_band) appears with
+    promotion_ready=True for at least one adjacent band. Returns the list of
+    UNSUPPORTED interpolated cohorts (empty == all supported). Callers may assert
+    on the empty-ness; the report carries it as `interpolated_unsupported` so the
+    CLI surfaces a drift without crashing a long backfill run.
+    """
+    by_cohort = {
+        (r["language"], r["size_band"]): r for r in report.get("cohorts", [])
+    }
+    unsupported = []
+    for lang, band in sorted(_INTERPOLATED_COHORTS):
+        ok = any(
+            by_cohort.get((lang, adj), {}).get("promotion_ready")
+            for adj in _adjacent_bands(band)
+        )
+        if not ok:
+            unsupported.append([lang, band])
+    return unsupported
+
 _LINE_PREFIX = re.compile(r"^\d+\t")
 # Claude Code's Read render is "N\t<line>" (1-indexed, no leading space). Strip
 # exactly that; a leading \s* would clip the first column of legit TSV content.
@@ -275,7 +326,7 @@ def build_report(cohorts, totals, edit_window):
             "would_be_tokens": c["would_be_tokens"],
             "promotion_ready": passes,
         })
-    return {
+    report = {
         "edit_window_turns": edit_window,
         "metric": "first-read-only per session",
         "promotion_gate": {"edit_rate_pct": 100 * PROMOTION_EDIT_RATE,
@@ -284,6 +335,10 @@ def build_report(cohorts, totals, edit_window):
         "totals": totals,
         "cohorts": rows,
     }
+    # F5: surface any interpolated cohort whose language lacks a passing adjacent
+    # band so the CLI/test catches an unsupported interpolation (arch invariant).
+    report["interpolated_unsupported"] = assert_interpolated_cohorts_supported(report)
+    return report
 
 
 def print_report(report):
@@ -315,12 +370,208 @@ def print_report(report):
     print()
 
 
+# ---------------------------------------------------------------------------
+# Agent/Task result compression backfill (WS4).
+#
+# Agent (sub-agent) results enter the parent context whole and are large
+# (Alex's 30d: ~1.3M tokens of Agent results). The proposed active treatment is
+# a progressive-disclosure replacement: keep HEAD (first _AGENT_HEAD_CHARS) +
+# TAIL (last _AGENT_TAIL_CHARS) inline plus an expand pointer, archiving the full
+# result. The MIDDLE is elided. Because sub-agents often put findings in the
+# middle (head = preamble, tail = usage/continuation block), the HARM PROXY is
+# mandatory: how often does the parent's NEXT assistant turn quote text that
+# lives in the would-be-elided middle (>=_HARM_MIN_SPAN-char verbatim span)? If
+# that rate is >=15% we ship measure-only; below 15% we ship active. The data
+# decides, per Alex's exception clause.
+# ---------------------------------------------------------------------------
+
+# C1: single source of truth — import the runtime gate constants from
+# archive_result (the hot-path hook that actually performs the head+tail+pointer
+# treatment) so the backfill measures EXACTLY what production would gate on.
+# Both now use CHAR semantics (the runtime gates on char count, not byte count),
+# so the size floor name carries CHARS. Fail-open to local literals if the
+# import is unavailable (e.g. a partial checkout running the backfill alone).
+try:
+    from archive_result import (
+        _AGENT_RESULT_MIN_CHARS,
+        _AGENT_RESULT_HEAD_CHARS as _AGENT_HEAD_CHARS,
+        _AGENT_RESULT_TAIL_CHARS as _AGENT_TAIL_CHARS,
+    )
+except Exception:  # pragma: no cover - standalone fallback
+    _AGENT_RESULT_MIN_CHARS = 8 * 1024
+    _AGENT_HEAD_CHARS = 2000
+    _AGENT_TAIL_CHARS = 2000
+_HARM_MIN_SPAN = 20                 # min verbatim span length to count as a "quote"
+_HARM_MAX_SPANS_CHECK = 400         # cap spans scanned per result (perf)
+
+
+def _verbatim_overlap_in_middle(middle: str, next_text: str) -> bool:
+    """True iff next_text contains a >=_HARM_MIN_SPAN verbatim span from middle.
+
+    Scans candidate spans from the middle (the would-be-elided region) and checks
+    membership in the parent's next assistant turn. Whitespace-run starts are used
+    as span anchors so we test meaningful token sequences, not arbitrary offsets.
+    Bounded by _HARM_MAX_SPANS_CHECK for performance on large middles.
+    """
+    if not middle or not next_text or len(middle) < _HARM_MIN_SPAN:
+        return False
+    # Anchor candidate spans at word boundaries in the middle.
+    anchors = [0]
+    for m in re.finditer(r"\S{4,}", middle):
+        anchors.append(m.start())
+        if len(anchors) >= _HARM_MAX_SPANS_CHECK:
+            break
+    for start in anchors:
+        span = middle[start:start + _HARM_MIN_SPAN]
+        if len(span) < _HARM_MIN_SPAN:
+            continue
+        if span.strip() and span in next_text:
+            return True
+    return False
+
+
+def replay_agent_results(path: Path):
+    """Yield (result_text, next_assistant_text) for EVERY Agent/Task result.
+
+    next_assistant_text is the concatenation of text blocks in the parent's NEXT
+    assistant message after the tool_result (the turn that acts on the result).
+
+    C3: yields every agent result regardless of size; the caller applies the
+    >=_AGENT_RESULT_MIN_CHARS gate so it can count the full pre-gate pool in
+    totals["results"]. The gate uses CHAR length (C1 — same semantics the
+    runtime hook gates on), not byte length.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return
+
+    events = []
+    for ln in lines:
+        try:
+            events.append(json.loads(ln))
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    agent_ids: set[str] = set()
+    for idx, ev in enumerate(events):
+        msg = ev.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("name") in ("Task", "Agent"):
+                if block.get("id"):
+                    agent_ids.add(block["id"])
+            elif block.get("type") == "tool_result" and block.get("tool_use_id") in agent_ids:
+                txt = _result_text(block)
+                if not txt:
+                    continue
+                # Find the NEXT assistant message after this event.
+                next_text = ""
+                for j in range(idx + 1, len(events)):
+                    nmsg = events[j].get("message")
+                    if events[j].get("type") != "assistant" or not isinstance(nmsg, dict):
+                        continue
+                    ncontent = nmsg.get("content")
+                    if isinstance(ncontent, list):
+                        next_text = "".join(
+                            b.get("text", "") for b in ncontent
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    break
+                yield (txt, next_text)
+
+
+def analyze_agent_results(projects_dir: Path, limit: int | None):
+    """Aggregate the Agent-result pool + harm proxy across all transcripts."""
+    from token_estimate import estimate_tokens as _est
+    totals = {
+        "sessions": 0, "results": 0, "results_over_8kb": 0,
+        "orig_tokens": 0, "would_be_tokens": 0,
+        "harm_hits": 0, "harm_checked": 0,
+        "no_next_turn": 0,
+    }
+    processed = 0
+    for path in iter_transcripts(projects_dir):
+        if limit and processed >= limit:
+            break
+        saw = False
+        for result_text, next_text in replay_agent_results(path):
+            # C3: count EVERY agent result in the pool, pre-gate, so the JSON's
+            # "results" total is truthful (it was previously initialized but
+            # never incremented). The >=8KB gate decides the candidate subset.
+            totals["results"] += 1
+            if len(result_text) < _AGENT_RESULT_MIN_CHARS:
+                continue
+            saw = True
+            totals["results_over_8kb"] += 1
+            orig_tok = _est(result_text)
+            head = result_text[:_AGENT_HEAD_CHARS]
+            tail = result_text[-_AGENT_TAIL_CHARS:] if len(result_text) > _AGENT_TAIL_CHARS else ""
+            middle = result_text[_AGENT_HEAD_CHARS: len(result_text) - _AGENT_TAIL_CHARS]
+            would_be = _est(head + tail)
+            totals["orig_tokens"] += orig_tok
+            totals["would_be_tokens"] += max(0, orig_tok - would_be)
+            # Harm proxy: only meaningful when there IS a next turn and a middle.
+            if not next_text:
+                totals["no_next_turn"] += 1
+                continue
+            if not middle.strip():
+                continue
+            totals["harm_checked"] += 1
+            if _verbatim_overlap_in_middle(middle, next_text):
+                totals["harm_hits"] += 1
+        if saw:
+            totals["sessions"] += 1
+            processed += 1
+    return totals
+
+
+def build_agent_report(totals):
+    checked = totals["harm_checked"]
+    harm_rate = (totals["harm_hits"] / checked) if checked else 0.0
+    return {
+        "metric": "agent/task result compression (head+tail+pointer)",
+        "head_chars": _AGENT_HEAD_CHARS,
+        "tail_chars": _AGENT_TAIL_CHARS,
+        "min_chars": _AGENT_RESULT_MIN_CHARS,  # C1: char-semantics gate (shared)
+        "harm_span_min_chars": _HARM_MIN_SPAN,
+        "totals": totals,
+        "harm_rate_pct": round(100 * harm_rate, 1),
+        "harm_gate_pct": 100 * PROMOTION_EDIT_RATE,
+        "ship_active": harm_rate < PROMOTION_EDIT_RATE,
+    }
+
+
+def print_agent_report(report):
+    t = report["totals"]
+    print("\n  Agent/Task result compression BACKFILL (from real transcripts)")
+    print("  " + "=" * 66)
+    print(f"  Sessions with >8KB agent results: {t['sessions']:,}   "
+          f"results: {t['results_over_8kb']:,}")
+    print(f"  Original tokens: {t['orig_tokens']:,}   "
+          f"would-be saved (head+tail): {t['would_be_tokens']:,}")
+    print(f"  Harm proxy: next-turn verbatim quote (>= {report['harm_span_min_chars']} chars) "
+          f"from the elided MIDDLE")
+    print(f"    checked: {t['harm_checked']:,}   hits: {t['harm_hits']:,}   "
+          f"no-next-turn: {t['no_next_turn']:,}")
+    verdict = "SHIP ACTIVE" if report["ship_active"] else "MEASURE-ONLY"
+    print(f"    harm rate: {report['harm_rate_pct']:.1f}%  "
+          f"(gate <{report['harm_gate_pct']:.0f}% — {verdict})")
+    print()
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="First-read shadow backfill analyzer")
     ap.add_argument("--projects-dir", default=str(Path.home() / ".claude" / "projects"))
     ap.add_argument("--edit-window", type=int, default=DEFAULT_EDIT_WINDOW_TURNS)
     ap.add_argument("--limit", type=int, default=None,
                     help="max sessions WITH reads to process (for a quick sample)")
+    ap.add_argument("--agent-results", action="store_true",
+                    help="run the WS4 Agent/Task result compression + harm-proxy backfill")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -328,6 +579,14 @@ def main(argv=None):
     if not projects_dir.exists():
         print(f"[backfill] projects dir not found: {projects_dir}", file=sys.stderr)
         return 1
+    if args.agent_results:
+        totals = analyze_agent_results(projects_dir, args.limit)
+        report = build_agent_report(totals)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print_agent_report(report)
+        return 0
     cohorts, totals = analyze(projects_dir, args.edit_window, args.limit)
     report = build_report(cohorts, totals, args.edit_window)
     if args.json:
