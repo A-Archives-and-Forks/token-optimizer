@@ -46,6 +46,50 @@ Read `references/phase0-setup.md` for the full setup sequence: context window de
 
 ---
 
+## Phase 0.5: Keep-Warm Consent (first run only, Claude Code)
+
+Keep-Warm is opt-in and pays off only for API-key-billed Claude Code sessions. Ask once:
+
+```bash
+python3 "$MEASURE_PY" keepwarm-consent-status   # JSON: {billing_mode, consent, should_ask}
+```
+
+If `should_ask` is `false`, skip this phase silently (subscription users are never asked; declined/enabled users keep their choice). If `should_ask` is `true`, first compute the user's own projection, then present the pitch:
+
+```bash
+python3 "$MEASURE_PY" keepwarm-backfill --json --no-fence   # read modes."probe-only".net_usd
+```
+
+Read `net_usd` under `modes."probe-only"`. If it is a positive number, include it as the projection. If backfill errors, returns nothing, or `net_usd <= 0`, drop the dollar sentence entirely (do not invent a number) and use the no-data wording below.
+
+> **Keep your prompt cache warm automatically?** When a Claude Code session pauses past its 1h cache window and resumes, the whole prefix is re-written at up to 2x input. Keep-Warm pings the cache just before expiry (~0.1x of the prefix, max 2 pings per pause) so a resume stays warm. A history-replay projection from your own last 30 days nets ~$<net_usd>/30d at the conservative probe-only setting. A tripwire auto-disables it if pings ever stop paying for themselves, and you can turn it off any time. Enable it?
+
+No-data wording (when backfill yields no positive projection): drop the projection sentence and say "Your savings depend on your own pause-and-resume pattern; the dashboard will show your number once pings have fired."
+
+Then record the answer (do this exactly once). **Record the yes/no FIRST**, so an interrupted run never strands an "asked" marker with no recorded answer:
+
+```bash
+# yes:
+python3 "$MEASURE_PY" keepwarm-enable
+# no:
+python3 "$MEASURE_PY" keepwarm-disable
+```
+
+`keepwarm-enable` and `keepwarm-disable` are terminal states, so they already satisfy `should_ask`. Only if the user defers or ignores the question (records neither) run the shown-marker so they are not re-asked next run:
+
+```bash
+python3 "$MEASURE_PY" keepwarm-consent-asked          # mark shown (sticky); use ONLY when no enable/disable was recorded
+```
+
+`keepwarm-enable` records consent and installs the scheduler (macOS); on other OSes the scheduler is pending, so it is watchdog-only. It refuses on subscription with an honest message. To confirm it is armed:
+
+```bash
+python3 "$MEASURE_PY" keepwarm-scheduler status      # JSON: installed/loaded state (macOS)
+python3 "$MEASURE_PY" keepwarm-tick --dry-run        # JSON: what the next tick would decide
+```
+
+---
+
 ## Phase 1: Quick Audit (Parallel Agents)
 
 Read `references/agent-prompts.md` for all prompt templates.
