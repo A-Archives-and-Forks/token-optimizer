@@ -449,6 +449,13 @@ Claude Code (CLI and VS Code), OpenCode, OpenClaw, Codex, Hermes, and GitHub Cop
 | Output compression | 🟢 Full | 🟢 Native TS | Platform-native | 🟢 Via Python delegation | 🟡 Capability-gated per CLI version |
 | Continuity + checkpoints | 🟢 | 🟢 | 🟢 | 🟢 | 🟡 Session-start restore |
 | Dashboard + savings | 🟢 | 🟢 | 🟢 | 🟢 (via bridge) | 🟢 Credits-led (cost pass-through) |
+| Cache Health watchdog | 🟢 | 🟡 Watchdog-only | 🟡 Watchdog-only | 🟡 Watchdog-only | 🟡 Watchdog-only |
+| Keep-Warm automation | 🟢 Claude Code (macOS scheduler) ¹ | 🔴 | 🔴 | 🔴 | 🔴 |
+| Dashboard light mode | 🟢 ² | 🟡 Follow-up | 🟡 Follow-up | n/a (no UI) | n/a (no UI) |
+
+¹ Keep-Warm ships for **Claude Code** on macOS (the launchd scheduler installs on opt-in; Linux/Windows scheduler is a follow-up — the `keepwarm-tick` engine itself is cross-platform and can be wired to your own cron/timer). **Codex is a documented gap**: OpenAI caching is automatic with no cache-write premium, so there is no re-write cost to recover, and `codex exec resume` appends rather than forking. Hermes/OpenClaw/OpenCode/Copilot are watchdog-only.
+
+² Light mode covers the main dashboard and Codex (transitive — same rendered template) natively, and VS Code via the editor's native theme tokens. OpenClaw and OpenCode light mode is a follow-up (their dashboards are compiled from TypeScript and need a `tsc` rebuild).
 
 Quality signal counts differ because each platform targets a different measurement context: Claude Code/Codex measures session-level telemetry, OpenClaw measures run-level outcomes, OpenCode does file-level analysis with per-model degradation curves. The grade scale (S/A/B/C/D/F) is identical everywhere.
 
@@ -793,6 +800,37 @@ Every insight is grounded in your actual numbers, not generic advice. "Your shor
 | Wasteful thinking | Extended thinking >2x output for small edits |
 | Output waste | Verbose responses to simple operations, repeated explanations |
 | Cache instability | CLAUDE.md patterns that break Anthropic's prompt cache prefix |
+
+### Keep-Warm: Recover Cache Re-Write Waste Automatically (opt-in, API billing)
+
+The Cache Health watchdog shows a specific waste shape on Claude Code: when a session pauses longer than its prompt-cache TTL and then resumes, the whole prefix is re-written at the cache-write rate (up to 2x input on a 1h entry). Keep-Warm turns that observed waste into recoverable dollars by issuing a tiny cache-read **ping** just before the entry would expire. A read refreshes the entry's TTL and costs roughly **0.1x** of the prefix, versus the **1.25-2x** re-write you would otherwise pay on resume.
+
+It is **opt-in and off by default**, and it only runs for the user class where the economics are positive: **API-key-billed Claude Code sessions**. On Max/Pro subscription auth a ping would burn shared quota without saving dollars, so Keep-Warm stays hard-off there and the dashboard says so plainly. The first time Token Optimizer runs for an API-billed user it asks once, in plain language, what Keep-Warm does, what a ping costs, and the savings projected from that user's own watchdog history (the projection comes from `keepwarm-backfill`, replaying your last 30 days through the shipping policy). Declined users are never re-asked.
+
+If the dashboard tile shows Keep-Warm off because you are on subscription auth (off-subscription state) or on a platform without the auto-scheduler (platform-gap state), the remedy is the same: switch to an API key by setting `ANTHROPIC_API_KEY` and run `keepwarm-enable`. On Linux/Windows, also wire `keepwarm-tick` to your own cron/timer until the scheduler lands.
+
+**How it works, and how it stays honest:**
+
+- **Measured mechanism, not an assumption.** Both load-bearing claims were verified live before the feature shipped: a resume-style ping lands as a cache **read** (not a re-write) on the exact session prefix, and that read refreshes the entry so the user's later real resume stays warm past the original expiry window. The ping runs through the `claude` CLI so it reproduces the real cache key, never touches the user's transcript, and is skipped if the session looks active.
+- **Spend is always booked; savings only on proof.** Every ping's cost is logged before it fires. A saving is counted as realized only when a resume actually lands on a kept-warm prefix; opportunity is never folded into the realized headline. Net (realized minus spend) is always shown.
+- **Tripwire auto-off.** A rolling realized-to-spend ratio guards the feature: if pings stop paying for themselves it auto-demotes (sustain → probe-only → off) and stays demoted until you re-enable.
+- **History-replay projection on our dogfood machine.** Replaying our own 30-day Claude Code history through the shipping policy code projects **+$53.50/30d** of recoverable waste at the conservative probe-only setting (API billing). These are replayed-through-the-policy projections, not yet-realized dollars — our dogfood machine is on subscription, where Keep-Warm stays hard-off, so no real pings fired and no dollars were booked there. Your number depends on your own pause-and-resume pattern; the dashboard shows it from your data once pings fire.
+
+```bash
+# measure.py lives in the install dir; run from there so the bare invocation resolves:
+cd ~/.claude/skills/token-optimizer/scripts
+python3 measure.py keepwarm-enable          # opt in (API billing only) — records consent + installs the macOS scheduler
+python3 measure.py keepwarm-scheduler status  # verify it armed (macOS launchd state)
+python3 measure.py keepwarm-tick --dry-run    # "is it armed?" — shows what the next tick would decide
+python3 measure.py keepwarm-report            # net savings, spend, tripwire state (populates once a warm resume lands)
+python3 measure.py keepwarm-disable           # opt out any time
+```
+
+On Linux/Windows the scheduler is a follow-up, so `keepwarm-enable` records consent and runs watchdog-only there; wire `keepwarm-tick` to your own cron/timer to activate pinging.
+
+### Dashboard light mode
+
+The dashboard now ships a light theme alongside the default dark one. It follows your OS `prefers-color-scheme` automatically and has an explicit top-right toggle that persists your choice across reloads. Both themes are audited to WCAG 2.1 AA contrast (status colors are re-derived for light backgrounds, not naively inverted), so savings-green, waste-red, and warning-amber stay legible either way.
 
 ### Fleet Auditor
 

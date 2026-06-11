@@ -73,6 +73,18 @@ fi
 ```
 Use this to tell the user whether balanced hooks, compact prompt guidance, dashboard refresh, and status-line support are installed.
 
+5. **Keep-Warm consent (first run only, Claude Code)**:
+```bash
+python3 "$MEASURE_PY" keepwarm-consent-status   # JSON: {billing_mode, consent, should_ask}
+```
+If `should_ask` is `false`, skip silently. If `true` (API-billed, not yet asked), offer Keep-Warm once after the coaching conversation. First compute the projection from the user's own history:
+```bash
+python3 "$MEASURE_PY" keepwarm-backfill --json --no-fence   # read modes."probe-only".net_usd
+```
+Then pitch: when a session pauses past its 1h cache window and resumes, the prefix is re-written at up to 2x; Keep-Warm pings before expiry (~0.1x, max 2 pings/pause) so resumes stay warm, with a tripwire that auto-disables if it stops paying off. If `modes."probe-only".net_usd` is positive, say "a history-replay projection from your own last 30 days nets ~$<net_usd>/30d at probe-only"; if backfill yields nothing or `net_usd <= 0`, drop the dollar sentence (do not invent one) and say savings depend on their own pattern and the dashboard shows it once pings fire.
+
+Record the answer — **yes/no FIRST** so an interrupted run never strands an "asked" marker with no answer: `keepwarm-enable` (yes) or `keepwarm-disable` (no), both terminal. Only if the user defers/ignores (records neither) run `keepwarm-consent-asked` as the shown-marker. `keepwarm-enable` records consent and installs the scheduler (macOS); other OSes are scheduler-pending, watchdog-only. Confirm it is armed with `keepwarm-scheduler status` and `keepwarm-tick --dry-run`. It is off by default and refuses on subscription auth.
+
 ## Phase 1: Intake
 
 Ask ONE question:
