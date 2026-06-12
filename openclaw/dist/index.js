@@ -510,12 +510,13 @@ exports.default = definePluginEntry({
                     const nudgeSnapshot = buildRuntimeEventContext(openclawDir, freshContextAudit(), event.agentId, event.sessionId, "session-patch");
                     if (nudgeSnapshot) {
                         const hasPriorScore = _freshNudgePriorScores.has(event.sessionId);
-                        const nudgeMsg = (0, quality_1.buildFreshSessionNudgeMessage)(nudgeSnapshot.qualityScore, nudgeSnapshot.fillPct, hasPriorScore, nudgeSnapshot.model);
+                        const nudgeMsg = (0, quality_1.buildFreshSessionNudgeMessage)(nudgeSnapshot.qualityScore, nudgeSnapshot.fillPct, hasPriorScore, nudgeSnapshot.model, nudgeSnapshot.contextWindow // thread the exact window fillPct was measured against
+                        );
                         // Always update the prior-score baseline (whether or not the nudge fired).
                         _freshNudgePriorScores.set(event.sessionId, nudgeSnapshot.qualityScore);
                         if (nudgeMsg) {
                             _freshNudgeFiredSessions.add(event.sessionId);
-                            const { savedTokens } = (0, quality_1.freshSessionSavingsEstimate)(nudgeSnapshot.fillPct, nudgeSnapshot.model);
+                            const { savedTokens } = (0, quality_1.freshSessionSavingsEstimate)(nudgeSnapshot.fillPct, nudgeSnapshot.model, nudgeSnapshot.contextWindow);
                             (0, read_cache_1.logSavingsEvent)("fresh_session_nudge", savedTokens, event.sessionId, `score=${nudgeSnapshot.qualityScore} fill_pct=${nudgeSnapshot.fillPct.toFixed(1)}`);
                             (0, telemetry_1.logCompressionEvent)({
                                 feature: "fresh_session_nudge",
@@ -697,6 +698,7 @@ function buildRuntimeEventContext(openclawDir, contextAudit, agentId, sessionId,
         sessionFile,
         fillPct: snapshot.fillPct,
         qualityScore: snapshot.qualityScore,
+        contextWindow: snapshot.contextWindow,
         toolName,
         eventKind,
         model: run.model,
@@ -713,6 +715,7 @@ function maybeCheckpointFromRuntimeSnapshot(openclawDir, contextAudit, agentId, 
     const decision = (0, checkpoint_policy_1.maybeDecideSnapshotCheckpoint)(sessionId, {
         fillPct: snapshot.fillPct,
         qualityScore: snapshot.qualityScore,
+        contextWindow: snapshot.contextWindow,
     });
     captureDecisionCheckpoint(decision, snapshot, api);
 }

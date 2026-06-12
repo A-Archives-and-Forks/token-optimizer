@@ -666,14 +666,15 @@ export default definePluginEntry({
               nudgeSnapshot.qualityScore,
               nudgeSnapshot.fillPct,
               hasPriorScore,
-              nudgeSnapshot.model
+              nudgeSnapshot.model,
+              nudgeSnapshot.contextWindow  // thread the exact window fillPct was measured against
             );
             // Always update the prior-score baseline (whether or not the nudge fired).
             _freshNudgePriorScores.set(event.sessionId, nudgeSnapshot.qualityScore);
 
             if (nudgeMsg) {
               _freshNudgeFiredSessions.add(event.sessionId);
-              const { savedTokens } = freshSessionSavingsEstimate(nudgeSnapshot.fillPct, nudgeSnapshot.model);
+              const { savedTokens } = freshSessionSavingsEstimate(nudgeSnapshot.fillPct, nudgeSnapshot.model, nudgeSnapshot.contextWindow);
               logSavingsEvent("fresh_session_nudge", savedTokens, event.sessionId,
                 `score=${nudgeSnapshot.qualityScore} fill_pct=${nudgeSnapshot.fillPct.toFixed(1)}`);
               logCompressionEvent({
@@ -846,6 +847,9 @@ interface RuntimeEventContext {
   sessionFile: string;
   fillPct: number;
   qualityScore: number;
+  /** The exact context-window (tokens) used to derive fillPct. Threaded into
+   *  freshSessionSavingsEstimate so the token count is always consistent with %. */
+  contextWindow: number;
   toolName?: string;
   eventKind: RuntimeEventKind;
   model: string;
@@ -924,6 +928,7 @@ function buildRuntimeEventContext(
     sessionFile,
     fillPct: snapshot.fillPct,
     qualityScore: snapshot.qualityScore,
+    contextWindow: snapshot.contextWindow,
     toolName,
     eventKind,
     model: run.model,
@@ -948,6 +953,7 @@ function maybeCheckpointFromRuntimeSnapshot(
   const decision = maybeDecideSnapshotCheckpoint(sessionId, {
     fillPct: snapshot.fillPct,
     qualityScore: snapshot.qualityScore,
+    contextWindow: snapshot.contextWindow,
   });
   captureDecisionCheckpoint(decision, snapshot, api);
 }

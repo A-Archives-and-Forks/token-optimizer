@@ -19,6 +19,9 @@ export interface SessionCheckpointState {
 export interface RuntimeSnapshot {
   fillPct: number;
   qualityScore: number;
+  /** The exact context-window size (tokens) used to derive fillPct. Thread this
+   *  into savings estimates so the token count is always consistent with the %. */
+  contextWindow: number;
 }
 
 export interface CheckpointDecision {
@@ -370,6 +373,9 @@ export function buildRuntimeSnapshot(
   return {
     fillPct,
     qualityScore,
+    // Carry the exact window used to measure fillPct so downstream savings estimates
+    // always use the SAME window — never re-derive it from the model string.
+    contextWindow: ctxWindow,
   };
 }
 

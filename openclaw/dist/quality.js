@@ -673,9 +673,20 @@ exports.FRESH_NUDGE_LEAN_BLOCK_TOKENS = 1000;
  *
  * Returns { savedTokens, contextWindow }.
  * Mirrors Python _fresh_session_savings_estimate().
+ *
+ * `sessionContextWindow` MUST be the same window fill_pct was measured against
+ * (pass RuntimeEventContext.contextWindow or RuntimeSnapshot.contextWindow).
+ * This prevents the token estimate from being inconsistent with the fill %:
+ * e.g. "119K tokens = 60% of window" would be nonsense on a 1M-context session
+ * if the estimate silently used a 200K fallback. Model-based re-detection is
+ * kept as a fallback ONLY when the session window is genuinely unavailable.
  */
-function freshSessionSavingsEstimate(fillPct, model = "") {
-    const contextWindow = contextWindowForModel(model) || 200_000;
+function freshSessionSavingsEstimate(fillPct, model = "", sessionContextWindow) {
+    // Use the explicitly passed session window first (the authoritative value),
+    // fall back to model-name detection only as a last resort.
+    const contextWindow = (sessionContextWindow && sessionContextWindow > 0)
+        ? sessionContextWindow
+        : (contextWindowForModel(model) || 200_000);
     const safeFill = Math.min(100, Math.max(0, fillPct));
     const currentCtx = Math.round((safeFill / 100) * contextWindow);
     const savedTokens = Math.max(0, currentCtx - exports.FRESH_NUDGE_LEAN_BLOCK_TOKENS);
@@ -717,14 +728,19 @@ function freshSessionSavingsUsd(savedTokens, model = "") {
  *
  * Mirrors Python _maybe_fresh_session_nudge() logic (minus cache read/write
  * and the _is_v5_feature_enabled guard, which the caller handles).
+ *
+ * `sessionContextWindow` should be RuntimeEventContext.contextWindow -- the exact
+ * window used to derive fillPct. Avoids token/% inconsistency (e.g. "119K = 60%"
+ * on a 1M session when a 200K fallback was used). Falls back to model detection
+ * only when the session window is genuinely unavailable.
  */
-function buildFreshSessionNudgeMessage(qualityScore, fillPct, hasPriorScore, model = "") {
+function buildFreshSessionNudgeMessage(qualityScore, fillPct, hasPriorScore, model = "", sessionContextWindow) {
     if (!hasPriorScore)
         return null;
     if (!(qualityScore < exports.FRESH_NUDGE_QUALITY_THRESHOLD && fillPct >= exports.FRESH_NUDGE_MIN_FILL)) {
         return null;
     }
-    const { savedTokens } = freshSessionSavingsEstimate(fillPct, model);
+    const { savedTokens } = freshSessionSavingsEstimate(fillPct, model, sessionContextWindow);
     const savedStr = savedTokens >= 1000
         ? `~${Math.floor(savedTokens / 1000)}K`
         : `~${savedTokens}`;

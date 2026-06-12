@@ -72,6 +72,12 @@ interface SessionState {
   regimeChangeEmitted: boolean;
   /** Set to true after the fresh-session nudge fires so it emits at most once per session. */
   freshNudgeFired: boolean;
+  /**
+   * The context-window value used in the most recent maybeComputeQuality call.
+   * Threaded into checkFreshSessionNudge so freshSessionSavingsEstimate uses
+   * the SAME window that fill% was measured against (window-consistency fix).
+   */
+  lastContextWindow: number;
   recentSummaries: number[];
   toolCallsSinceCap: number;
   // Token usage keyed by assistant message id. message.updated fires repeatedly
@@ -129,6 +135,7 @@ export const TokenOptimizerPlugin: Plugin = async (
       pendingContinuityPrompt: "",
       regimeChangeEmitted: false,
       freshNudgeFired: false,
+      lastContextWindow: 0,
       recentSummaries: [],
       toolCallsSinceCap: 0,
       usageByMessage: new Map(),
@@ -208,6 +215,9 @@ export const TokenOptimizerPlugin: Plugin = async (
     const store = state.store;
     try {
       const contextWindow = contextWindowForModel(state.currentModel ?? "");
+      // Store for window-consistency: freshSessionSavingsEstimate must use this
+      // exact value, not re-derive it, so token count == fill% of this window.
+      state.lastContextWindow = contextWindow;
       const result = computeQualityScore(store, fillPct, state.currentModel, contextWindow, config);
 
       const cache = store.getQualityCache();
@@ -261,6 +271,7 @@ export const TokenOptimizerPlugin: Plugin = async (
         state.freshNudgeFired,
         config.features.qualityNudges,
         state.currentModel,
+        state.lastContextWindow || undefined,
       );
       if (freshNudge.shouldNudge && freshNudge.message) {
         state.freshNudgeFired = true;

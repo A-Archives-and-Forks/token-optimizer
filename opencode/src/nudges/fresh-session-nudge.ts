@@ -122,12 +122,24 @@ export interface FreshNudgeResult {
  * current context size = (fillPct / 100) * contextWindow
  * savings = current context - lean block re-injection overhead
  *
- * @param fillPct   0-100 (percentage, not fraction)
- * @param model     optional model id for context-window lookup
+ * @param fillPct        0-100 (percentage, not fraction)
+ * @param model          optional model id — used only as a last-resort fallback
+ *                       when sessionWindow is unavailable
+ * @param sessionWindow  the EXACT context-window value the fill% was measured
+ *                       against (pass the same value used in computeQualityScore).
+ *                       When provided this takes priority over re-deriving from the
+ *                       model, which guarantees token count == fill% of that window
+ *                       (e.g. 54% of 1_000_000 ≈ 540K, never ~107K on a 200K fallback).
  * @returns [savedTokens, contextWindow]
  */
-export function freshSessionSavingsEstimate(fillPct: number, model?: string): [number, number] {
-  const contextWindow = contextWindowForModel(model ?? "");
+export function freshSessionSavingsEstimate(fillPct: number, model?: string, sessionWindow?: number): [number, number] {
+  // Priority: explicit session window > model-based lookup > default fallback.
+  // Re-deriving from the model is a last resort: it can silently disagree with
+  // the window the fill % was actually computed against (e.g. 200K fallback on a
+  // 1M session makes the token estimate 5x too low).
+  const contextWindow = (sessionWindow && sessionWindow > 0)
+    ? sessionWindow
+    : contextWindowForModel(model ?? "");
   const clampedFill = Math.max(0, Math.min(100, fillPct));
   const currentCtx = Math.round((clampedFill / 100) * contextWindow);
   const saved = Math.max(0, currentCtx - FRESH_NUDGE_LEAN_BLOCK_TOKENS);
@@ -142,7 +154,10 @@ export function freshSessionSavingsEstimate(fillPct: number, model?: string): [n
  * @param previousScore       score from the previous turn (null = no prior score yet)
  * @param freshNudgeFired     whether the nudge already fired this session
  * @param nudgesEnabled       whether quality nudges are enabled in config
- * @param model               optional model id for context-window lookup
+ * @param model               optional model id — fallback for context-window lookup
+ * @param sessionWindow       the EXACT context-window value the fill% was measured
+ *                            against; threads through to freshSessionSavingsEstimate
+ *                            so the token count is consistent with the fill% display
  */
 export function checkFreshSessionNudge(
   currentScore: number,
@@ -151,6 +166,7 @@ export function checkFreshSessionNudge(
   freshNudgeFired: boolean,
   nudgesEnabled: boolean,
   model?: string,
+  sessionWindow?: number,
 ): FreshNudgeResult {
   if (!nudgesEnabled) return { shouldNudge: false, message: null };
 
@@ -166,7 +182,7 @@ export function checkFreshSessionNudge(
     return { shouldNudge: false, message: null };
   }
 
-  const [saved] = freshSessionSavingsEstimate(fillPct, model);
+  const [saved] = freshSessionSavingsEstimate(fillPct, model, sessionWindow);
   const savedStr = saved >= 1000 ? `~${Math.floor(saved / 1000)}K` : `~${saved}`;
   const fillRounded = Math.round(fillPct);
   const scoreRounded = Math.round(currentScore);

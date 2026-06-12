@@ -17311,7 +17311,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.5"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.6"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -25844,14 +25844,29 @@ def _checkpoint_restore_credited_recently(session_id, window_seconds=_NUDGE_FOLL
         return False
 
 
-def _fresh_session_savings_estimate(fill_pct):
+def _fresh_session_savings_estimate(fill_pct, window=None):
     """Tokens reclaimed by starting fresh now: the current context (fill% of the
     window) that a continued session keeps re-paying, minus the small lean block a
-    fresh resume re-injects. Returns (saved_tokens, window). Best-effort."""
+    fresh resume re-injects. Returns (saved_tokens, window). Best-effort.
+
+    `window` MUST be the same window fill_pct was measured against -- callers pass
+    result["model_context_window"]. Two failure modes this guards against:
+    (1) detect_context_window() returns a (size, source) TUPLE, so the old
+    int(detect_context_window()) ALWAYS raised and silently fell back to 200K --
+    making the token count 5x too low on a 1M window; (2) re-detecting in this
+    process can see a different window than the live session, desyncing the token
+    count from the fill %.
+    """
     try:
-        window = int(detect_context_window())
-    except Exception:
-        window = 200_000
+        window = int(window) if window else 0
+    except (TypeError, ValueError):
+        window = 0
+    if window <= 0:
+        try:
+            win = detect_context_window()
+            window = int(win[0] if isinstance(win, tuple) else win)
+        except Exception:
+            window = 200_000
     current_ctx = int(max(0.0, min(100.0, float(fill_pct or 0))) / 100.0 * window)
     saved = max(0, current_ctx - _FRESH_NUDGE_LEAN_BLOCK_TOKENS)
     return saved, window
@@ -25898,7 +25913,8 @@ def _maybe_fresh_session_nudge(result, cache_path, quality_data, quiet=False):
     if not (score < _FRESH_NUDGE_QUALITY_THRESHOLD and fill_pct >= _FRESH_NUDGE_MIN_FILL):
         return None
 
-    saved, _window = _fresh_session_savings_estimate(fill_pct)
+    saved, _window = _fresh_session_savings_estimate(
+        fill_pct, window=result.get("model_context_window"))
     result["_fresh_nudge_fired"] = True
     session_id = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
     _log_compression_event(

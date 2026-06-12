@@ -89,8 +89,15 @@ export declare const FRESH_NUDGE_LEAN_BLOCK_TOKENS = 1000;
  *
  * Returns { savedTokens, contextWindow }.
  * Mirrors Python _fresh_session_savings_estimate().
+ *
+ * `sessionContextWindow` MUST be the same window fill_pct was measured against
+ * (pass RuntimeEventContext.contextWindow or RuntimeSnapshot.contextWindow).
+ * This prevents the token estimate from being inconsistent with the fill %:
+ * e.g. "119K tokens = 60% of window" would be nonsense on a 1M-context session
+ * if the estimate silently used a 200K fallback. Model-based re-detection is
+ * kept as a fallback ONLY when the session window is genuinely unavailable.
  */
-export declare function freshSessionSavingsEstimate(fillPct: number, model?: string): {
+export declare function freshSessionSavingsEstimate(fillPct: number, model?: string, sessionContextWindow?: number): {
     savedTokens: number;
     contextWindow: number;
 };
@@ -118,6 +125,11 @@ export declare function freshSessionSavingsUsd(savedTokens: number, model?: stri
  *
  * Mirrors Python _maybe_fresh_session_nudge() logic (minus cache read/write
  * and the _is_v5_feature_enabled guard, which the caller handles).
+ *
+ * `sessionContextWindow` should be RuntimeEventContext.contextWindow -- the exact
+ * window used to derive fillPct. Avoids token/% inconsistency (e.g. "119K = 60%"
+ * on a 1M session when a 200K fallback was used). Falls back to model detection
+ * only when the session window is genuinely unavailable.
  */
-export declare function buildFreshSessionNudgeMessage(qualityScore: number, fillPct: number, hasPriorScore: boolean, model?: string): string | null;
+export declare function buildFreshSessionNudgeMessage(qualityScore: number, fillPct: number, hasPriorScore: boolean, model?: string, sessionContextWindow?: number): string | null;
 //# sourceMappingURL=quality.d.ts.map

@@ -295,6 +295,9 @@ function buildRuntimeSnapshot(run, contextAudit) {
     return {
         fillPct,
         qualityScore,
+        // Carry the exact window used to measure fillPct so downstream savings estimates
+        // always use the SAME window — never re-derive it from the model string.
+        contextWindow: ctxWindow,
     };
 }
 function maybeDecideSnapshotCheckpoint(sessionId, snapshot, nowMs = Date.now()) {

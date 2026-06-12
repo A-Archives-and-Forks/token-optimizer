@@ -14,6 +14,9 @@ export interface SessionCheckpointState {
 export interface RuntimeSnapshot {
     fillPct: number;
     qualityScore: number;
+    /** The exact context-window size (tokens) used to derive fillPct. Thread this
+     *  into savings estimates so the token count is always consistent with the %. */
+    contextWindow: number;
 }
 export interface CheckpointDecision {
     trigger: string;

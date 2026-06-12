@@ -732,12 +732,25 @@ export const FRESH_NUDGE_LEAN_BLOCK_TOKENS = 1000;
  *
  * Returns { savedTokens, contextWindow }.
  * Mirrors Python _fresh_session_savings_estimate().
+ *
+ * `sessionContextWindow` MUST be the same window fill_pct was measured against
+ * (pass RuntimeEventContext.contextWindow or RuntimeSnapshot.contextWindow).
+ * This prevents the token estimate from being inconsistent with the fill %:
+ * e.g. "119K tokens = 60% of window" would be nonsense on a 1M-context session
+ * if the estimate silently used a 200K fallback. Model-based re-detection is
+ * kept as a fallback ONLY when the session window is genuinely unavailable.
  */
 export function freshSessionSavingsEstimate(
   fillPct: number,
-  model: string = ""
+  model: string = "",
+  sessionContextWindow?: number
 ): { savedTokens: number; contextWindow: number } {
-  const contextWindow = contextWindowForModel(model) || 200_000;
+  // Use the explicitly passed session window first (the authoritative value),
+  // fall back to model-name detection only as a last resort.
+  const contextWindow =
+    (sessionContextWindow && sessionContextWindow > 0)
+      ? sessionContextWindow
+      : (contextWindowForModel(model) || 200_000);
   const safeFill = Math.min(100, Math.max(0, fillPct));
   const currentCtx = Math.round((safeFill / 100) * contextWindow);
   const savedTokens = Math.max(0, currentCtx - FRESH_NUDGE_LEAN_BLOCK_TOKENS);
@@ -779,19 +792,25 @@ export function freshSessionSavingsUsd(savedTokens: number, model: string = ""):
  *
  * Mirrors Python _maybe_fresh_session_nudge() logic (minus cache read/write
  * and the _is_v5_feature_enabled guard, which the caller handles).
+ *
+ * `sessionContextWindow` should be RuntimeEventContext.contextWindow -- the exact
+ * window used to derive fillPct. Avoids token/% inconsistency (e.g. "119K = 60%"
+ * on a 1M session when a 200K fallback was used). Falls back to model detection
+ * only when the session window is genuinely unavailable.
  */
 export function buildFreshSessionNudgeMessage(
   qualityScore: number,
   fillPct: number,
   hasPriorScore: boolean,
-  model: string = ""
+  model: string = "",
+  sessionContextWindow?: number
 ): string | null {
   if (!hasPriorScore) return null;
   if (!(qualityScore < FRESH_NUDGE_QUALITY_THRESHOLD && fillPct >= FRESH_NUDGE_MIN_FILL)) {
     return null;
   }
 
-  const { savedTokens } = freshSessionSavingsEstimate(fillPct, model);
+  const { savedTokens } = freshSessionSavingsEstimate(fillPct, model, sessionContextWindow);
   const savedStr = savedTokens >= 1000
     ? `~${Math.floor(savedTokens / 1000)}K`
     : `~${savedTokens}`;
