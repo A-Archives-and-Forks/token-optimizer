@@ -17311,7 +17311,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.4"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.5"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -25857,6 +25857,21 @@ def _fresh_session_savings_estimate(fill_pct):
     return saved, window
 
 
+def _fresh_session_savings_usd(saved_tokens, session_id=None):
+    """API-equivalent dollar value of the reclaimed tokens, priced at the session's
+    own model input rate. Best-effort -> 0.0 on any error."""
+    try:
+        tier = _load_pricing_tier()
+        tier_data = PRICING_TIERS.get(tier, PRICING_TIERS["anthropic"])
+        model = _resolve_session_model(session_id)
+        rates = tier_data["claude_models"].get(
+            model, tier_data["claude_models"].get("sonnet", {}))
+        cost_per_mtok = rates.get("input", 3.0)
+        return max(0.0, int(saved_tokens or 0) * cost_per_mtok / 1_000_000)
+    except Exception:
+        return 0.0
+
+
 def _maybe_fresh_session_nudge(result, cache_path, quality_data, quiet=False):
     """Suggest starting a fresh session when this one is BOTH long and degraded.
 
@@ -25893,13 +25908,15 @@ def _maybe_fresh_session_nudge(result, cache_path, quality_data, quiet=False):
         verified=False,
     )
     saved_str = f"~{saved // 1000}K" if saved >= 1000 else f"~{saved}"
+    usd = _fresh_session_savings_usd(saved, session_id)
+    cost_str = f", about ${usd:.2f} in API-equivalent cost" if usd >= 0.01 else ""
     return (
         f"[Token Optimizer] This session is long ({fill_pct}% full) and context "
         f"quality has fallen to {score}. Starting a fresh session now would reclaim "
-        f"{saved_str} tokens (~{int(fill_pct)}% of your window). You won't lose your "
-        f"place: Token Optimizer has checkpointed your active task, key decisions, "
-        f"files, and tool results, so a new session picks up exactly where you "
-        f"stopped. Just open one and say \"continue this\" -- the context is rebuilt "
+        f"{saved_str} tokens (~{int(fill_pct)}% of your window){cost_str}. You won't "
+        f"lose your place: Token Optimizer has checkpointed your active task, key "
+        f"decisions, files, and tool results, so a new session picks up exactly where "
+        f"you stopped. Just open one and say \"continue this\" -- the context is rebuilt "
         f"for free."
     )
 
@@ -26264,19 +26281,20 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
     # "start fresh (context is preserved)" is the stronger remedy than /compact, and
     # firing both would be noise. Only fall back to the /compact nudge if it didn't fire.
     fresh_msg = _maybe_fresh_session_nudge(result, cache_path, quality_data)
-    if fresh_msg:
-        system_messages.append(fresh_msg)
-    else:
+    if not fresh_msg:
         nudge_msg = _maybe_nudge(result, cache_path, quality_data)
         if nudge_msg:
             system_messages.append(nudge_msg)
     loop_msg = _maybe_loop_warning(result, cache_path, quality_data)
     if loop_msg:
         system_messages.append(loop_msg)
-    if system_messages:
-        # Write updated nudge/loop state back to cache
+    # Persist nudge/loop/fresh state (the once-per-session _fresh_nudge_fired flag
+    # must survive even if only the fresh nudge fired this turn).
+    if system_messages or fresh_msg:
         _write_quality_cache(cache_path, result)
-        # Gate systemMessage emissions under context pressure
+    if system_messages:
+        # Gate the routine informational batch (quality/loop/fill warnings) under
+        # context pressure.
         _emit_msgs = True
         try:
             from context_pressure import should_inject, get_pressure_level, log_suppression
@@ -26293,6 +26311,15 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
                     print(json.dumps({"systemMessage": msg}))
                 except Exception:
                     pass
+    # The fresh-session nudge BYPASSES pressure suppression on purpose: it fires at
+    # most once per session and is most relevant precisely when the session is
+    # degraded (i.e. under pressure). Suppressing it would defeat its purpose and
+    # silently burn the one-shot -- the exact bug where users never saw it.
+    if fresh_msg:
+        try:
+            print(json.dumps({"systemMessage": fresh_msg}))
+        except Exception:
+            pass
 
     # Nudge follow-through: if PostCompact triggered this run (force=True)
     # and a nudge preceded the compact, measure the actual fill_pct recovery.

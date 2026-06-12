@@ -543,6 +543,41 @@ Enable optional local-only checkpoint telemetry to see whether checkpoints are f
 TOKEN_OPTIMIZER_CHECKPOINT_TELEMETRY=1 python3 measure.py checkpoint-stats --days 7
 ```
 
+### Cold-Resume-Lean: reopen a stale session for free
+
+Long sessions degrade. The usual move is to keep grinding in a bloated, low-quality
+context or to `--resume`, which re-loads the entire transcript at full cost. Token
+Optimizer adds a third option: **let the old session go, then reopen it lean.**
+
+Open a fresh session and just ask for it in plain language:
+
+> *"Let's continue the auth refactor — check what we discussed last session."*
+
+Token Optimizer reconstructs a **lean** context for the right **same-project** prior
+session (active task, where you left off, key decisions, modified files, git state)
+straight from its checkpoint — no LLM call, no full-transcript cold-resume. Name a
+topic and it picks that session; stay vague ("where we left off") and it grabs the
+most recent one in the project. It never pulls another project's context. The only
+cost is your new session's normal first turn reading the injected summary, typically
+~160K cache-write tokens cheaper than a `--resume`.
+
+You can also drive it manually:
+
+```bash
+python3 measure.py resume-lean                       # list reopenable cold sessions
+python3 measure.py resume-lean <#|session_id> --print # emit the lean context block
+claude "$(python3 measure.py resume-lean 1 --print)"  # seed a fresh session with it
+```
+
+**Fresh-session nudge.** When a session runs long (high context fill) *and* quality
+drops below 70, Token Optimizer nudges you once: it tells you how many tokens (and
+the API-$ equivalent) you'd reclaim by starting fresh right now, and reassures you
+that your task, decisions, and files are already checkpointed so a new session picks
+up exactly where you stopped. The reclaimed savings are tracked as a realized
+`Lean resumes` line in the Savings view. Tune or disable via
+`TOKEN_OPTIMIZER_FRESH_NUDGE_QUALITY` (default 70) and
+`TOKEN_OPTIMIZER_FRESH_NUDGE_MIN_FILL` (default 50).
+
 ---
 
 ## Quality Scoring

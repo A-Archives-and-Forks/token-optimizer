@@ -15,6 +15,89 @@
 
 import { contextWindowForModel } from "../util/context-window.js";
 
+// ---------------------------------------------------------------------------
+// Per-model input rates ($/M tokens). Mirrors Python PRICING_TIERS["anthropic"]
+// and the non-Claude model table. Fallback is Sonnet at $3.00/M.
+// ---------------------------------------------------------------------------
+const MODEL_INPUT_RATES: Record<string, number> = {
+  // Anthropic Claude
+  fable: 10.0,
+  opus: 5.0,
+  sonnet: 3.0,
+  haiku: 1.0,
+  // GPT-5 family
+  "gpt-5.5-pro": 30.0,
+  "gpt-5.5": 5.0,
+  "gpt-5.4": 2.5,
+  "gpt-5.4-mini": 0.75,
+  "gpt-5.4-nano": 0.2,
+  "gpt-5.3-codex": 1.75,
+  "gpt-5.2-codex": 1.75,
+  "gpt-5.2": 1.75,
+  "gpt-5.1-codex-mini": 0.25,
+  "gpt-5.1-codex": 1.25,
+  "gpt-5.1": 1.25,
+  "gpt-5-codex": 1.25,
+  "gpt-5": 1.25,
+  "gpt-5-mini": 0.25,
+  "gpt-5-nano": 0.05,
+  // GPT-4 family
+  "gpt-4.1": 2.0,
+  "gpt-4.1-mini": 0.4,
+  "gpt-4.1-nano": 0.1,
+  "gpt-4o": 2.5,
+  "gpt-4o-mini": 0.15,
+  // OpenAI reasoning
+  "o3-pro": 20.0,
+  o3: 2.0,
+  "o3-mini": 1.1,
+  "o4-mini": 1.1,
+  // Google Gemini
+  "gemini-2.5-pro": 1.25,
+  "gemini-2.5-flash": 0.3,
+  "gemini-2.5-flash-lite": 0.1,
+  "gemini-2.0-flash": 0.1,
+  "gemini-2.0-flash-lite": 0.075,
+};
+
+/** Sonnet input rate used as the default fallback ($/M tokens). */
+const FALLBACK_INPUT_RATE_PER_MTOK = 3.0;
+
+/**
+ * Look up the API input rate ($/M tokens) for the given model.
+ * Substring-matches the lowercase model id against the table — same
+ * strategy as contextWindowForModel. Falls back to Sonnet ($3.00/M).
+ */
+export function modelInputRatePer1M(model?: string): number {
+  if (!model) return FALLBACK_INPUT_RATE_PER_MTOK;
+  const lower = model.toLowerCase();
+
+  const direct = MODEL_INPUT_RATES[lower];
+  if (direct !== undefined) return direct;
+
+  // Substring scan (longest key wins via insertion order — most specific first
+  // in the table above). Mirrors Python's model-tier resolution.
+  for (const [key, rate] of Object.entries(MODEL_INPUT_RATES)) {
+    if (lower.includes(key)) return rate;
+  }
+
+  return FALLBACK_INPUT_RATE_PER_MTOK;
+}
+
+/**
+ * API-equivalent dollar value of the reclaimed tokens, priced at the session's
+ * own model input rate. Returns 0 on any error (best-effort).
+ * Mirrors Python _fresh_session_savings_usd.
+ */
+export function freshSessionSavingsUsd(savedTokens: number, model?: string): number {
+  try {
+    const rate = modelInputRatePer1M(model);
+    return Math.max(0, savedTokens * rate / 1_000_000);
+  } catch {
+    return 0;
+  }
+}
+
 function intEnv(key: string, fallback: number): number {
   const raw = process.env[key]?.trim();
   if (!raw) return fallback;
@@ -88,9 +171,12 @@ export function checkFreshSessionNudge(
   const fillRounded = Math.round(fillPct);
   const scoreRounded = Math.round(currentScore);
 
+  const usd = freshSessionSavingsUsd(saved, model);
+  const costStr = usd >= 0.01 ? `, about $${usd.toFixed(2)} in API-equivalent cost` : "";
+
   const message =
     `[Token Optimizer] This session is long (${fillRounded}% full) and context quality has fallen to ${scoreRounded}. ` +
-    `Starting a fresh session now would reclaim ${savedStr} tokens (~${fillRounded}% of your window). ` +
+    `Starting a fresh session now would reclaim ${savedStr} tokens (~${fillRounded}% of your window)${costStr}. ` +
     `You won't lose your place: Token Optimizer has checkpointed your active task, key decisions, files, and tool results, ` +
     `so a new session picks up exactly where you stopped. Just open one and say "continue this" — the context is rebuilt for free.`;
 

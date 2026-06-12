@@ -10,6 +10,7 @@
 
 import { AgentRun, totalTokens, EXPENSIVE_MODELS } from "./models";
 import { ContextAudit } from "./context-audit";
+import { normalizeModelName, DEFAULT_PRICING } from "./pricing";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -744,6 +745,25 @@ export function freshSessionSavingsEstimate(
 }
 
 /**
+ * Compute the API-equivalent dollar value of the reclaimed tokens.
+ *
+ * Uses the model's input rate from DEFAULT_PRICING. Returns 0 on any error
+ * or unknown model. Best-effort, never throws.
+ * Mirrors Python _fresh_session_savings_usd().
+ */
+export function freshSessionSavingsUsd(savedTokens: number, model: string = ""): number {
+  try {
+    const key = normalizeModelName(model);
+    const rates = key ? DEFAULT_PRICING[key] : undefined;
+    const inputRatePerToken = rates?.input ?? 0;
+    if (inputRatePerToken <= 0) return 0;
+    return Math.max(0, savedTokens * inputRatePerToken);
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Build the fresh-session nudge message string.
  *
  * Returns a string when ALL conditions are met:
@@ -776,10 +796,13 @@ export function buildFreshSessionNudgeMessage(
     ? `~${Math.floor(savedTokens / 1000)}K`
     : `~${savedTokens}`;
 
+  const usd = freshSessionSavingsUsd(savedTokens, model);
+  const costStr = usd >= 0.01 ? `, about $${usd.toFixed(2)} in API-equivalent cost` : "";
+
   return (
     `[Token Optimizer] This session is long (${Math.round(fillPct)}% full) and context ` +
     `quality has fallen to ${qualityScore}. Starting a fresh session now would reclaim ` +
-    `${savedStr} tokens (~${Math.round(fillPct)}% of your window). You won't lose your ` +
+    `${savedStr} tokens (~${Math.round(fillPct)}% of your window)${costStr}. You won't lose your ` +
     `place: Token Optimizer has checkpointed your active task, key decisions, ` +
     `files, and tool results, so a new session picks up exactly where you ` +
     `stopped. Just open one and say "continue this" -- the context is rebuilt for free.`

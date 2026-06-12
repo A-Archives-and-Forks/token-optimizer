@@ -95,6 +95,14 @@ export declare function freshSessionSavingsEstimate(fillPct: number, model?: str
     contextWindow: number;
 };
 /**
+ * Compute the API-equivalent dollar value of the reclaimed tokens.
+ *
+ * Uses the model's input rate from DEFAULT_PRICING. Returns 0 on any error
+ * or unknown model. Best-effort, never throws.
+ * Mirrors Python _fresh_session_savings_usd().
+ */
+export declare function freshSessionSavingsUsd(savedTokens: number, model?: string): number;
+/**
  * Build the fresh-session nudge message string.
  *
  * Returns a string when ALL conditions are met:
