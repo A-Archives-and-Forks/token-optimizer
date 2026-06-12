@@ -48,6 +48,7 @@ const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const models_1 = require("./models");
 const quality_1 = require("./quality");
+const savings_1 = require("./savings");
 const pricing_1 = require("./pricing");
 // ---------------------------------------------------------------------------
 // RL1: Data aggregation
@@ -269,6 +270,7 @@ function buildDashboardData(runs, report, quality = null, context = null, coach 
         pricingTierLabel,
         coach,
         savings,
+        savingsEvents: (0, savings_1.readSavingsEventsByCategory)(),
     };
 }
 // ---------------------------------------------------------------------------
@@ -969,11 +971,29 @@ function renderSavings(data) {
             .join("")}
       </div>`
         : "";
+    // Savings-events breakdown (grouped by event_type, no allowlist)
+    const evts = data.savingsEvents;
+    const savingsEventsCard = evts.totalCount > 0
+        ? `<div class="card">
+        <div class="card-header"><span>Savings by source</span><span style="color:var(--c-text-dim);font-size:13px">${evts.totalCount.toLocaleString()} events</span></div>
+        ${evts.categories.map((cat) => `<div class="bar-row">
+          <span class="bar-row-label">${esc(cat.label)}</span>
+          <span style="font-family:var(--font-mono);font-size:13px;color:var(--c-text-dim);margin-left:auto;padding-right:var(--s-3)">${cat.count.toLocaleString()} events</span>
+          <span style="font-family:var(--font-mono);color:var(--c-accent-cyan)">${fmtTokens(cat.tokensSaved)} tokens</span>
+        </div>`).join("")}
+        <div class="bar-row" style="border-top:1px solid var(--c-border);margin-top:var(--s-2);padding-top:var(--s-2)">
+          <span class="bar-row-label" style="font-weight:600">Total realized</span>
+          <span style="font-family:var(--font-mono);font-size:13px;color:var(--c-text-dim);margin-left:auto;padding-right:var(--s-3)">${evts.totalCount.toLocaleString()} events</span>
+          <span style="font-family:var(--font-mono);color:var(--c-success);font-weight:600">${fmtTokens(evts.totalTokensSaved)} tokens</span>
+        </div>
+      </div>`
+        : "";
     return `<div class="view" id="view-savings">
     ${header}
     ${hero}
     ${cumulative}
     ${levers}
+    ${savingsEventsCard}
   </div>`;
 }
 function renderSessions(data) {

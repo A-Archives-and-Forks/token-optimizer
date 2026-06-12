@@ -86,6 +86,21 @@ export declare function findBestContinuityCheckpoint(promptText: string, current
  */
 export declare function buildContinuityHint(candidate: ContinuityCandidate): string;
 /**
+ * Neutralize a raw checkpoint body before injecting it into context.
+ *
+ * Mirrors Python _neutralize_recovered_body() in measure.py:
+ *   1. Strip C0 control chars EXCEPT tab (\x09) and newline (\x0a) — preserves
+ *      body structure while removing null bytes, BEL, BS, etc.
+ *   2. Defang forged RECOVERED-DATA sentinels: "[RECOVERED…" → "(RECOVERED…"
+ *      so injected body cannot close the data fence and smuggle instructions.
+ *   3. Defang role-prefix lines (system:, assistant:, user:, etc.) that could
+ *      read as a new turn / system instruction.
+ *
+ * Applied to the raw checkpoint body BEFORE slicing and fence-escaping so
+ * the neutralization runs over the full text (not just the excerpt).
+ */
+export declare function neutralizeRecoveredBody(text: string): string;
+/**
  * Extract file paths from the "## File Changes" section of an OpenClaw
  * checkpoint markdown. Returns up to 25 absolute-looking paths (containing
  * a path separator), de-duplicated. Used by U-G recordHintServe.
@@ -106,5 +121,98 @@ export declare function storePendingContinuityHint(sessionId: string, hint: stri
  * removed so subsequent compactions don't re-inject stale context.
  */
 export declare function consumePendingContinuityHint(sessionId: string): string | null;
+/**
+ * Regex that fires on natural resume cues. Case-insensitive. MUST NOT fire on
+ * incidental "continue to the next file" style prompts.
+ * Mirrors Python _RESUME_INTENT_RE in measure.py.
+ */
+export declare const RESUME_INTENT_RE: RegExp;
+/**
+ * True when the prompt asks to continue or recall prior work.
+ * Exported for tests.
+ */
+export declare function isResumeIntent(text: string): boolean;
+/**
+ * Compute residual-topic precision of the prompt against a checkpoint.
+ *
+ * CRITICAL: does NOT call keywordRelevanceScore — that short-circuits to 1.0 on
+ * "continue"/"resume", which would collapse named vs. vague distinctions.
+ * Instead: strip resume-intent cues → drop glue stopwords → compute precision of
+ * remaining content words (len>3) against checkpoint text tokens.
+ * Vague "continue last session" → residual empty → 0.0.
+ * Named "continue the token-optimizer keepwarm work" → scores higher on matching cp.
+ * Mirrors Python _resume_topic_score in measure.py.
+ */
+export declare function resumeTopicScore(promptText: string, checkpointContent: string): number;
+/**
+ * True when a checkpoint's working set contains files under cwd.
+ * Same-project = at least one file path == cwd or starts with cwd + "/".
+ * Mirrors Python _checkpoint_in_project using sidecar modified_files.
+ * Falls back to the content text search (cwd basename appears anywhere).
+ *
+ * FIX (torture phase 4): compare each path against BOTH the resolved cwd
+ * AND the raw cwd so that symlinked working dirs (macOS /tmp -> /private/tmp)
+ * don't silently fail the filter and leak cross-project context.  Mirrors the
+ * Python fix: build a small set {resolve(cwd), cwd}, trailing-slash-stripped.
+ */
+export declare function checkpointInProject(content: string, cwd: string): boolean;
+/**
+ * Build a LEAN reconstruction block for a matched prior-session checkpoint.
+ *
+ * Mirrors Python build_lean_resume_context:
+ *   header, [RECOVERED DATA fence], sections parsed from .md checkpoint,
+ *   char-budget ~3500 with [... lean-truncated], footer transparency notice.
+ *
+ * Deviations from Python (OpenClaw lacks structured JSON sidecar):
+ *   • active_task → parsed from ## Recent Messages first user line
+ *   • continuation/open_questions → not available (OpenClaw doesn't capture them)
+ *   • modified_files → ## File Changes section
+ *   • recent_reads → not available in OpenClaw checkpoint format
+ *   • git → not captured in OpenClaw checkpoint format
+ *   • quality → Fill/Quality from blockquote header metadata
+ *   Thin tier (no checkpoint .md): not implemented — OpenClaw always has the .md
+ *   since listAllCheckpoints() only returns valid, in-window checkpoints.
+ */
+export declare function buildResumeLeanBlock(entry: CheckpointEntry, content: string, maxChars?: number): string;
+/**
+ * Log a resume_lean savings event.
+ * avoided = checkpoint raw bytes / 3.3 (proxy for cache-create tokens — OpenClaw
+ *   has no session_log cache_create_1h_tokens / cache_create_5m_tokens equivalent).
+ * saved = max(0, avoided - lean_tokens).
+ * Idempotent per target session within ~6h. Best-effort: never breaks injection.
+ * Mirrors Python _log_resume_lean_savings.
+ */
+export declare function logResumeLeanSavings(targetEntry: CheckpointEntry, leanBlock: string, logSavingsEventFn: (eventType: string, tokensSaved: number, sessionId: string, detail?: string) => void): void;
+/**
+ * Find the best same-project checkpoint to inject when the user signals
+ * resume intent.
+ *
+ * Selection ("both", per spec):
+ *   - best residual score >= RESUME_TOPIC_BAR → keyword winner (topic named)
+ *   - else → most-recent same-project (vague "continue where we left off")
+ *
+ * Returns null when no same-project checkpoint found.
+ * Mirrors Python _continuity_resume_block.
+ */
+export declare function findResumeLeanCheckpoint(promptText: string, currentSessionId: string, cwd: string, maxAgeDays?: number): {
+    entry: CheckpointEntry;
+    content: string;
+    score: number;
+} | null;
+/**
+ * Entry point: given a prompt + current session state, try to produce a
+ * cold-resume-lean injection block.
+ *
+ * Returns the lean block string if resume intent is detected AND a same-project
+ * checkpoint is found; returns null to fall through to the existing lightweight
+ * hint path. Never throws.
+ *
+ * Wiring: call this BEFORE findBestContinuityCheckpoint in the session:patch
+ * handler. If it returns a string, inject that and skip the lightweight hint.
+ *
+ * `logSavingsEventFn` is injected (not imported directly here) so the module
+ * stays free of circular imports and tests can stub it out.
+ */
+export declare function tryBuildResumeLeanHint(promptText: string, currentSessionId: string, cwd: string, logSavingsEventFn: (eventType: string, tokensSaved: number, sessionId: string, detail?: string) => void, maxAgeDays?: number): string | null;
 export {};
 //# sourceMappingURL=continuity.d.ts.map

@@ -316,6 +316,112 @@ function getOrComputeBaseline(
   return { baseline, reason: "frozen" };
 }
 
+// ---------------------------------------------------------------------------
+// Savings-events aggregation (grouped by event_type, no allowlist)
+// ---------------------------------------------------------------------------
+
+/**
+ * Friendly labels for known savings event types (mirrors Python
+ * _SAVINGS_CATEGORY_LABELS in measure.py). Unknown types fall back to
+ * title-case of the raw key.
+ */
+const SAVINGS_CATEGORY_LABELS: Record<string, string> = {
+  resume_lean: "Lean resumes",
+  checkpoint_restore: "Checkpoint restores",
+  hint_followed: "Hints followed",
+  tool_archive: "Tool replacements",
+  structural_savings: "Structural (cumulative)",
+};
+
+export function savingsCategoryLabel(eventType: string): string {
+  if (SAVINGS_CATEGORY_LABELS[eventType]) return SAVINGS_CATEGORY_LABELS[eventType];
+  // Graceful fallback: title-case the raw key (underscores -> spaces)
+  return eventType
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+export interface SavingsEventCategory {
+  eventType: string;
+  label: string;
+  count: number;
+  tokensSaved: number;
+  costSavedUsd: number;
+}
+
+export interface SavingsEventsSummary {
+  categories: SavingsEventCategory[];
+  totalTokensSaved: number;
+  totalCostSavedUsd: number;
+  totalCount: number;
+}
+
+/**
+ * Read savings-events.jsonl, group by event_type, and return per-category
+ * totals + a grand total. No allowlist: every event_type in the file surfaces.
+ * Returns an empty summary (not an error) when the file is missing.
+ */
+export function readSavingsEventsByCategory(
+  openclawDir?: string
+): SavingsEventsSummary {
+  const dir = openclawDir
+    ? path.join(openclawDir, "token-optimizer")
+    : path.join(
+        process.env.HOME ?? process.env.USERPROFILE ?? "",
+        ".openclaw",
+        "token-optimizer"
+      );
+  const filePath = path.join(dir, "savings-events.jsonl");
+
+  const byType = new Map<
+    string,
+    { count: number; tokensSaved: number; costSavedUsd: number }
+  >();
+
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8");
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let row: Record<string, unknown>;
+      try {
+        row = JSON.parse(trimmed) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const et = typeof row.event_type === "string" ? row.event_type : null;
+      if (!et) continue;
+      const tokens =
+        typeof row.tokens_saved === "number" ? row.tokens_saved : 0;
+      const cost =
+        typeof row.cost_saved_usd === "number" ? row.cost_saved_usd : 0;
+      const entry = byType.get(et) ?? { count: 0, tokensSaved: 0, costSavedUsd: 0 };
+      entry.count++;
+      entry.tokensSaved += tokens;
+      entry.costSavedUsd += cost;
+      byType.set(et, entry);
+    }
+  } catch {
+    /* file missing or unreadable — return empty summary */
+  }
+
+  const categories: SavingsEventCategory[] = Array.from(byType.entries())
+    .map(([eventType, agg]) => ({
+      eventType,
+      label: savingsCategoryLabel(eventType),
+      count: agg.count,
+      tokensSaved: agg.tokensSaved,
+      costSavedUsd: agg.costSavedUsd,
+    }))
+    .sort((a, b) => b.tokensSaved - a.tokensSaved);
+
+  const totalTokensSaved = categories.reduce((s, c) => s + c.tokensSaved, 0);
+  const totalCostSavedUsd = categories.reduce((s, c) => s + c.costSavedUsd, 0);
+  const totalCount = categories.reduce((s, c) => s + c.count, 0);
+
+  return { categories, totalTokensSaved, totalCostSavedUsd, totalCount };
+}
+
 // --- Public result ----------------------------------------------------------
 export interface SavingsBreakdownItem {
   key: string;

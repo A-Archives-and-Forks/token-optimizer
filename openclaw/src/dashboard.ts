@@ -10,7 +10,8 @@ import * as path from "path";
 import { AgentRun, WasteFinding, AuditReport, totalTokens, Severity, CostlyPrompt } from "./models";
 import { QualityReport, contextWindowForModel, scoreSessionQuality, scoreToGrade } from "./quality";
 import { ContextAudit, SkillDetail, McpServer, ManageData } from "./context-audit";
-import type { RealizedSavings } from "./savings";
+import type { RealizedSavings, SavingsEventsSummary } from "./savings";
+import { readSavingsEventsByCategory } from "./savings";
 import { loadPricingTier, PRICING_TIER_LABELS, getPricing, normalizeModelName } from "./pricing";
 import { CoachData } from "./coach";
 
@@ -44,6 +45,7 @@ export interface DashboardData {
   pricingTierLabel: string;
   coach: CoachData | null;
   savings: RealizedSavings | null;
+  savingsEvents: SavingsEventsSummary;
 }
 
 interface OverviewData {
@@ -347,6 +349,7 @@ export function buildDashboardData(
     pricingTierLabel,
     coach,
     savings,
+    savingsEvents: readSavingsEventsByCategory(),
   };
 }
 
@@ -1091,11 +1094,30 @@ function renderSavings(data: DashboardData): string {
       </div>`
     : "";
 
+  // Savings-events breakdown (grouped by event_type, no allowlist)
+  const evts = data.savingsEvents;
+  const savingsEventsCard = evts.totalCount > 0
+    ? `<div class="card">
+        <div class="card-header"><span>Savings by source</span><span style="color:var(--c-text-dim);font-size:13px">${evts.totalCount.toLocaleString()} events</span></div>
+        ${evts.categories.map((cat) => `<div class="bar-row">
+          <span class="bar-row-label">${esc(cat.label)}</span>
+          <span style="font-family:var(--font-mono);font-size:13px;color:var(--c-text-dim);margin-left:auto;padding-right:var(--s-3)">${cat.count.toLocaleString()} events</span>
+          <span style="font-family:var(--font-mono);color:var(--c-accent-cyan)">${fmtTokens(cat.tokensSaved)} tokens</span>
+        </div>`).join("")}
+        <div class="bar-row" style="border-top:1px solid var(--c-border);margin-top:var(--s-2);padding-top:var(--s-2)">
+          <span class="bar-row-label" style="font-weight:600">Total realized</span>
+          <span style="font-family:var(--font-mono);font-size:13px;color:var(--c-text-dim);margin-left:auto;padding-right:var(--s-3)">${evts.totalCount.toLocaleString()} events</span>
+          <span style="font-family:var(--font-mono);color:var(--c-success);font-weight:600">${fmtTokens(evts.totalTokensSaved)} tokens</span>
+        </div>
+      </div>`
+    : "";
+
   return `<div class="view" id="view-savings">
     ${header}
     ${hero}
     ${cumulative}
     ${levers}
+    ${savingsEventsCard}
   </div>`;
 }
 

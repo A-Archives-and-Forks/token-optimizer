@@ -42,7 +42,13 @@ export { generateCoachData } from "./coach";
 export type { CoachData, CoachPattern } from "./coach";
 import { resetPricingCache } from "./pricing";
 import { auditContext, getSkillUsageHistory } from "./context-audit";
-import { scoreQuality } from "./quality";
+import {
+  scoreQuality,
+  buildFreshSessionNudgeMessage,
+  freshSessionSavingsEstimate,
+  FRESH_NUDGE_QUALITY_THRESHOLD,
+  FRESH_NUDGE_MIN_FILL,
+} from "./quality";
 import {
   buildRuntimeSnapshot,
   clearCheckpointState,
@@ -64,6 +70,8 @@ import {
   consumePendingContinuityHint,
   extractHintedPaths,
   RELEVANCE_THRESHOLD as _CONTINUITY_THRESHOLD,
+  tryBuildResumeLeanHint,
+  isResumeIntent,
 } from "./continuity";
 import {
   V5_FEATURES,
@@ -364,6 +372,15 @@ export default definePluginEntry({
     // replace the session:patch guard with a session:start handler here.
     const _continuityInjectedSessions = new Set<string>();
 
+    // Fresh-session nudge: per-session state.
+    // _freshNudgeFiredSessions: once-per-session dedup; cleared on session:end.
+    // _freshNudgePriorScores: last known quality score for each session; used to
+    //   detect the "prior score established" condition that mirrors Python's
+    //   _nudge_previous_score check (suppresses firing on the very first scored
+    //   turn, i.e. right after a compaction/fresh session when there is no baseline).
+    const _freshNudgeFiredSessions = new Set<string>();
+    const _freshNudgePriorScores = new Map<string, number>();
+
     // Register service so other plugins/skills can call our methods
     api.registerService("token-optimizer", {
       audit,
@@ -537,42 +554,84 @@ export default definePluginEntry({
             // guard ONLY now. A bare init session:patch (no prompt yet) leaves
             // the guard unset so a later patch with the real prompt still runs.
             _continuityInjectedSessions.add(event.sessionId);
-            const candidate = findBestContinuityCheckpoint(promptText, event.sessionId, process.cwd());
-            if (candidate) {
-              const hint = buildContinuityHint(candidate);
-              // T5 (U-G) serve side: record which files this hint surfaced so a
-              // later Read of one can claim the avoided-search credit. Best-effort:
-              // never let this bookkeeping break the hint itself.
-              try {
-                const hintedPaths = extractHintedPaths(candidate.content);
-                if (hintedPaths.length > 0) {
-                  recordHintServe(event.sessionId, hintedPaths);
-                }
-              } catch { /* best-effort */ }
+
+            // ── Cold-resume-lean path (upgrade from lightweight hint) ────────
+            // When the user signals resume intent ("continue our work / last
+            // session"), inject a FULL lean reconstruction of the right same-
+            // project prior checkpoint. Falls through to the lightweight hint
+            // when intent not detected or no same-project match found.
+            const resumeLeanBlock = tryBuildResumeLeanHint(
+              promptText,
+              event.sessionId,
+              process.cwd(),
+              logSavingsEvent
+            );
+            if (resumeLeanBlock) {
+              // Cold-resume-lean matched: inject the full reconstruction block
+              // and skip the lightweight hint (lean block is the full replacement).
               if (typeof event.inject === "function") {
-                // Best case: gateway forwards an inject callback on session:patch.
-                event.inject(hint);
+                event.inject(resumeLeanBlock);
                 api.logger.info(
-                  `[token-optimizer] Cross-session continuity injected for session ${event.sessionId} ` +
-                  `(score=${candidate.score.toFixed(2)}, source=${candidate.entry.sessionDirName})`
+                  `[token-optimizer] Cold-resume-lean injected for session ${event.sessionId}`
                 );
               } else {
-                // No inject path here. Persist the hint so the next
-                // session:compact:after — the spec-documented inject point —
-                // delivers it. Always store on a match so it lands at the
-                // earliest opportunity.
-                storePendingContinuityHint(event.sessionId, hint);
+                storePendingContinuityHint(event.sessionId, resumeLeanBlock);
                 api.logger.info(
-                  `[token-optimizer] Cross-session match for session ${event.sessionId} ` +
-                  `(score=${candidate.score.toFixed(2)}, source=${candidate.entry.sessionDirName}); ` +
-                  `queued for the next inject point.`
+                  `[token-optimizer] Cold-resume-lean matched for session ${event.sessionId}; queued for next inject point.`
                 );
               }
             } else {
-              api.logger.info(
-                `[token-optimizer] No matching prior checkpoint for session ${event.sessionId} ` +
-                `(threshold=${_CONTINUITY_THRESHOLD})`
-              );
+              // ── End cold-resume-lean path — fall through to lightweight hint ─
+              // CHANGE 2 parity: when resume intent fired AND cwd is known but no
+              // same-project match was found, do NOT fall through to the lightweight
+              // cross-session hint (it is un-gated and could surface a DIFFERENT
+              // project's checkpoint). Mirrors Python _continuity_prompt_hint:
+              //   if cwd: return ""  # no cross-project fallthrough on explicit resume
+              const _cwd = process.cwd();
+              if (isResumeIntent(promptText) && _cwd) {
+                api.logger.info(
+                  `[token-optimizer] Resume intent detected but no same-project checkpoint for session ${event.sessionId}; suppressing cross-project fallthrough.`
+                );
+                // Skip the lightweight hint entirely — do NOT surface another project's context.
+              } else {
+                const candidate = findBestContinuityCheckpoint(promptText, event.sessionId, _cwd);
+                if (candidate) {
+                  const hint = buildContinuityHint(candidate);
+                  // T5 (U-G) serve side: record which files this hint surfaced so a
+                  // later Read of one can claim the avoided-search credit. Best-effort:
+                  // never let this bookkeeping break the hint itself.
+                  try {
+                    const hintedPaths = extractHintedPaths(candidate.content);
+                    if (hintedPaths.length > 0) {
+                      recordHintServe(event.sessionId, hintedPaths);
+                    }
+                  } catch { /* best-effort */ }
+                  if (typeof event.inject === "function") {
+                    // Best case: gateway forwards an inject callback on session:patch.
+                    event.inject(hint);
+                    api.logger.info(
+                      `[token-optimizer] Cross-session continuity injected for session ${event.sessionId} ` +
+                      `(score=${candidate.score.toFixed(2)}, source=${candidate.entry.sessionDirName})`
+                    );
+                  } else {
+                    // No inject path here. Persist the hint so the next
+                    // session:compact:after — the spec-documented inject point —
+                    // delivers it. Always store on a match so it lands at the
+                    // earliest opportunity.
+                    storePendingContinuityHint(event.sessionId, hint);
+                    api.logger.info(
+                      `[token-optimizer] Cross-session match for session ${event.sessionId} ` +
+                      `(score=${candidate.score.toFixed(2)}, source=${candidate.entry.sessionDirName}); ` +
+                      `queued for the next inject point.`
+                    );
+                  }
+                } else {
+                  api.logger.info(
+                    `[token-optimizer] No matching prior checkpoint for session ${event.sessionId} ` +
+                    `(threshold=${_CONTINUITY_THRESHOLD})`
+                  );
+                }
+              }
             }
           } else {
             // Bare init patch before the first user message. Do NOT consume the
@@ -588,6 +647,62 @@ export default definePluginEntry({
         }
       }
       // ── End continuity injection ──────────────────────────────────────────
+
+      // ── Fresh-session nudge ───────────────────────────────────────────────
+      // Fires once per session when quality score < 70 AND context fill >= 50%.
+      // Suppressed until a prior score is established (mirrors Python's
+      // _nudge_previous_score guard against firing right after a compaction).
+      // Delivery: inject() when available (session:patch), otherwise stored as
+      // a pending hint for the next session:compact:after inject point.
+      // Takes precedence over the /compact quality nudge (no double message).
+      if (event.sessionId && !_freshNudgeFiredSessions.has(event.sessionId)) {
+        try {
+          const nudgeSnapshot = buildRuntimeEventContext(
+            openclawDir, freshContextAudit(), event.agentId, event.sessionId, "session-patch"
+          );
+          if (nudgeSnapshot) {
+            const hasPriorScore = _freshNudgePriorScores.has(event.sessionId);
+            const nudgeMsg = buildFreshSessionNudgeMessage(
+              nudgeSnapshot.qualityScore,
+              nudgeSnapshot.fillPct,
+              hasPriorScore,
+              nudgeSnapshot.model
+            );
+            // Always update the prior-score baseline (whether or not the nudge fired).
+            _freshNudgePriorScores.set(event.sessionId, nudgeSnapshot.qualityScore);
+
+            if (nudgeMsg) {
+              _freshNudgeFiredSessions.add(event.sessionId);
+              const { savedTokens } = freshSessionSavingsEstimate(nudgeSnapshot.fillPct, nudgeSnapshot.model);
+              logSavingsEvent("fresh_session_nudge", savedTokens, event.sessionId,
+                `score=${nudgeSnapshot.qualityScore} fill_pct=${nudgeSnapshot.fillPct.toFixed(1)}`);
+              logCompressionEvent({
+                feature: "fresh_session_nudge",
+                sessionId: event.sessionId,
+                detail: `score=${nudgeSnapshot.qualityScore} fill_pct=${nudgeSnapshot.fillPct.toFixed(1)} est_saved=${savedTokens}`,
+                verified: false,
+              });
+              if (typeof event.inject === "function") {
+                event.inject(nudgeMsg);
+                api.logger.info(
+                  `[token-optimizer] Fresh-session nudge injected for session ${event.sessionId} ` +
+                  `(score=${nudgeSnapshot.qualityScore}, fill=${nudgeSnapshot.fillPct.toFixed(1)}%)`
+                );
+              } else {
+                storePendingContinuityHint(event.sessionId, nudgeMsg);
+                api.logger.info(
+                  `[token-optimizer] Fresh-session nudge queued for session ${event.sessionId} ` +
+                  `(score=${nudgeSnapshot.qualityScore}, fill=${nudgeSnapshot.fillPct.toFixed(1)}%); ` +
+                  `will deliver at next inject point.`
+                );
+              }
+            }
+          }
+        } catch (err) {
+          api.logger.warn(`[token-optimizer] Fresh-session nudge error: ${err}`);
+        }
+      }
+      // ── End fresh-session nudge ───────────────────────────────────────────
 
       maybeCheckpointFromRuntimeSnapshot(openclawDir, freshContextAudit(), event.agentId, event.sessionId, api, "session-patch");
     });
@@ -711,6 +826,9 @@ export default definePluginEntry({
           // Release the per-session continuity one-shot guard so the Set does
           // not grow unbounded over a long-running gateway.
           _continuityInjectedSessions.delete(event.sessionId);
+          // Release fresh-session nudge state for this session.
+          _freshNudgeFiredSessions.delete(event.sessionId);
+          _freshNudgePriorScores.delete(event.sessionId);
         }
         // Prune checkpoints older than the retention window here too: an
         // always-on gateway may never restart, so the gateway:startup cleanup

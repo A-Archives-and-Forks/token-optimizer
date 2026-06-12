@@ -18,6 +18,7 @@ import { generateCompactionContext } from "./compaction/dynamic-instructions.js"
 import { captureCheckpoint, pruneCheckpoints } from "./compaction/checkpoint.js";
 import { restoreCheckpoint } from "./continuity/restore.js";
 import { checkQualityNudge } from "./nudges/quality-nudge.js";
+import { checkFreshSessionNudge } from "./nudges/fresh-session-nudge.js";
 import { detectLoop } from "./nudges/loop-detection.js";
 import { createTokenStatusTool } from "./tools/token-status.js";
 import { createDashboardTool } from "./tools/dashboard.js";
@@ -69,6 +70,8 @@ interface SessionState {
    */
   pendingContinuityPrompt: string;
   regimeChangeEmitted: boolean;
+  /** Set to true after the fresh-session nudge fires so it emits at most once per session. */
+  freshNudgeFired: boolean;
   recentSummaries: number[];
   toolCallsSinceCap: number;
   // Token usage keyed by assistant message id. message.updated fires repeatedly
@@ -125,6 +128,7 @@ export const TokenOptimizerPlugin: Plugin = async (
       continuityInjected: false,
       pendingContinuityPrompt: "",
       regimeChangeEmitted: false,
+      freshNudgeFired: false,
       recentSummaries: [],
       toolCallsSinceCap: 0,
       usageByMessage: new Map(),
@@ -246,19 +250,36 @@ export const TokenOptimizerPlugin: Plugin = async (
 
     if (config.features.qualityNudges) {
       const cache = store.getQualityCache();
-      const nudge = checkQualityNudge(store, state.lastQuality.resourceHealth, state.previousResourceHealth);
-      if (nudge.shouldNudge && nudge.message) {
-        warnings.push(nudge.message);
-        store.writeQualityCache({
-          resource_health: cache?.resource_health ?? state.lastQuality.resourceHealth,
-          session_efficiency: cache?.session_efficiency ?? state.lastQuality.sessionEfficiency,
-          fill_pct: cache?.fill_pct ?? state.lastQuality.fillPct,
-          compactions: cache?.compactions ?? 0,
-          tool_calls: cache?.tool_calls ?? 0,
-          last_nudge_time: Date.now() / 1000,
-          nudge_count: (cache?.nudge_count ?? 0) + 1,
-          data: cache?.data ?? null,
-        });
+      // Fresh-session nudge takes precedence: when a session is BOTH long AND degraded,
+      // "start fresh (context is preserved)" is the stronger remedy than /compact.
+      // Only fall back to the ordinary quality nudge if the fresh-session nudge did not fire.
+      const fillPctPct = Math.round(state.lastQuality.fillPct * 100);
+      const freshNudge = checkFreshSessionNudge(
+        state.lastQuality.resourceHealth,
+        fillPctPct,
+        state.previousResourceHealth,
+        state.freshNudgeFired,
+        config.features.qualityNudges,
+        state.currentModel,
+      );
+      if (freshNudge.shouldNudge && freshNudge.message) {
+        state.freshNudgeFired = true;
+        warnings.push(freshNudge.message);
+      } else {
+        const nudge = checkQualityNudge(store, state.lastQuality.resourceHealth, state.previousResourceHealth);
+        if (nudge.shouldNudge && nudge.message) {
+          warnings.push(nudge.message);
+          store.writeQualityCache({
+            resource_health: cache?.resource_health ?? state.lastQuality.resourceHealth,
+            session_efficiency: cache?.session_efficiency ?? state.lastQuality.sessionEfficiency,
+            fill_pct: cache?.fill_pct ?? state.lastQuality.fillPct,
+            compactions: cache?.compactions ?? 0,
+            tool_calls: cache?.tool_calls ?? 0,
+            last_nudge_time: Date.now() / 1000,
+            nudge_count: (cache?.nudge_count ?? 0) + 1,
+            data: cache?.data ?? null,
+          });
+        }
       }
     }
 
@@ -481,7 +502,17 @@ export const TokenOptimizerPlugin: Plugin = async (
             // Release the pending prompt — no longer needed once we've committed
             // to this restore attempt (success or miss).
             state.pendingContinuityPrompt = "";
-            const match = restoreCheckpoint(dataDir, firstMsg, input.sessionID, config);
+            const match = restoreCheckpoint(
+              dataDir,
+              firstMsg,
+              input.sessionID,
+              config,
+              // Pass trendsStore + cwd so the resume-lean path can credit savings
+              // and scope the same-project filter. ctx.project.worktree is the
+              // working directory of the project (the canonical cwd for this session).
+              trendsStore ?? undefined,
+              ctx.project.worktree,
+            );
             if (match) {
               // Fence restored content as untrusted DATA so it can't act as an
               // instruction in the system prompt (prompt-injection defense).
@@ -560,7 +591,10 @@ export const TokenOptimizerPlugin: Plugin = async (
         state.recentSummaries = [];
         state.lastQuality = null;
         state.lastQualityTime = 0;
+        state.previousResourceHealth = null; // reset so first post-compaction check is suppressed (mirrors Python _nudge_previous_score is None guard)
         state.regimeChangeEmitted = false;
+        // freshNudgeFired is intentionally NOT reset here — once-per-session must persist
+        // across compactions. Python carries _fresh_nudge_fired in _CARRY_KEYS across compactions.
 
         const fillPct = estimateFillFromSession(store, state.currentModel);
         maybeComputeQuality(state, fillPct);

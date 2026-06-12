@@ -709,3 +709,79 @@ export function scoreSessionQuality(run: AgentRun): { score: number; grade: stri
 
   return { score, grade, band };
 }
+
+// ---------------------------------------------------------------------------
+// Fresh-session nudge
+// ---------------------------------------------------------------------------
+
+/** Quality threshold below which the nudge fires (mirrors Python _FRESH_NUDGE_QUALITY_THRESHOLD). */
+export const FRESH_NUDGE_QUALITY_THRESHOLD = 70;
+
+/** Minimum context fill % required for the nudge to fire (mirrors Python _FRESH_NUDGE_MIN_FILL). */
+export const FRESH_NUDGE_MIN_FILL = 50;
+
+/** Approximate tokens a fresh lean-resume block re-injects (mirrors Python _FRESH_NUDGE_LEAN_BLOCK_TOKENS). */
+export const FRESH_NUDGE_LEAN_BLOCK_TOKENS = 1000;
+
+/**
+ * Estimate tokens reclaimed by starting a fresh session now.
+ *
+ * current_ctx = (fill_pct / 100) * context_window
+ * saved       = max(0, current_ctx - FRESH_NUDGE_LEAN_BLOCK_TOKENS)
+ *
+ * Returns { savedTokens, contextWindow }.
+ * Mirrors Python _fresh_session_savings_estimate().
+ */
+export function freshSessionSavingsEstimate(
+  fillPct: number,
+  model: string = ""
+): { savedTokens: number; contextWindow: number } {
+  const contextWindow = contextWindowForModel(model) || 200_000;
+  const safeFill = Math.min(100, Math.max(0, fillPct));
+  const currentCtx = Math.round((safeFill / 100) * contextWindow);
+  const savedTokens = Math.max(0, currentCtx - FRESH_NUDGE_LEAN_BLOCK_TOKENS);
+  return { savedTokens, contextWindow };
+}
+
+/**
+ * Build the fresh-session nudge message string.
+ *
+ * Returns a string when ALL conditions are met:
+ *   - qualityScore < FRESH_NUDGE_QUALITY_THRESHOLD (70)
+ *   - fillPct >= FRESH_NUDGE_MIN_FILL (50%)
+ *   - hasPriorScore = true (not a post-compaction/fresh session baseline)
+ *
+ * Returns null when any condition is not met. The caller is responsible for
+ * once-per-session dedup (tracking whether the nudge has already fired).
+ *
+ * Takes precedence over the compact nudge: if this returns a message, the
+ * caller must NOT also emit the /compact quality nudge.
+ *
+ * Mirrors Python _maybe_fresh_session_nudge() logic (minus cache read/write
+ * and the _is_v5_feature_enabled guard, which the caller handles).
+ */
+export function buildFreshSessionNudgeMessage(
+  qualityScore: number,
+  fillPct: number,
+  hasPriorScore: boolean,
+  model: string = ""
+): string | null {
+  if (!hasPriorScore) return null;
+  if (!(qualityScore < FRESH_NUDGE_QUALITY_THRESHOLD && fillPct >= FRESH_NUDGE_MIN_FILL)) {
+    return null;
+  }
+
+  const { savedTokens } = freshSessionSavingsEstimate(fillPct, model);
+  const savedStr = savedTokens >= 1000
+    ? `~${Math.floor(savedTokens / 1000)}K`
+    : `~${savedTokens}`;
+
+  return (
+    `[Token Optimizer] This session is long (${Math.round(fillPct)}% full) and context ` +
+    `quality has fallen to ${qualityScore}. Starting a fresh session now would reclaim ` +
+    `${savedStr} tokens (~${Math.round(fillPct)}% of your window). You won't lose your ` +
+    `place: Token Optimizer has checkpointed your active task, key decisions, ` +
+    `files, and tool results, so a new session picks up exactly where you ` +
+    `stopped. Just open one and say "continue this" -- the context is rebuilt for free.`
+  );
+}

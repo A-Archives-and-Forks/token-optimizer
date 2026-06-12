@@ -123,6 +123,74 @@ export class TrendsStore {
     }
   }
 
+  /**
+   * True if a savings event of the given type for the given target session was
+   * already credited within the specified window.
+   *
+   * Prevents double-counting when a user opens the same cold session from two
+   * different fresh sessions (cross-session dedup). Mirrors Python's
+   * `_resume_lean_already_credited` which dedups on the TARGET session_uuid.
+   *
+   * Best-effort: returns false on any error so we never block savings accounting.
+   */
+  hasRecentSavingsEvent(
+    eventType: string,
+    sessionId: string,
+    withinMs: number,
+  ): boolean {
+    if (!sessionId || withinMs <= 0) return false;
+    try {
+      const db = this.connect();
+      const cutoff = new Date(Date.now() - withinMs).toISOString();
+      const row = db.query(
+        `SELECT 1 FROM savings_events
+         WHERE event_type = ?
+           AND session_id = ?
+           AND timestamp >= ?
+         LIMIT 1`,
+      ).get(eventType, sessionId, cutoff);
+      return row !== null;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Returns the tokens_cache_write value from session_log for the given session,
+   * or 0 if not found / unavailable.
+   *
+   * This is the closest opencode equivalent to Python's
+   * `cache_create_1h_tokens + cache_create_5m_tokens` — the real cold-rewrite
+   * cost that a lean resume avoids. Used by logResumeLeanSavings for the
+   * primary avoided-cost estimate.
+   *
+   * OVERCOUNT VERIFICATION (Fix 7): tokens_cache_write is populated from
+   * `t?.cache?.write` in the message.updated handler, which maps directly to
+   * OpenCode SDK's `Message.tokens.cache.write` field. Per the SDK type definition
+   * (types.gen.d.ts L120), `cache.write` is the cache CREATION count only —
+   * distinct from `cache.read` (cheap hits). A `--resume` cold rewrite ONLY incurs
+   * write (creation) cost; read hits on an established cache do NOT re-pay write cost.
+   * Therefore tokens_cache_write is write-only and does NOT conflate cache-read tokens.
+   * No discount needed: this column is the correct, non-overcounting avoided-cost metric.
+   *
+   * Best-effort: returns 0 on any error.
+   */
+  getSessionCacheWrite(sessionId: string): number {
+    if (!sessionId) return 0;
+    try {
+      const db = this.connect();
+      const row = db.query(
+        `SELECT tokens_cache_write FROM session_log
+         WHERE session_id = ?
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      ).get(sessionId) as { tokens_cache_write: number } | null;
+      return (row?.tokens_cache_write ?? 0) > 0 ? row!.tokens_cache_write : 0;
+    } catch {
+      return 0;
+    }
+  }
+
   close(): void {
     if (this.db) {
       this.db.close();

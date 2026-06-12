@@ -7,7 +7,7 @@
 import { AgentRun, WasteFinding, AuditReport, Severity } from "./models";
 import { QualityReport } from "./quality";
 import { ContextAudit } from "./context-audit";
-import type { RealizedSavings } from "./savings";
+import type { RealizedSavings, SavingsEventsSummary } from "./savings";
 import { CoachData } from "./coach";
 export interface AgentCostBreakdown {
     name: string;
@@ -34,6 +34,7 @@ export interface DashboardData {
     pricingTierLabel: string;
     coach: CoachData | null;
     savings: RealizedSavings | null;
+    savingsEvents: SavingsEventsSummary;
 }
 interface OverviewData {
     totalRuns: number;

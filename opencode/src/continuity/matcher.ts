@@ -56,6 +56,34 @@ function safeSlice(str: string, maxChars: number): string {
   return str.slice(0, end) + "\n[... truncated]";
 }
 
+/**
+ * Make raw checkpoint body safe to inject after a [RECOVERED DATA ...] sentinel.
+ *
+ * The body is prior-conversation text and may be attacker-influenced (a pasted
+ * file, fetched web content, a crafted message). Strip C0 control chars and
+ * DEFANG any forged RECOVERED-DATA sentinel / role-prefix so the body cannot
+ * "close" the data fence and smuggle the following lines in as live instructions.
+ *
+ * Mirrors Python's _neutralize_recovered_body() in measure.py exactly:
+ *   - Strip C0 control chars except TAB and LF.
+ *   - Defang forged "[RECOVERED..." sentinels: leading bracket becomes paren.
+ *   - Bracket role-prefix lines (system:, user:, assistant:, etc.) so they
+ *     cannot read as a new turn or system instruction.
+ */
+export function neutralizeRecoveredBody(text: string): string {
+  if (!text) return "";
+  // Strip C0 control chars except tab (\x09) and newline (\x0a).
+  text = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, " ");
+  // Defang forged open/close sentinels: "[RECOVERED...", "[/RECOVERED...", etc.
+  text = text.replace(/\[(\s*\/?\s*RECOVERED\b)/gi, "($1");
+  // Defang role-prefix lines that could read as a new turn / system instruction.
+  text = text.replace(
+    /^(\s*)(system|assistant|user|human|developer|tool|instructions?)(\s*:)/gim,
+    "$1[$2]$3",
+  );
+  return text;
+}
+
 export function findBestCheckpoint(
   userPrompt: string,
   checkpoints: Array<{ session_id: string; content: string; mode: string; created_at: number }>,
@@ -69,8 +97,12 @@ export function findBestCheckpoint(
     const score = scoreRelevance(userPrompt, cp.content);
     if (score > bestScore && score >= threshold) {
       bestScore = score;
+      // Neutralize forged sentinels / control chars before injecting.
+      // The raw checkpoint body is replayed prior-conversation text and is
+      // attacker-influenceable; it must not be able to break the data fence.
+      const safeContent = neutralizeRecoveredBody(safeSlice(cp.content, maxChars));
       best = {
-        content: safeSlice(cp.content, maxChars),
+        content: safeContent,
         score,
         sessionId: cp.session_id,
         mode: cp.mode,

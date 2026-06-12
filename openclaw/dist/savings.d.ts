@@ -1,3 +1,23 @@
+export declare function savingsCategoryLabel(eventType: string): string;
+export interface SavingsEventCategory {
+    eventType: string;
+    label: string;
+    count: number;
+    tokensSaved: number;
+    costSavedUsd: number;
+}
+export interface SavingsEventsSummary {
+    categories: SavingsEventCategory[];
+    totalTokensSaved: number;
+    totalCostSavedUsd: number;
+    totalCount: number;
+}
+/**
+ * Read savings-events.jsonl, group by event_type, and return per-category
+ * totals + a grand total. No allowlist: every event_type in the file surfaces.
+ * Returns an empty summary (not an error) when the file is missing.
+ */
+export declare function readSavingsEventsByCategory(openclawDir?: string): SavingsEventsSummary;
 export interface SavingsBreakdownItem {
     key: string;
     label: string;

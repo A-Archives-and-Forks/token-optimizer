@@ -75,4 +75,41 @@ export declare function scoreSessionQuality(run: AgentRun): {
     grade: string;
     band: string;
 };
+/** Quality threshold below which the nudge fires (mirrors Python _FRESH_NUDGE_QUALITY_THRESHOLD). */
+export declare const FRESH_NUDGE_QUALITY_THRESHOLD = 70;
+/** Minimum context fill % required for the nudge to fire (mirrors Python _FRESH_NUDGE_MIN_FILL). */
+export declare const FRESH_NUDGE_MIN_FILL = 50;
+/** Approximate tokens a fresh lean-resume block re-injects (mirrors Python _FRESH_NUDGE_LEAN_BLOCK_TOKENS). */
+export declare const FRESH_NUDGE_LEAN_BLOCK_TOKENS = 1000;
+/**
+ * Estimate tokens reclaimed by starting a fresh session now.
+ *
+ * current_ctx = (fill_pct / 100) * context_window
+ * saved       = max(0, current_ctx - FRESH_NUDGE_LEAN_BLOCK_TOKENS)
+ *
+ * Returns { savedTokens, contextWindow }.
+ * Mirrors Python _fresh_session_savings_estimate().
+ */
+export declare function freshSessionSavingsEstimate(fillPct: number, model?: string): {
+    savedTokens: number;
+    contextWindow: number;
+};
+/**
+ * Build the fresh-session nudge message string.
+ *
+ * Returns a string when ALL conditions are met:
+ *   - qualityScore < FRESH_NUDGE_QUALITY_THRESHOLD (70)
+ *   - fillPct >= FRESH_NUDGE_MIN_FILL (50%)
+ *   - hasPriorScore = true (not a post-compaction/fresh session baseline)
+ *
+ * Returns null when any condition is not met. The caller is responsible for
+ * once-per-session dedup (tracking whether the nudge has already fired).
+ *
+ * Takes precedence over the compact nudge: if this returns a message, the
+ * caller must NOT also emit the /compact quality nudge.
+ *
+ * Mirrors Python _maybe_fresh_session_nudge() logic (minus cache read/write
+ * and the _is_v5_feature_enabled guard, which the caller handles).
+ */
+export declare function buildFreshSessionNudgeMessage(qualityScore: number, fillPct: number, hasPriorScore: boolean, model?: string): string | null;
 //# sourceMappingURL=quality.d.ts.map
