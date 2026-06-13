@@ -6,18 +6,17 @@
   <a href="https://github.com/alexgreensh/token-optimizer/releases/latest"><img src="https://img.shields.io/github/v/release/alexgreensh/token-optimizer?label=version&color=green" alt="Latest stable version"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/releases"><img src="https://img.shields.io/github/release-date/alexgreensh/token-optimizer?label=last%20release&color=blue" alt="Last Release"></a>
   <a href="https://github.com/alexgreensh/token-optimizer"><img src="https://img.shields.io/badge/Claude_Code-Plugin-blueviolet" alt="Claude Code Plugin"></a>
-  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/openclaw"><img src="https://img.shields.io/badge/OpenClaw-v2.4.7-brightgreen" alt="OpenClaw v2.4.7"></a>
-  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/opencode"><img src="https://img.shields.io/badge/OpenCode-v1.0.8-58a6ff" alt="OpenCode v1.0.8"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/openclaw"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Falexgreensh%2Ftoken-optimizer%2Fmain%2Fopenclaw%2Fpackage.json&query=%24.version&prefix=v&label=OpenClaw&color=brightgreen" alt="OpenClaw version"></a>
+  <a href="https://github.com/alexgreensh/token-optimizer/tree/main/opencode"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Falexgreensh%2Ftoken-optimizer%2Fmain%2Fopencode%2Fpackage.json&query=%24.version&prefix=v&label=OpenCode&color=58a6ff" alt="OpenCode version"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/blob/main/docs/codex.md"><img src="https://img.shields.io/badge/Codex-supported-orange" alt="Codex supported"></a>
-  <a href="https://marketplace.visualstudio.com/items?itemName=alexgreensh.token-optimizer-statusline"><img src="https://img.shields.io/visual-studio-marketplace/v/alexgreensh.token-optimizer-statusline?label=VS%20Code%20Marketplace&color=0078d7" alt="VS Code Marketplace"></a>
 </p>
 <p align="center">
   <img src="https://img.shields.io/badge/cuts%20context%20waste-3fb950" alt="Cuts context waste">
   <img src="https://img.shields.io/badge/survives%20compaction-checkpoint%20%2B%20restore-58a6ff" alt="Survives compaction">
   <img src="https://img.shields.io/badge/saves%20real%20%24-every%20session-2ea043" alt="Saves real dollars every session">
   <img src="https://img.shields.io/badge/live%20dashboard-tokens%20%2B%20%24%20%2B%20turns-8B5CF6?logo=chartdotjs&logoColor=white" alt="Live dashboard">
-  <img src="https://img.shields.io/badge/quality%20score-v6%20dual--score-blue" alt="Quality score v6 dual-score">
-  <img src="https://img.shields.io/badge/tests-572-brightgreen" alt="572 Tests">
+  <img src="https://img.shields.io/badge/context%20quality-live%20score-blue" alt="Live context quality score">
+  <img src="https://img.shields.io/badge/tests-passing-brightgreen" alt="Tests passing">
 </p>
 <p align="center">
   <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Zero Dependencies">
@@ -28,7 +27,10 @@
   <a href="https://github.com/alexgreensh/token-optimizer/stargazers"><img src="https://img.shields.io/github/stars/alexgreensh/token-optimizer" alt="GitHub Stars"></a>
   <a href="https://github.com/alexgreensh/token-optimizer/commits/main"><img src="https://img.shields.io/github/commit-activity/m/alexgreensh/token-optimizer" alt="Commit Activity"></a>
   <a href="https://linkedin.com/in/alexgreensh"><img src="https://img.shields.io/badge/LinkedIn-Connect-0A66C2?logo=linkedin&logoColor=white" alt="Connect on LinkedIn"></a>
-  <a href="https://github.com/sponsors/alexgreensh"><img src="https://img.shields.io/badge/sponsor-keep%20it%20free-%23ea4aaa?logo=githubsponsors" alt="Sponsor - Keep It Free"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/sponsors/alexgreensh"><img src="https://img.shields.io/badge/%E2%99%A5%20Support%20this%20project%20to%20keep%20it%20open%20source-ea4aaa?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Support this project to keep it open source"></a>
 </p>
 
 <h2 align="center">Cut the tokens you waste. Keep the work you'd lose.</h2>
@@ -153,7 +155,7 @@ See [`docs/codex.md`](docs/codex.md) for the full feature parity table, hook pro
 <details>
 <summary><h3>OpenCode</h3></summary>
 
-Native TypeScript plugin for [OpenCode](https://github.com/anomalyco/opencode) with full Claude Code feature parity. v6 dual-score quality engine, smart compaction with mode-aware context injection, session continuity, quality nudges, loop detection, and a built-in dashboard.
+Native TypeScript plugin for [OpenCode](https://github.com/anomalyco/opencode) with full Claude Code feature parity. Context-quality scoring engine, smart compaction with mode-aware context injection, session continuity, quality nudges, loop detection, and a built-in dashboard.
 
 ```bash
 opencode plugin token-optimizer-opencode
@@ -354,7 +356,7 @@ Token Optimizer runs as an external process. It doesn't inject always-on instruc
 | **Model routing and behavioral coaching** | 🟢 11 detectors, subagent cost breakdown, anti-patterns | 🔴 | 🔴 | 🔴 | 🟡 Basic suggestions |
 | **Historical trend analysis** | 🟢 30-day trends, quality/cost/cache/duration correlation, model-switch detection | 🔴 | 🔴 | 🔴 | 🔴 |
 | **Loop and spin detection** | 🟢 Catches behavioral loops before they burn | 🔴 | 🔴 | 🔴 | 🔴 |
-| **Context quality scoring** | 🟢 7-signal dual-score with grades | 🔴 | 🔴 | 🔴 | 🟡 Capacity % only |
+| **Context quality scoring** | 🟢 7-signal quality score with grades | 🔴 | 🔴 | 🔴 | 🟡 Capacity % only |
 | **Structural waste audit** | 🟢 Deep per-component (CLAUDE.md, skills, MCP, memory) | 🔴 | 🔴 | 🔴 | 🟡 Summary only |
 | **CLAUDE.md and MEMORY.md health** | 🟢 8 auditors + attention-curve scoring | 🔴 | 🔴 | 🔴 | 🔴 |
 | **Measures if compression helped** | 🟢 Local telemetry, before/after tokens, dollar savings | 🔴 | 🟡 `rtk gain` (token counts only) | 🔴 | 🔴 |
@@ -402,7 +404,7 @@ In that historical-baseline scenario, structural is the giant: the diagram model
 <details>
 <summary>🎯 <strong>Can Token Optimizer degrade my context quality?</strong></summary>
 
-No. Structural optimization only removes genuinely unused components (skills you never invoke, duplicate configs, orphaned memory entries). Active Compression controls can be disabled with a single command or env var. The v6 dual-score quality system actively tracks degradation, so if anything ever hurt quality, the score would show it.
+No. Structural optimization only removes genuinely unused components (skills you never invoke, duplicate configs, orphaned memory entries). Active Compression controls can be disabled with a single command or env var. The context-quality scoring system actively tracks degradation, so if anything ever hurt quality, the score would show it.
 </details>
 
 <details>
@@ -496,7 +498,7 @@ Token Optimizer tracks all of this. Quality score, degradation bands, compaction
 
 ![What happens inside a 1M session](skills/token-optimizer/assets/user-profiles.svg)
 
-> **"But doesn't removing tokens hurt the model?"** No. Token Optimizer only touches what's safe to touch. Structural optimization removes genuinely unused components (duplicate configs, unused skill frontmatter, orphaned memory entries), never the conversation itself. Active Compression works on new content entering your window (smart re-reads, credential-safe command summaries) and on the compaction boundary (checkpoints before auto-compact, restore after). Nothing already in your context gets edited or removed, which means your prompt cache stays intact. The v6 dual-score quality system tracks degradation in real time, and most users see scores improve after optimization because the model has more room for real work.
+> **"But doesn't removing tokens hurt the model?"** No. Token Optimizer only touches what's safe to touch. Structural optimization removes genuinely unused components (duplicate configs, unused skill frontmatter, orphaned memory entries), never the conversation itself. Active Compression works on new content entering your window (smart re-reads, credential-safe command summaries) and on the compaction boundary (checkpoints before auto-compact, restore after). Nothing already in your context gets edited or removed, which means your prompt cache stays intact. The context-quality scoring system tracks degradation in real time, and most users see scores improve after optimization because the model has more room for real work.
 
 ---
 
@@ -582,7 +584,7 @@ up exactly where you stopped. The reclaimed savings are tracked as a realized
 
 ## Quality Scoring
 
-v6 reports two composites: **Resource Health** for monotonic session risk, and **Session Efficiency** for behavior that can improve or regress during the session.
+The quality score reports two composites: **Resource Health** for monotonic session risk, and **Session Efficiency** for behavior that can improve or regress during the session.
 
 | Score | Signals | What It Means For You |
 |--------|--------|----------------|
@@ -905,7 +907,7 @@ Hover help on every column explains `Cache`, `TTL`, `Pacing`, `Cache R`, and `Ca
 | `quick` | **"Am I in trouble?"** 10-second answer: context health, degradation risk, biggest token offenders, which model to use. |
 | `doctor` | **"Is everything installed correctly?"** Score out of 10. Broken hooks, missing components, exact fix commands. |
 | `drift` | **"Has my setup grown?"** Side-by-side comparison vs your last snapshot. Catches config creep before it costs you. |
-| `quality` | **"How healthy is this session?"** v6 dual-score analysis of your live conversation. Stale reads, wasted tokens, compaction damage. |
+| `quality` | **"How healthy is this session?"** Context-quality analysis of your live conversation. Stale reads, wasted tokens, compaction damage. |
 | `report` | **"Where are my tokens going?"** Full per-component breakdown. Every skill, every MCP server, every config file. |
 | `conversation` | **"What happened each turn?"** Per-message token and cost breakdown with spike detection. |
 | `pricing-tier` | **"What am I paying?"** View or switch between Anthropic, Vertex, and Bedrock pricing tiers. |
