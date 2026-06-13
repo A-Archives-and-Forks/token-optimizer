@@ -23246,8 +23246,13 @@ def compact_capture(transcript_path=None, session_id=None, trigger="auto", cwd=N
     except OSError:
         pass
 
-    now = datetime.now(timezone.utc)
-    ts = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Local wall-clock, tz-aware. The filename stamp and the "Generated:" line are
+    # human-facing (SessionStart echoes the path; the body header shows the time),
+    # so they must match the user's clock. Stamping UTC here made a checkpoint
+    # written at 19:39 local read as "16:39" -- a fresh checkpoint looked hours
+    # stale. The offset suffix keeps it unambiguous; selection/age still use mtime.
+    now = datetime.now().astimezone()
+    ts = now.strftime("%Y-%m-%dT%H:%M:%S%z")
     ts_file = now.strftime("%Y%m%d-%H%M%S")
 
     if transcript_path:
@@ -25731,7 +25736,7 @@ _NUDGE_SESSION_CAP = 3
 # (quality < threshold), suggest starting a fresh session -- cold-resume-lean
 # rebuilds the context for free, so nothing is lost. Fires once per session.
 _FRESH_NUDGE_QUALITY_THRESHOLD = _int_env("TOKEN_OPTIMIZER_FRESH_NUDGE_QUALITY", 70)
-_FRESH_NUDGE_MIN_FILL = _int_env("TOKEN_OPTIMIZER_FRESH_NUDGE_MIN_FILL", 50)
+_FRESH_NUDGE_MIN_FILL = _int_env("TOKEN_OPTIMIZER_FRESH_NUDGE_MIN_FILL", 45)
 _FRESH_NUDGE_LEAN_BLOCK_TOKENS = 1000  # what a fresh lean-resume re-injects
 # A2: a compaction only counts as nudge follow-through if it happens within this
 # window of the nudge firing. A compaction hours later was not a response to it.
