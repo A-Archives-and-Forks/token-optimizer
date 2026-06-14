@@ -7429,6 +7429,7 @@ def _parse_session_jsonl(filepath):
     api_call_timestamps = []
     message_count = 0
     api_calls = 0
+    is_sidechain = False          # subagent sidechain transcript (isSidechain:true)
 
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
@@ -7437,6 +7438,12 @@ def _parse_session_jsonl(filepath):
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+
+                # A subagent sidechain transcript is flagged on its records; any
+                # such record marks the whole file as a sidechain (not a human
+                # working session) so the cost comparison can exclude it.
+                if record.get("isSidechain") is True:
+                    is_sidechain = True
 
                 # Extract version (take the first non-None we see)
                 if version is None:
@@ -7642,6 +7649,7 @@ def _parse_session_jsonl(filepath):
         "message_count": message_count,
         "api_calls": api_calls,
         "first_ts": first_ts.isoformat() if first_ts else None,
+        "is_sidechain": is_sidechain,
     }
 
 
@@ -7935,7 +7943,8 @@ CREATE TABLE IF NOT EXISTS session_log (
     quality_score REAL,
     quality_grade TEXT,
     stale_waste_tokens INTEGER DEFAULT 0,
-    session_uuid TEXT
+    session_uuid TEXT,
+    is_sidechain INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS daily_stats (
@@ -8003,6 +8012,136 @@ CREATE TABLE IF NOT EXISTS compression_events (
 """
 
 
+def _scan_jsonl_is_sidechain(filepath, max_lines=200):
+    """Return True if the transcript at `filepath` is a subagent sidechain.
+
+    isSidechain:true is stamped on every record of a sidechain transcript, so a
+    short head-scan is conclusive. Reads at most `max_lines` lines to keep the
+    one-time backfill fast over thousands of files. Missing/unreadable → None
+    (caller leaves the row unclassified rather than guessing).
+    """
+    try:
+        parsed = 0
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                # F7: cap on PARSED records, not raw lines -- blank/garbage lines must not
+                # eat the scan budget before a real record is examined.
+                if parsed >= max_lines:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                parsed += 1
+                if rec.get("isSidechain") is True:
+                    return True
+        return False
+    except (OSError, ValueError):
+        return None
+
+
+def _backfill_is_sidechain(conn):
+    """Classify is_sidechain for rows the migration left NULL (one-time).
+
+    Idempotent: targets only `is_sidechain IS NULL`, so re-running is a no-op
+    once every row is classified. Rows whose transcript is gone stay NULL (treated
+    as human downstream) and are retried on a later init if the file reappears.
+    Returns (classified, missing) counts.
+    """
+    rows = conn.execute(
+        "SELECT id, jsonl_path FROM session_log "
+        "WHERE is_sidechain IS NULL AND jsonl_path IS NOT NULL"
+    ).fetchall()
+    if not rows:
+        return (0, 0)
+    updates = []
+    missing = 0
+    for row_id, jpath in rows:
+        verdict = _scan_jsonl_is_sidechain(jpath)
+        if verdict is None:
+            missing += 1
+            continue
+        updates.append((1 if verdict else 0, row_id))
+    if updates:
+        conn.executemany(
+            "UPDATE session_log SET is_sidechain = ? WHERE id = ?", updates
+        )
+        conn.commit()
+    return (len(updates), missing)
+
+
+def _recompute_session_tokens(conn, rel_tol=0.1, limit=None):
+    """Re-parse stored sessions with the CURRENT collector and refresh stale token columns.
+
+    Rows collected by older collector versions (before the streaming-aware
+    per-requestId dedup) carry token counts that disagree with a fresh parse —
+    some over-counted (summed streaming chunks), some under-counted. Because rows
+    are written INSERT OR IGNORE and never updated, that staleness persists and
+    skews every per-session cost derived from session_log. This re-parses each
+    row whose transcript still exists and UPDATEs input_tokens / output_tokens /
+    cache_create_* / cache_hit_rate when they differ by more than `rel_tol`.
+
+    Idempotent: a row already matching the current parse is skipped. Rows whose
+    transcript is gone are left untouched (their stored values are the best we
+    have). Returns (refreshed, checked, missing). NOT run from _init_trends_db
+    (a full re-parse of every transcript is expensive); invoke via the
+    `recompute-tokens` command or a maintenance pass.
+    """
+    rows = conn.execute(
+        "SELECT id, jsonl_path, input_tokens FROM session_log "
+        "WHERE jsonl_path IS NOT NULL ORDER BY id DESC"
+    ).fetchall()
+    if limit:
+        rows = rows[:limit]
+    refreshed = checked = missing = 0
+    updates = []
+    for row_id, jpath, stored_input in rows:
+        if not jpath or not os.path.exists(jpath):
+            missing += 1
+            continue
+        parsed = _parse_session_jsonl(jpath)
+        if not parsed:
+            missing += 1
+            continue
+        checked += 1
+        new_input = int(parsed.get("total_input_tokens", 0) or 0)
+        stored = int(stored_input or 0)
+        # F4: only update when the fresh parse has a positive input. The old condition
+        # `stored <= 0 or ...` fired for stored==0 even when the new parse was also 0,
+        # overwriting valid cache_create_* on legitimately zero-input rows (e.g. the
+        # Codex path, where input_tokens can be 0 but cache_create is real). Requiring
+        # new_input > 0 keeps those rows intact while still catching every stale row.
+        if new_input > 0 and (stored <= 0 or abs(new_input - stored) > stored * rel_tol):
+            updates.append((
+                new_input,
+                int(parsed.get("total_output_tokens", 0) or 0),
+                int(parsed.get("total_cache_create_1h", 0) or 0),
+                int(parsed.get("total_cache_create_5m", 0) or 0),
+                float(parsed.get("cache_hit_rate", 0.0) or 0.0),
+                # F3: refresh the model-usage JSON columns too. Downstream cost calcs
+                # read BOTH input_tokens and these breakdowns; updating tokens without
+                # the breakdown leaves the row internally inconsistent.
+                json.dumps(parsed.get("model_usage", {})),
+                json.dumps(parsed.get("model_usage", {})),  # all_model_usage = {model:int}
+                json.dumps(parsed.get("model_usage_breakdown", {})),
+                row_id,
+            ))
+            refreshed += 1
+    if updates:
+        conn.executemany(
+            "UPDATE session_log SET input_tokens = ?, output_tokens = ?, "
+            "cache_create_1h_tokens = ?, cache_create_5m_tokens = ?, cache_hit_rate = ?, "
+            "model_usage_json = ?, all_model_usage_json = ?, model_usage_breakdown_json = ? "
+            "WHERE id = ?",
+            updates,
+        )
+        conn.commit()
+    return (refreshed, checked, missing)
+
+
 def _init_trends_db():
     """Initialize the trends SQLite DB. Returns a connection."""
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -8063,6 +8202,14 @@ def _init_trends_db():
         # totals arrive, instead of INSERT-OR-IGNORE freezing the partial data.
         if "incomplete" not in cols:
             conn.execute("ALTER TABLE session_log ADD COLUMN incomplete INTEGER DEFAULT 0")
+        # Subagent sidechains (isSidechain:true in the JSONL) are not human working
+        # sessions; flagging them lets the before/after cost comparison filter to
+        # human sessions on both sides instead of diluting "after" with cheap
+        # sidechain rows. Added WITHOUT a default so existing rows are NULL =
+        # "not yet classified" — the sentinel _backfill_is_sidechain targets. New
+        # collection always writes an explicit 0/1. Queries treat NULL as human.
+        if "is_sidechain" not in cols:
+            conn.execute("ALTER TABLE session_log ADD COLUMN is_sidechain INTEGER")
         conn.commit()
     except sqlite3.Error:
         pass
@@ -8090,6 +8237,13 @@ def _init_trends_db():
                 )
         conn.commit()
     except (sqlite3.Error, OSError, ValueError):
+        pass
+    # U2: one-time backfill of is_sidechain for rows the migration left NULL.
+    # Gated by the NULL sentinel, so it scans transcripts only on the first init
+    # after upgrade; once every row is classified there is nothing to do.
+    try:
+        _backfill_is_sidechain(conn)
+    except (sqlite3.Error, OSError):
         pass
     # Migrate: add quality columns to daily_stats for existing DBs
     try:
@@ -15587,8 +15741,8 @@ def collect_sessions(days=90, quiet=False, rebuild=False):
                 avg_call_gap_seconds, max_call_gap_seconds, p95_call_gap_seconds,
                 skills_json, subagents_json, tool_calls_json, model_usage_json,
                 all_model_usage_json, model_usage_breakdown_json, version, slug, topic, collected_at,
-                quality_score, quality_grade, stale_waste_tokens)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                quality_score, quality_grade, stale_waste_tokens, is_sidechain)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 str(filepath), date, project_name,
                 parsed["duration_minutes"],
@@ -15616,6 +15770,7 @@ def collect_sessions(days=90, quiet=False, rebuild=False):
                 sq["score"],
                 sq["grade"],
                 int(stale_waste or 0),
+                1 if parsed.get("is_sidechain") else 0,
             ),
         )
         if cur.rowcount != 1:
@@ -17591,7 +17746,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.8"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.9"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -28412,13 +28567,19 @@ def _model_output_rate_per_mtok(model):
 
 
 def _session_output_fraction(days=30):
-    """Measured share of billed tokens that are OUTPUT, from the user's own session_log.
+    """Measured OUTPUT share of the FRESH-rate token mix, from the user's session_log.
 
-    Returns SUM(output_tokens) / SUM(input_tokens + output_tokens) over the window,
-    clamped to [0, 1]. Used to blend input + output rates so routing savings reflect
-    the true token mix instead of pricing everything at the (cheaper) input rate.
-    This is grounded in the user's OWN data, never an invented multiplier. Returns
-    0.0 (input-only behaviour, conservative) when there is no usable history.
+    Returns SUM(output) / SUM(fresh_input + output) over the window, clamped to
+    [0, 1]. The denominator deliberately EXCLUDES cache-read and cache-creation
+    tokens: those are priced separately at their own (cheap) cache rates, so the
+    blend here only governs the split between FRESH input and output — the two
+    classes that share the full input/output rate axis. Using total input_tokens
+    (which is dominated by cache-read) as the denominator collapsed this fraction
+    to ~0.5% and made the blended rate effectively the input rate, understating
+    routing savings ~3x. Fresh input and output are taken from _session_token_vector
+    so the negative-fresh clamp is applied consistently. Grounded in the user's OWN
+    data, never an invented multiplier. Returns 0.0 (input-only, conservative) when
+    there is no usable history.
     """
     try:
         if not TRENDS_DB.exists():
@@ -28426,19 +28587,25 @@ def _session_output_fraction(days=30):
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         conn = _init_trends_db()
         try:
-            row = conn.execute(
-                "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) "
-                "FROM session_log WHERE date >= ?",
+            rows = conn.execute(
+                "SELECT input_tokens, output_tokens, cache_create_5m_tokens, "
+                "cache_create_1h_tokens, cache_hit_rate FROM session_log "
+                "WHERE input_tokens IS NOT NULL AND date >= ? "
+                "AND COALESCE(is_sidechain, 0) = 0",
                 (cutoff,),
-            ).fetchone()
+            ).fetchall()
         finally:
             conn.close()
-        in_tok = int(row[0] or 0)
-        out_tok = int(row[1] or 0)
-        denom = in_tok + out_tok
+        fresh_total = 0.0
+        out_total = 0.0
+        for r in rows:
+            fi, _cw, _cr, out = _session_token_vector(r)
+            fresh_total += fi
+            out_total += out
+        denom = fresh_total + out_total
         if denom <= 0:
             return 0.0
-        return max(0.0, min(1.0, out_tok / denom))
+        return max(0.0, min(1.0, out_total / denom))
     except (sqlite3.Error, OSError):
         return 0.0
 
@@ -29076,30 +29243,255 @@ def _cost_per_session(fi, cw, cr, out, shares, tier):
     return cost / total_share
 
 
+def _mix_from_session_rows(cutoff):
+    """Fallback model mix from session_log's stored per-model usage (H3).
+
+    Used when model_daily is empty/stale (so _model_mix_shares returns {}) while
+    session_log still has rows. Sums all_model_usage_json (preferred) or
+    model_usage_json across human (non-sidechain) rows since `cutoff` and returns
+    {model: share}. Empty dict when nothing usable -- the caller bails on that
+    rather than silently pricing the actual arm at the sonnet default. Never raises.
+    """
+    totals = {}
+    try:
+        if not TRENDS_DB.exists():
+            return {}
+        conn = _init_trends_db()
+        try:
+            rows = conn.execute(
+                "SELECT all_model_usage_json, model_usage_json FROM session_log "
+                "WHERE date >= ? AND COALESCE(is_sidechain, 0) = 0", (cutoff,)
+            ).fetchall()
+        finally:
+            conn.close()
+        for amu, mu in rows:
+            usage = _safe_json_dict(amu) or _safe_json_dict(mu)
+            for model, toks in usage.items():
+                if not model:
+                    continue
+                try:
+                    t = int(toks or 0)
+                except (TypeError, ValueError):
+                    continue
+                if t > 0:
+                    totals[model] = totals.get(model, 0) + t
+    except (sqlite3.Error, OSError):
+        return {}
+    grand = sum(totals.values())
+    if grand <= 0:
+        return {}
+    return {m: t / grand for m, t in totals.items()}
+
+# Module-level memo for the subagent pool (dashboard perf): the transcript scan
+# is bounded and the result is cached for _SUBAGENT_POOL_TTL seconds, re-keyed on
+# the requested window. _parse_session_jsonl already does requestId-MAX streaming
+# dedup, so a cold scan is the only cost we are amortizing.
+_subagent_pool_memo = {"key": None, "ts": 0.0, "payload": None}
+_SUBAGENT_POOL_TTL = 900.0  # 15 min, matches the cache-health sidecar cadence
+_SUBAGENT_SCAN_MAX_FILES = 4000  # bound the scan so the dashboard never stalls
+
+
+def _opus_baseline_shares(opus_share=0.95):
+    """The pre-TO counterfactual mix: ~95% Opus / remainder Sonnet."""
+    o = max(0.0, min(1.0, float(opus_share)))
+    return {"opus": o, "sonnet": round(1.0 - o, 4)}
+
+
+def _opus_floor_consented():
+    """Whether the 0.95-Opus pre-TO default may be applied for an Anthropic user with
+    NO measured baseline. Gated (#5) so a brand-new user who never ran mostly Opus is
+    not handed a fabricated baseline that over-counts. Returns True only on explicit
+    opt-in: env override, or a config flag set by one-time consent. A user with a real
+    measured frozen baseline never reaches this gate (the frozen share is trusted)."""
+    env = os.environ.get("TOKEN_OPTIMIZER_PRETOOL_OPUS")
+    if env is not None:
+        return str(env).strip().lower() in ("1", "true", "yes", "on")
+    return bool(_read_config_flag("pretool_opus_baseline_confirmed", default=False))
+
+
+def _subagent_model_cost(model, fi, cr, out, cw, cw1h, cw5m, shares, tier):
+    """Blended TTL-aware cost of one subagent token bundle priced over `shares`.
+
+    Mirrors _cost_per_session (unpriced model -> runtime default, denominator = total
+    present share) but threads the cache-write 1h/5m split into _get_model_cost so 1h
+    writes bill at 2x input and 5m at 1.25x, consistent with the main pool."""
+    items = [(mdl, s) for mdl, s in (shares or {}).items() if s and s > 0]
+    default_model = _default_model_for_runtime()
+    if not items:
+        return _get_model_cost(default_model, int(fi), int(out), int(cr), int(cw),
+                               tier=tier, cache_create_1h=int(cw1h),
+                               cache_create_5m=int(cw5m))
+    tot = sum(s for _, s in items)
+    return sum(
+        s * _get_model_cost(
+            mdl if _is_priced_model(mdl, tier) else default_model,
+            int(fi), int(out), int(cr), int(cw), tier=tier,
+            cache_create_1h=int(cw1h), cache_create_5m=int(cw5m))
+        for mdl, s in items) / tot
+
+
+def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=False):
+    """Subagent (sidechain) routing pool — the big missing lever.
+
+    Subagents run in sidechain transcripts (isSidechain:true), are NOT stored as
+    standalone session_log rows (the collector only walks top-level project JSONL),
+    and were therefore entirely excluded from the transformation. They are real spend
+    that Token Optimizer routes: Alex's CLAUDE.md routes subagents to Haiku/Sonnet;
+    pre-TO they would have run on Opus. This pool prices that delta.
+
+    Method (separate from, and summed with, the main pool — no token overlap because
+    these are different transcripts):
+      1. Locate sidechain JSONL for the current `days` window. We scan project dirs
+         for both top-level transcripts AND the `{uuid}/subagents/*.jsonl` files,
+         filtered by mtime, then keep only files _parse_session_jsonl flags
+         is_sidechain. The scan is bounded (_SUBAGENT_SCAN_MAX_FILES) and memoized.
+      2. For each sidechain session, _parse_session_jsonl applies the SAME
+         streaming-aware requestId-MAX dedup as the main pool and returns per-model
+         {fresh_input, cache_read, cache_create, output}. Aggregate F/CR/CW/O by model.
+      3. actual_sub = price each model's bundle at its OWN (real) rate.
+      4. counterfactual_sub = price the SAME bundles at the ~95% Opus baseline mix.
+      5. subagent_transformation = counterfactual_sub - actual_sub (clamped >= 0).
+
+    Returns {actual_usd, counterfactual_usd, transformation_usd, sessions, by_model}.
+    Memoized for _SUBAGENT_POOL_TTL seconds (keyed on days + baseline share) so the
+    dashboard isn't slowed by re-reading transcripts. Never raises.
+    """
+    zero = {"actual_usd": 0.0, "counterfactual_usd": 0.0,
+            "transformation_usd": 0.0, "sessions": 0, "by_model": {}}
+    try:
+        if tier is None:
+            tier = _load_pricing_tier()
+        key = (round(float(days), 3), round(float(baseline_opus_share), 4),
+               detect_runtime())
+        now = time.time()
+        if (not fresh and _subagent_pool_memo["payload"] is not None
+                and _subagent_pool_memo["key"] == key
+                and (now - _subagent_pool_memo["ts"]) < _SUBAGENT_POOL_TTL):
+            return _subagent_pool_memo["payload"]
+
+        projects_base = CLAUDE_DIR / "projects"
+        if not projects_base.exists():
+            return zero
+        cutoff_ts = now - days * 86400
+
+        # Gather candidate transcripts: top-level project JSONL + nested subagents/.
+        # A sidechain can appear either as its own file or under {uuid}/subagents/.
+        candidates = []
+        for project_dir in projects_base.iterdir():
+            if not project_dir.is_dir():
+                continue
+            try:
+                for jf in project_dir.rglob("*.jsonl"):
+                    try:
+                        if jf.stat().st_mtime >= cutoff_ts:
+                            candidates.append(jf)
+                    except OSError:
+                        continue
+                    if len(candidates) >= _SUBAGENT_SCAN_MAX_FILES:
+                        break
+            except OSError:
+                continue
+            if len(candidates) >= _SUBAGENT_SCAN_MAX_FILES:
+                break
+
+        # Aggregate per-model billed token classes across sidechain sessions only.
+        by_model = {}  # model -> {"fi","cw","cr","out"}
+        n_side = 0
+        for jf in candidates:
+            parsed = _parse_session_jsonl(jf)
+            if not parsed or not parsed.get("is_sidechain"):
+                continue
+            n_side += 1
+            for model, bd in (parsed.get("model_usage_breakdown") or {}).items():
+                if not model or str(model).startswith("<"):
+                    continue
+                slot = by_model.setdefault(
+                    model, {"fi": 0.0, "cw": 0.0, "cw1h": 0.0, "cw5m": 0.0,
+                            "cr": 0.0, "out": 0.0})
+                slot["fi"] += float(bd.get("fresh_input", 0) or 0)
+                slot["cr"] += float(bd.get("cache_read", 0) or 0)
+                slot["cw"] += float(bd.get("cache_create", 0) or 0)
+                slot["cw1h"] += float(bd.get("cache_create_1h", 0) or 0)
+                slot["cw5m"] += float(bd.get("cache_create_5m", 0) or 0)
+                slot["out"] += float(bd.get("output", 0) or 0)
+
+        if not by_model:
+            payload = dict(zero, sessions=n_side)
+            _subagent_pool_memo.update(key=key, ts=now, payload=payload)
+            return payload
+
+        # actual = each model at its own rate; counterfactual = same tokens at 95% Opus.
+        before_shares = _opus_baseline_shares(baseline_opus_share)
+        actual = 0.0
+        counterfactual = 0.0
+        by_model_cost = {}
+        for model, s in by_model.items():
+            fi, cw, cr, out = s["fi"], s["cw"], s["cr"], s["out"]
+            cw1h, cw5m = s["cw1h"], s["cw5m"]
+            # TTL-aware: 1h cache-writes bill at 2x input, 5m at 1.25x. Apportion any
+            # clamp/rounding gap into 5m (conservative) so the split sums to cw.
+            if cw1h + cw5m <= 0:
+                cw5m = cw
+            a = _subagent_model_cost(model, fi, cr, out, cw, cw1h, cw5m,
+                                     {model: 1.0}, tier)
+            actual += a
+            counterfactual += _subagent_model_cost(
+                model, fi, cr, out, cw, cw1h, cw5m, before_shares, tier)
+            by_model_cost[_friendly_model(model)] = (
+                by_model_cost.get(_friendly_model(model), 0.0) + a)
+
+        transformation = max(0.0, counterfactual - actual)
+        payload = {
+            "actual_usd": round(actual, 2),
+            "counterfactual_usd": round(counterfactual, 2),
+            "transformation_usd": round(transformation, 2),
+            "sessions": n_side,
+            "by_model": {k: round(v, 2) for k, v in by_model_cost.items()},
+        }
+        _subagent_pool_memo.update(key=key, ts=now, payload=payload)
+        return payload
+    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, OverflowError):
+        return zero
+
+
 def _estimate_before_after_savings(days=30):
-    """THE headline saving: your current activity priced at your PRE-TO per-session
-    weight + model mix, vs what it actually costs now.
+    """THE headline saving: your CURRENT 30-day volume, held constant, priced at your
+    PRE-TO efficiency (~95% Opus + baseline cache pattern) vs what it actually cost.
 
-    Earlier pillars captured only the model-mix shift on CURRENT (already-light)
-    volume — a thin slice. This captures the whole footprint collapse: sessions,
-    sub-agents, structural prefix, and routing together, by comparing a typical
-    pre-Token-Optimizer session to a typical session now, then scaling the
-    per-session delta by current monthly session volume. The per-session token mix
-    already includes the structural prefix (in cache_write) and sub-agent weight, so
-    this is comprehensive; do NOT add structural on top.
+    This is a CURRENT-VOLUME COUNTERFACTUAL, not a per-session period comparison. We
+    take the exact token volume you actually moved this period (current human sessions,
+    sidechains excluded), and ask: "had you worked it the way you did BEFORE Token
+    Optimizer — mostly Opus, with your pre-TO caching pattern — what would it have
+    cost?" Volume is identical on both arms; only EFFICIENCY (model mix + cache-hit)
+    differs, so the gap is pure behavioral transformation and is never confounded by
+    workload growth (the flaw in the old per-session method).
 
-    The "before" anchor is the user's FROZEN robust baseline (`_get_baseline_state`:
-    a winsorized-mean typical session over the earliest STABLE window, onboarding +
-    marathon outliers excluded, captured once). This keeps the headline stable and
-    immune to a few install-era spikes dominating the mean. The "after" is a robust
-    (same winsorized-mean) typical CURRENT session. Both are priced through the canonical
-    rate card (`_get_model_cost`) at Opus and Sonnet and blended by the era's Opus
-    share (pre-TO from the frozen baseline, current measured). Counterfactual ("your
-    current sessions, run the old way"), grounded entirely in the user's own history.
+    Method (validated against the owner's own data):
+      1. CURRENT window = human session_log rows over `days`. Aggregate billed token
+         classes via `_session_token_vector`: F=fresh_input, CR=cache_read,
+         CW=cache_write, O=output. total_in = F + CR + CW.
+      2. ACTUAL = price(F, CR, CW, O) at the CURRENT model mix.
+      3. COUNTERFACTUAL ("the old way") = same volume, but caching redistributed over the
+         FRESH+CACHE_READ POOL (pool = total_in - CW) at the BASELINE pool-hit rate
+         (cf_CR = base_hit*pool; cf_F = pool - cf_CR), pool priced at the BASELINE model
+         mix (~95% Opus). CW count is held constant AND priced at the same (after) mix on
+         both arms (cache-write is not a routing lever). The invariant cf_F + cf_CR + CW ==
+         total_in holds exactly, so the counterfactual never prices more volume than moved.
+      4. TRANSFORMATION (monthly) = COUNTERFACTUAL - ACTUAL. The window is already 30d,
+         so the figure is already monthly. Clamped >= 0 for display.
+
+    Baseline model mix is ~95% Opus: the product owner's confirmed pre-TO mix. We floor
+    the frozen baseline's measured opus_share at 0.95 (the early window was already
+    partly optimized, so its measured share understates the true pre-TO era). base_hit
+    comes from the frozen baseline typical session's cache pattern; if unavailable it
+    falls back to the current cache-hit (caching lever = 0, conservative).
+
     Returns zeros (with `reason`) when no stable baseline exists yet. Never raises.
 
     Returns {before_cost_per_session, after_cost_per_session, savings_per_session,
-             sessions_per_month, monthly_savings_usd, before_opus, after_opus,
+             sessions_per_month, monthly_savings_usd (= counterfactual - actual),
+             counterfactual_monthly_usd, actual_monthly_usd, transformation_pct,
+             baseline_opus_share, before_opus, after_opus,
              before_tokens, after_tokens, before_sessions, after_sessions,
              baseline_source ("pretool_baseline" | "robust_earliest"),
              breakdown ([{key, waterfall_index, label, monthly_usd}], sorted
@@ -29111,7 +29503,9 @@ def _estimate_before_after_savings(days=30):
     """
     zero = {"before_cost_per_session": 0.0, "after_cost_per_session": 0.0,
             "savings_per_session": 0.0, "sessions_per_month": 0,
-            "monthly_savings_usd": 0.0, "before_opus": 0.0, "after_opus": 0.0,
+            "monthly_savings_usd": 0.0, "counterfactual_monthly_usd": 0.0,
+            "actual_monthly_usd": 0.0, "transformation_pct": 0.0,
+            "baseline_opus_share": 0.0, "before_opus": 0.0, "after_opus": 0.0,
             "before_mix_label": "", "after_mix_label": "",
             "before_tokens": 0, "after_tokens": 0, "before_sessions": 0,
             "after_sessions": 0, "baseline_source": None, "breakdown": [],
@@ -29120,9 +29514,10 @@ def _estimate_before_after_savings(days=30):
         if not TRENDS_DB.exists():
             return zero
 
-        # "Before" = the user's FROZEN robust baseline (a typical pre-TO session),
-        # captured once over the earliest stable window with outliers trimmed. This is
-        # the stable anchor that keeps the headline immune to onboarding-marathon spikes.
+        # The frozen robust baseline supplies the PRE-TO efficiency anchors: the model
+        # mix (floored to ~95% Opus, the owner's confirmed pre-TO mix) and the cache-hit
+        # pattern. It is NOT used for volume -- volume comes entirely from the current
+        # window, held constant across both arms.
         baseline = _get_baseline_state()
         if not baseline or not baseline.get("typical_session"):
             return {**zero, "reason": "insufficient_history"}
@@ -29131,151 +29526,304 @@ def _estimate_before_after_savings(days=30):
         bcw = float(ts.get("cache_write", 0) or 0)
         bcr = float(ts.get("cache_read", 0) or 0)
         bout = float(ts.get("output", 0) or 0)
-        before_opus = float(baseline.get("opus_share", 0) or 0)
+        frozen_opus = float(baseline.get("opus_share", 0) or 0)
         baseline_source = baseline.get("opus_share_source") or "robust_earliest"
         bn = int((baseline.get("window") or {}).get("sessions_used", 0) or 0)
-        # Pre-tool model mix as full shares (provider-agnostic). Back-compat: a baseline
-        # frozen before v4 has only opus_share -> synthesize an opus/sonnet split.
-        before_shares = dict(baseline.get("model_shares") or {})
-        if not before_shares and before_opus > 0:
-            before_shares = {"opus": before_opus, "sonnet": round(1.0 - before_opus, 4)}
+        # after_shares (the current/actual model mix) is needed both to price the actual
+        # arm AND, for a non-Anthropic runtime with no captured baseline, to define the
+        # before-arm mix (never fabricate Opus a user never ran). Resolve it up front.
+        after_shares = dict((_model_mix_shares(days=days).get("shares") or {}))
+        # H3: an empty after mix would silently price the ACTUAL arm at the sonnet default
+        # (via _cost_per_session's fallback), understating actual and INFLATING savings.
+        # If model_daily is empty/stale, derive the actual mix from the SAME session_log
+        # rows already loaded (their stored model_usage breakdown). Bail if still empty.
+        # Baseline (pre-TO) model mix: floor to ~95% Opus ONLY for an Anthropic runtime
+        # with no usable measured baseline. A real frozen baseline share is trusted as-is;
+        # a non-Anthropic user is priced at their own measured mix, never fabricated Opus.
+        anthropic = detect_runtime() not in {"codex", "hermes", "copilot", "opencode"}
+        if frozen_opus and frozen_opus > 0:
+            # A real measured baseline share exists -> trust it (this is Alex's case:
+            # Anthropic + frozen ~0.95, resolves to ~0.95).
+            baseline_opus_share = frozen_opus
+            before_shares = {"opus": baseline_opus_share,
+                             "sonnet": round(1.0 - baseline_opus_share, 4)}
+        elif anthropic and _opus_floor_consented():
+            # Anthropic user, no measured baseline, but they confirmed (one-time consent
+            # or explicit config) that they ran mostly Opus pre-TO -> owner default mix.
+            # Gated so a NEW Anthropic user who never ran Opus is not handed a fabricated
+            # 0.95 baseline that over-counts the routing lever. Alex has a real measured
+            # frozen 0.95 (handled by the frozen_opus branch above), so she is unaffected.
+            baseline_opus_share = 0.95
+            before_shares = {"opus": baseline_opus_share,
+                             "sonnet": round(1.0 - baseline_opus_share, 4)}
+        elif anthropic:
+            # Anthropic user, no baseline and no consent -> do NOT fabricate Opus.
+            # Price the before-arm at the user's real current mix (routing lever falls to
+            # the caching lever alone until a baseline is measured or consent is given).
+            baseline_opus_share = float(after_shares.get("opus", 0.0))
+            before_shares = dict(after_shares)
+        else:
+            # Non-Anthropic (Codex/Hermes/Copilot/OpenCode) with no baseline -> price the
+            # before-arm at the user's real current mix. Never inject Opus they never used;
+            # with no routing lever the transformation falls to the caching lever alone.
+            baseline_opus_share = float(after_shares.get("opus", 0.0))
+            before_shares = dict(after_shares)
+        # Baseline cache-hit pattern, defined over the FRESH+CACHE_READ POOL only (cache
+        # write excluded). C1/C2: the counterfactual redistributes caching over the pool,
+        # not over total_in (which includes CW); a total_in-based hit prices MORE volume on
+        # the counterfactual arm than actually moved and breaks the volume invariant.
+        # base_hit_pool = baseline cache_read / (baseline fresh + baseline cache_read).
+        # Falls back to the current pool-hit below (caching lever = 0, conservative) when
+        # the baseline session has no usable pool.
+        b_pool = bfi + bcr
+        base_hit = (bcr / b_pool) if b_pool > 0 else None
 
-        # "After" = a robust (same winsorized-mean) typical CURRENT session, priced at the
-        # measured current model mix. Same estimator both sides keeps the comparison fair.
-        # The after-window must NOT overlap the frozen baseline window, or a recently
-        # installed user would be compared to themselves (apparent savings = pure mix
-        # drift within the same sessions). Clamp the cutoff to the baseline window end so
-        # the comparison is clean as soon as enough post-baseline sessions exist; until
-        # then `recent_n < _AFTER_MIN_SESSIONS` hides the panel (no fake number).
+        # CURRENT window = human sessions over `days` (sidechains excluded -- they are
+        # subagent transcripts, not the user's own billed work). Aggregate the billed
+        # token classes; this is the EXACT volume that is held constant across both arms.
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        baseline_end = (baseline.get("window") or {}).get("end")
-        if baseline_end and baseline_end > cutoff:
-            cutoff = baseline_end
         conn = _init_trends_db()
         try:
             recent_rows = conn.execute(
                 "SELECT input_tokens, output_tokens, cache_create_5m_tokens, "
                 "cache_create_1h_tokens, cache_hit_rate FROM session_log "
-                "WHERE input_tokens IS NOT NULL AND date >= ?", (cutoff,)
+                "WHERE input_tokens IS NOT NULL AND date >= ? "
+                "AND COALESCE(is_sidechain, 0) = 0", (cutoff,)
             ).fetchall()
         finally:
             conn.close()
         recent_n = len(recent_rows)
         if recent_n < _AFTER_MIN_SESSIONS:
             return {**zero, "before_sessions": bn, "reason": "no_recent_sessions"}
-        (afi, acw, acr, aout), an, _ = _winsorized_mean_session(recent_rows)
-        after_shares = dict((_model_mix_shares(days=days).get("shares") or {}))
-        after_opus = float(after_shares.get("opus", 0.0))
 
-        # Price each typical session at its era's REAL model mix via _cost_per_session:
-        # a weighted average over every present model, with an unpriced entry (a generic
-        # "codex" row, an unrecognized/local model) proxy-priced at the runtime default
-        # rather than dropped or renormalized away. Provider-agnostic -- Anthropic
-        # (opus/sonnet/haiku) and Codex (gpt-*-codex) both price correctly. Same
-        # estimator both sides keeps it fair.
+        # Aggregate the current window into billed token classes (sum, not mean): the
+        # counterfactual holds this TOTAL volume constant and swaps only efficiency.
+        #
+        # NO outlier drop. The metric is volume-held-constant: a heavy session's tokens
+        # are REAL volume that genuinely cost more at 95% Opus, so dropping them is a pure
+        # definitional undercount (it deletes exactly the sessions where routing saved the
+        # most absolute dollars). The former M4 guard (drop > 150*median) deleted ~24% of
+        # real billed tokens on Alex's data while leaving the efficiency RATE flat, proving
+        # it only suppressed dollars. Corrupt-row protection already lives in
+        # _session_token_vector's clamps (cw >= 0, cw <= inp, fi >= 0), so no guard is
+        # needed here. (Removed per the Opus transformation verdict, 2026-06-15.)
+        _vectors = [_session_token_vector(r) for r in recent_rows]
+        F = CR = CW = O = 0.0
+        CW_5m = CW_1h = 0.0  # TTL split, so the counterfactual prices 1h writes at 2x.
+        for r, (fi, cw, cr, out) in zip(recent_rows, _vectors):
+            F += fi; CW += cw; CR += cr; O += out
+            # _session_token_vector may clamp cw down to <= inp; apportion the clamped CW
+            # across the raw 5m/1h split so CW_5m + CW_1h == CW exactly (TTL pricing).
+            raw_5m = float(r[2] or 0); raw_1h = float(r[3] or 0)
+            raw_cw = raw_5m + raw_1h
+            if raw_cw > 0 and cw > 0:
+                CW_5m += cw * (raw_5m / raw_cw)
+                CW_1h += cw * (raw_1h / raw_cw)
+            else:
+                CW_5m += cw  # no split info -> treat as 5m (conservative)
+        total_in = F + CR + CW
+        if total_in <= 0:
+            return {**zero, "before_sessions": bn, "after_sessions": recent_n,
+                    "reason": "no_recent_sessions"}
+        # Current cache-hit defined over the same FRESH+CACHE_READ POOL as the baseline
+        # (C1/C2: cache-write excluded), so both sides redistribute caching consistently.
+        cur_pool = F + CR
+        cur_hit = (CR / cur_pool) if cur_pool > 0 else 0.0
+        if base_hit is None:
+            base_hit = cur_hit  # caching lever neutralized; conservative
+
+        # after_shares resolved up front. H3: if the model mix is empty (model_daily stale
+        # while session_log has rows), _cost_per_session would silently fall back to the
+        # sonnet default for the ACTUAL arm -> understated actual -> inflated savings.
+        # Recover the actual mix from the loaded rows' stored model_usage; bail otherwise.
+        if not any(s and s > 0 for s in after_shares.values()):
+            after_shares = _mix_from_session_rows(cutoff)
+            if not any(s and s > 0 for s in after_shares.values()):
+                return {**zero, "before_sessions": bn, "after_sessions": recent_n,
+                        "reason": "no_mix"}
+            # Any user whose before-arm tracks the actual mix (non-Anthropic, OR an
+            # Anthropic user with no measured baseline and no Opus-floor consent) must
+            # refresh it now that the actual mix is recovered.
+            tracks_actual_mix = not (frozen_opus and frozen_opus > 0) and (
+                not anthropic or not _opus_floor_consented())
+            if tracks_actual_mix:
+                baseline_opus_share = float(after_shares.get("opus", 0.0))
+                before_shares = dict(after_shares)
+        after_opus = float(after_shares.get("opus", 0.0))
         tier = _load_pricing_tier()  # resolve once; reused across the waterfall levers
 
-        def cost_per_session(fi, cw, cr, out, shares):
-            return _cost_per_session(fi, cw, cr, out, shares, tier)
+        # SUBAGENT (sidechain) pool (#3) -- the big missing lever. Subagents are NOT in
+        # session_log (the main pool above), so this is a SEPARATE, non-overlapping pool
+        # read from sidechain transcripts and priced at each subagent's real model vs the
+        # ~95% Opus baseline. Summed into the headline below. Memoized for dashboard perf.
+        sub_pool = _subagent_pool_savings(
+            days=days, baseline_opus_share=baseline_opus_share, tier=tier)
+        sub_actual = float(sub_pool.get("actual_usd", 0.0) or 0.0)
+        sub_cf = float(sub_pool.get("counterfactual_usd", 0.0) or 0.0)
+        sub_transformation = float(sub_pool.get("transformation_usd", 0.0) or 0.0)
 
-        before_cost = cost_per_session(bfi, bcw, bcr, bout, before_shares)
-        after_cost = cost_per_session(afi, acw, acr, aout, after_shares)
-        # Replaces the old `before_opus<=0` bail (which hid the panel for any 0%-Opus /
-        # Codex baseline): the only true blocker is being unable to price the baseline.
-        if before_cost <= 0:
-            return {**zero, "before_sessions": bn, "reason": "insufficient_history"}
-        per_session = before_cost - after_cost
-        # Monthly-ize by the ACTUAL after-window length (the cutoff may have been clamped
-        # to the baseline end for a recently installed user, so it can be < `days`).
-        try:
-            after_window_days = (datetime.now() - datetime.fromisoformat(cutoff)).days + 1
-        except (ValueError, TypeError):
-            after_window_days = days
-        after_window_days = max(1, min(after_window_days, days))
-        # Don't extrapolate a monthly figure from a sliver of a window: a user whose
-        # baseline just elapsed could have a 1-2 day after-window, and recent_n/1*30 would
-        # blow one day's burst up ~30x. Require a week of post-baseline activity first;
-        # until then hide the panel rather than show an inflated number.
-        if after_window_days < 7:
-            return {**zero, "before_sessions": bn, "after_sessions": an,
-                    "reason": "no_recent_sessions"}
-        sessions_per_month = int(recent_n / after_window_days * 30)
-        if per_session <= 0 or sessions_per_month <= 0:
-            # Distinguish "costs went up net" from "no recent activity" so a consumer
-            # can tell why the transformation panel is empty (vs thin history above).
-            # Propagate the computed opus shares so a caller can explain a cost increase.
-            return {**zero, "before_sessions": bn, "after_sessions": an,
-                    "before_cost_per_session": round(before_cost, 4),
-                    "after_cost_per_session": round(after_cost, 4),
-                    "before_opus": round(before_opus, 4), "after_opus": round(after_opus, 4),
+        def price(fi, cr, out, shares):
+            # Price the fresh+cache_read pool and output (NO cache-write). _cost_per_session
+            # is per-token-linear, so aggregate totals price the whole window directly.
+            return _cost_per_session(fi, 0.0, cr, out, shares, tier)
+
+        def price_cw(shares):
+            # Price cache-write at `shares`, TTL-aware: 1h writes bill at 2x input, 5m at
+            # 1.25x. _get_model_cost applies the split when both 1h and 5m are passed.
+            items = [(mdl, s) for mdl, s in (shares or {}).items() if s and s > 0]
+            default_model = _default_model_for_runtime()
+            if not items:
+                return _get_model_cost(default_model, 0, 0, 0, int(CW), tier=tier,
+                                       cache_create_1h=int(CW_1h),
+                                       cache_create_5m=int(CW_5m))
+            tot = sum(s for _, s in items)
+            return sum(
+                s * _get_model_cost(
+                    mdl if _is_priced_model(mdl, tier) else default_model,
+                    0, 0, 0, int(CW), tier=tier,
+                    cache_create_1h=int(CW_1h), cache_create_5m=int(CW_5m))
+                for mdl, s in items) / tot
+
+        # Cache-write IS a routing lever (#2): cache-creation tokens are billed at the
+        # WRITING model's rate (Opus $6.25 vs Sonnet $3.75 /MTok). Pre-TO those writes ran
+        # at Opus; routing lighter models also made the writes cheaper. So CW is held
+        # constant in TOKEN count across arms but priced at each arm's OWN mix -- baseline
+        # mix in the counterfactual, actual mix in actual -- exactly like fresh/cache_read/
+        # output. (Reverts the former H1 same-mix choice, which dropped ~$170/mo of real
+        # Opus-rate cache-write saving.)
+
+        # ACTUAL = current volume at the current model mix (what it really cost). The pool
+        # (fresh + cache_read) AND cache-write (TTL-aware) priced at the after mix.
+        actual_monthly = price(F, CR, O, after_shares) + price_cw(after_shares)
+        if actual_monthly <= 0:
+            return {**zero, "before_sessions": bn, "after_sessions": recent_n,
+                    "reason": "insufficient_history"}
+
+        # COUNTERFACTUAL ("the old way") = the SAME volume, but caching redistributed over
+        # the FRESH+CACHE_READ POOL at the baseline pool-hit rate, the pool priced at the
+        # baseline (~95% Opus) mix, AND cache-write priced at the baseline mix too. CW is
+        # unchanged in count. C1/C2: redistributing over the pool (which excludes CW) keeps
+        # the volume invariant exact -- cf_F + cf_CR + CW == total_in -- and needs no floor,
+        # since base_hit in [0,1] keeps cf_F non-negative.
+        pool = total_in - CW  # = F + CR
+        cf_CR = base_hit * pool
+        cf_F = pool - cf_CR
+        counterfactual_monthly = price(cf_F, cf_CR, O, before_shares) + price_cw(before_shares)
+
+        # MAIN TRANSFORMATION = counterfactual - actual (main pool). The window is 30d, so
+        # this is already the monthly figure. Clamp >= 0: if the "old way" would somehow be
+        # cheaper (net-negative efficiency on the main pool), show no MAIN transformation
+        # rather than a negative -- but the subagent pool can still carry the headline.
+        main_transformation = max(0.0, counterfactual_monthly - actual_monthly)
+        if main_transformation <= 0 and sub_transformation <= 0:
+            return {**zero, "before_sessions": bn, "after_sessions": recent_n,
+                    "actual_monthly_usd": round(actual_monthly, 2),
+                    "counterfactual_monthly_usd": round(counterfactual_monthly, 2),
+                    "main_transformation_usd": 0.0,
+                    "subagent_transformation_usd": 0.0,
+                    "subagent_actual_usd": round(sub_actual, 2),
+                    "subagent_counterfactual_usd": round(sub_cf, 2),
+                    "subagent_sessions": int(sub_pool.get("sessions", 0) or 0),
+                    "baseline_opus_share": round(baseline_opus_share, 4),
+                    "before_opus": round(baseline_opus_share, 4),
+                    "after_opus": round(after_opus, 4),
                     "before_mix_label": _mix_label(before_shares),
                     "after_mix_label": _mix_label(after_shares),
-                    "reason": "net_negative" if per_session <= 0 else "no_recent_sessions"}
+                    "reason": "net_negative"}
+        # Combined headline = main + subagent (separate, non-overlapping pools). The pct is
+        # over the COMBINED counterfactual (main cf + subagent cf) so it reflects the full
+        # spend base being transformed.
+        transformation = main_transformation + sub_transformation
+        combined_counterfactual = counterfactual_monthly + sub_cf
+        transformation_pct = (transformation / combined_counterfactual
+                              if combined_counterfactual > 0 else 0.0)
 
-        # --- Attribution breakdown of the per-session delta (waterfall) ---
-        # The headline delta is driven by exactly two levers inside cost_per_session:
-        # the per-session token footprint (fi/cw/cr/out) and the Opus share. Decompose
-        # it by morphing the BEFORE cohort into the AFTER cohort one lever at a time,
-        # crediting each the incremental cost it removes. The five UNROUNDED steps
-        # telescope to `per_session` (no residual/interaction term); after per-lever
-        # rounding the displayed lines reconcile to the headline within a few cents.
-        # Sequential attribution is order-dependent, so the order is fixed and disclosed:
-        # routing first (held at the before token mix), then the footprint collapse
-        # priced at today's mix, split by token class heaviest-first. `waterfall_index`
-        # preserves that causal order for machines; the list is sorted largest-first
-        # for display.
-        v0 = cost_per_session(bfi, bcw, bcr, bout, after_shares)  # before tokens, today's mix
-        s_route = before_cost - v0
-        v1 = cost_per_session(bfi, bcw, acr, bout, after_shares)  # context re-reads collapse
-        v2 = cost_per_session(bfi, acw, acr, bout, after_shares)  # structural prefix
-        v3 = cost_per_session(afi, acw, acr, bout, after_shares)  # fresh input
-        # final class: output (v3 holds before-output bout; after_cost holds after-output aout)
-        # Each lever: (key, savings-framed label, grew-framed label, per-session delta).
-        # A negative delta means that class GREW (a cost increase), so the grew label is
-        # shown, so a "-$X" line never reads as if cutting that class saved money.
+        # --- Attribution breakdown (waterfall over the two behavioral levers) ---
+        # The gap is driven by exactly two efficiency levers on a held-constant volume:
+        # model routing (mix, now INCLUDING the cache-write reprice) and caching (cache-hit
+        # redistribution). Decompose by morphing the counterfactual into the actual one
+        # lever at a time. Routing is credited first (the baseline footprint, INCLUDING CW,
+        # repriced from the baseline mix to today's mix), then caching at today's mix; the
+        # two UNROUNDED steps telescope to the headline. Sequential attribution is
+        # order-dependent (fixed + disclosed via `waterfall_index`).
+        # v_route = counterfactual footprint (pool + CW + output) repriced at today's mix.
+        # CW now carries the routing reprice (#2), so the routing lever captures the
+        # cache-write mix-delta too.
+        if main_transformation > 0:
+            v_route = price(cf_F, cf_CR, O, after_shares) + price_cw(after_shares)
+            s_route = counterfactual_monthly - v_route  # before->after mix (incl. CW)
+            s_cache = v_route - actual_monthly  # remaining gap = caching
+        else:
+            # Main pool net-negative (clamped to 0); only the subagent lever carries the
+            # headline. Zero the main levers so the breakdown still sums to the combined.
+            s_route = 0.0
+            s_cache = 0.0
+        # s_route + s_cache telescopes to the MAIN transformation; the subagent pool is a
+        # third lever whose own (cf - actual) is added so the breakdown sums to the COMBINED
+        # headline.
         _levers = [
             ("routing", "Smarter model routing (lighter mix)",
              "Model mix shifted to costlier models (added cost)", s_route),
-            ("context_rereads", "Lighter sessions (fewer context re-reads)",
-             "Heavier context re-reads (added cost)", v0 - v1),
-            ("structural", "Trimmed structural prefix",
-             "Larger structural prefix (added cost)", v1 - v2),
-            ("fresh_input", "Less fresh input per session",
-             "More fresh input per session (added cost)", v2 - v3),
-            ("output", "Less output per session",
-             "More output per session (added cost)", v3 - after_cost),
+            ("context_rereads", "Lighter sessions (better cache reuse)",
+             "Heavier context re-reads (added cost)", s_cache),
+            ("subagent_routing", "Cheaper subagents (lighter delegation)",
+             "Subagents shifted to costlier models (added cost)", sub_transformation),
         ]
         breakdown = sorted(
             ({"key": k, "waterfall_index": i,
               "label": (pos if d >= 0 else neg),
-              "monthly_usd": round(d * sessions_per_month, 2)}
+              "monthly_usd": round(d, 2)}
              for i, (k, pos, neg, d) in enumerate(_levers)),
             key=lambda x: abs(x["monthly_usd"]), reverse=True,
         )
         breakdown_caveat = (
-            "Waterfall attribution of the monthly figure: each lever is credited the "
-            "cost it removes as your sessions morph from your baseline window to now. "
-            "Attribution is sequential (routing credited first, then footprint by token "
-            "class); lines are shown largest-first and sum to the headline (±a few cents "
-            "from rounding). A negative line means that class grew. Sub-agent weight is "
-            "folded into the per-session token volume; it can't be isolated from session "
-            "aggregates."
+            "Counterfactual attribution: your current 30-day volume is held constant and "
+            "priced two ways -- the way you work now, and the way you worked before Token "
+            "Optimizer (~95% Opus, your old cache pattern). The difference is split between "
+            "model routing (including cache-write, which is billed at the writing model's "
+            "rate) and caching. Subagent (sidechain) routing is counted as a separate pool "
+            "and added to the headline. Volume is identical on both sides, so workload "
+            "growth never inflates or zeroes the figure -- only efficiency does."
         )
 
+        # Keep the existing per-session keys populated (the dashboard reads them): divide
+        # the monthly aggregates by the current session count so the "per session" panel
+        # stays sensible. before_* now means "the old way", after_* means "now".
+        before_cps = counterfactual_monthly / recent_n
+        after_cps = actual_monthly / recent_n
+        # Combined (main + subagent) spend on each arm: the dashboard/printer headline
+        # ("est. $X now vs $Y the old way") spans both pools, so report the combined
+        # actual/counterfactual while keeping the main-only figures available too.
+        combined_actual = actual_monthly + sub_actual
+        combined_cf = counterfactual_monthly + sub_cf
         return {
-            "before_cost_per_session": round(before_cost, 4),
-            "after_cost_per_session": round(after_cost, 4),
-            "savings_per_session": round(per_session, 4),
-            "sessions_per_month": sessions_per_month,
-            "monthly_savings_usd": round(per_session * sessions_per_month, 2),
-            "before_opus": round(before_opus, 4),
+            "before_cost_per_session": round(before_cps, 4),
+            "after_cost_per_session": round(after_cps, 4),
+            "savings_per_session": round(before_cps - after_cps, 4),
+            "sessions_per_month": recent_n,
+            "monthly_savings_usd": round(transformation, 2),  # = main + subagent
+            "main_transformation_usd": round(main_transformation, 2),
+            "subagent_transformation_usd": round(sub_transformation, 2),
+            # Headline arms span both pools (combined).
+            "counterfactual_monthly_usd": round(combined_cf, 2),
+            "actual_monthly_usd": round(combined_actual, 2),
+            # Main-pool-only arms (for drill-down / back-compat).
+            "main_counterfactual_monthly_usd": round(counterfactual_monthly, 2),
+            "main_actual_monthly_usd": round(actual_monthly, 2),
+            "subagent_counterfactual_usd": round(sub_cf, 2),
+            "subagent_actual_usd": round(sub_actual, 2),
+            "subagent_sessions": int(sub_pool.get("sessions", 0) or 0),
+            "subagent_by_model": sub_pool.get("by_model", {}),
+            "transformation_pct": round(transformation_pct, 4),
+            "baseline_opus_share": round(baseline_opus_share, 4),
+            "before_opus": round(baseline_opus_share, 4),
             "after_opus": round(after_opus, 4),
             "before_mix_label": _mix_label(before_shares),
             "after_mix_label": _mix_label(after_shares),
-            "before_tokens": int(bfi + bcw + bcr + bout),
-            "after_tokens": int(afi + acw + acr + aout),
+            "before_tokens": int(total_in + O),
+            "after_tokens": int(total_in + O),
             "before_sessions": bn,
-            "after_sessions": an,
+            "after_sessions": recent_n,
             "baseline_source": baseline_source,
             "breakdown": breakdown,
             "breakdown_caveat": breakdown_caveat,
@@ -29585,14 +30133,16 @@ def savings_report(days=30, as_json=False):
     print(f"  {'=' * 58}")
     print(f"  Period: Last {days} days ({start} to {end})")
 
-    # Headline before/after transformation (current activity at pre-TO weight+mix vs actual).
+    # Headline transformation (current 30d volume held constant, priced the old way vs now).
     ba = summary.get("before_after") or {}
     if float(ba.get("monthly_savings_usd", 0.0) or 0.0) > 0:
         print()
         print(f"  YOUR TRANSFORMATION: ~${ba['monthly_savings_usd']:,.0f}/mo")
-        print(f"    {ba.get('sessions_per_month', 0):,} sessions/mo, pre-TO way (~{ba.get('before_opus', 0) * 100:.0f}% Opus, "
-              f"heavy) ${ba.get('before_cost_per_session', 0):.2f}/session vs ${ba.get('after_cost_per_session', 0):.2f}/session now "
-              f"(~{ba.get('after_opus', 0) * 100:.0f}% Opus). Cut ${ba.get('savings_per_session', 0):.2f}/session [estimated]")
+        print(f"    Had you worked this 30-day period the way you did before Token Optimizer "
+              f"(~{ba.get('before_opus', 0) * 100:.0f}% Opus, including subagents), you'd have paid "
+              f"~${ba['monthly_savings_usd']:,.0f} more "
+              f"— est. ${ba.get('actual_monthly_usd', 0):,.0f} now vs ${ba.get('counterfactual_monthly_usd', 0):,.0f} "
+              f"the old way [estimated]")
         # Where it comes from: the waterfall attribution (reconciles to the headline).
         ba_breakdown = ba.get("breakdown") or []
         if ba_breakdown:
