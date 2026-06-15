@@ -3847,7 +3847,7 @@ var DB = (function() {
           '<span style="font-family:var(--font-mono);font-weight:300;font-size:84px;line-height:0.9;color:var(--c-accent-cyan);text-shadow:0 0 28px var(--c-accent-glow);letter-spacing:-0.02em;">' + money(ba.monthly_savings_usd) + '</span>' +
           '<span style="font-size:24px;color:var(--c-text-dim);font-family:var(--font-mono);">/mo</span>' +
         '</div>' +
-        '<div class="lede">Had you worked this 30-day period the way you did before Token Optimizer (~' + (Math.round((Number(ba.before_opus) || 0) * 100)) + '% Opus, including subagents), you\'d have paid about <strong>' + money(ba.monthly_savings_usd) + ' more</strong> — est. <strong>' + money(ba.actual_monthly_usd) + '</strong> now vs <strong>' + money(ba.counterfactual_monthly_usd) + '</strong> the old way. Your volume is held constant on both sides, so this is pure efficiency, not workload growth.</div>' +
+        '<div class="lede">Had you worked this 30-day period the way you did before Token Optimizer (~' + (Math.round((Number(ba.before_opus) || 0) * 100)) + '% Opus, including subagents and the lighter context Token Optimizer keeps for you), you\'d have paid about <strong>' + money(ba.monthly_savings_usd) + ' more</strong> — est. <strong>' + money(ba.actual_monthly_usd) + '</strong> now vs <strong>' + money(ba.counterfactual_monthly_usd) + '</strong> the old way. Your volume is held constant on both sides, so this is pure efficiency, not workload growth.</div>' +
         '<div class="lede" style="margin-top:var(--s-2);">Across your <strong>' + (Number(ba.sessions_per_month) || 0).toLocaleString() + ' sessions</strong> this period, that works out to about <strong>' + money(ba.before_cost_per_session) + '/session</strong> the old way vs <strong>' + money(ba.after_cost_per_session) + '/session</strong> now.</div>' +
         fold('What changed',
           '<p>Your earliest sessions ran heavier' + (beforeMix ? ', mostly ' + esc(beforeMix) : '') + '. Now sessions are lighter, sub-agents are lighter, and routine work runs on cheaper models. That compounds across every session you run.</p>' +
@@ -3868,6 +3868,22 @@ var DB = (function() {
           (baExplicit || !(Number(ba.before_opus) > 0)
             ? ''
             : '<p style="color:var(--c-accent-cyan);">For a sharper baseline, run <strong>/token-optimizer set-baseline --opus 0.95</strong> to pin your real pre-install model mix.</p>')) +
+      '</div>';
+    } else if (ba.baseline_building) {
+      // New install: no frozen baseline yet, so the headline transformation can't be
+      // computed. Explain WHY (it uses the user's OWN history, never a fake anchor) and
+      // show progress, instead of silently rendering nothing and leaving only the small
+      // measured floor below (which reads as "TO only saved me $X").
+      var bb = ba.baseline_building;
+      var sNeed = Number(bb.sessions_needed) || 30;
+      var sHave = Math.min(sNeed, Number(bb.sessions_in_window) || 0);
+      var dLeft = Number(bb.days_left) || 0;
+      var pct = sNeed > 0 ? Math.min(100, Math.round(sHave / sNeed * 100)) : 0;
+      html += '<div class="card wide" style="padding:var(--s-5) var(--s-4);margin-bottom:var(--s-3);border:1px solid var(--c-accent-blue);box-shadow:0 0 0 1px rgba(0,102,255,0.12);">' +
+        '<div class="label" style="margin-bottom:var(--s-2);color:var(--c-accent-cyan);">Your savings baseline is still building</div>' +
+        '<div class="lede">Token Optimizer measures your savings against <strong>your own</strong> pre-optimization baseline, frozen from your first ' + (Number(bb.early_window_days) || 30) + ' days of real sessions. It never uses anyone else\'s numbers, and never freezes a half-formed anchor.</div>' +
+        '<div class="lede" style="margin-top:var(--s-2);"><strong>' + sHave + ' of ~' + sNeed + ' sessions</strong> collected in your baseline window' + (dLeft > 0 ? ', about <strong>' + dLeft + ' day' + (dLeft === 1 ? '' : 's') + '</strong> until it locks in' : '') + '. Until then, the figure below is the directly-metered floor, not your full savings.</div>' +
+        '<div style="margin-top:var(--s-4);height:8px;background:rgba(255,255,255,0.08);border-radius:4px;overflow:hidden;"><div style="height:100%;width:' + pct + '%;background:var(--c-accent-cyan);box-shadow:0 0 12px var(--c-accent-glow);transition:width .3s;"></div></div>' +
       '</div>';
     }
 
@@ -3921,10 +3937,10 @@ var DB = (function() {
       '</div>';
     if (si && (Number(si.measured_usd) > 0 || Number(si.estimated_usd) > 0)) {
       html += '<div class="card" style="flex:1;min-width:210px;padding:var(--s-5) var(--s-4);">' +
-          '<div class="label" style="margin-bottom:var(--s-2);">Measured since you installed</div>' +
+          '<div class="label" style="margin-bottom:var(--s-2);">Measured to date</div>' +
           '<div style="font-family:var(--font-mono);font-weight:300;font-size:52px;line-height:0.9;color:var(--c-text-main);letter-spacing:-0.02em;">' + money(Number(si.measured_usd)) + '</div>' +
           (Number(si.estimated_usd) > 0 ? '<div style="margin-top:var(--s-1);font-family:var(--font-mono);font-size:14px;color:var(--c-text-dim);">+ ' + money(Number(si.estimated_usd)) + ' estimated</div>' : '') +
-          '<div style="margin-top:var(--s-3);font-size:14px;color:var(--c-text-dim);font-family:var(--font-mono);line-height:1.85;">since ' + esc(prettyDate(si.install_date)) + '<br>adds up every day you work</div>' +
+          '<div style="margin-top:var(--s-3);font-size:14px;color:var(--c-text-dim);font-family:var(--font-mono);line-height:1.85;">measuring since ' + esc(prettyDate(si.install_date)) + '<br>(your first tracked session, not necessarily install day)</div>' +
         '</div>';
     }
     html += '</div>';
@@ -3944,15 +3960,21 @@ var DB = (function() {
       parts.push('Favor targeted Edits over full-file Writes. About ' + (Number(ow.avoidable_writes) || 0) + ' of your Writes could have been Edits, worth about ' + money(mo(ow.cost_saved_usd)) + '/mo in output.');
     }
     if (parts.length > 0) {
-      html += '<div class="card wide"><div class="card-header"><span>Save more</span><span class="label">about ' + money(opportunityMo) + '/mo available</span></div>';
-      html += '<div style="display:flex;flex-direction:column;gap:var(--s-4);padding-top:var(--s-2);">';
+      html += '<div class="card wide" style="padding:var(--s-5) var(--s-4);margin-bottom:var(--s-3);border:1px solid var(--c-amber);box-shadow:0 0 0 1px rgba(217,164,65,0.18), 0 0 44px rgba(217,164,65,0.12);">';
+      html += '<div class="label" style="margin-bottom:var(--s-2);color:var(--c-amber);letter-spacing:0.08em;">Money on the table &middot; opportunity</div>';
+      html += '<div style="display:flex;align-items:baseline;gap:var(--s-2);flex-wrap:wrap;">' +
+          '<span style="font-family:var(--font-mono);font-weight:300;font-size:76px;line-height:0.9;color:var(--c-amber);text-shadow:0 0 30px rgba(217,164,65,0.5);letter-spacing:-0.02em;">' + money(opportunityMo) + '</span>' +
+          '<span style="font-size:23px;color:var(--c-text-dim);font-family:var(--font-mono);">/mo still on the table</span>' +
+        '</div>';
+      html += '<div class="lede" style="margin-top:var(--s-2);">Real savings you have <strong>not</strong> captured yet — on top of what you are already saving. Each step below is money Token Optimizer recovers for you, most of it automatically once you act.</div>';
+      html += '<div style="display:flex;flex-direction:column;gap:var(--s-4);padding-top:var(--s-4);">';
       parts.forEach(function(p, i){
         html += '<div style="display:flex;gap:var(--s-3);align-items:flex-start;">' +
-          '<div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;border:1px solid var(--c-accent-cyan);display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:14px;color:var(--c-accent-cyan);margin-top:2px;">' + (i+1) + '</div>' +
-          '<div style="font-size:16px;color:var(--c-text-main);line-height:1.75;max-width:720px;">' + esc(p) + '</div></div>';
+          '<div style="flex-shrink:0;width:34px;height:34px;border-radius:50%;border:1.5px solid var(--c-amber);background:rgba(217,164,65,0.08);display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:16px;color:var(--c-amber);margin-top:2px;">' + (i+1) + '</div>' +
+          '<div style="font-size:18px;color:var(--c-text-main);line-height:1.7;max-width:760px;">' + esc(p) + '</div></div>';
       });
       html += '</div>';
-      html += '<div style="margin-top:var(--s-4);padding:var(--s-3);background:rgba(0,240,255,0.04);border:1px solid rgba(0,240,255,0.15);border-radius:8px;font-family:var(--font-mono);font-size:15px;line-height:1.6;color:var(--c-text-dim);">Run <span style="color:var(--c-accent-cyan);">/token-optimizer</span> and follow its suggestions to unlock the rest.</div>';
+      html += '<div style="margin-top:var(--s-5);padding:var(--s-4);background:rgba(217,164,65,0.07);border:1px solid var(--c-amber);border-radius:10px;font-family:var(--font-mono);font-size:17px;line-height:1.6;color:var(--c-text-main);font-weight:500;">Run <span style="color:var(--c-amber);">/token-optimizer</span> and follow its suggestions to claim the rest &rarr;</div>';
       html += '</div>';
     }
 

@@ -13,11 +13,23 @@ export interface SavingsEventsSummary {
     totalCount: number;
 }
 /**
+ * Optional lookback window for savings-events reads. Mirrors Python
+ * `_get_savings_summary(days=days)`, which filters `timestamp >= now - days`.
+ * When omitted, ALL events are summed (the display/grouping callers want lifetime
+ * totals); the compression add-back caller passes a window so a stale event is not
+ * counted and then monthly-scaled.
+ */
+export interface SavingsEventsWindow {
+    days: number;
+    now?: number;
+}
+/**
  * Read savings-events.jsonl, group by event_type, and return per-category
  * totals + a grand total. No allowlist: every event_type in the file surfaces.
- * Returns an empty summary (not an error) when the file is missing.
+ * Returns an empty summary (not an error) when the file is missing. When `window`
+ * is given, only events whose `timestamp` is within `now - days` are counted.
  */
-export declare function readSavingsEventsByCategory(openclawDir?: string): SavingsEventsSummary;
+export declare function readSavingsEventsByCategory(openclawDir?: string, window?: SavingsEventsWindow): SavingsEventsSummary;
 export interface SavingsBreakdownItem {
     key: string;
     label: string;
@@ -26,9 +38,12 @@ export interface SavingsBreakdownItem {
 export interface RealizedSavings {
     ready: boolean;
     status: string;
+    /** Headline transformation = main + subagent(0) + compression add-back, monthly. */
     monthlySavingsUsd: number;
     savingsPerSession: number;
+    /** "The old way" cost per session (counterfactual / current session count). */
     beforeCostPerSession: number;
+    /** "Now" cost per session (actual / current session count). */
     afterCostPerSession: number;
     sessionsPerMonth: number;
     beforeMixLabel: string;
@@ -36,9 +51,23 @@ export interface RealizedSavings {
     cumulativeSavedUsd: number;
     installDate: string | null;
     breakdown: SavingsBreakdownItem[];
+    /** Combined counterfactual arm = main cf + compression add-back, monthly USD. */
+    counterfactualMonthlyUsd: number;
+    /** Actual arm = current volume at current mix, monthly USD. */
+    actualMonthlyUsd: number;
+    mainTransformationUsd: number;
+    /** Always 0 on OpenClaw — no Claude-style sidechains (documented gap). */
+    subagentTransformationUsd: number;
+    compressionTransformationUsd: number;
+    /** Directly-metered compression $ before the baseline-mix reprice. */
+    compressionMeasuredUsd: number;
+    transformationPct: number;
+    beforeOpus: number;
+    afterOpus: number;
 }
 /**
- * Compute realized before/after savings. `now` is injectable for testing.
+ * Compute the realized current-volume counterfactual transformation. `now` is
+ * injectable for testing. See the module header for the full methodology.
  */
 export declare function computeRealizedSavings(openclawDir: string, days?: number, now?: number): RealizedSavings;
 //# sourceMappingURL=savings.d.ts.map

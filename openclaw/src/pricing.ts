@@ -403,11 +403,23 @@ export function calculateCost(
   const multiplier = tierMultiplier(loadPricingTier(openclawDir), pricingKey);
 
   let cacheWriteCost: number;
-  const split1h = cacheWriteSplit?.cacheWrite1hTokens ?? 0;
-  const split5m = cacheWriteSplit?.cacheWrite5mTokens ?? 0;
+  let split1h = Math.max(0, cacheWriteSplit?.cacheWrite1hTokens ?? 0);
+  let split5m = Math.max(0, cacheWriteSplit?.cacheWrite5mTokens ?? 0);
   if (split1h || split5m) {
-        const rate1h = rates.cacheWrite1h ?? rates.cacheWrite;
-    const unsplit = Math.max(0, tokens.cacheWrite - split1h - split5m);
+    // F3: a TTL split that exceeds the total cacheWrite (inconsistent upstream
+    // parse / hand-edited history) would over-price — e.g. cw1h=50k on a 30k total
+    // bills 50k tokens, a 67% overcharge. Scale the buckets down proportionally so
+    // split1h + split5m never exceeds tokens.cacheWrite (mirrors measure.py's
+    // apportioning, which keeps the class split <= the billed total).
+    const cw = Math.max(0, tokens.cacheWrite);
+    const splitSum = split1h + split5m;
+    if (splitSum > cw && splitSum > 0) {
+      const scale = cw / splitSum;
+      split1h *= scale;
+      split5m *= scale;
+    }
+    const rate1h = rates.cacheWrite1h ?? rates.cacheWrite;
+    const unsplit = Math.max(0, cw - split1h - split5m);
     cacheWriteCost =
       split1h * rate1h +
       (split5m + unsplit) * rates.cacheWrite;
