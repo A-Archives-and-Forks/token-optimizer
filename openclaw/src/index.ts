@@ -9,6 +9,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { StringDecoder } from "string_decoder";
 import {
   findOpenClawDir,
   scanAllSessions,
@@ -869,17 +870,94 @@ function firstUserPromptFromSession(
   try {
     const sessionFile = resolveSessionFile(openclawDir, agentId, sessionId);
     if (!sessionFile) return "";
-    const messages = loadMessagesFromSessionFile(sessionFile);
-    if (!messages) return "";
-    for (const m of messages) {
-      if (m.role === "user" && typeof m.content === "string" && m.content.trim()) {
-        return m.content.trim().slice(0, 2000);
-      }
-    }
-    return "";
+    return firstUserPromptFromSessionFile(sessionFile);
   } catch {
     return "";
   }
+}
+
+/**
+ * Stream a session transcript and return the first non-empty USER message text
+ * (trimmed, capped at 2000 chars), stopping as soon as it is found.
+ *
+ * The previous implementation went through loadMessagesFromSessionFile(), which
+ * reads AND JSON-parses the entire transcript. firstUserPromptFromSession only
+ * needs the first user message, which sits near the top of the file, yet this
+ * runs on the continuity-injection path that may fire on several early
+ * session:patch events before the first user prompt has landed on disk. Reading
+ * in chunks and breaking at the first match avoids parsing an ever-growing
+ * transcript on each of those calls. Returns "" when no user text exists yet.
+ */
+function firstUserPromptFromSessionFile(sessionFile: string): string {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(sessionFile, "r");
+    const CHUNK = 64 * 1024;
+    const buf = Buffer.alloc(CHUNK);
+    // StringDecoder buffers any partial multi-byte UTF-8 sequence that lands on
+    // a chunk boundary, so line text is never corrupted mid-character.
+    const decoder = new StringDecoder("utf8");
+    let carry = "";
+    let bytes: number;
+    while ((bytes = fs.readSync(fd, buf, 0, CHUNK, null)) > 0) {
+      carry += decoder.write(buf.subarray(0, bytes));
+      let nl: number;
+      while ((nl = carry.indexOf("\n")) !== -1) {
+        const text = userTextFromJsonlLine(carry.slice(0, nl));
+        if (text) return text;
+        carry = carry.slice(nl + 1);
+      }
+    }
+    // Flush any decoder remainder, then check the final (unterminated) line.
+    carry += decoder.end();
+    return userTextFromJsonlLine(carry);
+  } catch {
+    return "";
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* best-effort close */
+      }
+    }
+  }
+}
+
+/**
+ * Parse one transcript JSONL line and return its trimmed user text (capped at
+ * 2000 chars), or "" when the line is not a non-empty user message. Mirrors the
+ * content handling in loadMessagesFromSessionFile (a plain string, or an array
+ * of text blocks).
+ */
+function userTextFromJsonlLine(line: string): string {
+  const trimmed = line.trim();
+  if (!trimmed) return "";
+  let record: Record<string, unknown>;
+  try {
+    record = JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    return "";
+  }
+  if (record.type !== "user") return "";
+  const message = record.message as Record<string, unknown> | undefined;
+  const rawContent = message?.content;
+  let content = "";
+  if (typeof rawContent === "string") {
+    content = rawContent;
+  } else if (Array.isArray(rawContent)) {
+    content = rawContent
+      .map((block) => {
+        if (!block || typeof block !== "object") return "";
+        const entry = block as Record<string, unknown>;
+        if (entry.type === "text" && typeof entry.text === "string") return entry.text;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  const text = content.trim();
+  return text ? text.slice(0, 2000) : "";
 }
 
 function resolveSessionFile(openclawDir: string, agentId: string | undefined, sessionId: string): string | null {
