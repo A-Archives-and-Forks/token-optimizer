@@ -98,10 +98,36 @@ export interface SavingsBreakdownItem {
   monthlyUsd: number;
 }
 
+/** Progress toward a frozen baseline (displayed when ready=false). */
+export interface BaselineBuilding {
+  /** Sessions collected in the early window so far. */
+  sessionsInWindow: number;
+  /** Sessions needed before the baseline locks in. */
+  sessionsNeeded: number;
+  /** Length of the early-window in days (matches BASELINE_EARLY_WINDOW_DAYS). */
+  earlyWindowDays: number;
+  /** Calendar days until the early window closes (0 once it has closed). */
+  daysLeft: number;
+  /** ISO date of the user's very first tracked session. */
+  firstDate: string;
+}
+
 export interface RealizedSavings {
   ready: boolean;
   status: string;
   monthlySavingsUsd: number;
+  /** Monthly $ at the user's CURRENT model mix + cache pattern ("now" arm). */
+  actualMonthlyUsd: number;
+  /** Monthly $ at the user's BASELINE mix + cache pattern ("the old way" arm). */
+  counterfactualMonthlyUsd: number;
+  /** Transformation as a fraction: (counterfactual − actual) / counterfactual. */
+  transformationPct: number;
+  /**
+   * Metered compression floor — tokens TO removed from context, repriced to the
+   * baseline input mix. This is the PROVEN subset of compressionAddback and is
+   * NEVER summed into the transformation headline. Render it as a separate card.
+   */
+  compressionMeasuredUsd: number;
   savingsPerSession: number;
   beforeCostPerSession: number;
   afterCostPerSession: number;
@@ -111,6 +137,12 @@ export interface RealizedSavings {
   cumulativeSavedUsd: number;
   installDate: string | null;
   breakdown: SavingsBreakdownItem[];
+  /**
+   * Populated when ready=false and the user has at least one session. Gives the
+   * dashboard enough data to render a progress card + bar instead of a dead end.
+   * null when there are zero sessions (no installDate yet).
+   */
+  baselineBuilding: BaselineBuilding | null;
 }
 
 function mixLabel(mix: ModelMix): string {
@@ -122,6 +154,10 @@ const NOT_READY = (status: string): RealizedSavings => ({
   ready: false,
   status,
   monthlySavingsUsd: 0,
+  actualMonthlyUsd: 0,
+  counterfactualMonthlyUsd: 0,
+  transformationPct: 0,
+  compressionMeasuredUsd: 0,
   savingsPerSession: 0,
   beforeCostPerSession: 0,
   afterCostPerSession: 0,
@@ -131,6 +167,7 @@ const NOT_READY = (status: string): RealizedSavings => ({
   cumulativeSavedUsd: 0,
   installDate: null,
   breakdown: [],
+  baselineBuilding: null,
 });
 
 /**
@@ -174,14 +211,29 @@ export function computeRealizedSavings(
   const before = history.filter((r) => r.ts >= windowStart && r.ts < windowEnd);
 
   if (before.length < BASELINE_MIN_STABLE_SESSIONS) {
+    const daysLeft = Math.max(0, Math.ceil((windowEnd - now) / DAY_MS));
     const r = NOT_READY(`building baseline (${before.length}/${BASELINE_MIN_STABLE_SESSIONS} early sessions)`);
     r.installDate = installDate;
+    r.baselineBuilding = {
+      sessionsInWindow: before.length,
+      sessionsNeeded: BASELINE_MIN_STABLE_SESSIONS,
+      earlyWindowDays: BASELINE_EARLY_WINDOW_DAYS,
+      daysLeft,
+      firstDate: installDate,
+    };
     return r;
   }
   if (now < windowEnd) {
     const daysLeft = Math.ceil((windowEnd - now) / DAY_MS);
     const r = NOT_READY(`building baseline (${daysLeft}d of early window left)`);
     r.installDate = installDate;
+    r.baselineBuilding = {
+      sessionsInWindow: before.length,
+      sessionsNeeded: BASELINE_MIN_STABLE_SESSIONS,
+      earlyWindowDays: BASELINE_EARLY_WINDOW_DAYS,
+      daysLeft,
+      firstDate: installDate,
+    };
     return r;
   }
 
@@ -197,6 +249,14 @@ export function computeRealizedSavings(
     const r = NOT_READY(`building comparison (${after.length}/${AFTER_MIN_SESSIONS} recent sessions)`);
     r.installDate = installDate;
     r.beforeMixLabel = mixLabel(beforeMix);
+    // Baseline window is closed and frozen — daysLeft=0 here.
+    r.baselineBuilding = {
+      sessionsInWindow: before.length,
+      sessionsNeeded: BASELINE_MIN_STABLE_SESSIONS,
+      earlyWindowDays: BASELINE_EARLY_WINDOW_DAYS,
+      daysLeft: 0,
+      firstDate: installDate,
+    };
     return r;
   }
 
@@ -217,6 +277,13 @@ export function computeRealizedSavings(
     const r = NOT_READY("no recent volume");
     r.installDate = installDate;
     r.beforeMixLabel = mixLabel(beforeMix);
+    r.baselineBuilding = {
+      sessionsInWindow: before.length,
+      sessionsNeeded: BASELINE_MIN_STABLE_SESSIONS,
+      earlyWindowDays: BASELINE_EARLY_WINDOW_DAYS,
+      daysLeft: 0,
+      firstDate: installDate,
+    };
     return r;
   }
 
@@ -253,6 +320,13 @@ export function computeRealizedSavings(
     const r = NOT_READY("insufficient pricing data");
     r.installDate = installDate;
     r.beforeMixLabel = mixLabel(beforeMix);
+    r.baselineBuilding = {
+      sessionsInWindow: before.length,
+      sessionsNeeded: BASELINE_MIN_STABLE_SESSIONS,
+      earlyWindowDays: BASELINE_EARLY_WINDOW_DAYS,
+      daysLeft: 0,
+      firstDate: installDate,
+    };
     return r;
   }
 
@@ -330,10 +404,25 @@ export function computeRealizedSavings(
     .filter((b) => b.key !== "subagent_routing" || b.monthlyUsd !== 0) // drop the always-0 sidechain lever
     .sort((a, b) => Math.abs(b.monthlyUsd) - Math.abs(a.monthlyUsd));
 
+  // transformationPct: fraction of counterfactual spend eliminated. Clamped [0,1].
+  const transformationPct = counterfactualMonthly > 0
+    ? Math.max(0, Math.min(1, (counterfactualMonthly - actualMonthly) / counterfactualMonthly))
+    : 0;
+
+  // compressionMeasuredUsd: the RAW metered floor (before repricing to baseline mix).
+  // This is the proven, event-by-event subset of compressionAddback. It is returned
+  // as a SEPARATE field so the dashboard can render it in its own card, kept OUT of
+  // the transformation headline. INVARIANT: never summed into monthlySavingsUsd.
+  const compressionMeasuredUsd = m(Math.max(0, measuredCompression));
+
   return {
     ready: true,
     status: "ok",
     monthlySavingsUsd: transformation,
+    actualMonthlyUsd: actualMonthly,
+    counterfactualMonthlyUsd: counterfactualMonthly,
+    transformationPct,
+    compressionMeasuredUsd,
     savingsPerSession: beforeCps - afterCps,
     beforeCostPerSession: beforeCps,
     afterCostPerSession: afterCps,
@@ -343,5 +432,6 @@ export function computeRealizedSavings(
     cumulativeSavedUsd: cumulative,
     installDate,
     breakdown,
+    baselineBuilding: null, // not needed when ready=true
   };
 }

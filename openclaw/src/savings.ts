@@ -479,22 +479,44 @@ function getOrComputeBaseline(
   history: SessionRecord[],
   now: number,
   proxy: string
-): { baseline: FrozenBaseline | null; reason: string } {
+): { baseline: FrozenBaseline | null; reason: string; baselineBuilding?: BaselineBuildingProgress } {
   const frozen = loadFrozenBaseline(openclawDir);
   if (frozen) return { baseline: frozen, reason: "frozen" };
   if (history.length === 0) return { baseline: null, reason: "no history" };
 
   const installTs = history[0].ts;
+  const firstDate = new Date(installTs).toISOString().slice(0, 10);
   const windowStart = installTs + BASELINE_ONBOARDING_DAYS * DAY_MS;
   const windowEnd = windowStart + BASELINE_EARLY_WINDOW_DAYS * DAY_MS;
   const before = history.filter((r) => r.ts >= windowStart && r.ts < windowEnd);
 
   if (before.length < BASELINE_MIN_STABLE_SESSIONS) {
-    return { baseline: null, reason: `building baseline (${before.length}/${BASELINE_MIN_STABLE_SESSIONS} early sessions)` };
+    const daysLeft = Math.max(0, Math.ceil((windowEnd - now) / DAY_MS));
+    return {
+      baseline: null,
+      reason: `building baseline (${before.length}/${BASELINE_MIN_STABLE_SESSIONS} early sessions)`,
+      baselineBuilding: {
+        sessionsInWindow: before.length,
+        sessionsNeeded: BASELINE_MIN_STABLE_SESSIONS,
+        earlyWindowDays: BASELINE_EARLY_WINDOW_DAYS,
+        daysLeft,
+        firstDate,
+      },
+    };
   }
   if (now < windowEnd) {
     const daysLeft = Math.ceil((windowEnd - now) / DAY_MS);
-    return { baseline: null, reason: `building baseline (${daysLeft}d of early window left)` };
+    return {
+      baseline: null,
+      reason: `building baseline (${daysLeft}d of early window left)`,
+      baselineBuilding: {
+        sessionsInWindow: before.length,
+        sessionsNeeded: BASELINE_MIN_STABLE_SESSIONS,
+        earlyWindowDays: BASELINE_EARLY_WINDOW_DAYS,
+        daysLeft,
+        firstDate,
+      },
+    };
   }
 
   const baseline: FrozenBaseline = {
@@ -678,6 +700,15 @@ export interface SavingsBreakdownItem {
   monthlyUsd: number;
 }
 
+/** Structured baseline-building progress (mirrors measure.py `_baseline_progress`). */
+export interface BaselineBuildingProgress {
+  sessionsInWindow: number;
+  sessionsNeeded: number;
+  earlyWindowDays: number;
+  daysLeft: number;
+  firstDate: string;
+}
+
 export interface RealizedSavings {
   ready: boolean;
   status: string;
@@ -708,6 +739,12 @@ export interface RealizedSavings {
   transformationPct: number;
   beforeOpus: number;
   afterOpus: number;
+  /**
+   * Structured baseline-building progress. Present when `ready === false` and the
+   * not-ready reason is an insufficient early-session count or the window is still
+   * open. Undefined when the baseline is already frozen or when there is no history.
+   */
+  baselineBuilding?: BaselineBuildingProgress;
 }
 
 function mixLabel(shares: Record<string, number>): string {
@@ -759,11 +796,12 @@ export function computeRealizedSavings(
 
   // One proxy for unpriced models, derived from full history, used in both eras.
   const globalProxy = dominantPricedModel(history, openclawDir);
-  const { baseline, reason } = getOrComputeBaseline(openclawDir, history, now, globalProxy);
+  const { baseline, reason, baselineBuilding } = getOrComputeBaseline(openclawDir, history, now, globalProxy);
   const installDate = new Date(history[0].ts).toISOString().slice(0, 10);
   if (!baseline) {
     const r = NOT_READY(reason);
     r.installDate = installDate;
+    if (baselineBuilding) r.baselineBuilding = baselineBuilding;
     return r;
   }
 

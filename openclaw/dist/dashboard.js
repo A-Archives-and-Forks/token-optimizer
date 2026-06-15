@@ -904,37 +904,90 @@ function renderDaily(data) {
 }
 function renderSavings(data) {
     const s = data.savings;
+    // --- Item 5: updated header copy — no longer implies "install day" ---
+    const measuringLine = s?.installDate
+        ? `measuring since ${esc(s.installDate)} — your first tracked session, not necessarily install day`
+        : "your first tracked session establishes the baseline";
     const header = `
     <div class="section-header">
       <div class="label">Realized Savings</div>
       <h1>Savings</h1>
-      <p>Your measured before/after cost change since you started using Token Optimizer.</p>
+      <p>Current-volume counterfactual: what your sessions would have cost at your old model mix vs. what they actually cost now. ${measuringLine}.</p>
     </div>`;
+    // --- Opportunity panel (Item 4) — sum waste-detector realizable totals ---
+    // data.waste is already in scope (same DashboardData). Sum monthlyWasteUsd
+    // across all findings; rendered below the hero as an amber "Save more" panel.
+    const opportunityMonthlyUsd = data.waste.reduce((sum, f) => sum + (f.monthlyWasteUsd ?? 0), 0);
+    const opportunityPanel = opportunityMonthlyUsd > 0
+        ? `<div class="savings-opportunity-panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-2)">
+          <div>
+            <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.1em;color:var(--c-warning);margin-bottom:4px">Money on the table &middot; opportunity</div>
+            <div style="font-size:13px;color:var(--c-text-dim)">${data.waste.length} waste pattern${data.waste.length !== 1 ? "s" : ""} detected — additional realizable savings</div>
+          </div>
+          <div style="font-family:var(--font-mono);font-size:32px;color:var(--c-warning);text-shadow:0 0 12px rgba(245,158,11,0.4)">${fmtCost(opportunityMonthlyUsd)}<span style="font-size:15px;opacity:0.7">/mo</span></div>
+        </div>
+        <div style="font-size:13px;color:var(--c-text-dim)">Run <code style="background:rgba(255,255,255,0.06);padding:1px 6px;border-radius:3px">/token-optimizer</code> or check the Waste tab to claim these savings.</div>
+      </div>`
+        : "";
+    // --- Baseline-building progress (Item 3) ---
+    // When not ready and we have structured progress, render a progress card
+    // instead of dumping a flat status string.
+    const buildingProgress = (bb) => {
+        if (!bb)
+            return "";
+        const pct = Math.min(100, Math.round((bb.sessionsInWindow / bb.sessionsNeeded) * 100));
+        const progressBar = `<div style="background:rgba(255,255,255,0.06);border-radius:4px;height:8px;margin:var(--s-2) 0;overflow:hidden">
+      <div style="height:100%;width:${pct}%;background:var(--c-accent-cyan);border-radius:4px;transition:width 0.3s"></div>
+    </div>`;
+        const daysNote = bb.daysLeft > 0
+            ? `About ${bb.daysLeft} day${bb.daysLeft !== 1 ? "s" : ""} until the window closes and the baseline locks in.`
+            : "Session count is the only remaining gate — keep using OpenClaw and it will freeze automatically.";
+        return `<div class="card" style="border-left:3px solid var(--c-accent-cyan)">
+      <div class="card-header"><span>Building your baseline</span><span style="font-family:var(--font-mono);font-size:13px;color:var(--c-accent-cyan)">${bb.sessionsInWindow} / ${bb.sessionsNeeded} sessions</span></div>
+      ${progressBar}
+      <div style="font-size:13px;color:var(--c-text-dim);margin-top:var(--s-1)">${pct}% of ~${bb.sessionsNeeded} sessions needed to freeze the baseline. ${daysNote}</div>
+      <div style="font-size:12px;color:var(--c-text-dim);margin-top:var(--s-2)">First tracked session: ${esc(bb.firstDate)} &middot; early window: ${bb.earlyWindowDays} days</div>
+    </div>`;
+    };
+    // --- Early exit: no savings data at all ---
     if (!s || (!s.ready && s.cumulativeSavedUsd === 0 && s.monthlySavingsUsd === 0)) {
+        const progressCard = s?.baselineBuilding ? buildingProgress(s.baselineBuilding) : "";
         const status = s?.status ?? "no sessions yet";
         return `<div class="view" id="view-savings">
       ${header}
-      <div class="card">
+      ${opportunityPanel}
+      ${progressCard || `<div class="card">
         <div class="empty-state">
           Realized savings need a baseline of your early usage to compare against.<br>
           <span style="color:var(--c-text-dim);font-size:13px">${esc(status)}</span>
         </div>
-      </div>
-      <p class="daily-hint">This measures your actual cost-per-session drop over time. Until the baseline is set, the Waste view shows per-pattern savings you can act on now.</p>
+      </div>`}
+      <p class="daily-hint">Until the baseline is set, the Waste tab shows per-pattern savings you can act on right now.</p>
     </div>`;
     }
+    // --- Item 5: measuring-since label (first tracked session, not install day) ---
     const installLine = s.installDate
-        ? `<span style="color:var(--c-text-dim);font-size:13px">since ${esc(s.installDate)}</span>`
+        ? `<span style="color:var(--c-text-dim);font-size:13px">measuring since ${esc(s.installDate)}</span>`
         : "";
-    // Headline: clamp the monthly figure at 0 for display (a negative means usage
-    // grew, which we show honestly in the per-session line rather than the hero).
+    // --- Item 1 + 6: transformation hero with $ AND %, plus old-way vs now arms ---
+    // Clamp the monthly figure at 0 for display (negative = usage grew, shown in per-session line).
     const heroMonthly = Math.max(0, s.monthlySavingsUsd);
+    const pctDisplay = s.transformationPct > 0
+        ? `<span style="font-size:28px;color:var(--c-accent-cyan);font-family:var(--font-mono)">&minus;${(s.transformationPct * 100).toFixed(0)}%</span>`
+        : "";
     const hero = s.ready
         ? `<div class="card">
-        <div class="card-header"><span>Estimated monthly savings</span> ${installLine}</div>
-        <div style="display:flex;align-items:baseline;gap:var(--s-3);padding:var(--s-2) 0">
+        <div class="card-header"><span>Monthly transformation</span> ${installLine}</div>
+        <div style="display:flex;align-items:baseline;gap:var(--s-3);padding:var(--s-2) 0;flex-wrap:wrap">
           <div class="daily-stat-val" style="font-size:64px">${fmtCost(heroMonthly)}</div>
           <div style="color:var(--c-text-dim);font-size:15px">/ month</div>
+          ${pctDisplay}
+        </div>
+        <div style="font-size:13px;color:var(--c-text-dim);margin-bottom:var(--s-2)">
+          est. <strong style="color:var(--c-text-main)">${fmtCost(s.actualMonthlyUsd)}/mo</strong> now
+          vs <strong style="color:var(--c-text-dim)">${fmtCost(s.counterfactualMonthlyUsd)}/mo</strong> the old way
+          &mdash; volume held constant on both sides, pure efficiency gain
         </div>
         <div class="savings-beforeafter">
           <span class="sba-before">${fmtCost(s.beforeCostPerSession)}<small>/session</small></span>
@@ -946,17 +999,17 @@ function renderSavings(data) {
           ${esc(s.beforeMixLabel)} &rarr; ${esc(s.afterMixLabel)} &middot; ~${Math.round(s.sessionsPerMonth)} sessions/mo
         </div>
       </div>`
-        : `<div class="card">
+        : `<div class="card" style="border-left:3px solid var(--c-accent-cyan)">
         <div class="card-header"><span>Baseline frozen &mdash; building comparison</span> ${installLine}</div>
-        <div class="empty-state" style="padding:var(--s-3) 0">
+        ${s.baselineBuilding ? buildingProgress(s.baselineBuilding) : `<div class="empty-state" style="padding:var(--s-3) 0">
           <span style="color:var(--c-text-dim);font-size:13px">${esc(s.status)}</span>
-        </div>
+        </div>`}
       </div>`;
     const cumulative = s.cumulativeSavedUsd > 0
         ? `<div class="card">
         <div class="card-header"><span>Saved so far</span></div>
         <div class="daily-stat-val" style="font-size:36px;padding:var(--s-2) 0">${fmtCost(s.cumulativeSavedUsd)}</div>
-        <div style="color:var(--c-text-dim);font-size:13px">Per-session delta applied across every session since your baseline.</div>
+        <div style="color:var(--c-text-dim);font-size:13px">Per-session efficiency applied across every post-baseline session.</div>
       </div>`
         : "";
     const levers = s.ready && s.breakdown.length
@@ -971,29 +1024,56 @@ function renderSavings(data) {
             .join("")}
       </div>`
         : "";
-    // Savings-events breakdown (grouped by event_type, no allowlist)
+    // --- Item 2: Measured-floor card (NEVER summed into the transformation headline) ---
+    // Surface compressionMeasuredUsd as the directly-metered proven floor, with the
+    // events breakdown folded under it. Clear labeling that this is a SUBSET of the
+    // transformation headline, not additive.
     const evts = data.savingsEvents;
-    const savingsEventsCard = evts.totalCount > 0
-        ? `<div class="card">
-        <div class="card-header"><span>Savings by source</span><span style="color:var(--c-text-dim);font-size:13px">${evts.totalCount.toLocaleString()} events</span></div>
-        ${evts.categories.map((cat) => `<div class="bar-row">
-          <span class="bar-row-label">${esc(cat.label)}</span>
-          <span style="font-family:var(--font-mono);font-size:13px;color:var(--c-text-dim);margin-left:auto;padding-right:var(--s-3)">${cat.count.toLocaleString()} events</span>
-          <span style="font-family:var(--font-mono);color:var(--c-accent-cyan)">${fmtTokens(cat.tokensSaved)} tokens</span>
-        </div>`).join("")}
-        <div class="bar-row" style="border-top:1px solid var(--c-border);margin-top:var(--s-2);padding-top:var(--s-2)">
-          <span class="bar-row-label" style="font-weight:600">Total realized</span>
-          <span style="font-family:var(--font-mono);font-size:13px;color:var(--c-text-dim);margin-left:auto;padding-right:var(--s-3)">${evts.totalCount.toLocaleString()} events</span>
-          <span style="font-family:var(--font-mono);color:var(--c-success);font-weight:600">${fmtTokens(evts.totalTokensSaved)} tokens</span>
+    const measuredFloor = s.compressionMeasuredUsd > 0
+        ? `<div class="card" style="border-left:3px solid var(--c-success)">
+        <div class="card-header">
+          <span>Counted directly / measured to date</span>
+          <span style="font-family:var(--font-mono);color:var(--c-success)">${fmtCost(s.compressionMeasuredUsd)}/mo</span>
         </div>
+        <div style="font-size:13px;color:var(--c-text-dim);margin-bottom:var(--s-2)">
+          This is the <em>metered slice</em> — directly counted tokens removed from context (tool replacements, lean resumes, checkpoint restores). It is smaller and exact. The transformation headline above is the superset estimate that also includes routing and caching efficiency; do not add these two together.
+        </div>
+        ${evts.totalCount > 0 ? `<div style="margin-top:var(--s-2)">
+          ${evts.categories.map((cat) => `<div class="bar-row">
+            <span class="bar-row-label">${esc(cat.label)}</span>
+            <span style="font-family:var(--font-mono);font-size:13px;color:var(--c-text-dim);margin-left:auto;padding-right:var(--s-3)">${cat.count.toLocaleString()} events</span>
+            <span style="font-family:var(--font-mono);color:var(--c-accent-cyan)">${fmtTokens(cat.tokensSaved)} tokens</span>
+          </div>`).join("")}
+          <div class="bar-row" style="border-top:1px solid var(--c-border);margin-top:var(--s-2);padding-top:var(--s-2)">
+            <span class="bar-row-label" style="font-weight:600">Total metered</span>
+            <span style="font-family:var(--font-mono);font-size:13px;color:var(--c-text-dim);margin-left:auto;padding-right:var(--s-3)">${evts.totalCount.toLocaleString()} events</span>
+            <span style="font-family:var(--font-mono);color:var(--c-success);font-weight:600">${fmtTokens(evts.totalTokensSaved)} tokens</span>
+          </div>
+        </div>` : ""}
       </div>`
-        : "";
+        : (evts.totalCount > 0
+            ? `<div class="card">
+            <div class="card-header"><span>Savings by source</span><span style="color:var(--c-text-dim);font-size:13px">${evts.totalCount.toLocaleString()} events</span></div>
+            <div style="font-size:13px;color:var(--c-text-dim);margin-bottom:var(--s-2)">Directly-counted token removals — a metered slice (subset) of the transformation headline, not additive.</div>
+            ${evts.categories.map((cat) => `<div class="bar-row">
+              <span class="bar-row-label">${esc(cat.label)}</span>
+              <span style="font-family:var(--font-mono);font-size:13px;color:var(--c-text-dim);margin-left:auto;padding-right:var(--s-3)">${cat.count.toLocaleString()} events</span>
+              <span style="font-family:var(--font-mono);color:var(--c-accent-cyan)">${fmtTokens(cat.tokensSaved)} tokens</span>
+            </div>`).join("")}
+            <div class="bar-row" style="border-top:1px solid var(--c-border);margin-top:var(--s-2);padding-top:var(--s-2)">
+              <span class="bar-row-label" style="font-weight:600">Total metered</span>
+              <span style="font-family:var(--font-mono);font-size:13px;color:var(--c-text-dim);margin-left:auto;padding-right:var(--s-3)">${evts.totalCount.toLocaleString()} events</span>
+              <span style="font-family:var(--font-mono);color:var(--c-success);font-weight:600">${fmtTokens(evts.totalTokensSaved)} tokens</span>
+            </div>
+          </div>`
+            : "");
     return `<div class="view" id="view-savings">
     ${header}
+    ${opportunityPanel}
     ${hero}
     ${cumulative}
     ${levers}
-    ${savingsEventsCard}
+    ${measuredFloor}
   </div>`;
 }
 function renderSessions(data) {
@@ -1887,6 +1967,14 @@ h1, h2, h3, h4 { font-weight: 400; }
 .sba-arrow { color: var(--c-text-dim); }
 .sba-after { color: var(--c-text); }
 .sba-delta { font-size: 14px; color: var(--c-accent-cyan); background: rgba(0,240,255,0.08); padding: 2px 10px; border-radius: 999px; }
+.savings-opportunity-panel {
+  background: rgba(245,158,11,0.07);
+  border: 1px solid rgba(245,158,11,0.3);
+  border-left: 3px solid var(--c-warning);
+  border-radius: 8px;
+  padding: var(--s-4);
+  margin-bottom: var(--s-3);
+}
 
 /* BAR ROWS (horizontal) */
 .bar-row {

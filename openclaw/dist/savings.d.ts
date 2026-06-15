@@ -35,6 +35,14 @@ export interface SavingsBreakdownItem {
     label: string;
     monthlyUsd: number;
 }
+/** Structured baseline-building progress (mirrors measure.py `_baseline_progress`). */
+export interface BaselineBuildingProgress {
+    sessionsInWindow: number;
+    sessionsNeeded: number;
+    earlyWindowDays: number;
+    daysLeft: number;
+    firstDate: string;
+}
 export interface RealizedSavings {
     ready: boolean;
     status: string;
@@ -64,6 +72,12 @@ export interface RealizedSavings {
     transformationPct: number;
     beforeOpus: number;
     afterOpus: number;
+    /**
+     * Structured baseline-building progress. Present when `ready === false` and the
+     * not-ready reason is an insufficient early-session count or the window is still
+     * open. Undefined when the baseline is already frozen or when there is no history.
+     */
+    baselineBuilding?: BaselineBuildingProgress;
 }
 /**
  * Compute the realized current-volume counterfactual transformation. `now` is

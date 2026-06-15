@@ -417,15 +417,37 @@ function getOrComputeBaseline(openclawDir, history, now, proxy) {
     if (history.length === 0)
         return { baseline: null, reason: "no history" };
     const installTs = history[0].ts;
+    const firstDate = new Date(installTs).toISOString().slice(0, 10);
     const windowStart = installTs + BASELINE_ONBOARDING_DAYS * DAY_MS;
     const windowEnd = windowStart + BASELINE_EARLY_WINDOW_DAYS * DAY_MS;
     const before = history.filter((r) => r.ts >= windowStart && r.ts < windowEnd);
     if (before.length < BASELINE_MIN_STABLE_SESSIONS) {
-        return { baseline: null, reason: `building baseline (${before.length}/${BASELINE_MIN_STABLE_SESSIONS} early sessions)` };
+        const daysLeft = Math.max(0, Math.ceil((windowEnd - now) / DAY_MS));
+        return {
+            baseline: null,
+            reason: `building baseline (${before.length}/${BASELINE_MIN_STABLE_SESSIONS} early sessions)`,
+            baselineBuilding: {
+                sessionsInWindow: before.length,
+                sessionsNeeded: BASELINE_MIN_STABLE_SESSIONS,
+                earlyWindowDays: BASELINE_EARLY_WINDOW_DAYS,
+                daysLeft,
+                firstDate,
+            },
+        };
     }
     if (now < windowEnd) {
         const daysLeft = Math.ceil((windowEnd - now) / DAY_MS);
-        return { baseline: null, reason: `building baseline (${daysLeft}d of early window left)` };
+        return {
+            baseline: null,
+            reason: `building baseline (${daysLeft}d of early window left)`,
+            baselineBuilding: {
+                sessionsInWindow: before.length,
+                sessionsNeeded: BASELINE_MIN_STABLE_SESSIONS,
+                earlyWindowDays: BASELINE_EARLY_WINDOW_DAYS,
+                daysLeft,
+                firstDate,
+            },
+        };
     }
     const baseline = {
         version: BASELINE_VERSION,
@@ -598,11 +620,13 @@ function computeRealizedSavings(openclawDir, days = 30, now = Date.now()) {
         return NOT_READY("no sessions yet");
     // One proxy for unpriced models, derived from full history, used in both eras.
     const globalProxy = dominantPricedModel(history, openclawDir);
-    const { baseline, reason } = getOrComputeBaseline(openclawDir, history, now, globalProxy);
+    const { baseline, reason, baselineBuilding } = getOrComputeBaseline(openclawDir, history, now, globalProxy);
     const installDate = new Date(history[0].ts).toISOString().slice(0, 10);
     if (!baseline) {
         const r = NOT_READY(reason);
         r.installDate = installDate;
+        if (baselineBuilding)
+            r.baselineBuilding = baselineBuilding;
         return r;
     }
     // "After" = recent sessions in the lookback window, strictly after the

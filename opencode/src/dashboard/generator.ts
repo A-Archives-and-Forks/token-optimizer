@@ -211,46 +211,126 @@ tr:hover td { background: var(--bg-hover); }
 
   <!-- SAVINGS -->
   <div class="view" id="view-savings">
-    <div class="section-title">Realized Savings</div>
-    ${!savings.ready ? `
+    <div class="section-title">Token Optimizer &middot; Savings</div>
+
+    ${!savings.ready ? (() => {
+      // New-user view: render baseline-building progress card instead of a dead end.
+      const bb = savings.baselineBuilding;
+      if (bb) {
+        const sNeed = bb.sessionsNeeded;
+        const sHave = Math.min(sNeed, bb.sessionsInWindow);
+        const dLeft = bb.daysLeft;
+        const pct = sNeed > 0 ? Math.min(100, Math.round(sHave / sNeed * 100)) : 0;
+        return `
+    <div style="background:var(--bg-card);border:1px solid var(--accent);border-radius:var(--radius);padding:var(--s-6);margin-bottom:var(--s-4);box-shadow:0 0 0 1px rgba(88,166,255,0.12);">
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--accent);margin-bottom:var(--s-2);">Your savings baseline is still building</div>
+      <div style="font-size:14px;color:var(--text-dim);line-height:1.6;margin-bottom:var(--s-3);">
+        Token Optimizer measures savings against <strong>your own</strong> pre-optimization baseline, frozen from your first ${bb.earlyWindowDays} days of real sessions. It never uses anyone else's numbers.
+      </div>
+      <div style="font-size:14px;color:var(--text);margin-bottom:var(--s-3);">
+        <strong>${sHave} of ~${sNeed} sessions</strong> collected in your baseline window${dLeft > 0 ? `, about <strong>${dLeft} day${dLeft === 1 ? "" : "s"}</strong> until it locks in` : ""}.
+        Until then, the Sessions view shows your current usage.
+      </div>
+      <div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden;">
+        <div style="height:100%;width:${pct}%;background:var(--accent);border-radius:4px;transition:width 0.3s;"></div>
+      </div>
+      <div style="margin-top:var(--s-2);font-size:11px;color:var(--text-dim);">${pct}% complete &middot; first tracked session: ${esc(bb.firstDate)}</div>
+    </div>`;
+      }
+      // Absolute zero state (no sessions at all).
+      return `
     <div class="empty">
-      Realized savings need a baseline of your early usage to compare against.<br>
-      <span style="font-size:13px">${esc(savings.status)}</span>
+      No sessions recorded yet — install the Token Optimizer plugin and start coding to see savings here.
+    </div>`;
+    })() : `
+    <!-- TRANSFORMATION HERO: the big picture estimated (old way vs now). -->
+    <!-- INVARIANT: compressionMeasuredUsd is rendered below as a SEPARATE card    -->
+    <!-- and is NEVER summed into monthlySavingsUsd. Do not change this.           -->
+    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:var(--s-6);margin-bottom:var(--s-4);">
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-2);">The big picture &middot; estimated</div>
+      <div style="display:flex;align-items:baseline;gap:var(--s-2);flex-wrap:wrap;margin-bottom:var(--s-3);">
+        <span style="font-family:monospace;font-size:52px;font-weight:700;line-height:1;color:var(--success)">${fmtCost(Math.max(0, savings.monthlySavingsUsd))}</span>
+        <span style="font-size:20px;color:var(--text-dim);font-family:monospace;">/mo${savings.transformationPct > 0 ? ` &mdash; ~${Math.round(savings.transformationPct * 100)}% lighter` : ""}</span>
+      </div>
+      <div style="font-size:13px;color:var(--text-dim);line-height:1.6;margin-bottom:var(--s-4);">
+        Had you worked this period the way you did before Token Optimizer, you'd have paid about
+        <strong style="color:var(--text)">${fmtCost(Math.max(0, savings.monthlySavingsUsd))} more</strong>
+        &mdash; est. <strong style="color:var(--text)">${fmtCost(savings.actualMonthlyUsd)}</strong> now vs
+        <strong style="color:var(--text)">${fmtCost(savings.counterfactualMonthlyUsd)}</strong> the old way.
+        Your volume is held constant on both sides, so this is pure efficiency, not workload growth.
+      </div>
+      <!-- Old way vs now grid -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:var(--s-4);padding:var(--s-4);background:var(--bg-hover);border-radius:var(--radius);margin-bottom:var(--s-4);">
+        <div>
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-1);">The old way</div>
+          <div style="font-family:monospace;font-size:22px;font-weight:700;color:var(--text)">${fmtCost(savings.beforeCostPerSession)}<span style="font-size:12px;color:var(--text-dim)">/session</span></div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1)">${esc(savings.beforeMixLabel)}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-1);">Now</div>
+          <div style="font-family:monospace;font-size:22px;font-weight:700;color:var(--success)">${fmtCost(savings.afterCostPerSession)}<span style="font-size:12px;color:var(--text-dim)">/session</span></div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1)">${esc(savings.afterMixLabel)}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-1);">Cut per session</div>
+          <div style="font-family:monospace;font-size:22px;font-weight:700;color:var(--success)">${fmtCost(Math.abs(savings.savingsPerSession))}</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1);">across ~${Math.round(savings.sessionsPerMonth)} sessions/mo</div>
+        </div>
+        <div>
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-1);">Saved to date</div>
+          <div style="font-family:monospace;font-size:22px;font-weight:700;color:var(--success)">${fmtCost(savings.cumulativeSavedUsd)}</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1);">all sessions since baseline</div>
+        </div>
+      </div>
+      <!-- Waterfall breakdown: levers telescope to the headline. -->
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-2);">Where it comes from</div>
+      <table>
+        <thead><tr><th>Lever</th><th>Est. $/month</th></tr></thead>
+        <tbody>
+          ${savings.breakdown.filter((b) => Math.abs(b.monthlyUsd) >= 0.005).map((b) => `<tr>
+            <td>${esc(b.label)}</td>
+            <td style="font-family:monospace;color:${b.monthlyUsd >= 0 ? "var(--success)" : "var(--danger)"}">${b.monthlyUsd >= 0 ? "" : "+"}${fmtCost(Math.abs(b.monthlyUsd))}/mo</td>
+          </tr>`).join("")}
+        </tbody>
+      </table>
     </div>
-    <div class="stat-sub" style="margin-top:var(--s-4)">This measures your actual cost-per-session drop over time, priced from your recorded spend. Until the baseline is set, the Sessions view shows current usage.</div>
-    ` : `
-    <div class="stats">
-      <div class="stat">
-        <div class="stat-value" style="color:var(--success)">${fmtCost(Math.max(0, savings.monthlySavingsUsd))}</div>
-        <div class="stat-label">Est. Monthly Savings</div>
-        <div class="stat-sub">${savings.installDate ? "since " + esc(savings.installDate) : ""}</div>
+
+    <!-- MEASURED FLOOR card: the proven, event-by-event subset. -->
+    <!-- SEPARATE from the transformation hero. Never summed into the headline.     -->
+    ${savings.compressionMeasuredUsd >= 0.005 ? `
+    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:var(--s-4) var(--s-4) var(--s-3);margin-bottom:var(--s-4);">
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-2);">Counted directly &middot; measured to date</div>
+      <div style="display:flex;align-items:baseline;gap:var(--s-2);">
+        <span style="font-family:monospace;font-size:32px;font-weight:700;color:var(--text)">${fmtCost(savings.compressionMeasuredUsd)}</span>
+        <span style="font-size:14px;color:var(--text-dim);font-family:monospace;">/mo</span>
       </div>
-      <div class="stat">
-        <div class="stat-value">${fmtCost(savings.beforeCostPerSession)} &rarr; ${fmtCost(savings.afterCostPerSession)}</div>
-        <div class="stat-label">Cost / Session</div>
-        <div class="stat-sub">${savings.savingsPerSession >= 0 ? "&minus;" : "+"}${fmtCost(Math.abs(savings.savingsPerSession))}/session</div>
+      <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-2);line-height:1.6;">
+        Tokens TO removed from your context (tool archives, delta reads, structure maps), as metered, before the baseline-mix reprice.
+        This is the proven, event-by-event floor &mdash; a subset of the transformation estimate above, not added to it.
       </div>
-      <div class="stat">
-        <div class="stat-value">${fmtCost(savings.cumulativeSavedUsd)}</div>
-        <div class="stat-label">Saved So Far</div>
-        <div class="stat-sub">across all sessions since baseline</div>
-      </div>
-      <div class="stat">
-        <div class="stat-value" style="font-size:18px">${esc(savings.beforeMixLabel)} &rarr; ${esc(savings.afterMixLabel)}</div>
-        <div class="stat-label">Model Mix Shift</div>
-        <div class="stat-sub">~${Math.round(savings.sessionsPerMonth)} sessions/mo</div>
+      <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1);">
+        measuring since ${savings.installDate ? esc(savings.installDate) : "your first tracked session"} &mdash; your first tracked session, not necessarily install day
       </div>
     </div>
-    <div class="section-title">Where the savings come from</div>
-    <table>
-      <thead><tr><th>Lever</th><th>Est. $/month</th></tr></thead>
-      <tbody>
-        ${savings.breakdown.filter((b) => Math.abs(b.monthlyUsd) >= 0.005).map((b) => `<tr>
-          <td>${esc(b.label)}</td>
-          <td style="font-family:monospace;color:${b.monthlyUsd >= 0 ? "var(--success)" : "var(--danger)"}">${b.monthlyUsd >= 0 ? "" : "+"}${fmtCost(Math.abs(b.monthlyUsd))}/mo</td>
-        </tr>`).join("")}
-      </tbody>
-    </table>
+    ` : ""}
+
+    <!-- OPPORTUNITY panel: "save more" (amber). -->
+    <!-- Realizable savings inputs: OpenCode pipeline does not yet expose            -->
+    <!-- unused-skill pruning ($) or model-routing potential ($) as separate fields. -->
+    <!-- Scaffolding for when those inputs become available; currently shows a       -->
+    <!-- one-action prompt toward the full /token-optimizer skill flow.              -->
+    <div style="background:var(--bg-card);border:1px solid var(--warning);border-radius:var(--radius);padding:var(--s-4) var(--s-4) var(--s-3);margin-bottom:var(--s-4);box-shadow:0 0 0 1px rgba(210,153,34,0.14);">
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--warning);margin-bottom:var(--s-2);">Money on the table &middot; opportunity</div>
+      <div style="font-size:13px;color:var(--text-dim);line-height:1.6;margin-bottom:var(--s-3);">
+        Real savings you have <strong style="color:var(--text)">not</strong> captured yet &mdash; on top of what you are already saving.
+        OpenCode's pipeline does not yet expose per-opportunity $ figures (unused-skill pruning,
+        model-routing potential, cache-drop cost), so this panel cannot show a dollar total.
+        Run the skill below to surface all actionable opportunities.
+      </div>
+      <div style="padding:var(--s-3) var(--s-4);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:var(--radius);font-family:monospace;font-size:13px;color:var(--text);">
+        Run <span style="color:var(--warning);">/token-optimizer</span> and follow its suggestions to claim the rest &rarr;
+      </div>
+    </div>
     `}
   </div>
 
