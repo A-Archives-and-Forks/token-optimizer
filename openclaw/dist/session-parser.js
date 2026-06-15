@@ -535,11 +535,6 @@ function scanAllSessions(openclawDir, days = 30) {
  * an assistant response (e.g. trailing user messages) are included with
  * zero token counts.
  *
- * Multi-provider token field handling:
- * - Claude (Anthropic): cache_read_input_tokens / cache_creation_input_tokens
- * - GPT-5 / OpenAI: cached_tokens inside usage.prompt_tokens_details
- * - Gemini / others: no cache fields, input/output only
- *
  * Returns TurnData[] sorted by timestamp ascending.
  * Malformed JSONL lines are silently skipped.
  */
@@ -554,7 +549,21 @@ function parseSessionTurns(filePath, openclawDir) {
     catch {
         return [];
     }
-    const lines = content.split("\n");
+    return parseSessionTurnsFromLines(content.split("\n"), openclawDir);
+}
+/**
+ * Parse per-turn data from already-split JSONL lines.
+ *
+ * Split out from {@link parseSessionTurns} so callers that have already read the
+ * file (e.g. {@link extractCostlyPrompts}) can reuse the same lines instead of
+ * reading and splitting the same file a second time.
+ *
+ * Multi-provider token field handling:
+ * - Claude (Anthropic): cache_read_input_tokens / cache_creation_input_tokens
+ * - GPT-5 / OpenAI: cached_tokens inside usage.prompt_tokens_details
+ * - Gemini / others: no cache fields, input/output only
+ */
+function parseSessionTurnsFromLines(lines, openclawDir) {
     const records = [];
     for (const line of lines) {
         const record = parseLine(line);
@@ -725,12 +734,11 @@ function parseSessionTurns(filePath, openclawDir) {
  * @returns CostlyPrompt[] sorted by costUsd descending, length <= topN.
  */
 function extractCostlyPrompts(filePath, topN = 5, openclawDir) {
-    // Get per-turn token/cost data from the existing parser
-    const turns = parseSessionTurns(filePath, openclawDir);
-    if (turns.length === 0)
-        return [];
-    // Re-read the file to extract user message text, walking in document order
-    // so we can pair each user message with the matching turn by turnIndex.
+    // Read the file once, then derive both the per-turn token/cost data and the
+    // user message text from the same lines. (This previously read the file twice:
+    // once inside parseSessionTurns and once here to walk for user text. Reusing the
+    // lines also makes the turn-index pairing immune to the file changing between
+    // two separate reads.)
     let content;
     try {
         const stat = fs.statSync(filePath);
@@ -742,6 +750,11 @@ function extractCostlyPrompts(filePath, topN = 5, openclawDir) {
         return [];
     }
     const lines = content.split("\n");
+    // Get per-turn token/cost data, walking in document order so we can pair each
+    // user message with the matching turn by turnIndex.
+    const turns = parseSessionTurnsFromLines(lines, openclawDir);
+    if (turns.length === 0)
+        return [];
     // Build a turn iterator (turns are sorted ascending by timestamp/turnIndex)
     // We walk records in document order and pair user text with the next assistant turn.
     const turnsByIndex = new Map();
