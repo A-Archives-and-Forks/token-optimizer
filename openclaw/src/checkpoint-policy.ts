@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { appendFileNoFollow, writeFileNoFollow } from "./fs-utils";
 import { AgentRun } from "./models";
 import { contextWindowForModel, scoreSessionQuality } from "./quality";
 import { ContextAudit } from "./context-audit";
@@ -285,7 +286,10 @@ function checkpointStatePath(sessionId: string): string {
 function persistState(sessionId: string, state: SessionCheckpointState): void {
   const dir = ensureSafeCheckpointDirForWrites(sessionId);
   const statePath = safeCheckpointFilePathForWrite(dir, STATE_FILENAME);
-  fs.writeFileSync(
+  // O_NOFOLLOW: refuse to write through a symlink swapped in after the
+  // safeCheckpointFilePathForWrite() lstat check (TOCTOU), matching the
+  // hardening on the artifact/manifest/continuity write paths.
+  writeFileNoFollow(
     statePath,
     JSON.stringify(
       {
@@ -302,7 +306,7 @@ function persistState(sessionId: string, state: SessionCheckpointState): void {
       null,
       2
     ),
-    { encoding: "utf-8", mode: 0o600 }
+    0o600
   );
 }
 
@@ -544,12 +548,9 @@ function appendCheckpointEvent(
       eventKind: telemetry.eventKind,
       model: telemetry.model,
     };
-    const fd = fs.openSync(eventPath, "a", 0o600);
-    try {
-      fs.writeSync(fd, JSON.stringify(event) + "\n");
-    } finally {
-      fs.closeSync(fd);
-    }
+    // O_NOFOLLOW: refuse to append through a symlink swapped in after the
+    // safeCheckpointRootFilePathForWrite() lstat check (TOCTOU).
+    appendFileNoFollow(eventPath, JSON.stringify(event) + "\n", 0o600);
   } catch {
     // Telemetry is best-effort only.
   }

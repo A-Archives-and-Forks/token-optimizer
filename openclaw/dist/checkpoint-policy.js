@@ -53,6 +53,7 @@ exports.cleanupPolicyArtifacts = cleanupPolicyArtifacts;
 exports.getCheckpointHealth = getCheckpointHealth;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
+const fs_utils_1 = require("./fs-utils");
 const quality_1 = require("./quality");
 exports.FILL_BANDS = [20, 35, 50, 65, 80];
 exports.QUALITY_THRESHOLDS = [80, 70, 50, 40];
@@ -231,7 +232,10 @@ function checkpointStatePath(sessionId) {
 function persistState(sessionId, state) {
     const dir = ensureSafeCheckpointDirForWrites(sessionId);
     const statePath = safeCheckpointFilePathForWrite(dir, STATE_FILENAME);
-    fs.writeFileSync(statePath, JSON.stringify({
+    // O_NOFOLLOW: refuse to write through a symlink swapped in after the
+    // safeCheckpointFilePathForWrite() lstat check (TOCTOU), matching the
+    // hardening on the artifact/manifest/continuity write paths.
+    (0, fs_utils_1.writeFileNoFollow)(statePath, JSON.stringify({
         capturedFillBands: [...state.capturedFillBands],
         capturedQualityThresholds: [...state.capturedQualityThresholds],
         capturedMilestones: [...state.capturedMilestones],
@@ -241,7 +245,7 @@ function persistState(sessionId, state) {
         editedFiles: [...state.editedFiles],
         editBatchMarkerWrites: state.editBatchMarkerWrites,
         editBatchMarkerFiles: state.editBatchMarkerFiles,
-    }, null, 2), { encoding: "utf-8", mode: 0o600 });
+    }, null, 2), 0o600);
 }
 function loadPersistedState(sessionId) {
     const sessionDir = resolveSafeExistingCheckpointDir(checkpointSessionDir(sessionId));
@@ -429,13 +433,9 @@ function appendCheckpointEvent(sessionId, trigger, telemetry) {
             eventKind: telemetry.eventKind,
             model: telemetry.model,
         };
-        const fd = fs.openSync(eventPath, "a", 0o600);
-        try {
-            fs.writeSync(fd, JSON.stringify(event) + "\n");
-        }
-        finally {
-            fs.closeSync(fd);
-        }
+        // O_NOFOLLOW: refuse to append through a symlink swapped in after the
+        // safeCheckpointRootFilePathForWrite() lstat check (TOCTOU).
+        (0, fs_utils_1.appendFileNoFollow)(eventPath, JSON.stringify(event) + "\n", 0o600);
     }
     catch {
         // Telemetry is best-effort only.
