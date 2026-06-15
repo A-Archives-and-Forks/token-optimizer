@@ -191,6 +191,79 @@ export class TrendsStore {
     }
   }
 
+  /**
+   * Summarize compression/volume-reduction savings_events over the window for
+   * the realized-savings compression add-back (pool #3).
+   *
+   * Mirrors Python's `_get_savings_summary`: the returned `totalCostSavedUsd` is
+   * the MEASURED compression floor with estimated-tier categories relocated OUT
+   * (setup_optimization, mcp_cap, hint_followed) and tool_archive re-expansions
+   * NETTED against tool_archive (a re-popped result didn't stay collapsed, so its
+   * eager credit is reversed, floored at 0). What remains is the directly-metered
+   * removed-token dollars the old way would have re-read.
+   *
+   * Best-effort: returns zeros on any error (never throws). `now` is injectable
+   * for testing.
+   */
+  getCompressionSavings(days: number = 30, now: number = Date.now()): {
+    totalTokensSaved: number;
+    totalCostSavedUsd: number;
+    totalEvents: number;
+  } {
+    try {
+      const db = this.connect();
+      const cutoff = new Date(now - days * 86_400_000).toISOString();
+      const rows = db
+        .query(
+          `SELECT event_type, COUNT(*) as cnt,
+                  SUM(tokens_saved) as tok, SUM(cost_saved_usd) as cost
+           FROM savings_events WHERE timestamp >= ? GROUP BY event_type`,
+        )
+        .all(cutoff) as Array<{ event_type: string; cnt: number; tok: number | null; cost: number | null }>;
+
+      const byCategory = new Map<string, { events: number; tokens: number; cost: number }>();
+      for (const r of rows) {
+        byCategory.set(r.event_type, {
+          events: r.cnt,
+          tokens: r.tok ?? 0,
+          cost: r.cost ?? 0,
+        });
+      }
+
+      // Relocate estimated-tier categories OUT of the measured total (A1/A3/U-G
+      // in measure.py: setup_optimization is a one-time trim double-counted by
+      // structural_savings; mcp_cap and hint_followed are observed-trigger but
+      // estimated-magnitude). They never belong in the measured realized total.
+      for (const k of ["setup_optimization", "mcp_cap", "hint_followed"]) {
+        byCategory.delete(k);
+      }
+
+      // B6: net tool_archive re-expansions against tool_archive (re-popped
+      // results didn't stay collapsed), floored at 0. The debit is not its own line.
+      const reexpand = byCategory.get("tool_archive_reexpand");
+      if (reexpand) {
+        byCategory.delete("tool_archive_reexpand");
+        const ta = byCategory.get("tool_archive");
+        if (ta) {
+          ta.tokens = Math.max(0, ta.tokens - reexpand.tokens);
+          ta.cost = Math.max(0, ta.cost - reexpand.cost);
+        }
+      }
+
+      let totalTokensSaved = 0;
+      let totalCostSavedUsd = 0;
+      let totalEvents = 0;
+      for (const v of byCategory.values()) {
+        totalTokensSaved += v.tokens;
+        totalCostSavedUsd += v.cost;
+        totalEvents += v.events;
+      }
+      return { totalTokensSaved, totalCostSavedUsd, totalEvents };
+    } catch {
+      return { totalTokensSaved: 0, totalCostSavedUsd: 0, totalEvents: 0 };
+    }
+  }
+
   close(): void {
     if (this.db) {
       this.db.close();

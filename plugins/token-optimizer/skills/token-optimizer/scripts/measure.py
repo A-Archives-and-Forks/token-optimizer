@@ -5632,7 +5632,48 @@ def _run_session_end_flush_worker(args):
     try:
         if _session_refresh_due():
             try:
-                collect_sessions(days=90, quiet=True, rebuild=False)
+                # First-ever collection: DEEP backfill of all history still on disk
+                # (not just the rolling 90-day window), so a long-time user's baseline
+                # freezes from their REAL earliest sessions immediately -- we never make
+                # someone with existing history wait for a fresh 30-day window. Claude
+                # Code purges old transcripts over time, so we grab everything still
+                # present the first chance we get; collect is incremental + zero-token
+                # (it skips files already collected). Subsequent flushes use the rolling
+                # 90-day window. The marker also re-triggers once after an upgrade to this
+                # version, so existing users (e.g. installs that only started collecting
+                # recently) get the deep backfill applied retroactively.
+                _backfill_marker = SNAPSHOT_DIR / ".initial-backfill-done"
+                _attempts_marker = SNAPSHOT_DIR / ".initial-backfill-attempts"
+                _deep = not _backfill_marker.exists()
+                _collect_days = _INITIAL_BACKFILL_DAYS if _deep else 90
+                if _deep:
+                    # Count this attempt BEFORE the heavy call, so a _HookTimeout (which is a
+                    # BaseException that bypasses `except Exception` below) still increments the
+                    # counter. Once we hit the cap, retire the deep glob unconditionally so it
+                    # can never re-fire forever; the rolling 90-day window keeps data current.
+                    try:
+                        _attempts = int(_attempts_marker.read_text().strip() or "0")
+                    except (OSError, ValueError):
+                        _attempts = 0
+                    try:
+                        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+                        _attempts_marker.write_text(str(_attempts + 1))
+                    except OSError:
+                        pass
+                    if _attempts + 1 >= _INITIAL_BACKFILL_MAX_ATTEMPTS:
+                        try:
+                            _backfill_marker.touch()
+                        except OSError:
+                            pass
+                collect_sessions(days=_collect_days, quiet=True, rebuild=False)
+                # Reached only when collect_sessions returns NORMALLY (no timeout): the deep
+                # backfill completed within budget, so mark it done and stop re-globbing.
+                if _deep:
+                    try:
+                        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+                        _backfill_marker.touch()
+                    except OSError:
+                        pass
             except Exception:
                 pass
             try:
@@ -15777,7 +15818,21 @@ def collect_sessions(days=90, quiet=False, rebuild=False):
             continue
 
         new_count += 1
+        # Bank progress every batch so an interrupted deep backfill (a hook timeout
+        # mid-parse) persists what it already collected instead of rolling back the
+        # whole transaction. _is_file_collected skips banked files on the next run, so
+        # the backfill converges over a few cycles rather than looping forever.
+        if new_count % _COLLECT_COMMIT_BATCH == 0:
+            try:
+                conn.commit()
+            except sqlite3.Error:
+                pass
 
+    # ATOMICITY INVARIANT: _rebuild_aggregate_tables does DELETE-then-reINSERT and must
+    # NOT commit internally. The whole wipe+rebuild is one transaction that commits only on
+    # the next line, so a _HookTimeout (BaseException) mid-rebuild rolls back cleanly and the
+    # prior aggregates survive intact. NEVER insert a conn.commit() between the DELETE and the
+    # re-INSERTs -- a half-applied commit would leave the dashboard reading empty aggregates.
     _rebuild_aggregate_tables(conn)
     conn.commit()
     # Ensure schema version is set (idempotent, also set in migration and rebuild)
@@ -17746,7 +17801,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.9"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.10"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -24063,15 +24118,35 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
     sid_safe = sanitize_session_id(session_id) if session_id else None
 
     if new_session_only:
-        # New-session path: offer pointer to recent cross-session checkpoint.
-        # Skip if checkpoint is from the current session (compact-matcher hook handles that).
-        latest = checkpoints[0]
+        # New-session path: offer a pointer to a recent cross-session checkpoint.
+        # Prefer one whose work lives under the CURRENT cwd, so a home-dir / catch-all
+        # cwd does not surface an unrelated project's checkpoint (e.g. a token-optimizer
+        # checkpoint leaking into a Total Recall session run from the same home dir).
+        # When cwd cannot disambiguate, fall back to the most recent but LABEL it with its
+        # project + branch so an irrelevant pointer is self-evidently ignorable, not a
+        # mystery the next session investigates.
+        try:
+            cur = Path(cwd) if cwd else Path.cwd()
+        except Exception:
+            cur = None
+        chosen = None
+        if cur is not None and str(cur) != str(Path.home()):
+            cur_prefix = str(cur) + os.sep
+            for cp in checkpoints:
+                if sid_safe and sid_safe in cp["filename"]:
+                    continue
+                if any(str(p).startswith(cur_prefix) for p in _checkpoint_work_paths(cp["path"])):
+                    chosen = cp
+                    break
+        latest = chosen or checkpoints[0]
         age_seconds = (datetime.now() - latest["created"]).total_seconds()
         if age_seconds > 1800:
             return
         if sid_safe and sid_safe in latest["filename"]:
             return
-        print(f"[Token Optimizer] Previous session checkpoint available at {latest['path']}. Ask me to load it if relevant.")
+        desc = _checkpoint_descriptor(latest["path"])
+        about = f" (prior work on {desc})" if desc else ""
+        print(f"[Token Optimizer] A recent checkpoint is available{about} at {latest['path']}. Load it only if it matches what you are working on now.")
         return
 
     if is_compact and sid_safe:
@@ -24132,6 +24207,57 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
         if latest["created"] >= retention_cutoff:
             print(f"[Token Optimizer] No checkpoint matched this session. Recent checkpoint available at {latest['path']}. Ask me to load it if relevant.")
         return
+
+
+def _checkpoint_work_paths(checkpoint_path):
+    """File paths a checkpoint's session touched (modified + recently read), from its
+    sidecar. Used to tell which PROJECT a checkpoint belongs to so a cross-project
+    pointer is not surfaced (or at least is labelled). Returns [] when unknown."""
+    try:
+        sc = _read_checkpoint_sidecar(checkpoint_path) or {}
+        paths = []
+        for mf in (sc.get("modified_files") or []):
+            p = mf.get("path") if isinstance(mf, dict) else mf
+            if p:
+                paths.append(str(p))
+        paths.extend(str(p) for p in (sc.get("recent_reads") or []) if p)
+        return paths
+    except Exception:
+        return []
+
+
+def _checkpoint_descriptor(checkpoint_path):
+    """Short, human-readable label for a checkpoint (project name + git branch), derived
+    from its sidecar, so a surfaced cross-session pointer is self-identifying. A Total
+    Recall session that is handed a token-optimizer checkpoint can then see "token-optimizer
+    (branch ...)" and ignore it, instead of investigating an unrelated mystery. Returns ''
+    when nothing is known. Never raises."""
+    try:
+        sc = _read_checkpoint_sidecar(checkpoint_path) or {}
+        paths = _checkpoint_work_paths(checkpoint_path)
+        # Project = the most frequent meaningful path segment (commonpath collapses to
+        # $HOME when a session also touches a sibling tree like ~/.claude, so frequency is
+        # more robust). Generic container/scaffolding segments are excluded.
+        generic = {"Users", "home", "CascadeProjects", "Prompts", "Claude-Skills",
+                   ".claude", "projects", "src", "tests", "test", "scripts", "memory",
+                   "assets", "skills", "commands", "docs", "node_modules", "dist", "lib",
+                   Path.home().name, cwd_to_project_dir_name().lstrip("-")}
+        proj = ""
+        if paths:
+            counts = {}
+            for p in paths:
+                for seg in Path(p).parts:
+                    if (seg and seg not in generic and seg not in (os.sep, "/")
+                            and not seg.startswith("-") and not seg.startswith(".")):
+                        counts[seg] = counts.get(seg, 0) + 1
+            if counts:
+                proj = max(counts, key=lambda k: (counts[k], len(k)))
+        branch = ((sc.get("git") or {}).get("branch") or "").strip()
+        topic = (sc.get("topic") or "").strip()
+        bits = [b for b in (proj, (f"branch {branch}" if branch else ""), topic) if b]
+        return " · ".join(dict.fromkeys(bits))
+    except Exception:
+        return ""
 
 
 def _read_checkpoint_sidecar(checkpoint_path):
@@ -28994,6 +29120,23 @@ _BASELINE_MIN_STABLE_SESSIONS = _int_env("TOKEN_OPTIMIZER_BASELINE_MIN_SESSIONS"
 # Matched to a sane floor so the recent-side estimate is not built on a handful of
 # sessions (a thin after-window otherwise swings the headline session to session).
 _AFTER_MIN_SESSIONS = _int_env("TOKEN_OPTIMIZER_AFTER_MIN_SESSIONS", 10)
+# Depth of the ONE-TIME initial backfill (first flush after install/upgrade). A
+# long-time user has months of transcripts still on disk; grab them all so the baseline
+# freezes from their real earliest sessions immediately rather than waiting for a fresh
+# 30-day window. Bounded so the one-off parse stays sane. Rolling collections use 90d.
+_INITIAL_BACKFILL_DAYS = _int_env("TOKEN_OPTIMIZER_INITIAL_BACKFILL_DAYS", 365)
+# Commit collected sessions in batches so an interrupted backfill banks progress instead
+# of discarding the whole transaction. Without this, a deep first-run backfill that exceeds
+# the SessionEnd hook's _HookTimeout would commit NOTHING and never write its success
+# marker, re-parsing from scratch every flush in a permanent loop (torture-room blocker).
+_COLLECT_COMMIT_BATCH = _int_env("TOKEN_OPTIMIZER_COLLECT_COMMIT_BATCH", 200)
+# Hard cap on deep-backfill attempts. collect_sessions raises _HookTimeout (a BaseException,
+# NOT caught by `except Exception`) when the 365-day parse exceeds the hook budget, so the
+# success marker would never be written and the deep glob would re-fire on every SessionEnd.
+# The batch-commit above means each attempt banks real progress, so a few attempts collect a
+# large history incrementally; this cap then guarantees termination (after N tries we stop the
+# deep glob and let the rolling 90-day window keep things current). Belt and suspenders.
+_INITIAL_BACKFILL_MAX_ATTEMPTS = _int_env("TOKEN_OPTIMIZER_INITIAL_BACKFILL_MAX_ATTEMPTS", 5)
 
 
 def _session_token_vector(row):
@@ -29091,7 +29234,12 @@ def _compute_baseline_state():
             rows = conn.execute(
                 "SELECT date, input_tokens, output_tokens, cache_create_5m_tokens, "
                 "cache_create_1h_tokens, cache_hit_rate FROM session_log "
-                "WHERE input_tokens IS NOT NULL ORDER BY date, id"
+                # Human sessions only -- the baseline anchor must count the same population
+                # as _baseline_progress (the "ready" signal) and _mix_from_session_rows, so
+                # heavy sidechain/subagent volume can't inflate the frozen typical-session
+                # vector or qualify the window before the human-session count is actually met.
+                "WHERE input_tokens IS NOT NULL AND COALESCE(is_sidechain, 0) = 0 "
+                "ORDER BY date, id"
             ).fetchall()
         finally:
             conn.close()
@@ -29454,6 +29602,49 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
         return zero
 
 
+def _baseline_progress():
+    """How close THIS user is to a frozen baseline, for the dashboard's "building" state.
+
+    A new install has no frozen anchor yet (we never freeze a half-formed window), so the
+    headline transformation can't be computed. Rather than show nothing, the dashboard
+    shows progress: sessions collected in the early window vs the floor, and days until the
+    window closes. Returns None when there is no data at all. Never raises.
+    """
+    try:
+        if not TRENDS_DB.exists():
+            return None
+        conn = _init_trends_db()
+        try:
+            rows = conn.execute(
+                "SELECT date FROM session_log WHERE input_tokens IS NOT NULL "
+                "AND COALESCE(is_sidechain, 0) = 0 ORDER BY date, id"
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return None
+        first = datetime.fromisoformat(str(rows[0][0])[:10])
+        win_start = first + timedelta(days=_BASELINE_ONBOARDING_DAYS)
+        win_end = win_start + timedelta(days=_BASELINE_EARLY_WINDOW_DAYS)
+        in_window = sum(
+            1 for r in rows
+            if win_start <= datetime.fromisoformat(str(r[0])[:10]) < win_end
+        )
+        now = datetime.now()
+        days_left = max(0, (win_end - now).days)
+        ready = in_window >= _BASELINE_MIN_STABLE_SESSIONS and now >= win_end
+        return {
+            "ready": ready,
+            "first_date": str(rows[0][0])[:10],
+            "sessions_in_window": in_window,
+            "sessions_needed": _BASELINE_MIN_STABLE_SESSIONS,
+            "early_window_days": _BASELINE_EARLY_WINDOW_DAYS,
+            "days_left": days_left,
+        }
+    except Exception:
+        return None
+
+
 def _estimate_before_after_savings(days=30):
     """THE headline saving: your CURRENT 30-day volume, held constant, priced at your
     PRE-TO efficiency (~95% Opus + baseline cache pattern) vs what it actually cost.
@@ -29474,9 +29665,11 @@ def _estimate_before_after_savings(days=30):
       3. COUNTERFACTUAL ("the old way") = same volume, but caching redistributed over the
          FRESH+CACHE_READ POOL (pool = total_in - CW) at the BASELINE pool-hit rate
          (cf_CR = base_hit*pool; cf_F = pool - cf_CR), pool priced at the BASELINE model
-         mix (~95% Opus). CW count is held constant AND priced at the same (after) mix on
-         both arms (cache-write is not a routing lever). The invariant cf_F + cf_CR + CW ==
-         total_in holds exactly, so the counterfactual never prices more volume than moved.
+         mix (~95% Opus). CW count is held constant in tokens but priced at EACH ARM'S OWN
+         mix (baseline mix in the counterfactual, actual mix in actual): cache-write IS a
+         routing lever, since cache-creation tokens bill at the writing model's rate. The
+         invariant cf_F + cf_CR + CW == total_in holds exactly, so the counterfactual never
+         prices more volume than moved.
       4. TRANSFORMATION (monthly) = COUNTERFACTUAL - ACTUAL. The window is already 30d,
          so the figure is already monthly. Clamped >= 0 for display.
 
@@ -29520,7 +29713,8 @@ def _estimate_before_after_savings(days=30):
         # window, held constant across both arms.
         baseline = _get_baseline_state()
         if not baseline or not baseline.get("typical_session"):
-            return {**zero, "reason": "insufficient_history"}
+            return {**zero, "reason": "insufficient_history",
+                    "baseline_building": _baseline_progress()}
         ts = baseline["typical_session"]
         bfi = float(ts.get("fresh_input", 0) or 0)
         bcw = float(ts.get("cache_write", 0) or 0)
@@ -29594,7 +29788,8 @@ def _estimate_before_after_savings(days=30):
             conn.close()
         recent_n = len(recent_rows)
         if recent_n < _AFTER_MIN_SESSIONS:
-            return {**zero, "before_sessions": bn, "reason": "no_recent_sessions"}
+            return {**zero, "before_sessions": bn, "reason": "no_recent_sessions",
+                    "baseline_building": _baseline_progress()}
 
         # Aggregate the current window into billed token classes (sum, not mean): the
         # counterfactual holds this TOTAL volume constant and swaps only efficiency.
@@ -29695,7 +29890,10 @@ def _estimate_before_after_savings(days=30):
         # ACTUAL = current volume at the current model mix (what it really cost). The pool
         # (fresh + cache_read) AND cache-write (TTL-aware) priced at the after mix.
         actual_monthly = price(F, CR, O, after_shares) + price_cw(after_shares)
-        if actual_monthly <= 0:
+        # `NaN <= 0` is False, so a non-finite price (e.g. a corrupt custom pricing tier
+        # carrying inf/NaN) would slip past the guard and propagate NaN into the headline.
+        # Treat non-finite as insufficient_history and bail to zero.
+        if not math.isfinite(actual_monthly) or actual_monthly <= 0:
             return {**zero, "before_sessions": bn, "after_sessions": recent_n,
                     "reason": "insufficient_history"}
 
@@ -29710,17 +29908,45 @@ def _estimate_before_after_savings(days=30):
         cf_F = pool - cf_CR
         counterfactual_monthly = price(cf_F, cf_CR, O, before_shares) + price_cw(before_shares)
 
+        # COMPRESSION ADD-BACK (#4): the VOLUME-REDUCTION lever. Token Optimizer REMOVES
+        # tokens from context (tool_archive, structure_map skeletons, resume_lean,
+        # checkpoint_restore, delta_read). Those tokens are real volume the OLD way would
+        # have kept re-reading and paying for. They are NOT in session_log (already removed
+        # before billing), so this pool is DISJOINT from the main pool AND from the caching
+        # lever (which only redistributes BILLED fresh+cache_read tokens). We take the
+        # directly-METERED removed-token dollars (savings_events) and reprice them to the
+        # baseline input mix: the ~95% Opus "old way" would have paid even more per re-read
+        # than today's mix did. The measured figure is the proven floor of this lever; the
+        # reprice (baseline_input_rate / current_input_rate) is the only estimated step and
+        # is disclosed. actual for this pool is 0 (the tokens were never billed), so its
+        # whole repriced value is transformation. (Spec #4, enabled per owner decision
+        # 2026-06-15: keep volume-reduction IN the headline so it is a true superset.)
+        comp = _get_savings_summary(days=days)
+        comp_measured = float((comp or {}).get("total_cost_usd", 0.0) or 0.0)
+        in_after = price(1_000_000.0, 0.0, 0.0, after_shares)
+        in_before = price(1_000_000.0, 0.0, 0.0, before_shares)
+        # KNOWN LIMITATION (cross-provider only): the reprice uses the FRESH-INPUT rate ratio,
+        # but most removed tokens were avoided cache-READ re-reads. For Claude tiers this is
+        # exact -- input and cache_read rates are proportional within a tier, so the ratio is
+        # identical either way. For mixed OpenAI/Gemini baselines (where cache_read is not a
+        # clean fraction of input) it can over/understate. Acceptable now (headline is Claude-
+        # centric); revisit by repricing at the cache_read ratio or blending by event class.
+        comp_reprice = (in_before / in_after) if in_after > 0 else 1.0
+        compression_addback = max(0.0, comp_measured * comp_reprice)
+
         # MAIN TRANSFORMATION = counterfactual - actual (main pool). The window is 30d, so
         # this is already the monthly figure. Clamp >= 0: if the "old way" would somehow be
         # cheaper (net-negative efficiency on the main pool), show no MAIN transformation
         # rather than a negative -- but the subagent pool can still carry the headline.
         main_transformation = max(0.0, counterfactual_monthly - actual_monthly)
-        if main_transformation <= 0 and sub_transformation <= 0:
+        if main_transformation <= 0 and sub_transformation <= 0 and compression_addback <= 0:
             return {**zero, "before_sessions": bn, "after_sessions": recent_n,
                     "actual_monthly_usd": round(actual_monthly, 2),
                     "counterfactual_monthly_usd": round(counterfactual_monthly, 2),
                     "main_transformation_usd": 0.0,
                     "subagent_transformation_usd": 0.0,
+                    "compression_transformation_usd": 0.0,
+                    "compression_measured_usd": round(comp_measured, 2),
                     "subagent_actual_usd": round(sub_actual, 2),
                     "subagent_counterfactual_usd": round(sub_cf, 2),
                     "subagent_sessions": int(sub_pool.get("sessions", 0) or 0),
@@ -29730,11 +29956,13 @@ def _estimate_before_after_savings(days=30):
                     "before_mix_label": _mix_label(before_shares),
                     "after_mix_label": _mix_label(after_shares),
                     "reason": "net_negative"}
-        # Combined headline = main + subagent (separate, non-overlapping pools). The pct is
-        # over the COMBINED counterfactual (main cf + subagent cf) so it reflects the full
-        # spend base being transformed.
-        transformation = main_transformation + sub_transformation
-        combined_counterfactual = counterfactual_monthly + sub_cf
+        # Combined headline = main + subagent + compression add-back (three separate,
+        # non-overlapping pools). The pct is over the COMBINED counterfactual (main cf +
+        # subagent cf + compression add-back) so it reflects the full spend base being
+        # transformed. The compression pool's actual is 0, so its counterfactual == its
+        # transformation contribution.
+        transformation = main_transformation + sub_transformation + compression_addback
+        combined_counterfactual = counterfactual_monthly + sub_cf + compression_addback
         transformation_pct = (transformation / combined_counterfactual
                               if combined_counterfactual > 0 else 0.0)
 
@@ -29768,6 +29996,8 @@ def _estimate_before_after_savings(days=30):
              "Heavier context re-reads (added cost)", s_cache),
             ("subagent_routing", "Cheaper subagents (lighter delegation)",
              "Subagents shifted to costlier models (added cost)", sub_transformation),
+            ("context_compression", "Lighter context (fewer re-reads, metered)",
+             "Lighter context (fewer re-reads, metered)", compression_addback),
         ]
         breakdown = sorted(
             ({"key": k, "waterfall_index": i,
@@ -29782,8 +30012,11 @@ def _estimate_before_after_savings(days=30):
             "Optimizer (~95% Opus, your old cache pattern). The difference is split between "
             "model routing (including cache-write, which is billed at the writing model's "
             "rate) and caching. Subagent (sidechain) routing is counted as a separate pool "
-            "and added to the headline. Volume is identical on both sides, so workload "
-            "growth never inflates or zeroes the figure -- only efficiency does."
+            "and added to the headline. A fourth pool adds the directly-metered tokens Token "
+            "Optimizer removed from context (tool archiving, skeletons, lean resumes) -- real "
+            "volume the old way would have re-read -- repriced at the baseline mix. The "
+            "billed-volume levers are identical on both sides, so workload growth never "
+            "inflates or zeroes the figure -- only efficiency and metered removals do."
         )
 
         # Keep the existing per-session keys populated (the dashboard reads them): divide
@@ -29795,15 +30028,17 @@ def _estimate_before_after_savings(days=30):
         # ("est. $X now vs $Y the old way") spans both pools, so report the combined
         # actual/counterfactual while keeping the main-only figures available too.
         combined_actual = actual_monthly + sub_actual
-        combined_cf = counterfactual_monthly + sub_cf
+        combined_cf = counterfactual_monthly + sub_cf + compression_addback
         return {
             "before_cost_per_session": round(before_cps, 4),
             "after_cost_per_session": round(after_cps, 4),
             "savings_per_session": round(before_cps - after_cps, 4),
             "sessions_per_month": recent_n,
-            "monthly_savings_usd": round(transformation, 2),  # = main + subagent
+            "monthly_savings_usd": round(transformation, 2),  # = main + subagent + compression
             "main_transformation_usd": round(main_transformation, 2),
             "subagent_transformation_usd": round(sub_transformation, 2),
+            "compression_transformation_usd": round(compression_addback, 2),
+            "compression_measured_usd": round(comp_measured, 2),
             # Headline arms span both pools (combined).
             "counterfactual_monthly_usd": round(combined_cf, 2),
             "actual_monthly_usd": round(combined_actual, 2),
@@ -30607,8 +30842,13 @@ def run_ensure_health():
     # v5.4.9: dual marker check. Version string alone isn't enough --
     # if a future release shares TOKEN_OPTIMIZER_VERSION with existing
     # HTML but changes the data shape, users would silently see stale
-    # numbers. Also check for the shape marker "total_fresh_input" which
-    # was introduced in v5.4.9 as the headline billable source of truth.
+    # numbers. We also check for a SHAPE marker keyed to the newest data
+    # contract, so a dashboard generated before that contract is always
+    # rebuilt even if its version string somehow matches. The marker tracks
+    # the latest headline shape: "compression_transformation_usd" is the
+    # 4-pool superset key (routing + caching + subagent + compression
+    # add-back) introduced with the current methodology, so any dashboard
+    # missing it predates the corrected calculation and is force-refreshed.
     try:
         if DASHBOARD_PATH.exists():
             # v5.4.14: read FULL file, not a head slice. The version marker
@@ -30623,7 +30863,7 @@ def run_ensure_health():
             except OSError:
                 head = ""
             version_marker = f'"version": "{TOKEN_OPTIMIZER_VERSION}"'
-            shape_marker = '"total_fresh_input"'  # present in v5.4.9+ only
+            shape_marker = '"compression_transformation_usd"'  # 4-pool superset; current methodology only
             if version_marker not in head or shape_marker not in head:
                 try:
                     generate_standalone_dashboard(quiet=True, force=True)
