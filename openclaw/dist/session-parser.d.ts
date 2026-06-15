@@ -62,11 +62,6 @@ export declare function scanAllSessions(openclawDir: string, days?: number): Age
  * an assistant response (e.g. trailing user messages) are included with
  * zero token counts.
  *
- * Multi-provider token field handling:
- * - Claude (Anthropic): cache_read_input_tokens / cache_creation_input_tokens
- * - GPT-5 / OpenAI: cached_tokens inside usage.prompt_tokens_details
- * - Gemini / others: no cache fields, input/output only
- *
  * Returns TurnData[] sorted by timestamp ascending.
  * Malformed JSONL lines are silently skipped.
  */
