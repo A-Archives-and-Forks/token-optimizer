@@ -243,6 +243,18 @@ else:
     _CONFIG_BASE = None  # resolved below after constants
 
 DASHBOARD_PATH = SNAPSHOT_DIR / "dashboard.html"
+# Headline-shape marker for the current dashboard data contract (4-pool superset:
+# routing + caching + subagent + compression add-back). Bumped only when the data
+# shape changes; ensure-health regenerates any dashboard whose sidecar meta lacks it.
+_DASHBOARD_SHAPE_MARKER = "compression_transformation_usd"
+
+
+def _dashboard_meta_path(html_path):
+    """Tiny sidecar recording the (version, shape) a dashboard HTML was generated
+    with, so the SessionStart staleness check reads a ~40-byte JSON file instead
+    of scanning the 4-5MB HTML every session (the marker can sit megabytes deep
+    in __TOKEN_DATA__)."""
+    return Path(html_path).with_suffix(".meta.json")
 
 
 def _use_codex_session_adapter(filepath=None):
@@ -934,15 +946,28 @@ def resolve_real_path(filepath):
         return filepath
 
 
+def _encode_project_dir_name(path_str):
+    """Encode an absolute path the way Claude Code names its project dirs.
+
+    Claude Code replaces EVERY non-alphanumeric character with '-' (no collapsing
+    of consecutive dashes). This matters on Windows, where a path like
+    `D:\\Code\\my app` must become `D--Code-my-app` -- the old `/`-and-`_`-only
+    replacement left the drive colon, backslashes, and spaces intact, so the
+    encoded name never matched and `find_projects_dir` fell back to the most
+    recently modified project across ALL projects (GitHub #61, cross-project
+    leak). A leading separator still yields the leading '-' on POSIX, and POSIX
+    paths with spaces now encode correctly too.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path_str))
+
+
 def cwd_to_project_dir_name():
     """Convert cwd to Claude Code project directory name format.
 
-    Claude Code encodes project paths by replacing / with - and dropping leading -.
-    e.g., /Users/alex/myproject -> -Users-alex-myproject
+    e.g. /Users/alex/my project -> -Users-alex-my-project
+         D:\\Code\\my app       -> D--Code-my-app  (Windows)
     """
-    cwd = str(Path.cwd())
-    # Claude Code normalizes underscores to hyphens in project dir names
-    return "-" + cwd.replace("/", "-").replace("_", "-").lstrip("-")
+    return _encode_project_dir_name(Path.cwd())
 
 
 def find_projects_dir():
@@ -960,7 +985,7 @@ def find_projects_dir():
     # Fallback: try parent directories (user may be in a subdirectory)
     cwd = Path.cwd()
     for parent in list(cwd.parents)[:5]:
-        parent_name = "-" + str(parent).replace("/", "-").lstrip("-")
+        parent_name = _encode_project_dir_name(parent)
         parent_dir = projects_base / parent_name
         if parent_dir.exists():
             return parent_dir
@@ -5566,6 +5591,19 @@ def generate_standalone_dashboard(days=30, quiet=False, force=False):
         if not quiet:
             print("  [Error] Failed to write dashboard to any path")
         return None
+
+    # Sidecar meta (version + shape) next to each written HTML, so ensure-health's
+    # staleness check reads a few bytes instead of the whole 4-5MB file.
+    _meta_blob = json.dumps({
+        "version": TOKEN_OPTIMIZER_VERSION,
+        "shape": _DASHBOARD_SHAPE_MARKER,
+    })
+    for wp in write_paths:
+        try:
+            if wp.exists():
+                _dashboard_meta_path(wp).write_text(_meta_blob, encoding="utf-8")
+        except OSError:
+            pass
 
     if not quiet:
         print(f"  Dashboard: {DASHBOARD_PATH}")
@@ -17801,7 +17839,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.11"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.12"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -19733,8 +19771,19 @@ def _uninstall_task_scheduler_daemon():
         print("[Token Optimizer] No daemon artifacts found. Nothing to remove.")
 
 
-SYSTEMD_UNIT_NAME = "token-optimizer-codex-dashboard.service" if _DAEMON_RUNTIME == "codex" else "token-optimizer-dashboard.service"
-LINUX_LAUNCHER_NAME = "codex-dashboard-launcher.sh" if _DAEMON_RUNTIME == "codex" else "dashboard-launcher.sh"
+# Runtime-suffix-derived (not a codex-vs-else ternary) so hermes/copilot get
+# their own unit + launcher names instead of colliding on the Claude ones, the
+# same way DAEMON_LABEL / WINDOWS_TASK_NAME already distinguish every runtime.
+SYSTEMD_UNIT_NAME = (
+    f"token-optimizer-{_DAEMON_RUNTIME_SUFFIX}-dashboard.service"
+    if _DAEMON_RUNTIME_SUFFIX != "claude"
+    else "token-optimizer-dashboard.service"
+)
+LINUX_LAUNCHER_NAME = (
+    f"{_DAEMON_RUNTIME_SUFFIX}-dashboard-launcher.sh"
+    if _DAEMON_RUNTIME_SUFFIX != "claude"
+    else "dashboard-launcher.sh"
+)
 
 
 def _generate_linux_launcher_sh(daemon_script_path, log_dir):
@@ -24653,6 +24702,20 @@ def _checkpoint_in_project(sidecar, cwd):
     """
     if not cwd or not isinstance(sidecar, dict):
         return False
+
+    # Normalize separators (and case on case-insensitive filesystems) before any
+    # prefix comparison. Windows sidecar/cwd paths use backslashes, so the old
+    # `rstrip("/")` was a no-op and `root + "/"` could never prefix a
+    # backslash-separated path -- this always returned False on Windows, silently
+    # disabling the same-project filter and leaking cross-project context
+    # (GitHub #61). macOS/Windows default filesystems are case-insensitive, so we
+    # casefold there too for a robust match.
+    _case_insensitive = platform.system() in ("Windows", "Darwin")
+
+    def _norm(p):
+        s = str(p).replace("\\", "/").rstrip("/")
+        return s.casefold() if _case_insensitive else s
+
     # Compare against BOTH the symlink-resolved and the raw cwd: checkpoint
     # sidecars store file paths exactly as Claude Code reported them (unresolved),
     # but Path.resolve() expands symlinks (e.g. macOS /tmp -> /private/tmp). Matching
@@ -24660,10 +24723,10 @@ def _checkpoint_in_project(sidecar, cwd):
     # which would drop the same-project filter and leak cross-project context.
     roots = set()
     try:
-        roots.add(str(Path(cwd).resolve()).rstrip("/"))
+        roots.add(_norm(Path(cwd).resolve()))
     except (OSError, RuntimeError, ValueError):
         pass
-    roots.add(str(cwd).rstrip("/"))
+    roots.add(_norm(cwd))
     roots = {r for r in roots if r}
     if not roots:
         return False
@@ -24673,10 +24736,10 @@ def _checkpoint_in_project(sidecar, cwd):
         for item in mod:
             p = item.get("path") if isinstance(item, dict) else item
             if p:
-                paths.append(str(p))
+                paths.append(_norm(p))
     reads = sidecar.get("recent_reads")
     if isinstance(reads, list):
-        paths.extend(str(p) for p in reads if p)
+        paths.extend(_norm(p) for p in reads if p)
     for p in paths:
         for root in roots:
             if p == root or p.startswith(root + "/"):
@@ -24825,6 +24888,13 @@ def _continuity_prompt_hint(prompt_text="", session_id=None, cwd=None, max_age_m
                 continue
             score, sidecar = _checkpoint_topic_score(text, checkpoint, cwd=cwd)
             if score >= _RELEVANCE_THRESHOLD:
+                # Project-scope when cwd is known: the lightweight hint must NOT
+                # surface checkpoints from OTHER projects (GitHub #61 -- a fresh
+                # prompt in project A was receiving project B's tasks/decisions).
+                # The resume path already filters this way; the lightweight pool
+                # now mirrors it. cwd unknown -> best-effort global (unchanged).
+                if cwd and not _checkpoint_in_project(sidecar, cwd):
+                    continue
                 composite = score * activity_weight
                 candidates.append({
                     "composite": composite,
@@ -31246,20 +31316,32 @@ def run_ensure_health():
     # missing it predates the corrected calculation and is force-refreshed.
     try:
         if DASHBOARD_PATH.exists():
-            # v5.4.14: read FULL file, not a head slice. The version marker
-            # lives inside __TOKEN_DATA__ which can be 4-5MB on active users.
-            # A 256KB cap missed the marker at byte 4.8M, causing a 24s full
-            # regen on EVERY SessionStart (Performance Oracle HIGH finding).
-            # Full read costs ~2ms (measured); the regen it prevents costs 24s.
-            head = ""
-            try:
-                with open(str(DASHBOARD_PATH), "r", encoding="utf-8", errors="replace") as _f:
-                    head = _f.read()
-            except OSError:
-                head = ""
-            version_marker = f'"version": "{TOKEN_OPTIMIZER_VERSION}"'
-            shape_marker = '"compression_transformation_usd"'  # 4-pool superset; current methodology only
-            if version_marker not in head or shape_marker not in head:
+            # Cheap staleness check via the sidecar meta (~40 bytes) instead of
+            # scanning the 4-5MB HTML every SessionStart. The dashboard is fresh
+            # iff the sidecar's version+shape match the running build. A missing
+            # sidecar = a dashboard generated before this scheme: fall back to the
+            # one-time full-HTML scan, then the regen writes the sidecar so every
+            # subsequent session takes the cheap path.
+            _fresh = False
+            _meta_path = _dashboard_meta_path(DASHBOARD_PATH)
+            if _meta_path.exists():
+                try:
+                    _meta = json.loads(_meta_path.read_text(encoding="utf-8"))
+                    _fresh = (isinstance(_meta, dict)
+                              and _meta.get("version") == TOKEN_OPTIMIZER_VERSION
+                              and _meta.get("shape") == _DASHBOARD_SHAPE_MARKER)
+                except (OSError, json.JSONDecodeError, ValueError):
+                    _fresh = False
+            else:
+                # Legacy dashboard with no sidecar: scan the HTML once.
+                try:
+                    with open(str(DASHBOARD_PATH), "r", encoding="utf-8", errors="replace") as _f:
+                        _html = _f.read()
+                    _fresh = (f'"version": "{TOKEN_OPTIMIZER_VERSION}"' in _html
+                              and _DASHBOARD_SHAPE_MARKER in _html)
+                except OSError:
+                    _fresh = False
+            if not _fresh:
                 try:
                     generate_standalone_dashboard(quiet=True, force=True)
                     print(f"  [Token Optimizer] Refreshed dashboard to v{TOKEN_OPTIMIZER_VERSION}")
