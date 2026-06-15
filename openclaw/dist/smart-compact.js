@@ -60,6 +60,37 @@ function isWithinDir(root, candidate) {
     const relative = path.relative(root, candidate);
     return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
+/**
+ * Write a file while refusing to follow a symlink at the final path component.
+ *
+ * The safe*Path() guards lstat the target before returning it, but a TOCTOU
+ * window remains between that check and the write: another process could swap
+ * the target for a symlink in between. Opening with O_NOFOLLOW makes the kernel
+ * reject the open with ELOOP if the final component is a symlink at open time,
+ * so the write can never land on an attacker-planted link. O_TRUNC overwrites
+ * an existing regular checkpoint file in place (no O_EXCL).
+ *
+ * Limitations (this narrows the race, it does not close it entirely):
+ *  - Only the FINAL component is protected, not parent directories. Parent dirs
+ *    remain covered by the lstat/realpath checks in the safe*Path() helpers.
+ *  - O_NOFOLLOW only rejects symlinks, not hardlinks. A pre-planted hardlink at
+ *    a fixed-name target would still be written through; closing that needs a
+ *    write-to-temp-then-rename pattern, out of scope for this symlink fix.
+ *  - POSIX-only: fs.constants.O_NOFOLLOW is undefined on Windows and ORs in as
+ *    0, so the open still succeeds but without the guard -- Windows simply keeps
+ *    the pre-existing lstat-based protection level (no regression).
+ */
+function writeFileNoFollow(filePath, data, mode) {
+    const fd = fs.openSync(filePath, 
+    // eslint-disable-next-line no-bitwise
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, mode);
+    try {
+        fs.writeFileSync(fd, data, "utf-8");
+    }
+    finally {
+        fs.closeSync(fd);
+    }
+}
 function checkpointRootDir() {
     return path.dirname((0, checkpoint_policy_1.checkpointSessionDir)("__root_probe__"));
 }
@@ -264,7 +295,11 @@ function buildCheckpointBody(sessionId, messages, maxMessages, options) {
 function appendCheckpointManifest(sessionId, entry) {
     const manifestPath = safeManifestPath(sessionId);
     fs.mkdirSync(path.dirname(manifestPath), { recursive: true, mode: 0o700 });
-    const fd = fs.openSync(manifestPath, "a", 0o600);
+    // O_NOFOLLOW: refuse to append through a symlink swapped in after the
+    // safeManifestPath() lstat check (TOCTOU). Append mode preserves prior entries.
+    const fd = fs.openSync(manifestPath, 
+    // eslint-disable-next-line no-bitwise
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o600);
     try {
         fs.writeSync(fd, JSON.stringify(entry) + "\n");
     }
@@ -348,7 +383,7 @@ function writeCheckpointArtifact(session, maxMessages, options) {
     const filename = checkpointFilename(timestamp, trigger);
     const filepath = safeCheckpointPath(sessionId, filename);
     try {
-        fs.writeFileSync(filepath, body, { encoding: "utf-8", mode: 0o600 });
+        writeFileNoFollow(filepath, body, 0o600);
     }
     catch {
         return null;
@@ -589,7 +624,7 @@ function captureCheckpointV2(session, maxRecentMessages = 10, options = {}) {
     const filename = checkpointFilename(timestamp, bodyOptions.trigger ?? "compact");
     const filepath = safeCheckpointPath(session.sessionId, filename);
     try {
-        fs.writeFileSync(filepath, lines.join("\n"), { encoding: "utf-8", mode: 0o600 });
+        writeFileNoFollow(filepath, lines.join("\n"), 0o600);
     }
     catch {
         return null;
