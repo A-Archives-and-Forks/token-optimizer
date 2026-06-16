@@ -29,8 +29,11 @@ export default defineConfig({
       favicon: "/favicon.ico",
       components: {
         // Enables Astro view transitions so navigation swaps content in place
-        // instead of a full page reload (kills the white flash between pages).
+        // instead of a full page reload (kills the white flash between pages),
+        // and preserves the left-sidebar scroll position across navigations.
         Head: "./src/components/Head.astro",
+        // Adds a "Star on GitHub" button alongside the default social icons.
+        SocialIcons: "./src/components/SocialIcons.astro",
       },
       customCss: ["./src/styles/theme.css"],
       lastUpdated: true,
@@ -44,6 +47,11 @@ export default defineConfig({
           icon: "github",
           label: "GitHub",
           href: "https://github.com/alexgreensh/token-optimizer",
+        },
+        {
+          icon: "x.com",
+          label: "X",
+          href: "https://x.com/alexgreensh",
         },
         {
           icon: "linkedin",

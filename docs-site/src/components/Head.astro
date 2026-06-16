@@ -8,3 +8,27 @@ import { ClientRouter } from "astro:transitions";
 
 <Default><slot /></Default>
 <ClientRouter />
+
+{/*
+  ClientRouter swaps the page content but re-renders the left sidebar fresh,
+  which resets its scroll position to the top on every link click. Save the
+  sidebar's scroll offset right before the swap and restore it right after, so
+  the reader keeps their spot in a long menu. Listeners attach once (document
+  survives soft navigations); restore only fires during view-transition
+  navigations, so a hard load still lets Starlight scroll to the active item.
+*/}
+<script is:inline>
+  (function () {
+    var KEY = "sl-sidebar-scroll";
+    var pane = function () { return document.getElementById("starlight__sidebar"); };
+    document.addEventListener("astro:before-swap", function () {
+      var el = pane();
+      if (el) sessionStorage.setItem(KEY, String(el.scrollTop));
+    });
+    document.addEventListener("astro:after-swap", function () {
+      var el = pane();
+      var v = sessionStorage.getItem(KEY);
+      if (el && v !== null) el.scrollTop = parseInt(v, 10) || 0;
+    });
+  })();
+</script>
