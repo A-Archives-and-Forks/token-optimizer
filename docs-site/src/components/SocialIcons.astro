@@ -1,0 +1,65 @@
+---
+// Overrides Starlight's SocialIcons to prepend a "Star on GitHub" button to the
+// header's top line, then renders the default social icons (GitHub, X, LinkedIn).
+import Default from "@astrojs/starlight/components/SocialIcons.astro";
+
+const REPO_URL = "https://github.com/alexgreensh/token-optimizer";
+---
+
+<a
+  class="star-on-github"
+  href={REPO_URL}
+  target="_blank"
+  rel="noopener noreferrer"
+  aria-label="Star Token Optimizer on GitHub"
+>
+  <svg aria-hidden="true" width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+    <path
+      d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"
+    ></path>
+  </svg>
+  <span>Star on GitHub</span>
+</a>
+
+<Default {...Astro.props}><slot /></Default>
+
+<style>
+  .star-on-github {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.34rem 0.72rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 9999px;
+    font-size: var(--sl-text-xs);
+    font-weight: 600;
+    line-height: 1;
+    color: var(--sl-color-white);
+    background: var(--sl-color-bg-nav);
+    text-decoration: none;
+    white-space: nowrap;
+    transition:
+      color 0.15s ease,
+      border-color 0.15s ease;
+  }
+  .star-on-github:hover {
+    color: var(--sl-color-accent-high);
+    border-color: var(--sl-color-accent);
+  }
+  .star-on-github svg {
+    color: var(--sl-color-accent);
+    flex-shrink: 0;
+  }
+  .star-on-github:hover svg {
+    color: var(--sl-color-accent-high);
+  }
+  /* Keep the header uncluttered on small screens: drop the label, keep the pill. */
+  @media (max-width: 50rem) {
+    .star-on-github span {
+      display: none;
+    }
+    .star-on-github {
+      padding: 0.34rem 0.46rem;
+    }
+  }
+</style>
