@@ -38,6 +38,11 @@
 <p align="center"><em>Optimize every session, then watch the dollars add up on the dashboard.</em></p>
 
 <p align="center">
+  <a href="https://alexgreensh.github.io/token-optimizer/"><img src="https://img.shields.io/badge/%F0%9F%93%96%20Read%20the%20Docs-alexgreensh.github.io%2Ftoken--optimizer-e85329?style=for-the-badge&logoColor=white" alt="Read the documentation"></a>
+  <a href="https://alexgreensh.github.io/token-optimizer/start/quickstart/"><img src="https://img.shields.io/badge/Quickstart-2%20minutes-3fb950?style=for-the-badge" alt="Quickstart in 2 minutes"></a>
+</p>
+
+<p align="center">
 <strong>Most token tools only touch one slice of the problem.</strong>
 </p>
 <p align="center">
