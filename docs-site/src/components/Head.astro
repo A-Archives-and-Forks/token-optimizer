@@ -1,34 +1,15 @@
 ---
-// Extends Starlight's default Head and adds Astro's ClientRouter so navigating
-// between docs pages swaps content in place (SPA-style) instead of a full page
-// reload. That removes the white flash / "blink" on every link click.
+// Pass-through of Starlight's default Head.
+//
+// NOTE: We previously added Astro's <ClientRouter /> here for SPA-style
+// no-flash navigation. It broke Pagefind search: Starlight initialises the
+// search UI on first load, but a view-transition swap inserts a fresh, empty
+// search dialog without re-running that init, so search came up blank on every
+// soft-navigated page. Full-page navigation re-initialises search each time,
+// so we keep the default behaviour. If SPA nav is wanted back, it must come
+// with a Search component override that uses `transition:persist` (or an
+// `astro:page-load` re-init) so the search UI survives the swap.
 import Default from "@astrojs/starlight/components/Head.astro";
-import { ClientRouter } from "astro:transitions";
 ---
 
 <Default><slot /></Default>
-<ClientRouter />
-
-{/*
-  ClientRouter swaps the page content but re-renders the left sidebar fresh,
-  which resets its scroll position to the top on every link click. Save the
-  sidebar's scroll offset right before the swap and restore it right after, so
-  the reader keeps their spot in a long menu. Listeners attach once (document
-  survives soft navigations); restore only fires during view-transition
-  navigations, so a hard load still lets Starlight scroll to the active item.
-*/}
-<script is:inline>
-  (function () {
-    var KEY = "sl-sidebar-scroll";
-    var pane = function () { return document.getElementById("starlight__sidebar"); };
-    document.addEventListener("astro:before-swap", function () {
-      var el = pane();
-      if (el) sessionStorage.setItem(KEY, String(el.scrollTop));
-    });
-    document.addEventListener("astro:after-swap", function () {
-      var el = pane();
-      var v = sessionStorage.getItem(KEY);
-      if (el && v !== null) el.scrollTop = parseInt(v, 10) || 0;
-    });
-  })();
-</script>
