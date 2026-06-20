@@ -11,7 +11,7 @@
  * Toggle state is persisted to `~/.openclaw/token-optimizer/v5-features.json`
  * so a gateway restart preserves user choices.
  */
-export type V5FeatureId = "delta_read" | "structure_map_beta" | "quality_nudge" | "loop_detection" | "bash_compression";
+export type V5FeatureId = "delta_read" | "structure_map_beta" | "quality_nudge" | "loop_detection" | "bash_compression" | "bash_compress_search" | "verbosity_steer";
 export interface V5Feature {
     id: V5FeatureId;
     label: string;

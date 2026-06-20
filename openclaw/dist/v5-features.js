@@ -101,6 +101,25 @@ exports.V5_FEATURES = {
         // mutation hook. Reassessed once the upstream hook-mutation RFCs land.
         status: "deferred",
     },
+    bash_compress_search: {
+        id: "bash_compress_search",
+        label: "Search Results Compression",
+        description: "Group grep/ripgrep/ag/ack output by file, keep top matches per file, and summarize the rest. Activates on 30+ line search results.",
+        defaultEnabled: false,
+        risk: "medium",
+        // Deferred: same limitation as bash_compression (requires tool-result mutation).
+        status: "deferred",
+    },
+    verbosity_steer: {
+        id: "verbosity_steer",
+        label: "Verbosity Steering",
+        description: "Inject a tiered conciseness nudge on UserPromptSubmit when context is under pressure (55%+ fill with degraded quality, or 75%+ fill). Includes cooldown and critical-fill suppression.",
+        defaultEnabled: false,
+        risk: "medium",
+        // Deferred: requires a session-visible notification surface for inline
+        // context injection (same gap as quality_nudge).
+        status: "deferred",
+    },
 };
 const HOME = process.env.HOME ?? process.env.USERPROFILE ?? os.homedir();
 const V5_DIR = path.join(HOME, ".openclaw", "token-optimizer");

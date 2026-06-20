@@ -19,6 +19,7 @@ import { captureCheckpoint, pruneCheckpoints } from "./compaction/checkpoint.js"
 import { restoreCheckpoint } from "./continuity/restore.js";
 import { checkQualityNudge } from "./nudges/quality-nudge.js";
 import { checkFreshSessionNudge } from "./nudges/fresh-session-nudge.js";
+import { checkVerbositySteer, verbositySteerSavingsEstimate } from "./nudges/verbosity-steer.js";
 import { detectLoop } from "./nudges/loop-detection.js";
 import { createTokenStatusTool } from "./tools/token-status.js";
 import { createDashboardTool } from "./tools/dashboard.js";
@@ -54,6 +55,7 @@ interface MsgUsage {
  */
 interface SessionState {
   store: SessionStore;
+  sessionId: string;
   lastQuality: QualityResult | null;
   lastQualityTime: number;
   previousResourceHealth: number | null;
@@ -125,6 +127,7 @@ export const TokenOptimizerPlugin: Plugin = async (
     const store = new SessionStore(dataDir, sessionId);
     state = {
       store,
+      sessionId,
       lastQuality: null,
       lastQualityTime: 0,
       previousResourceHealth: null,
@@ -291,6 +294,43 @@ export const TokenOptimizerPlugin: Plugin = async (
             data: cache?.data ?? null,
           });
         }
+      }
+    }
+
+    // Verbosity-steer: inject a conciseness nudge when context is under
+    // pressure. Shares the quality-cache cooldown counter so the two
+    // features don't double-nudge within the same cooldown window.
+    if (config.features.qualityNudges) {
+      const fillPctPct = Math.round(state.lastQuality.fillPct * 100);
+      const vsResult = checkVerbositySteer(
+        store,
+        fillPctPct,
+        state.lastQuality.resourceHealth,
+      );
+      if (vsResult.shouldNudge && vsResult.message) {
+        warnings.push(vsResult.message);
+        // Update cooldown counter (shared with quality nudge)
+        const cache = store.getQualityCache();
+        store.writeQualityCache({
+          resource_health: cache?.resource_health ?? state.lastQuality.resourceHealth,
+          session_efficiency: cache?.session_efficiency ?? state.lastQuality.sessionEfficiency,
+          fill_pct: cache?.fill_pct ?? state.lastQuality.fillPct,
+          compactions: cache?.compactions ?? 0,
+          tool_calls: cache?.tool_calls ?? 0,
+          last_nudge_time: Date.now() / 1000,
+          nudge_count: (cache?.nudge_count ?? 0) + 1,
+          data: cache?.data ?? null,
+        });
+        // Log estimated savings event
+        try {
+          const [savedTokens, tier] = verbositySteerSavingsEstimate(fillPctPct);
+          getTrendsStore().logSavingsEvent(
+            "verbosity_steer",
+            savedTokens,
+            state.sessionId,
+            `fill=${Math.round(fillPctPct)}% score=${Math.round(state.lastQuality.resourceHealth)} tier=${tier}`,
+          );
+        } catch { /* best-effort */ }
       }
     }
 

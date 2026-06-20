@@ -69,6 +69,10 @@ export interface RealizedSavings {
     compressionTransformationUsd: number;
     /** Directly-metered compression $ before the baseline-mix reprice. */
     compressionMeasuredUsd: number;
+    /** Estimated verbosity-steer $ before the baseline-output reprice. */
+    verbosityMeasuredUsd: number;
+    /** Repriced verbosity-steer $ (estimated output reduction at baseline mix). */
+    verbosityTransformationUsd: number;
     transformationPct: number;
     beforeOpus: number;
     afterOpus: number;

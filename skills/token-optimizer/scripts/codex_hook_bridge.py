@@ -152,6 +152,30 @@ def handle_user_prompt_submit() -> None:
         hint_context = ""
     if hint_context:
         additional_context = "\n\n".join(part for part in (additional_context, hint_context.strip()) if part)
+
+    # Verbosity-steer: inject a conciseness nudge when context is under pressure.
+    # Mirrors the Claude Code verbosity-steer hook in measure.py.
+    # run_verbosity_steer returns the JSON payload string (doesn't print to stdout),
+    # so we call it directly instead of through _capture_stdout.
+    try:
+        verbosity_payload = measure.run_verbosity_steer(
+            transcript_path=transcript_path,
+            session_id=session_id,
+        )
+        if verbosity_payload:
+            import json as _json
+            parsed = _json.loads(verbosity_payload.strip())
+            ctx = (
+                parsed.get("hookSpecificOutput", {})
+                .get("additionalContext", "")
+            )
+            if ctx:
+                additional_context = "\n\n".join(
+                    part for part in (additional_context, ctx.strip()) if part
+                )
+    except Exception:
+        pass
+
     _emit_additional_context("UserPromptSubmit", additional_context)
 
 

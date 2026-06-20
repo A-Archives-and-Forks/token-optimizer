@@ -15060,6 +15060,16 @@ def _get_savings_summary(days=30):
             total_cost -= float(hint_followed_est.get("cost_saved_usd", 0.0) or 0.0)
             total_events -= int(hint_followed_est.get("events", 0) or 0)
 
+        # verbosity_steer: the UserPromptSubmit nudge is a deterministic trigger
+        # but the output-token reduction is an ESTIMATE (we can't measure the
+        # counterfactual output). Relocate to estimated tier, same as mcp_cap /
+        # hint_followed. The trigger is observed; the magnitude is not metered.
+        verbosity_steer_est = by_category.pop("verbosity_steer", None)
+        if verbosity_steer_est:
+            total_tokens -= int(verbosity_steer_est.get("tokens_saved", 0) or 0)
+            total_cost -= float(verbosity_steer_est.get("cost_saved_usd", 0.0) or 0.0)
+            total_events -= int(verbosity_steer_est.get("events", 0) or 0)
+
         # B6: net tool-archive re-expansions out of the tool_archive credit. A
         # re-popped result didn't stay collapsed, so its eager credit is reversed
         # (floored at 0). tool_archive_reexpand is a DEBIT, never its own savings
@@ -15101,6 +15111,11 @@ def _get_savings_summary(days=30):
             # U-G: observed-trigger / estimated-magnitude avoided-search from
             # proactive hints. Estimated tier, never in the realized total.
             "hint_followed_estimated": hint_followed_est,
+            # Verbosity-steer: estimated output-token reduction from conciseness
+            # nudges. Estimated tier, never in the realized total. Surfaced so
+            # _estimate_before_after_savings can add it to the transformation
+            # headline as a separate estimated addback.
+            "verbosity_steer_estimated": verbosity_steer_est,
         }
     except Exception:
         return {
@@ -15113,6 +15128,7 @@ def _get_savings_summary(days=30):
             "one_time_setup": None,
             "mcp_cap_estimated": None,
             "hint_followed_estimated": None,
+            "verbosity_steer_estimated": None,
         }
 
 
@@ -28297,6 +28313,11 @@ _LEGACY_SAVINGS_LABELS = {
     # redundant_block: MEASURED. block-mode hard-denies a redundant reread with no
     # structure-map replacement, so the file's tokens never re-enter context.
     "redundant_block": "Redundant rereads blocked",
+    # verbosity_steer: ESTIMATED. The UserPromptSubmit hook injects a conciseness
+    # nudge when context is under pressure. Output token reduction is estimated
+    # (10-15% of affected response tokens) since we can't measure the
+    # counterfactual output the model would have produced without the nudge.
+    "verbosity_steer": "Verbosity steering [est]",
 }
 
 # v5 Active Compression categories — stored in compression_events and
@@ -28322,6 +28343,11 @@ _V5_COMPRESSION_LABELS = {
     "bash_compress_list": "Bash compress (list)",
     "bash_compress_build": "Bash compress (build)",
     "bash_compress_test_exts": "Bash compress (test runners)",
+    # v5.2 bash compression handlers
+    "bash_compress_search": "Bash compress (search results)",
+    "bash_compress_stack": "Bash compress (stack traces)",
+    "bash_compress_k8s": "Bash compress (k8s)",
+    "bash_compress_cloud": "Bash compress (cloud CLI)",
     # U4: unmatched-output coverage (tier=measured). U5: first-read skeleton —
     # only its ACTIVE (tier=measured) rows reach the headline; shadow rows are
     # tier=opportunity and filtered out in _get_compression_summary.
@@ -30167,7 +30193,8 @@ def _estimate_before_after_savings(days=30):
             "before_mix_label": "", "after_mix_label": "",
             "before_tokens": 0, "after_tokens": 0, "before_sessions": 0,
             "after_sessions": 0, "baseline_source": None, "breakdown": [],
-            "breakdown_caveat": "", "reason": None, "evidence": "estimated"}
+            "breakdown_caveat": "", "reason": None, "evidence": "estimated",
+            "verbosity_transformation_usd": 0.0, "verbosity_measured_usd": 0.0}
     try:
         if not TRENDS_DB.exists():
             return zero
@@ -30399,12 +30426,27 @@ def _estimate_before_after_savings(days=30):
         comp_reprice = (in_before / in_after) if in_after > 0 else 1.0
         compression_addback = max(0.0, comp_measured * comp_reprice)
 
+        # Verbosity-steer add-back: estimated output tokens never produced due to
+        # conciseness nudges. The main counterfactual holds output volume constant
+        # (both arms price the same O), so the output reduction from nudges is NOT
+        # captured by main_transformation. These are estimated savings (10-15% of
+        # affected response tokens), logged to savings_events but relocated to the
+        # estimated tier in _get_savings_summary. Reprice to the baseline OUTPUT
+        # rate: the old way would have produced the same verbose output at the
+        # baseline model mix's output rate, so the avoided cost is higher.
+        vs_est = (comp or {}).get("verbosity_steer_estimated") or {}
+        vs_measured = float(vs_est.get("cost_saved_usd", 0.0) or 0.0)
+        out_after = price(0.0, 0.0, 1_000_000.0, after_shares)
+        out_before = price(0.0, 0.0, 1_000_000.0, before_shares)
+        vs_reprice = (out_before / out_after) if out_after > 0 else 1.0
+        verbosity_addback = max(0.0, vs_measured * vs_reprice)
+
         # MAIN TRANSFORMATION = counterfactual - actual (main pool). The window is 30d, so
         # this is already the monthly figure. Clamp >= 0: if the "old way" would somehow be
         # cheaper (net-negative efficiency on the main pool), show no MAIN transformation
         # rather than a negative -- but the subagent pool can still carry the headline.
         main_transformation = max(0.0, counterfactual_monthly - actual_monthly)
-        if main_transformation <= 0 and sub_transformation <= 0 and compression_addback <= 0:
+        if main_transformation <= 0 and sub_transformation <= 0 and compression_addback <= 0 and verbosity_addback <= 0:
             return {**zero, "before_sessions": bn, "after_sessions": recent_n,
                     "actual_monthly_usd": round(actual_monthly, 2),
                     "counterfactual_monthly_usd": round(counterfactual_monthly, 2),
@@ -30412,6 +30454,8 @@ def _estimate_before_after_savings(days=30):
                     "subagent_transformation_usd": 0.0,
                     "compression_transformation_usd": 0.0,
                     "compression_measured_usd": round(comp_measured, 2),
+                    "verbosity_transformation_usd": 0.0,
+                    "verbosity_measured_usd": round(vs_measured, 2),
                     "subagent_actual_usd": round(sub_actual, 2),
                     "subagent_counterfactual_usd": round(sub_cf, 2),
                     "subagent_sessions": int(sub_pool.get("sessions", 0) or 0),
@@ -30421,13 +30465,14 @@ def _estimate_before_after_savings(days=30):
                     "before_mix_label": _mix_label(before_shares),
                     "after_mix_label": _mix_label(after_shares),
                     "reason": "net_negative"}
-        # Combined headline = main + subagent + compression add-back (three separate,
-        # non-overlapping pools). The pct is over the COMBINED counterfactual (main cf +
-        # subagent cf + compression add-back) so it reflects the full spend base being
-        # transformed. The compression pool's actual is 0, so its counterfactual == its
-        # transformation contribution.
-        transformation = main_transformation + sub_transformation + compression_addback
-        combined_counterfactual = counterfactual_monthly + sub_cf + compression_addback
+        # Combined headline = main + subagent + compression add-back + verbosity
+        # add-back (four separate, non-overlapping pools). The pct is over the
+        # COMBINED counterfactual (main cf + subagent cf + compression add-back +
+        # verbosity add-back) so it reflects the full spend base being transformed.
+        # The compression and verbosity pools' actual is 0, so their counterfactual
+        # == their transformation contribution.
+        transformation = main_transformation + sub_transformation + compression_addback + verbosity_addback
+        combined_counterfactual = counterfactual_monthly + sub_cf + compression_addback + verbosity_addback
         transformation_pct = (transformation / combined_counterfactual
                               if combined_counterfactual > 0 else 0.0)
 
@@ -30463,6 +30508,8 @@ def _estimate_before_after_savings(days=30):
              "Subagents shifted to costlier models (added cost)", sub_transformation),
             ("context_compression", "Lighter context (fewer re-reads, metered)",
              "Lighter context (fewer re-reads, metered)", compression_addback),
+            ("verbosity_steer", "Lean output nudges (less output, estimated)",
+             "Verbosity nudges (less output, estimated)", verbosity_addback),
         ]
         breakdown = sorted(
             ({"key": k, "waterfall_index": i,
@@ -30479,9 +30526,12 @@ def _estimate_before_after_savings(days=30):
             "rate) and caching. Subagent (sidechain) routing is counted as a separate pool "
             "and added to the headline. A fourth pool adds the directly-metered tokens Token "
             "Optimizer removed from context (tool archiving, skeletons, lean resumes) -- real "
-            "volume the old way would have re-read -- repriced at the baseline mix. The "
-            "billed-volume levers are identical on both sides, so workload growth never "
-            "inflates or zeroes the figure -- only efficiency and metered removals do."
+            "volume the old way would have re-read -- repriced at the baseline mix. A fifth "
+            "pool adds estimated output-token savings from lean-output conciseness nudges (the "
+            "counterfactual holds output constant, so reduced output is a separate lever). "
+            "The billed-volume levers are identical on both sides, so workload growth never "
+            "inflates or zeroes the figure -- only efficiency, metered removals, and "
+            "estimated output reduction do."
         )
 
         # Keep the existing per-session keys populated (the dashboard reads them): divide
@@ -30493,17 +30543,19 @@ def _estimate_before_after_savings(days=30):
         # ("est. $X now vs $Y the old way") spans both pools, so report the combined
         # actual/counterfactual while keeping the main-only figures available too.
         combined_actual = actual_monthly + sub_actual
-        combined_cf = counterfactual_monthly + sub_cf + compression_addback
+        combined_cf = counterfactual_monthly + sub_cf + compression_addback + verbosity_addback
         return {
             "before_cost_per_session": round(before_cps, 4),
             "after_cost_per_session": round(after_cps, 4),
             "savings_per_session": round(before_cps - after_cps, 4),
             "sessions_per_month": recent_n,
-            "monthly_savings_usd": round(transformation, 2),  # = main + subagent + compression
+            "monthly_savings_usd": round(transformation, 2),  # = main + subagent + compression + verbosity
             "main_transformation_usd": round(main_transformation, 2),
             "subagent_transformation_usd": round(sub_transformation, 2),
             "compression_transformation_usd": round(compression_addback, 2),
             "compression_measured_usd": round(comp_measured, 2),
+            "verbosity_transformation_usd": round(verbosity_addback, 2),
+            "verbosity_measured_usd": round(vs_measured, 2),
             # Headline arms span both pools (combined).
             "counterfactual_monthly_usd": round(combined_cf, 2),
             "actual_monthly_usd": round(combined_actual, 2),
@@ -30741,6 +30793,10 @@ def _get_merged_savings(days=30):
         # U-G: deterministically-triggered avoided-search from proactive hints
         # (observed hint->read), estimated magnitude. Estimated tier, never realized.
         "hint_followed": savings.get("hint_followed_estimated"),
+        # Verbosity-steer: estimated output-token reduction from conciseness
+        # nudges. Estimated tier, never in the realized total. Surfaced for
+        # the dashboard's estimated-tier display.
+        "verbosity_steer": savings.get("verbosity_steer_estimated"),
     }
 
 
@@ -31748,6 +31804,144 @@ def run_ensure_health():
             _write_config_flag("autoupdate_nudge_shown", True)
     except Exception:
         pass
+
+
+def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
+    """Tiered conciseness nudge for UserPromptSubmit.
+
+    Reads the quality cache to get fill_pct + score, then emits a JSON
+    hookSpecificOutput payload on stdout (or returns it if quiet=True).
+
+    Returns the JSON string if a nudge was emitted, empty string otherwise.
+
+    Tiered messaging:
+      55-74% fill + degraded quality  → gentle nudge
+      75-89% fill                     → strong nudge with specific directives
+      90%+ fill                        → suppressed (adding tokens makes it worse)
+
+    Cooldown: max 3 nudges per session, 5 min between nudges.
+    """
+    try:
+        filepath = None
+        if transcript_path and Path(transcript_path).exists():
+            filepath = Path(transcript_path)
+        else:
+            filepath = _find_current_session_jsonl()
+        if not filepath:
+            return ""
+        cache_path = _quality_cache_path_for(filepath)
+        cached = _read_quality_cache(cache_path) if cache_path.exists() else {}
+        if not cached:
+            return ""
+        fill_pct = cached.get("fill_pct", 0) or 0
+        score = cached.get("score", 100) or 100
+
+        # Cooldown check
+        import time as _vs_time
+        _now = _vs_time.time()
+        _nudge_count = cached.get("nudge_count", 0) or 0
+        _last_nudge = cached.get("last_nudge_time", 0) or 0
+        _COOLDOWN_SEC = 300
+        _MAX_NUDGES = 3
+        if _nudge_count >= _MAX_NUDGES:
+            return ""
+        if _now - _last_nudge < _COOLDOWN_SEC:
+            return ""
+
+        # At 90%+ fill, don't add more tokens
+        if fill_pct >= 90:
+            if not quiet:
+                sys.stderr.write(
+                    f"[Token Optimizer] Context at {fill_pct:.0f}% — consider /compact or /clear. "
+                    f"Verbosity nudge suppressed to avoid adding tokens.\n"
+                )
+            return ""
+
+        # Determine nudge tier
+        if fill_pct >= 75:
+            nudge = (
+                f"[Token Optimizer] Context at {fill_pct:.0f}% capacity, quality {score:.0f}/100. "
+                "Reason as deeply as you need — but keep your visible output lean: no preamble, "
+                "no restating the request, no explanations unless asked. Every token saved extends the session."
+            )
+        elif fill_pct >= 55 and score < 75:
+            nudge = (
+                f"[Token Optimizer] Context at {fill_pct:.0f}% capacity, quality {score:.0f}/100. "
+                "Reason fully, then keep your output lean — skip restating the request and "
+                "omit unnecessary preamble. Every token saved extends the session."
+            )
+        else:
+            return ""
+
+        payload = json.dumps({
+            "continue": True,
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": nudge,
+            },
+        })
+
+        # Log estimated output token savings (best-effort, non-blocking).
+        # The 10-15% reduction is an ASSUMPTION — we can't measure the counterfactual
+        # (what the model would have output without the nudge). But we CAN record the
+        # session's prior average output tokens so a follow-through calibration can
+        # compare the actual post-nudge output against the pre-nudge baseline.
+        try:
+            _session_id = session_id or os.environ.get("CLAUDE_SESSION_ID", "")
+            _est_output_reduction = 0.10 if fill_pct < 75 else 0.15
+            _avg_response_tokens = 800
+            _est_saved = int(_avg_response_tokens * _est_output_reduction)
+
+            # Empirical calibration: record the session's pre-nudge avg output
+            # so we can later compare against the actual post-nudge output.
+            _pre_nudge_avg_output = 0
+            _pre_nudge_turns = 0
+            try:
+                if filepath and filepath.exists():
+                    _turn_outputs = []
+                    for _line in filepath.read_text(encoding="utf-8").splitlines():
+                        _line = _line.strip()
+                        if not _line:
+                            continue
+                        try:
+                            _entry = json.loads(_line)
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+                        if _entry.get("type") == "assistant" and "message" in _entry:
+                            _msg = _entry["message"]
+                            _usage = _msg.get("usage", {})
+                            _out = int(_usage.get("output_tokens", 0) or 0)
+                            if _out > 0:
+                                _turn_outputs.append(_out)
+                    if _turn_outputs:
+                        _pre_nudge_avg_output = round(sum(_turn_outputs) / len(_turn_outputs))
+                        _pre_nudge_turns = len(_turn_outputs)
+            except Exception:
+                pass
+
+            _tier_label = 'strong' if fill_pct >= 75 else 'gentle'
+            _detail = (f"fill={fill_pct:.0f}% score={score:.0f} tier={_tier_label}"
+                       f" pre_avg_out={_pre_nudge_avg_output} pre_turns={_pre_nudge_turns}")
+            _log_savings_event(
+                "verbosity_steer",
+                _est_saved,
+                session_id=_session_id,
+                detail=_detail,
+            )
+        except Exception:
+            pass
+
+        # Update cooldown in cache (best-effort, non-blocking)
+        try:
+            cached["nudge_count"] = _nudge_count + 1
+            cached["last_nudge_time"] = _now
+            cache_path.write_text(json.dumps(cached), encoding="utf-8")
+        except Exception:
+            pass
+
+        return payload
+    except Exception:
+        return ""
 
 
 if __name__ == "__main__":
@@ -32952,89 +33146,14 @@ if __name__ == "__main__":
         finally:
             _clear_hook_budget(_tok_hook_old_sig)
     elif args[0] == "verbosity-steer":
-        # Claude Code UserPromptSubmit: inject a tiered conciseness nudge when
-        # context is under pressure. Reads the quality cache (populated by the
-        # quality-cache hook that runs on the same event) to get fill_pct + score.
-        # Emits additionalContext via hookSpecificOutput — never blocks.
-        #
-        # Tiered messaging:
-        #   55-74% fill + degraded quality  → gentle nudge
-        #   75-89% fill                     → strong nudge with specific directives
-        #   90%+ fill                        → critical nudge + suggest /compact
-        #
-        # Cooldown: max 3 nudges per session, 5 min between nudges.
-        # At 90%+ fill, suppress entirely (adding tokens makes it worse).
+        # Claude Code UserPromptSubmit: delegate to run_verbosity_steer.
+        # Reads stdin for transcript_path, then calls the shared function.
         try:
             hook_input = _read_stdin_hook_input()
             transcript_path = hook_input.get("transcript_path")
-            filepath = None
-            if transcript_path and Path(transcript_path).exists():
-                filepath = Path(transcript_path)
-            else:
-                filepath = _find_current_session_jsonl()
-            if not filepath:
-                sys.exit(0)
-            cache_path = _quality_cache_path_for(filepath)
-            cached = _read_quality_cache(cache_path) if cache_path.exists() else {}
-            if not cached:
-                sys.exit(0)
-            fill_pct = cached.get("fill_pct", 0) or 0
-            score = cached.get("score", 100) or 100
-
-            # Cooldown check
-            import time as _vs_time
-            _now = _vs_time.time()
-            _nudge_count = cached.get("nudge_count", 0) or 0
-            _last_nudge = cached.get("last_nudge_time", 0) or 0
-            _COOLDOWN_SEC = 300  # 5 minutes
-            _MAX_NUDGES = 3
-            if _nudge_count >= _MAX_NUDGES:
-                sys.exit(0)
-            if _now - _last_nudge < _COOLDOWN_SEC:
-                sys.exit(0)
-
-            # At 90%+ fill, don't add more tokens — suggest compact instead
-            # (but only via stderr so it doesn't inflate context)
-            if fill_pct >= 90:
-                sys.stderr.write(
-                    f"[Token Optimizer] Context at {fill_pct:.0f}% — consider /compact or /clear. "
-                    f"Verbosity nudge suppressed to avoid adding tokens.\n"
-                )
-                sys.exit(0)
-
-            # Determine nudge tier
-            if fill_pct >= 75:
-                nudge = (
-                    f"[Token Optimizer] Context at {fill_pct:.0f}% capacity, quality {score:.0f}/100. "
-                    "Be terse: no preamble, no restating the request, no explanations unless asked. "
-                    "Show only changed code lines, not full files. Use single-line summaries for status. "
-                    "Every token saved extends the session."
-                )
-            elif fill_pct >= 55 and score < 75:
-                nudge = (
-                    f"[Token Optimizer] Context at {fill_pct:.0f}% capacity, quality {score:.0f}/100. "
-                    "Prefer concise responses: skip restating the request, "
-                    "omit unnecessary preamble, use bullet points, "
-                    "and only show code that changed."
-                )
-            else:
-                sys.exit(0)
-
-            print(json.dumps({
-                "continue": True,
-                "hookSpecificOutput": {
-                    "hookEventName": "UserPromptSubmit",
-                    "additionalContext": nudge,
-                },
-            }))
-
-            # Update cooldown in cache (best-effort, non-blocking)
-            try:
-                cached["nudge_count"] = _nudge_count + 1
-                cached["last_nudge_time"] = _now
-                cache_path.write_text(json.dumps(cached), encoding="utf-8")
-            except Exception:
-                pass
+            payload = run_verbosity_steer(transcript_path=transcript_path, quiet=False)
+            if payload:
+                print(payload)
         except Exception:
             pass
     elif args[0] == "compact-instructions":

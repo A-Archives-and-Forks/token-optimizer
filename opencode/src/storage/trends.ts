@@ -233,8 +233,9 @@ export class TrendsStore {
       // Relocate estimated-tier categories OUT of the measured total (A1/A3/U-G
       // in measure.py: setup_optimization is a one-time trim double-counted by
       // structural_savings; mcp_cap and hint_followed are observed-trigger but
-      // estimated-magnitude). They never belong in the measured realized total.
-      for (const k of ["setup_optimization", "mcp_cap", "hint_followed"]) {
+      // estimated-magnitude; verbosity_steer output reduction is estimated not
+      // metered). They never belong in the measured realized total.
+      for (const k of ["setup_optimization", "mcp_cap", "hint_followed", "verbosity_steer"]) {
         byCategory.delete(k);
       }
 
@@ -261,6 +262,31 @@ export class TrendsStore {
       return { totalTokensSaved, totalCostSavedUsd, totalEvents };
     } catch {
       return { totalTokensSaved: 0, totalCostSavedUsd: 0, totalEvents: 0 };
+    }
+  }
+
+  /**
+   * Sum the ESTIMATED verbosity_steer savings (cost_saved_usd) over the window.
+   * These are estimated output-token reductions from lean-output conciseness nudges —
+   * the trigger is observed but the magnitude is not metered. Mirrors measure.py
+   * `_get_savings_summary` which relocates verbosity_steer to the estimated tier.
+   * The caller reprices to the baseline OUTPUT rate and adds as a separate pool.
+   *
+   * Best-effort: returns 0 on any error (never throws). `now` is injectable.
+   */
+  getVerbositySavings(days: number = 30, now: number = Date.now()): number {
+    try {
+      const db = this.connect();
+      const cutoff = new Date(now - days * 86_400_000).toISOString();
+      const row = db
+        .query(
+          `SELECT SUM(cost_saved_usd) as cost
+           FROM savings_events WHERE timestamp >= ? AND event_type = 'verbosity_steer'`,
+        )
+        .get(cutoff) as { cost: number | null } | null;
+      return Math.max(0, row?.cost ?? 0);
+    } catch {
+      return 0;
     }
   }
 

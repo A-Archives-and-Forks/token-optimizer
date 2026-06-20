@@ -21,7 +21,9 @@ export type V5FeatureId =
   | "structure_map_beta"
   | "quality_nudge"
   | "loop_detection"
-  | "bash_compression";
+  | "bash_compression"
+  | "bash_compress_search"
+  | "verbosity_steer";
 
 export interface V5Feature {
   id: V5FeatureId;
@@ -81,6 +83,27 @@ export const V5_FEATURES: Record<V5FeatureId, V5Feature> = {
     risk: "medium",
     // Deferred: OpenClaw's current plugin API does not expose a tool-result
     // mutation hook. Reassessed once the upstream hook-mutation RFCs land.
+    status: "deferred",
+  },
+  bash_compress_search: {
+    id: "bash_compress_search",
+    label: "Search Results Compression",
+    description:
+      "Group grep/ripgrep/ag/ack output by file, keep top matches per file, and summarize the rest. Activates on 30+ line search results.",
+    defaultEnabled: false,
+    risk: "medium",
+    // Deferred: same limitation as bash_compression (requires tool-result mutation).
+    status: "deferred",
+  },
+  verbosity_steer: {
+    id: "verbosity_steer",
+    label: "Verbosity Steering",
+    description:
+      "Inject a tiered conciseness nudge on UserPromptSubmit when context is under pressure (55%+ fill with degraded quality, or 75%+ fill). Includes cooldown and critical-fill suppression.",
+    defaultEnabled: false,
+    risk: "medium",
+    // Deferred: requires a session-visible notification surface for inline
+    // context injection (same gap as quality_nudge).
     status: "deferred",
   },
 };

@@ -27,6 +27,10 @@
  *      structure_map, resume_lean, checkpoint_restore, delta_read). Real volume
  *      the old way would have re-read. Directly-metered (savings_events),
  *      repriced to the baseline input mix. Disjoint from the billed pool.
+ *   4. Verbosity-steer add-back — estimated output tokens never produced due
+ *      to lean-output conciseness nudges, repriced at the baseline output mix. The
+ *      main counterfactual holds output volume constant, so this is a separate
+ *      lever. Estimated tier (trigger observed, magnitude not metered).
  *
  * BASELINE = the frozen EARLY-window mix + pool cache-hit, used ONLY for
  * efficiency anchors (never volume). NO 95% Opus floor: OpenCode is a
@@ -128,6 +132,10 @@ export interface RealizedSavings {
    * NEVER summed into the transformation headline. Render it as a separate card.
    */
   compressionMeasuredUsd: number;
+  /** Estimated verbosity-steer $ before the baseline-output reprice. */
+  verbosityMeasuredUsd: number;
+  /** Repriced verbosity-steer $ (estimated output reduction at baseline mix). */
+  verbosityTransformationUsd: number;
   savingsPerSession: number;
   beforeCostPerSession: number;
   afterCostPerSession: number;
@@ -158,6 +166,8 @@ const NOT_READY = (status: string): RealizedSavings => ({
   counterfactualMonthlyUsd: 0,
   transformationPct: 0,
   compressionMeasuredUsd: 0,
+  verbosityMeasuredUsd: 0,
+  verbosityTransformationUsd: 0,
   savingsPerSession: 0,
   beforeCostPerSession: 0,
   afterCostPerSession: 0,
@@ -186,6 +196,7 @@ export function computeRealizedSavings(
 ): RealizedSavings {
   let rows: Array<Record<string, unknown>> = rowsOverride ?? [];
   let measuredCompression = compressionOverride ?? 0;
+  let measuredVerbosity = 0;
 
   if (!rowsOverride) {
     const store = new TrendsStore(dataDir);
@@ -193,9 +204,12 @@ export function computeRealizedSavings(
       rows = store.getAllSessions();
       // Compression add-back (pool #3) reads metered savings_events for the window.
       measuredCompression = store.getCompressionSavings(days, now).totalCostSavedUsd;
+      // Verbosity-steer add-back (pool #4) reads estimated savings_events.
+      measuredVerbosity = store.getVerbositySavings(days, now);
     } catch {
       rows = [];
       measuredCompression = 0;
+      measuredVerbosity = 0;
     } finally {
       store.close();
     }
@@ -351,10 +365,24 @@ export function computeRealizedSavings(
   const compReprice = inAfter > 0 ? inBefore / inAfter : 1;
   const compressionAddbackWindow = Math.max(0, measuredCompression * compReprice);
 
+  // VERBOSITY-STEER ADD-BACK (#4): estimated output tokens never produced due
+  // to lean-output conciseness nudges. The main counterfactual holds output volume
+  // constant (both arms price the same O), so the output reduction from nudges
+  // is NOT captured by mainTransformation. These are estimated savings logged
+  // to savings_events but excluded from measuredCompression. Reprice to the
+  // baseline OUTPUT rate: the old way would have produced verbose output at the
+  // baseline model mix's output rate. Actual for this pool is 0, so the whole
+  // repriced value is transformation. Mirrors measure.py verbosity_addback.
+  const outAfter = price(0, 0, 1_000_000, afterMix);
+  const outBefore = price(0, 0, 1_000_000, beforeMix);
+  const vsReprice = outAfter > 0 ? outBefore / outAfter : 1;
+  const verbosityAddbackWindow = Math.max(0, measuredVerbosity * vsReprice);
+
   // Monthly arms (scaled once, here).
   const actualMonthly = m(actualWindow);
   const counterfactualMonthly = m(counterfactualWindow);
   const compressionAddback = m(compressionAddbackWindow);
+  const verbosityAddback = m(verbosityAddbackWindow);
 
   // MAIN transformation = counterfactual − actual (clamped >= 0), monthly.
   const mainTransformation = Math.max(0, counterfactualMonthly - actualMonthly);
@@ -365,8 +393,9 @@ export function computeRealizedSavings(
   // sessions distinctly, port _subagent_pool_savings here.
   const subagentTransformation = 0;
 
-  // Headline = main + subagent (0) + compression add-back (three disjoint pools), monthly.
-  const transformation = mainTransformation + subagentTransformation + compressionAddback;
+  // Headline = main + subagent (0) + compression add-back + verbosity add-back
+  // (four disjoint pools), monthly.
+  const transformation = mainTransformation + subagentTransformation + compressionAddback + verbosityAddback;
 
   const afterWindowDays = Math.max(1, (now - afterStart) / DAY_MS);
   const sessionsPerMonth = (after.length / afterWindowDays) * 30;
@@ -378,8 +407,12 @@ export function computeRealizedSavings(
   const afterCps = actualMonthly / recentN;
 
   // Cumulative: per-session transformation across every post-baseline session.
+  // Uses the full transformation (all 4 pools: main + subagent + compression +
+  // verbosity) divided by current session count, times all post-baseline sessions.
+  // Matches OpenClaw's approach.
   const allAfter = history.filter((r) => r.ts >= windowEnd);
-  const cumulative = (beforeCps - afterCps) * allAfter.length;
+  const perSessionTransformation = transformation / Math.max(1, recentN);
+  const cumulative = perSessionTransformation * allAfter.length;
 
   // --- Attribution breakdown: morph the counterfactual into the actual one lever
   // at a time so the UNROUNDED steps telescope to the headline. ---
@@ -400,13 +433,18 @@ export function computeRealizedSavings(
     { key: "context_rereads", label: "Lighter sessions (better cache reuse)", monthlyUsd: sCache },
     { key: "subagent_routing", label: "Cheaper subagents (no sidechains on OpenCode)", monthlyUsd: subagentTransformation },
     { key: "context_compression", label: "Lighter context (fewer re-reads, metered)", monthlyUsd: compressionAddback },
+    { key: "verbosity_steer", label: "Lean output nudges (less output, estimated)", monthlyUsd: verbosityAddback },
   ]
     .filter((b) => b.key !== "subagent_routing" || b.monthlyUsd !== 0) // drop the always-0 sidechain lever
     .sort((a, b) => Math.abs(b.monthlyUsd) - Math.abs(a.monthlyUsd));
 
-  // transformationPct: fraction of counterfactual spend eliminated. Clamped [0,1].
-  const transformationPct = counterfactualMonthly > 0
-    ? Math.max(0, Math.min(1, (counterfactualMonthly - actualMonthly) / counterfactualMonthly))
+  // transformationPct: fraction of combined counterfactual spend eliminated.
+  // The combined counterfactual = main cf + compression add-back + verbosity
+  // add-back (both add-back pools' actual is 0, so their cf == their contribution).
+  // Clamped [0,1].
+  const combinedCf = counterfactualMonthly + compressionAddback + verbosityAddback;
+  const transformationPct = combinedCf > 0
+    ? Math.max(0, Math.min(1, transformation / combinedCf))
     : 0;
 
   // compressionMeasuredUsd: the RAW metered floor (before repricing to baseline mix).
@@ -415,14 +453,21 @@ export function computeRealizedSavings(
   // the transformation headline. INVARIANT: never summed into monthlySavingsUsd.
   const compressionMeasuredUsd = m(Math.max(0, measuredCompression));
 
+  // verbosityMeasuredUsd: the RAW estimated verbosity $ (before repricing to
+  // baseline output mix). Also a separate field for the dashboard, kept OUT of
+  // the transformation headline.
+  const verbosityMeasuredUsd = m(Math.max(0, measuredVerbosity));
+
   return {
     ready: true,
     status: "ok",
     monthlySavingsUsd: transformation,
     actualMonthlyUsd: actualMonthly,
-    counterfactualMonthlyUsd: counterfactualMonthly,
+    counterfactualMonthlyUsd: combinedCf,
     transformationPct,
     compressionMeasuredUsd,
+    verbosityMeasuredUsd,
+    verbosityTransformationUsd: verbosityAddback,
     savingsPerSession: beforeCps - afterCps,
     beforeCostPerSession: beforeCps,
     afterCostPerSession: afterCps,
