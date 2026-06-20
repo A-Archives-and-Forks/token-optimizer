@@ -32952,10 +32952,18 @@ if __name__ == "__main__":
         finally:
             _clear_hook_budget(_tok_hook_old_sig)
     elif args[0] == "verbosity-steer":
-        # Claude Code UserPromptSubmit: inject a conciseness nudge when context
-        # is under pressure. Reads the quality cache (populated by the
-        # quality-cache hook that runs on the same event) to get fill_pct.
+        # Claude Code UserPromptSubmit: inject a tiered conciseness nudge when
+        # context is under pressure. Reads the quality cache (populated by the
+        # quality-cache hook that runs on the same event) to get fill_pct + score.
         # Emits additionalContext via hookSpecificOutput — never blocks.
+        #
+        # Tiered messaging:
+        #   55-74% fill + degraded quality  → gentle nudge
+        #   75-89% fill                     → strong nudge with specific directives
+        #   90%+ fill                        → critical nudge + suggest /compact
+        #
+        # Cooldown: max 3 nudges per session, 5 min between nudges.
+        # At 90%+ fill, suppress entirely (adding tokens makes it worse).
         try:
             hook_input = _read_stdin_hook_input()
             transcript_path = hook_input.get("transcript_path")
@@ -32972,25 +32980,61 @@ if __name__ == "__main__":
                 sys.exit(0)
             fill_pct = cached.get("fill_pct", 0) or 0
             score = cached.get("score", 100) or 100
-            # Only nudge when context is meaningfully filled (>55%) AND quality
-            # is degraded (<75). Below 55% there's enough room for verbose
-            # output; above 75 quality score the session is healthy enough.
-            if fill_pct >= 55 and score < 75:
-                nudge = (
-                    "[Token Optimizer] Context is at "
-                    f"{fill_pct:.0f}% capacity with quality score {score:.0f}. "
-                    "Prefer concise responses: skip restating the request, "
-                    "omit unnecessary preamble, use bullet points for lists, "
-                    "and only show code that changed. Save tokens for the "
-                    "actual work."
+
+            # Cooldown check
+            import time as _vs_time
+            _now = _vs_time.time()
+            _nudge_count = cached.get("nudge_count", 0) or 0
+            _last_nudge = cached.get("last_nudge_time", 0) or 0
+            _COOLDOWN_SEC = 300  # 5 minutes
+            _MAX_NUDGES = 3
+            if _nudge_count >= _MAX_NUDGES:
+                sys.exit(0)
+            if _now - _last_nudge < _COOLDOWN_SEC:
+                sys.exit(0)
+
+            # At 90%+ fill, don't add more tokens — suggest compact instead
+            # (but only via stderr so it doesn't inflate context)
+            if fill_pct >= 90:
+                sys.stderr.write(
+                    f"[Token Optimizer] Context at {fill_pct:.0f}% — consider /compact or /clear. "
+                    f"Verbosity nudge suppressed to avoid adding tokens.\n"
                 )
-                print(json.dumps({
-                    "continue": True,
-                    "hookSpecificOutput": {
-                        "hookEventName": "UserPromptSubmit",
-                        "additionalContext": nudge,
-                    },
-                }))
+                sys.exit(0)
+
+            # Determine nudge tier
+            if fill_pct >= 75:
+                nudge = (
+                    f"[Token Optimizer] Context at {fill_pct:.0f}% capacity, quality {score:.0f}/100. "
+                    "Be terse: no preamble, no restating the request, no explanations unless asked. "
+                    "Show only changed code lines, not full files. Use single-line summaries for status. "
+                    "Every token saved extends the session."
+                )
+            elif fill_pct >= 55 and score < 75:
+                nudge = (
+                    f"[Token Optimizer] Context at {fill_pct:.0f}% capacity, quality {score:.0f}/100. "
+                    "Prefer concise responses: skip restating the request, "
+                    "omit unnecessary preamble, use bullet points, "
+                    "and only show code that changed."
+                )
+            else:
+                sys.exit(0)
+
+            print(json.dumps({
+                "continue": True,
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": nudge,
+                },
+            }))
+
+            # Update cooldown in cache (best-effort, non-blocking)
+            try:
+                cached["nudge_count"] = _nudge_count + 1
+                cached["last_nudge_time"] = _now
+                cache_path.write_text(json.dumps(cached), encoding="utf-8")
+            except Exception:
+                pass
         except Exception:
             pass
     elif args[0] == "compact-instructions":
