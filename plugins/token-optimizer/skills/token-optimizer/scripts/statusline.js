@@ -274,11 +274,11 @@ process.stdin.on('end', () => {
     const limitColor = (pct) =>
       pct >= 90 ? '\x1b[5;31m' : pct >= 75 ? '\x1b[38;5;208m' : pct >= 50 ? '\x1b[33m' : '\x1b[32m';
     if (fiveHour) {
-      const p = Math.round(fiveHour.used_percentage);
+      const p = Math.ceil(fiveHour.used_percentage);
       row2Parts.push(`${limitColor(p)}5h:${p}%${fmtReset(fiveHour.resets_at)}${RESET}`);
     }
     if (sevenDay) {
-      const p = Math.round(sevenDay.used_percentage);
+      const p = Math.ceil(sevenDay.used_percentage);
       row2Parts.push(`${DIM}7d:${p}%${RESET}`);
     }
 

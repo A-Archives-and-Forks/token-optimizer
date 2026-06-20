@@ -47,8 +47,16 @@ _WHITELIST_SINGLE = frozenset({
     "tsc", "webpack", "esbuild",
     # v5.1 extended test runners (read-only test execution)
     "mocha", "karma",
+    # v5.8 additional test runners (read-only test execution)
+    "tox", "nox", "ava", "gradle", "gradlew", "mvn", "deno", "bun",
     # v5.5 read-only utilities
     "sqlite3", "wc", "du", "df",
+    # v5.8 JSON/CSV handlers (read-only data inspection)
+    "jq", "yq", "csvtool", "mlr", "csvcut",
+    # v5.8 cloud CLI handlers (read-only inventory queries)
+    "gcloud", "aws", "az",
+    # v5.9 search results handler (read-only code search)
+    "grep", "rg", "ag", "ack",
 })
 _WHITELIST_COMPOUND = {
     ("git", "status"), ("git", "log"), ("git", "diff"), ("git", "show"), ("git", "branch"),
@@ -85,12 +93,24 @@ _WHITELIST_COMPOUND = {
     ("npx", "playwright"),
     ("npx", "mocha"),
     ("npx", "karma"),
+    # v5.8 additional test runners (multi-word invocations)
+    ("npx", "ava"),
+    ("gradle", "test"),
+    ("gradlew", "test"),
+    ("mvn", "test"),
+    ("deno", "test"),
+    ("bun", "test"),
     # v5.5 docker/kubectl read-only inspection
     ("docker", "logs"),
     ("docker", "inspect"),
     ("kubectl", "get"),
     ("kubectl", "describe"),
     ("kubectl", "logs"),
+    # v5.8 kubectl extended read-only queries
+    ("kubectl", "top"),
+    ("kubectl", "events"),
+    # v5.8 JSON inspection via node/deno/bun (read-only)
+    # ("node", "-e") — intentionally excluded: arbitrary code execution
 }
 
 # Git write commands that should NOT be compressed

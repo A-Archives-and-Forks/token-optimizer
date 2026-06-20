@@ -17839,7 +17839,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.13"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.14"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -32951,6 +32951,48 @@ if __name__ == "__main__":
             pass
         finally:
             _clear_hook_budget(_tok_hook_old_sig)
+    elif args[0] == "verbosity-steer":
+        # Claude Code UserPromptSubmit: inject a conciseness nudge when context
+        # is under pressure. Reads the quality cache (populated by the
+        # quality-cache hook that runs on the same event) to get fill_pct.
+        # Emits additionalContext via hookSpecificOutput — never blocks.
+        try:
+            hook_input = _read_stdin_hook_input()
+            transcript_path = hook_input.get("transcript_path")
+            filepath = None
+            if transcript_path and Path(transcript_path).exists():
+                filepath = Path(transcript_path)
+            else:
+                filepath = _find_current_session_jsonl()
+            if not filepath:
+                sys.exit(0)
+            cache_path = _quality_cache_path_for(filepath)
+            cached = _read_quality_cache(cache_path) if cache_path.exists() else {}
+            if not cached:
+                sys.exit(0)
+            fill_pct = cached.get("fill_pct", 0) or 0
+            score = cached.get("score", 100) or 100
+            # Only nudge when context is meaningfully filled (>55%) AND quality
+            # is degraded (<75). Below 55% there's enough room for verbose
+            # output; above 75 quality score the session is healthy enough.
+            if fill_pct >= 55 and score < 75:
+                nudge = (
+                    "[Token Optimizer] Context is at "
+                    f"{fill_pct:.0f}% capacity with quality score {score:.0f}. "
+                    "Prefer concise responses: skip restating the request, "
+                    "omit unnecessary preamble, use bullet points for lists, "
+                    "and only show code that changed. Save tokens for the "
+                    "actual work."
+                )
+                print(json.dumps({
+                    "continue": True,
+                    "hookSpecificOutput": {
+                        "hookEventName": "UserPromptSubmit",
+                        "additionalContext": nudge,
+                    },
+                }))
+        except Exception:
+            pass
     elif args[0] == "compact-instructions":
         output_json = "--json" in args
         install = "--install" in args

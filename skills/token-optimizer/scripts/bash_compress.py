@@ -16,12 +16,14 @@ Security:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -298,22 +300,32 @@ _PYTEST_SUMMARY_TAIL_LINES = 40
 
 
 def _compress_pytest(output):
-    """Compress pytest/cypress/playwright/mocha/karma/rspec test output.
+    """Compress pytest/cypress/playwright/mocha/karma/rspec/unittest/gradle/tox/deno/bun/ava test output.
 
     Extracts trailing summary lines (anything containing passed, passing,
     failed, failing, error, pending, or skipped) plus the explicit
     FAILURES/ERRORS section when pytest emits one. Cypress and playwright
     speak in "passing" / "failing" terms, so the reverse-scan accepts both
-    vocabularies. The scan window is bounded by ``_PYTEST_SUMMARY_TAIL_LINES``
-    to avoid walking the whole output on pathological inputs, but is wide
-    enough to survive 15-20 trailing warning lines emitted after the summary.
+    vocabularies. The v5.8 extensions add "ran " (unittest), "build
+    successful"/"build failed" (gradle), "congratulations" (tox), and
+    "ok |" (deno) to the summary keyword set. The scan window is bounded
+    by ``_PYTEST_SUMMARY_TAIL_LINES`` to avoid walking the whole output on
+    pathological inputs, but is wide enough to survive 15-20 trailing
+    warning lines emitted after the summary.
     """
     lines = output.strip().splitlines()
     if not lines:
         return output
+    if len(lines) < 15:
+        return output  # too short to meaningfully compress
 
     summary_kw = ("passed", "passing", "failed", "failing", "error",
-                  "pending", "skipped")
+                  "pending", "skipped",
+                  # v5.8 test-runner extension summary markers
+                  "ran ", "build successful", "build failed",
+                  "congratulations", "ok |",
+                  # v5.8 bun test runner (uses "pass"/"fail" without -ed/-ing)
+                  "pass,", "fail,")
 
     # Reverse-scan the tail for a contiguous block of summary lines.
     # Accept up to 5 non-matching lines inside the block (trailing warnings)
@@ -856,6 +868,21 @@ def _detect_pattern(command_str):
         return "pytest"
     elif cmd in ("go", "cargo") and subcmd == "test":
         return "pytest"
+    # v5.8 test-runner extensions: unittest, tox, nox, gradle, mvn, deno, bun, ava
+    elif cmd in ("python", "python3") and subcmd == "-m" and cmd_start + 2 < len(tokens) and tokens[cmd_start + 2] == "unittest":
+        return "pytest"
+    elif cmd in ("tox", "nox", "nox-sessions"):
+        return "pytest"
+    elif cmd in ("gradle", "gradlew", "./gradlew") and subcmd == "test":
+        return "pytest"
+    elif cmd == "mvn" and subcmd == "test":
+        return "pytest"
+    elif cmd == "deno" and subcmd == "test":
+        return "pytest"
+    elif cmd == "bun" and subcmd == "test":
+        return "pytest"
+    elif cmd == "ava" or (cmd == "npx" and subcmd == "ava"):
+        return "pytest"
     elif cmd == "npm" and subcmd in ("install", "ci"):
         return "npm_install"
     elif cmd == "npm" and subcmd == "test":
@@ -919,7 +946,22 @@ def _detect_pattern(command_str):
     elif cmd == "kubectl" and subcmd in ("get", "describe", "logs"):
         if subcmd == "logs":
             return "logs"
-        return "list"
+        return "k8s"
+    elif cmd == "kubectl" and subcmd in ("top", "events"):
+        return "k8s"
+    elif cmd in ("gcloud", "aws", "az"):
+        return "cloud_cli"
+    elif cmd in ("jq", "yq"):
+        return "json"
+    elif cmd in ("python", "python3") and subcmd == "-m" and cmd_start + 2 < len(tokens) and tokens[cmd_start + 2] == "json.tool":
+        return "json"
+    elif cmd in ("csvtool", "mlr", "csvcut"):
+        return "csv"
+    elif cmd in ("node", "deno", "bun") and any(".json" in arg for arg in tokens[cmd_start + 1:]):
+        return "json"
+    # v5.9 search results handler (grep/ripgrep output)
+    elif cmd in ("grep", "rg", "ag", "ack"):
+        return "search_results"
 
     return None
 
@@ -967,6 +1009,311 @@ def _compress_docker_output(output):
     return _compress_logs(output)
 
 
+# ---------------------------------------------------------------------------
+# JSON / CSV / stack-trace / k8s / cloud-CLI handlers
+# ---------------------------------------------------------------------------
+
+_JSON_MIN_CHARS = 500
+_JSON_MAX_PARSE = 500_000
+_JSON_CELL_CAP = 100
+_JSON_MAX_COLS = 40
+_JSON_MIN_ROWS = 3
+_JSON_TOTAL_CAP = 8192
+_JSON_MIN_REDUCTION = 0.40
+
+
+def _compress_json(output):
+    """Compress JSON output: columnar for arrays-of-dicts, key-summary for objects."""
+    stripped = output.strip()
+    if len(stripped) < _JSON_MIN_CHARS:
+        return output
+    if not (stripped.startswith("[") or stripped.startswith("{")):
+        return output
+    try:
+        data = json.loads(stripped[:_JSON_MAX_PARSE])
+    except (json.JSONDecodeError, RecursionError, TypeError):
+        return output
+
+    if isinstance(data, list):
+        dict_rows = [r for r in data if isinstance(r, dict)]
+        if len(dict_rows) >= max(_JSON_MIN_ROWS, int(len(data) * 0.8)):
+            cols: list[str] = []
+            seen: set[str] = set()
+            for row in dict_rows:
+                for k in row.keys():
+                    if k not in seen:
+                        seen.add(k)
+                        cols.append(str(k))
+            if cols and len(cols) <= _JSON_MAX_COLS:
+                def _cell(v) -> str:
+                    s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+                    s = s.replace("\n", " ").replace("\t", " ")
+                    return s[:_JSON_CELL_CAP] + ("…" if len(s) > _JSON_CELL_CAP else "")
+
+                lines = [
+                    f"JSON array ({len(data)} items), columnar (schema-stripped, values preserved):",
+                    "cols: " + ", ".join(cols),
+                ]
+                for row in data:
+                    if isinstance(row, dict):
+                        lines.append("- " + " | ".join(_cell(row.get(c, "")) for c in cols))
+                    else:
+                        lines.append("- " + _cell(row))
+                result = "\n".join(lines)
+                if len(result) <= _JSON_TOTAL_CAP and len(result) < len(stripped) * (1.0 - _JSON_MIN_REDUCTION):
+                    return result
+        if len(data) > 20:
+            first = json.dumps(data[0], indent=2, ensure_ascii=False)[:500]
+            return f"JSON array ({len(data)} items), first:\n{first}\n... ({len(data) - 1} more items)"
+        return output
+
+    if isinstance(data, dict):
+        keys = list(data.keys())[:50]
+        result = f"JSON object ({len(data)} keys): {', '.join(keys)}"
+        if len(result) < len(stripped) * 0.9:
+            return result
+        return output
+
+    return output
+
+
+_CSV_MIN_LINES = 20
+_CSV_MAX_COLS = 40
+_CSV_CELL_CAP = 80
+_CSV_TOTAL_CAP = 8192
+_CSV_PREVIEW_ROWS = 15
+
+
+def _compress_csv(output):
+    """Compress CSV/TSV output: keep header + first rows, summarize the rest."""
+    lines = output.strip().splitlines()
+    if len(lines) < _CSV_MIN_LINES:
+        return output
+    delimiter = "\t" if "\t" in lines[0] else ","
+    try:
+        import csv as _csv
+        reader = _csv.reader(lines, delimiter=delimiter)
+        header = next(reader, None)
+        if not header:
+            return output
+        cols = header[:_CSV_MAX_COLS]
+        data_rows = list(reader)
+        total = len(data_rows)
+        if total < _CSV_MIN_LINES - 1:
+            return output
+        preview = data_rows[:_CSV_PREVIEW_ROWS]
+        lines_out = [delimiter.join(header)]
+        for row in preview:
+            row = row[:_CSV_MAX_COLS]
+            lines_out.append(delimiter.join(
+                (c[:_CSV_CELL_CAP] + "…" if len(c) > _CSV_CELL_CAP else c) for c in row
+            ))
+        lines_out.append(f"... ({total - len(preview)} more rows, {total} total)")
+        result = "\n".join(lines_out)
+        if len(result) > _CSV_TOTAL_CAP:
+            lines_out = lines_out[:2] + [lines_out[-1]]
+            result = "\n".join(lines_out)
+        return result
+    except Exception:
+        return output
+
+
+_STACK_TRACE_FRAME_RE = re.compile(r'^\s+(?:at\s+)?(.+?)\s+')
+_STACK_TRACE_FILE_RE = re.compile(r'\((.+?):(\d+)(?::(\d+))?\)')
+_STACK_TRACE_MIN_LINES = 15
+_STACK_TRACE_MAX_FRAMES = 20
+_STACK_TRACE_MARKERS = re.compile(
+    r'(?:Traceback \(most recent call last\)|'
+    r'^\s+at\s+[\w.$]+\(|'
+    r'Caused by:|'
+    r'Exception in thread|'
+    r'^\s+at\s+[\w.]+\([^)]+:\d+\))',
+    re.MULTILINE
+)
+
+
+def _looks_like_stack_trace(text: str) -> bool:
+    """Check if output contains a stack trace worth compressing."""
+    lines = text.splitlines()
+    if len(lines) < _STACK_TRACE_MIN_LINES:
+        return False
+    return bool(_STACK_TRACE_MARKERS.search(text))
+
+
+def _compress_stack_trace(output):
+    """Compress stack traces: keep exception message + top N frames, summarize the rest."""
+    lines = output.splitlines()
+    if len(lines) < _STACK_TRACE_MIN_LINES:
+        return output
+    exception_lines: list[str] = []
+    frames: list[str] = []
+    in_traceback = False
+    for line in lines:
+        stripped = line.strip()
+        # Detect start of traceback section
+        if stripped.startswith("Traceback") or stripped.startswith("Exception in thread"):
+            in_traceback = True
+            exception_lines.append(line)
+            continue
+        # Lines after the traceback section that look like the final exception
+        # (e.g. "ValueError: ...", "java.lang.NPE")
+        if in_traceback and not stripped.startswith("File ") and not stripped.startswith("at ") and not _STACK_TRACE_FRAME_RE.match(line):
+            # This is the exception message line (after all frames)
+            if stripped and not stripped.startswith("..."):
+                exception_lines.append(line)
+            continue
+        if in_traceback and (stripped.startswith("File ") or stripped.startswith("at ") or _STACK_TRACE_FRAME_RE.match(line)):
+            frames.append(line)
+        elif not in_traceback:
+            exception_lines.append(line)
+        else:
+            frames.append(line)
+    if not frames:
+        return output
+    kept_frames = frames[:_STACK_TRACE_MAX_FRAMES]
+    omitted = len(frames) - len(kept_frames)
+    result_lines = list(exception_lines)
+    result_lines.extend(kept_frames)
+    if omitted > 0:
+        result_lines.append(f"... ({omitted} stack frames omitted)")
+    result = "\n".join(result_lines)
+    if len(result) >= len(output) * 0.9:
+        return output
+    return result
+
+
+_K8S_MIN_LINES = 20
+_K8S_MAX_COLS = 40
+_K8S_CELL_CAP = 60
+_K8S_PREVIEW_ROWS = 15
+
+
+def _compress_k8s(output):
+    """Compress kubectl get/describe/top/events output: keep header + preview rows."""
+    lines = output.strip().splitlines()
+    if len(lines) < _K8S_MIN_LINES:
+        return output
+    if lines[0].startswith("NAME") or lines[0].startswith("NAMESPACE"):
+        header = lines[0].split()
+        data_lines = lines[1:]
+        total = len(data_lines)
+        if total < _K8S_MIN_LINES - 1:
+            return output
+        preview = data_lines[:_K8S_PREVIEW_ROWS]
+        result_lines = [lines[0]]
+        for row in preview:
+            result_lines.append(row)
+        result_lines.append(f"... ({total - len(preview)} more rows, {total} total)")
+        result = "\n".join(result_lines)
+        if len(result) > _K8S_CELL_CAP * _K8S_MAX_COLS * 2:
+            result_lines = [lines[0]] + preview[:5] + [result_lines[-1]]
+            result = "\n".join(result_lines)
+        return result
+    return _compress_logs(output)
+
+
+_CLOUD_CLI_MIN_CHARS = 1000
+_CLOUD_CLI_HEAD = 15
+_CLOUD_CLI_TAIL = 10
+
+
+def _compress_cloud_cli(output):
+    """Compress gcloud/aws/az output: keep head + tail, preserve important lines."""
+    lines = output.strip().splitlines()
+    if len(lines) < _CLOUD_CLI_MIN_CHARS // 40:
+        return output
+    collapsed: list[str] = []
+    run_val = None
+    run_count = 0
+    for ln in lines:
+        if ln == run_val:
+            run_count += 1
+        else:
+            if run_val is not None:
+                collapsed.append(f"{run_val}  (x{run_count})" if run_count > 1 else run_val)
+            run_val = ln
+            run_count = 1
+    if run_val is not None:
+        collapsed.append(f"{run_val}  (x{run_count})" if run_count > 1 else run_val)
+    if len(collapsed) <= _CLOUD_CLI_HEAD + _CLOUD_CLI_TAIL:
+        return "\n".join(collapsed)
+    head = collapsed[:_CLOUD_CLI_HEAD]
+    tail = collapsed[len(collapsed) - _CLOUD_CLI_TAIL:]
+    middle = collapsed[_CLOUD_CLI_HEAD:len(collapsed) - _CLOUD_CLI_TAIL]
+    important = [ln for ln in middle if _GENERIC_IMPORTANT.search(ln)][:_CLOUD_CLI_HEAD * 5]
+    omitted = len(middle) - len(important)
+    out = list(head)
+    if important:
+        out.append(f"... {omitted} lines omitted (kept {len(important)} error/warning lines) ...")
+        out.extend(important)
+    else:
+        out.append(f"... {omitted} lines omitted ...")
+    out.extend(tail)
+    return "\n".join(out)
+
+
+def _compress_search_results(output):
+    """Compress grep/ripgrep/ag/ack output: group by file, keep top matches per file.
+
+    Search output is typically `file:line:content` (or `file:line:content` with
+    color codes). For large result sets, we group by file, keep the first N
+    matches per file, and summarize the rest. Files with only 1-2 matches are
+    kept verbatim. The goal is the same as a skilled human skimming search
+    results: see which files have hits, see a few representative lines, skip
+    the rest.
+    """
+    lines = output.strip().splitlines()
+    if len(lines) < 30:
+        return output
+
+    # Strip ANSI color codes from grep/rg output
+    cleaned = _strip_ansi(output)
+    lines = cleaned.strip().splitlines()
+    if len(lines) < 30:
+        return output
+
+    # Group lines by file (everything before the first colon on lines with colons)
+    _FILE_LINE_RE = re.compile(r'^([^:]+):(\d+)[:](.*)$')
+    files: dict[str, list[str]] = {}
+    no_file: list[str] = []
+    for ln in lines:
+        m = _FILE_LINE_RE.match(ln)
+        if m:
+            fname = m.group(1)
+            files.setdefault(fname, []).append(ln)
+        else:
+            no_file.append(ln)
+
+    if not files:
+        return output  # not file:line format, don't compress
+
+    _MAX_PER_FILE = 3
+    _MAX_FILES = 20
+    result: list[str] = []
+    file_count = 0
+    for fname, file_lines in files.items():
+        if file_count >= _MAX_FILES:
+            remaining_files = len(files) - file_count
+            result.append(f"... {remaining_files} more files with matches omitted ...")
+            break
+        if len(file_lines) <= _MAX_PER_FILE:
+            result.extend(file_lines)
+        else:
+            result.extend(file_lines[:_MAX_PER_FILE])
+            result.append(f"  ... {len(file_lines) - _MAX_PER_FILE} more matches in {fname} ...")
+        file_count += 1
+
+    if no_file:
+        result.append("")
+        result.extend(no_file[:10])
+        if len(no_file) > 10:
+            result.append(f"... {len(no_file) - 10} more non-file lines omitted ...")
+
+    total_matches = sum(len(v) for v in files.values())
+    result.insert(0, f"[Search results: {total_matches} matches in {len(files)} files, showing top {min(file_count, _MAX_FILES)} files]")
+    return "\n".join(result)
+
+
 _PATTERN_HANDLERS = {
     "git_status": _compress_git_status,
     "git_log": _compress_git_log,
@@ -984,6 +1331,12 @@ _PATTERN_HANDLERS = {
     "sqlite3": _compress_sqlite3,
     "disk_stats": _compress_disk_stats,
     "docker_output": _compress_docker_output,
+    "json": _compress_json,
+    "csv": _compress_csv,
+    "stack_trace": _compress_stack_trace,
+    "k8s": _compress_k8s,
+    "cloud_cli": _compress_cloud_cli,
+    "search_results": _compress_search_results,
 }
 
 # Maps _detect_pattern() output to the feature name stored in compression_events.
@@ -1004,6 +1357,12 @@ _COMPRESS_FEATURE_MAP = {
     "sqlite3": "bash_compress_build",
     "disk_stats": "bash_compress_list",
     "docker_output": "bash_compress_build",
+    "json": "bash_compress_json",
+    "csv": "bash_compress_csv",
+    "stack_trace": "bash_compress_stack",
+    "k8s": "bash_compress_k8s",
+    "cloud_cli": "bash_compress_cloud",
+    "search_results": "bash_compress_search",
 }
 
 
@@ -1098,6 +1457,11 @@ def compress(command_str, raw_output, returncode=0, stderr=""):
     # Detect pattern
     pattern = _detect_pattern(command_str)
     if pattern is None:
+        # Output-based detection: stack traces can appear from any command.
+        # Check before generic compression so tracebacks get frame-limited.
+        if _looks_like_stack_trace(cleaned):
+            pattern = "stack_trace"
+    if pattern is None:
         # U4: generic structural/log compression for unmatched large output.
         # Small outputs pass through; large ones get deduped + head/tail with
         # all error/warning lines kept. The shared 10% gate below still applies.
@@ -1121,17 +1485,32 @@ def compress(command_str, raw_output, returncode=0, stderr=""):
     # line that happens to be contained inside a longer compressed line
     # is still emitted on its own rather than silently folded into the
     # larger line.
+    #
+    # Cap at _MAX_REINJECTED_LINES: when a credential pattern appears on
+    # most lines (e.g. grep for API keys), re-injecting all of them
+    # defeats compression. The first N are re-injected; the full original
+    # is already archived via progressive disclosure for retrieval.
     if preserved_lines:
+        _MAX_REINJECTED_LINES = max(1, min(20, len(compressed.splitlines()) // 5))
         original_lines = cleaned.splitlines()
         compressed_line_set = set(compressed.splitlines())
         appended: list[str] = []
+        injected = 0
         for line_idx in preserved_lines:
+            if injected >= _MAX_REINJECTED_LINES:
+                break
             if line_idx < len(original_lines):
                 preserved_line = original_lines[line_idx]
                 if preserved_line not in compressed_line_set:
                     appended.append(preserved_line)
                     compressed_line_set.add(preserved_line)
+                    injected += 1
         if appended:
+            if injected < len(preserved_lines):
+                appended.append(
+                    f"... {len(preserved_lines) - injected} more credential-bearing lines "
+                    f"archived in full original (retrieve via expand key) ..."
+                )
             compressed = compressed + "\n" + "\n".join(appended)
 
     try:
@@ -1184,6 +1563,25 @@ def main():
             returncode=result.returncode,
             stderr=stderr,
         )
+
+        # Progressive disclosure: archive the raw original BEFORE compression
+        # so the model can retrieve it via `expand <key>` if needed. Fail-open:
+        # if archiving fails, compression proceeds without the pointer.
+        _archive_key = None
+        if compressed != raw_output and len(raw_output) > 500:
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from archive_result import archive_original, build_archive_pointer
+                _session_id = os.environ.get("CLAUDE_SESSION_ID", "")
+                _archive_key = hashlib.sha256(
+                    f"{_session_id}|{command_str}|{time.time()}".encode("utf-8", errors="replace")
+                ).hexdigest()[:16]
+                if archive_original(raw_output, _session_id, _archive_key, "Bash") is not None:
+                    compressed = build_archive_pointer(compressed, len(raw_output), _archive_key)
+                else:
+                    _archive_key = None
+            except Exception:
+                _archive_key = None
 
         # Record savings to trends.db if compression was meaningful
         try:
