@@ -43,7 +43,10 @@ def read_stdin_hook_input(max_bytes: int = 1_048_576) -> dict:
         else:
             import select
             if select.select([sys.stdin], [], [], _STDIN_TIMEOUT)[0]:
-                data = sys.stdin.read(max_bytes)
+                # Decode from the raw buffer as UTF-8 so a non-UTF-8 host locale
+                # can't corrupt or crash on non-ASCII hook payloads (e.g. Hebrew
+                # cwd / tool args). Mirrors the Windows path above.
+                data = sys.stdin.buffer.read(max_bytes).decode("utf-8", errors="replace")
             else:
                 return {}
         return json.loads(data) if data else {}

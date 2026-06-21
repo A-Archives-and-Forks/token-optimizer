@@ -123,8 +123,11 @@ def _run_measure(args: list[str], *, capture_output: bool = True, timeout: int =
             cmd,
             capture_output=capture_output,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
-            env={**os.environ, "TOKEN_OPTIMIZER_RUNTIME": "hermes"},
+            env={**os.environ, "TOKEN_OPTIMIZER_RUNTIME": "hermes",
+                 "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
         )
         if result.returncode != 0 and result.stderr:
             logger.debug(
@@ -230,6 +233,11 @@ def run_dashboard(session_id: str = "", port: int = DASHBOARD_PORT) -> None:
 
 
 if __name__ == "__main__":
+    try:
+        from utf8_io import enforce_utf8_io
+        enforce_utf8_io()
+    except Exception:
+        pass
     # Quick smoke test: locate measure.py and print status.
     p = _locate_measure_py()
     if p:

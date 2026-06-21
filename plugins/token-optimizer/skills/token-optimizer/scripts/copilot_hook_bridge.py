@@ -218,7 +218,8 @@ def _copilot_cli_version():
     exe = os.environ.get("TOKEN_OPTIMIZER_COPILOT_BIN") or "copilot"
     try:
         proc = subprocess.run(
-            [exe, "--version"], capture_output=True, text=True, timeout=5
+            [exe, "--version"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=5
         )
         raw = (proc.stdout or proc.stderr or "").strip()
         return _parse_version(raw), raw
@@ -436,7 +437,7 @@ class _session_lock:
         try:
             import fcntl  # noqa: PLC0415
 
-            self._fh = open(self._path, "w")
+            self._fh = open(self._path, "w", encoding="utf-8")
             fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
         except (ImportError, OSError):
             self._fh = None
@@ -570,6 +571,11 @@ _HANDLERS = {
 
 
 def main(argv=None):
+    try:
+        from utf8_io import enforce_utf8_io
+        enforce_utf8_io()
+    except Exception:
+        pass
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] not in _HANDLERS:
         return 0

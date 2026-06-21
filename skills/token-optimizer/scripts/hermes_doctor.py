@@ -246,6 +246,8 @@ def _bridge_smoke_check() -> list[dict[str, str]]:
             [sys.executable, str(bridge)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:

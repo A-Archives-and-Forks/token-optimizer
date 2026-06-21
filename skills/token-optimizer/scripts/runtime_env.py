@@ -115,6 +115,8 @@ def _ancestor_in_process_tree(basenames: frozenset) -> bool:
             ["ps", "-Ao", "pid=,ppid=,comm="],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=2,
         )
         if proc.returncode != 0:

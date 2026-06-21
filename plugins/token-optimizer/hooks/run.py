@@ -57,7 +57,7 @@ def _check_consent() -> bool:
         if not config_path.exists() or config_path.is_symlink():
             return True  # No config or symlink = fail-open
 
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
 
         if config.get("enterprise_consent_shown"):
@@ -70,7 +70,7 @@ def _check_consent() -> bool:
             import tempfile
             fd, tmp = tempfile.mkstemp(dir=str(config_path.parent), suffix=".tmp")
             try:
-                with os.fdopen(fd, "w") as tf:
+                with os.fdopen(fd, "w", encoding="utf-8") as tf:
                     json.dump(config, tf, indent=2)
                 os.replace(tmp, str(config_path))
             except Exception:
@@ -127,9 +127,15 @@ def main() -> int:
     if not is_exempt and not _check_consent():
         return 0
 
+    # Force UTF-8 in every dispatched script regardless of the host locale, so
+    # non-ASCII session paths / transcript content (Hebrew, CJK, accented names)
+    # never crash a hook with UnicodeDecode/EncodeError. PYTHONUTF8 also makes the
+    # child's default open() encoding UTF-8; PYTHONIOENCODING covers its std streams.
+    child_env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+
     proc = None
     try:
-        proc = subprocess.Popen(cmd)
+        proc = subprocess.Popen(cmd, env=child_env)
         try:
             proc.wait(timeout=120)
         except subprocess.TimeoutExpired:

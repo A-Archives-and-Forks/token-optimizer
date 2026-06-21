@@ -92,6 +92,7 @@ except ImportError:  # pragma: no cover - Python < 3.11 fallback
 
 from hook_io import read_stdin_hook_input as _read_stdin_hook_input_shared
 from plugin_env import resolve_plugin_data_dir
+from utf8_io import enforce_utf8_io, reexec_in_utf8_mode
 from runtime_env import claude_home, detect_runtime, runtime_home, runtime_name_for_humans
 
 import codex_io
@@ -2806,7 +2807,8 @@ def git_context(as_json=False):
 
     def _run_git(*cmd):
         try:
-            r = _sp.run(["git"] + list(cmd), capture_output=True, text=True, timeout=10)
+            r = _sp.run(["git"] + list(cmd), capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", timeout=10)
             return r.stdout.strip() if r.returncode == 0 else ""
         except (FileNotFoundError, _sp.TimeoutExpired):
             return ""
@@ -7279,7 +7281,7 @@ def _extract_agent_type(subagent_file):
     meta_path = sf.with_suffix(".meta.json")
     if meta_path.exists():
         try:
-            with open(meta_path, "r") as mf:
+            with open(meta_path, "r", encoding="utf-8") as mf:
                 meta = json.load(mf)
                 agent_type = meta.get("agentType", "")
                 if agent_type:
@@ -12394,7 +12396,8 @@ def _keepwarm_fire_ping(record, now=None, runner=None):
             def runner(cmd, cwd, env, timeout):  # noqa: A001 - injectable default
                 return subprocess.run(
                     cmd, cwd=cwd, env=env, timeout=timeout,
-                    capture_output=True, text=True)
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace")
 
         # Real monotonic start (NOT the injected logical `now`) so duration_s is
         # sane even on backfill/replay paths that pass a synthetic now (lang M1).
@@ -17855,7 +17858,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.14"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.15"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -31945,6 +31948,13 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
 
 
 if __name__ == "__main__":
+    # On a non-UTF-8 host locale, re-exec under Python UTF-8 mode FIRST so every
+    # subprocess(text=True) decode (ps/git session detection), default open(), and
+    # stdio become UTF-8 -- closing the whole non-ASCII crash class. No-op for
+    # UTF-8 users and for scripts already launched with PYTHONUTF8=1 by run.py.
+    reexec_in_utf8_mode()
+    # Belt-and-suspenders for the case where re-exec was unavailable.
+    enforce_utf8_io()
     args = sys.argv[1:]
 
     # Parse global --context-size flag (applies to all commands)

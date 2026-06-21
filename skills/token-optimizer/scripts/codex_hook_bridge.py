@@ -266,6 +266,11 @@ def handle_subagent_stop() -> None:
 
 def main() -> int:
     try:
+        try:
+            from utf8_io import enforce_utf8_io
+            enforce_utf8_io()
+        except Exception:
+            pass
         if len(sys.argv) < 2:
             return 0
 

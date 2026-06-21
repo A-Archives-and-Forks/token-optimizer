@@ -161,6 +161,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        from utf8_io import enforce_utf8_io
+        enforce_utf8_io()
+    except Exception:
+        pass
     args = build_parser().parse_args(argv)
     if args.status:
         print(status())
