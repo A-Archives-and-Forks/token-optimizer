@@ -5,14 +5,24 @@ on:
   pull_request_target:
     types: [opened, closed, synchronize]
 
-permissions:
-  contents: write
-  pull-requests: write
-  statuses: write
+# Deny by default at the workflow level; grant the minimum at the job level so the
+# elevated token's blast radius stays scoped (this workflow runs on pull_request_target,
+# which executes with the base repo's secrets even for fork PRs).
+permissions: {}
 
 jobs:
   CLAAssistant:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+      # Required so that after a contributor signs, the action can re-run the failed
+      # CLA check on the PR's head commit and turn it green. Without this the post-sign
+      # re-run fails with "Resource not accessible by integration" and the PR stays red
+      # ("all checks have failed") even though the contributor signed. See
+      # contributor-assistant/github-action -> reRunLastWorkFlowIfRequired (cla-assistant#39).
+      actions: write
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
