@@ -53,12 +53,23 @@ def _check_consent() -> bool:
                 config_path = ch / "token-optimizer" / "config.json"
             else:
                 # Honor CLAUDE_CONFIG_DIR (Claude Code's official config-dir
-                # override) before falling back to ~/.claude.
-                claude_config = os.environ.get("CLAUDE_CONFIG_DIR", "")
+                # override) before falling back to ~/.claude. Mirrors
+                # runtime_env.claude_home(): accept any absolute, existing,
+                # non-symlink directory (CLAUDE_CONFIG_DIR may legitimately live
+                # OUTSIDE $HOME — containers, CI), reject relative/symlink, else
+                # fall back. The previous str.startswith($HOME) check both
+                # excluded valid out-of-home dirs and sibling-prefix-matched
+                # (/Users/alex-evil passing for /Users/alex).
+                claude_config = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+                cc = None
                 if claude_config:
-                    cc = Path(claude_config).resolve()
-                    if not str(cc).startswith(str(home)):
-                        return True  # Path outside home = skip (fail-open)
+                    candidate = Path(claude_config).expanduser()
+                    try:
+                        if candidate.is_absolute() and candidate.is_dir() and not candidate.is_symlink():
+                            cc = candidate.resolve()
+                    except OSError:
+                        cc = None
+                if cc is not None:
                     config_path = cc / "token-optimizer" / "config.json"
                 else:
                     config_path = home / ".claude" / "token-optimizer" / "config.json"

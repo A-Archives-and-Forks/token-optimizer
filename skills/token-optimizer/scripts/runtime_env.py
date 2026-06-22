@@ -227,14 +227,32 @@ def claude_home() -> Path:
     """Return Claude Code's home directory.
 
     Honors CLAUDE_CONFIG_DIR — Claude Code's official override for where it
-    stores projects/, settings.json, etc. — when it points at a safe directory
-    under the user home, matching how every other runtime honors its own home
-    env var (CODEX_HOME, HERMES_HOME, COPILOT_HOME, ...). Falls back to
-    ~/.claude. Without this, multi-config-dir users (CLAUDE_CONFIG_DIR set to a
-    non-default location) silently get session scans, the trends DB, and the
-    dashboard pinned to a stale ~/.claude that no longer receives sessions.
+    stores projects/, settings.json, etc. Unlike CODEX_HOME/HERMES_HOME (which
+    route through ``_safe_home_from_env`` and are confined under ``$HOME``),
+    Claude Code permits CLAUDE_CONFIG_DIR to point ANYWHERE: containers, CI
+    runners, a relocated config volume, a non-home ``$HOME``. Confining it to
+    ``$HOME`` would silently re-pin those users to a stale ~/.claude — the exact
+    failure this is meant to fix. So this resolver accepts any ABSOLUTE,
+    EXISTING, NON-SYMLINK directory (keeping the symlink + relative-path
+    rejection for traversal safety) and only falls back to ~/.claude when the
+    override is unset or unusable.
     """
-    return _safe_home_from_env(_CLAUDE_CONFIG_DIR_ENV, Path.home() / ".claude")
+    fallback = Path.home() / ".claude"
+    raw = os.environ.get(_CLAUDE_CONFIG_DIR_ENV, "").strip()
+    if not raw:
+        return fallback
+    candidate = Path(raw).expanduser()
+    try:
+        if candidate.is_absolute() and candidate.is_dir() and not candidate.is_symlink():
+            return candidate.resolve(strict=False)
+    except OSError:
+        pass
+    print(
+        f"[Token Optimizer] Warning: {_CLAUDE_CONFIG_DIR_ENV}={raw!r} rejected "
+        "(not an absolute, existing, non-symlink directory). Using default.",
+        file=sys.stderr,
+    )
+    return fallback
 
 
 def codex_home() -> Path:
