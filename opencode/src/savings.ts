@@ -2,14 +2,16 @@
  * Realized savings engine for OpenCode — the CURRENT-VOLUME COUNTERFACTUAL.
  *
  * Parity with measure.py `_estimate_before_after_savings` and the OpenClaw port.
- * Takes the user's CURRENT window billed volume, holds it constant, and prices
- * it two ways:
- *   ACTUAL        = current model mix + current cache pattern (what it cost).
- *   COUNTERFACTUAL = same volume, priced at the PRE-TO baseline efficiency
- *                    (baseline model mix + baseline pool cache-hit). "The old way."
- * Transformation = counterfactual − actual. Volume is identical on both arms, so
- * the gap is pure efficiency (model routing + caching), never confounded by
- * workload growth — the flaw in the retired per-session era comparison.
+ * Prices the FROZEN pre-TO typical session (the per-session mean of the early
+ * `before` window) two ways:
+ *   OLD WAY / session = baseline mix + the typical session's own cache pattern.
+ *                       Depends only on frozen inputs + prices -> a STABLE baseline
+ *                       that does NOT re-roll with this period's workload.
+ *   NOW / session     = the SAME frozen tokens, pool redistributed at the CURRENT
+ *                       cache-hit and priced at the CURRENT mix. Moves ONLY with
+ *                       efficiency (model routing + caching).
+ * Per-session transformation = old_cps − now_cps. Monthly = that x the session count,
+ * so volume re-enters ONLY as a multiplier — never as a confounder of the baseline.
  *
  * OpenCode persists every session to trends.db (session_log) with a pre-computed
  * cost_usd, but the counterfactual reprices the SAME volume at a DIFFERENT mix,
@@ -277,15 +279,15 @@ export function computeRealizedSavings(
   // Aggregate the CURRENT window billed token classes (SUM, not mean). NO
   // winsorization / outlier drop: a heavy session's tokens are real volume that
   // genuinely cost more at the baseline mix.
-  let F = 0, CR = 0, CW = 0, O = 0;
-  for (const r of after) { F += r.fi; CR += r.cr; CW += r.cw; O += r.out; }
+  let F = 0, CR = 0, CW = 0;
+  for (const r of after) { F += r.fi; CR += r.cr; CW += r.cw; }
   // Numeric safety: clamp the aggregated totals to finite, non-negative values
   // (mirrors measure.py's _session_token_vector clamps). Per-row reads are already
   // clamped in toRec, but a corrupt/overflowing row could still poison the SUM
   // (e.g. a row injected via rowsOverride bypassing the DB type system). A single
   // bad total must never NaN/negative the headline.
   const clampTotal = (x: number): number => (Number.isFinite(x) && x > 0 ? x : 0);
-  F = clampTotal(F); CR = clampTotal(CR); CW = clampTotal(CW); O = clampTotal(O);
+  F = clampTotal(F); CR = clampTotal(CR); CW = clampTotal(CW);
   const totalIn = F + CR + CW;
   if (totalIn <= 0) {
     const r = NOT_READY("no recent volume");
@@ -303,17 +305,24 @@ export function computeRealizedSavings(
 
   const afterMix = modelMix(after);
 
-  // Pool cache-hit over FRESH+CACHE_READ (cache-write excluded), so caching is
-  // redistributed over the pool, not over total_in — keeps the volume invariant
-  // exact (cf_F + cf_CR + CW == total_in).
-  const basePoolBefore = before.reduce((s, r) => s + r.fi + r.cr, 0);
-  const baseHitRaw = basePoolBefore > 0
-    ? before.reduce((s, r) => s + r.cr, 0) / basePoolBefore
-    : null;
+  // CURRENT pool cache-hit over FRESH+CACHE_READ (cache-write excluded) — the one
+  // efficiency signal the "now" arm needs from the current window.
   const curPool = F + CR;
   const curHit = curPool > 0 ? CR / curPool : 0;
-  // If the baseline pool is unusable, fall back to current hit (caching lever = 0).
-  const baseHit = baseHitRaw ?? curHit;
+
+  // FROZEN typical session = the per-session MEAN of the early (`before`) window, a
+  // fixed install-anchored cohort -> a stable, factual baseline. Both arms price THIS
+  // session, so per-session figures move ONLY with efficiency, never with the current
+  // period's workload volume. Mirrors measure.py _estimate_before_after_savings.
+  const nBefore = Math.max(1, before.length);
+  const tFi = before.reduce((s, r) => s + r.fi, 0) / nBefore;
+  const tCr = before.reduce((s, r) => s + r.cr, 0) / nBefore;
+  const tCw = before.reduce((s, r) => s + r.cw, 0) / nBefore;
+  const tOut = before.reduce((s, r) => s + r.out, 0) / nBefore;
+  const tPool = tFi + tCr; // frozen fresh + cache_read pool
+
+  const afterWindowDays = Math.max(1, (now - afterStart) / DAY_MS);
+  const sessionsPerMonth = (after.length / afterWindowDays) * 30;
 
   // MONTHLY SCALING: the token classes above are summed over the `days` window,
   // so every dollar figure derived from them is a WINDOW total, not a monthly one.
@@ -327,10 +336,19 @@ export function computeRealizedSavings(
   const monthlyScale = 30 / Math.max(1, days);
   const m = (x: number): number => x * monthlyScale;
 
-  // ACTUAL = current volume at the current mix: pool+output + cache-write (TTL is
-  // unknown in OpenCode -> all writes treated as 5m, conservative). WINDOW figure.
-  const actualWindow = price(F, CR, O, afterMix) + price_cw(CW, afterMix);
-  if (actualWindow <= 0) {
+  // OLD WAY / session (counterfactual) = the typical session's native fresh/cache_read
+  // split priced at the baseline mix + cache-write (5m, conservative) at the baseline
+  // mix. Depends only on the frozen early window + prices -> stable across runs.
+  const oldCps = price(tFi, tCr, tOut, beforeMix) + price_cw(tCw, beforeMix);
+  // NOW / session (actual) = the SAME frozen tokens, pool redistributed at the CURRENT
+  // pool-hit and priced at the CURRENT mix. Cache-write priced at the actual mix.
+  const curCRs = curHit * tPool;
+  const curFs = tPool - curCRs;
+  const nowCps = price(curFs, curCRs, tOut, afterMix) + price_cw(tCw, afterMix);
+  if (
+    !Number.isFinite(oldCps) || !Number.isFinite(nowCps) ||
+    oldCps <= 0 || nowCps <= 0
+  ) {
     const r = NOT_READY("insufficient pricing data");
     r.installDate = installDate;
     r.beforeMixLabel = mixLabel(beforeMix);
@@ -343,16 +361,9 @@ export function computeRealizedSavings(
     };
     return r;
   }
-
-  // COUNTERFACTUAL = same volume, caching redistributed over the F+CR pool at the
-  // baseline pool-hit, pool+output priced at the baseline mix, AND cache-write
-  // priced at the baseline mix (cache-write IS a routing lever). The invariant
-  // cf_F + cf_CR + CW == total_in holds exactly (baseHit in [0,1] keeps cf_F >= 0).
-  // WINDOW figure.
-  const pool = totalIn - CW; // = F + CR
-  const cfCR = baseHit * pool;
-  const cfF = pool - cfCR;
-  const counterfactualWindow = price(cfF, cfCR, O, beforeMix) + price_cw(CW, beforeMix);
+  // Monthly main arms = the per-session anchor x the monthly session count.
+  const cfMonthlyMain = oldCps * sessionsPerMonth;
+  const actualMonthlyMain = nowCps * sessionsPerMonth;
 
   // COMPRESSION ADD-BACK (#3): the measured removed-token dollars repriced to the
   // baseline input mix (baseline_input_rate / current_input_rate). actual = 0 for
@@ -378,9 +389,10 @@ export function computeRealizedSavings(
   const vsReprice = outAfter > 0 ? outBefore / outAfter : 1;
   const verbosityAddbackWindow = Math.max(0, measuredVerbosity * vsReprice);
 
-  // Monthly arms (scaled once, here).
-  const actualMonthly = m(actualWindow);
-  const counterfactualMonthly = m(counterfactualWindow);
+  // Monthly arms. Main arms come from the frozen per-session anchors x session count;
+  // the add-back pools are still window sums scaled to monthly via m().
+  const actualMonthly = actualMonthlyMain;
+  const counterfactualMonthly = cfMonthlyMain;
   const compressionAddback = m(compressionAddbackWindow);
   const verbosityAddback = m(verbosityAddbackWindow);
 
@@ -397,14 +409,12 @@ export function computeRealizedSavings(
   // (four disjoint pools), monthly.
   const transformation = mainTransformation + subagentTransformation + compressionAddback + verbosityAddback;
 
-  const afterWindowDays = Math.max(1, (now - afterStart) / DAY_MS);
-  const sessionsPerMonth = (after.length / afterWindowDays) * 30;
-
-  // Per-session keys (dashboard reads them): the MONTHLY arms divided by the
-  // current session count. before_* = "the old way", after_* = "now".
+  // Per-session keys (dashboard reads them) = the FROZEN typical-session anchors
+  // directly. before_* = "the old way" (stable across runs); after_* = "now" (moves
+  // only with efficiency). recentN drives the cumulative figure below.
   const recentN = after.length;
-  const beforeCps = counterfactualMonthly / recentN;
-  const afterCps = actualMonthly / recentN;
+  const beforeCps = oldCps;
+  const afterCps = nowCps;
 
   // Cumulative: per-session transformation across every post-baseline session.
   // Uses the full transformation (all 4 pools: main + subagent + compression +
@@ -423,9 +433,10 @@ export function computeRealizedSavings(
   // the (monthly) main transformation.
   let sRoute = 0, sCache = 0;
   if (mainTransformation > 0) {
-    const vRouteWindow = price(cfF, cfCR, O, afterMix) + price_cw(CW, afterMix);
-    sRoute = m(counterfactualWindow - vRouteWindow); // before->after mix (incl CW)
-    sCache = m(vRouteWindow - actualWindow); // remaining gap = caching
+    // Per-session: typical baseline cache split repriced at the actual mix, then x count.
+    const vRouteS = price(tFi, tCr, tOut, afterMix) + price_cw(tCw, afterMix);
+    sRoute = (oldCps - vRouteS) * sessionsPerMonth; // before->after mix (incl CW)
+    sCache = (vRouteS - nowCps) * sessionsPerMonth; // remaining gap = caching
   }
 
   const breakdown: SavingsBreakdownItem[] = [

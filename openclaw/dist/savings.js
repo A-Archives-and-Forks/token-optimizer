@@ -44,16 +44,17 @@ exports.computeRealizedSavings = computeRealizedSavings;
  * OpenClaw is a zero-dep Node plugin (engines >=18), so we persist to JSON under
  * ~/.openclaw/token-optimizer/ exactly like v5-features.json.
  *
- * THE HEADLINE = a current-volume counterfactual (a superset), NOT a per-session
- * early-vs-recent era comparison (that was RETIRED — confounded by volume growth).
- * We take the user's CURRENT `days`-window billed volume, hold it constant, and
- * price it two ways:
- *   ACTUAL         = current model mix + current cache pattern (what it really cost).
- *   COUNTERFACTUAL = same volume, priced at the frozen PRE-TO baseline efficiency
- *                    (baseline model mix + baseline pool cache-hit). "The old way."
- * Transformation = counterfactual - actual. Volume is identical on both arms, so
- * the gap is pure efficiency (model routing incl. cache-write + caching), never
- * confounded by workload growth.
+ * THE HEADLINE = a FROZEN per-typical-session counterfactual (a superset). We price the
+ * frozen pre-TO typical session (baseline meanTokens) two ways:
+ *   OLD WAY / session = baseline mix + baseline cache pattern (the typical session's own
+ *                       native fresh/cache_read split). Depends only on frozen inputs +
+ *                       prices, so it is a STABLE baseline that does NOT re-roll with this
+ *                       period's workload.
+ *   NOW / session     = the SAME frozen tokens, pool redistributed at the CURRENT cache-hit
+ *                       and priced at the CURRENT mix. Moves ONLY with efficiency.
+ * Per-session transformation = old_cps - now_cps. Monthly = that x the session count, so
+ * volume re-enters ONLY as a multiplier — never as a confounder of the baseline. (This
+ * replaces the old current-volume counterfactual whose per-session figure floated each run.)
  *
  * Three non-overlapping pools sum to the headline:
  *   1. Main routing + caching (billed session_log volume; NO winsorization/outlier
@@ -694,29 +695,16 @@ function computeRealizedSavings(openclawDir, days = 30, now = Date.now()) {
     // if the baseline mix is empty, fall back to the actual mix (routing lever -> 0).
     const beforeShares = Object.keys(bs.shares).length > 0 ? bs.shares : as.shares;
     const afterShares = as.shares;
-    // Baseline pool cache-hit, defined over the FRESH+CACHE_READ POOL only (cache
-    // write excluded), from the baseline's winsorized typical-session token vector.
-    // base_hit = baseline cache_read / (baseline fresh + baseline cache_read).
-    const bPool = bs.meanTokens.fi + bs.meanTokens.cr;
-    let baseHit = bPool > 0 ? bs.meanTokens.cr / bPool : null;
-    // CURRENT window = the `after` sessions, aggregated into billed token classes
-    // (SUM, not mean). NO winsorization / NO outlier drop (methodology #1): a heavy
-    // session's tokens are REAL volume that genuinely cost more at the baseline mix,
-    // so dropping them is a pure definitional undercount. This is the EXACT volume
-    // held constant across both arms.
-    let F = 0, CR = 0, CW = 0, O = 0, CW1h = 0, CW5m = 0;
+    // CURRENT window = the `after` sessions, aggregated ONLY to derive the current pool
+    // cache-hit (curHit, the one efficiency signal the "now" arm needs) and to confirm the
+    // window is non-empty. The main pool is now priced per FROZEN typical session (below),
+    // so current-window VOLUME is no longer priced directly.
+    let F = 0, CR = 0, CW = 0;
     for (const r of after) {
         F += r.input;
         CR += r.cacheRead;
         CW += r.cacheWrite;
-        O += r.output;
-        CW1h += r.cacheWrite1h;
-        CW5m += r.cacheWrite5m;
     }
-    // Apportion any cache-write not split into TTL buckets as 5m (conservative).
-    const splitSum = CW1h + CW5m;
-    if (splitSum < CW)
-        CW5m += CW - splitSum;
     const totalIn = F + CR + CW;
     if (totalIn <= 0) {
         const r = NOT_READY("no recent billed volume");
@@ -725,32 +713,42 @@ function computeRealizedSavings(openclawDir, days = 30, now = Date.now()) {
     }
     const curPool = F + CR;
     const curHit = curPool > 0 ? CR / curPool : 0;
-    if (baseHit === null)
-        baseHit = curHit; // caching lever neutralized; conservative
     const afterWindowDays = Math.max(1, (now - afterStart) / DAY_MS);
     const sessionsPerMonth = (after.length / afterWindowDays) * 30;
     // Window is `days`; scale aggregate window cost to a monthly figure.
     const monthlyScale = 30 / Math.max(1, days);
     const m = (x) => x * monthlyScale;
-    // ACTUAL = current volume at the current mix. Pool (fresh + cache_read) + output,
-    // PLUS cache-write (TTL-aware) priced at the actual mix.
-    const actualWindow = pricePool(F, CR, O, afterShares, proxy, openclawDir) +
-        priceCacheWrite(CW, CW1h, CW5m, afterShares, proxy, openclawDir);
-    if (actualWindow <= 0) {
+    // --- PER-TYPICAL-SESSION pricing (FROZEN baseline volume = a factual anchor) ---
+    // Both arms price the SAME frozen typical session (bs.meanTokens), so the per-session
+    // figures move ONLY with efficiency (model mix + cache reuse), NEVER with this period's
+    // workload size. Volume re-enters solely as the monthly session-count multiplier. This
+    // makes "the old way / session" a stable baseline, not a value re-derived from whatever
+    // volume fell in the current window. Mirrors measure.py _estimate_before_after_savings.
+    const tFi = bs.meanTokens.fi;
+    const tCr = bs.meanTokens.cr;
+    const tCw = bs.meanTokens.cw;
+    const tOut = bs.meanTokens.out;
+    const tPool = tFi + tCr; // frozen fresh + cache_read pool
+    // OLD WAY / session (counterfactual) = the typical session as it was pre-TO (its native
+    // fresh/cache_read split) priced at the baseline mix. Depends only on frozen inputs +
+    // prices -> stable across runs. Cache-write has no recorded TTL split -> treat as 5m.
+    const oldCps = pricePool(tFi, tCr, tOut, beforeShares, proxy, openclawDir) +
+        priceCacheWrite(tCw, 0, tCw, beforeShares, proxy, openclawDir);
+    // NOW / session (actual) = the SAME frozen tokens, but the pool redistributed at the
+    // CURRENT pool-hit (curHit) and priced at the CURRENT mix. Only efficiency moves it.
+    const curCRs = curHit * tPool;
+    const curFs = tPool - curCRs;
+    const nowCps = pricePool(curFs, curCRs, tOut, afterShares, proxy, openclawDir) +
+        priceCacheWrite(tCw, 0, tCw, afterShares, proxy, openclawDir);
+    if (!Number.isFinite(oldCps) || !Number.isFinite(nowCps) ||
+        oldCps <= 0 || nowCps <= 0) {
         const r = NOT_READY("insufficient billed cost");
         r.installDate = installDate;
         return r;
     }
-    // COUNTERFACTUAL ("the old way") = SAME volume, caching redistributed over the
-    // FRESH+CACHE_READ POOL at the baseline pool-hit rate, pool priced at the baseline
-    // mix, AND cache-write priced at the baseline mix (cache-write IS a routing lever).
-    // CW count unchanged. Volume invariant cf_F + cf_CR + CW == totalIn holds exactly,
-    // and base_hit in [0,1] keeps cf_F non-negative.
-    const pool = totalIn - CW; // = F + CR
-    const cfCR = baseHit * pool;
-    const cfF = pool - cfCR;
-    const counterfactualWindow = pricePool(cfF, cfCR, O, beforeShares, proxy, openclawDir) +
-        priceCacheWrite(CW, CW1h, CW5m, beforeShares, proxy, openclawDir);
+    // Monthly main arms = the per-session anchor x the monthly session count.
+    const cfMonthlyMain = oldCps * sessionsPerMonth;
+    const actualMonthlyMain = nowCps * sessionsPerMonth;
     // COMPRESSION ADD-BACK (#3): directly-metered tokens TO removed from context.
     // DISJOINT from the billed pool (already removed before billing). Reprice the
     // measured $ to the baseline input mix; actual for this pool is 0, so the whole
@@ -763,8 +761,8 @@ function computeRealizedSavings(openclawDir, days = 30, now = Date.now()) {
     const inBefore = inputRate(beforeShares, proxy, openclawDir);
     const compReprice = inAfter > 0 ? inBefore / inAfter : 1;
     const compressionAddback = Math.max(0, compMeasured * compReprice);
-    // MAIN transformation (monthly). Clamp >= 0.
-    const mainTransformation = Math.max(0, m(counterfactualWindow - actualWindow));
+    // MAIN transformation (monthly) = (old_cps - now_cps) x monthly session count. Clamp >= 0.
+    const mainTransformation = Math.max(0, cfMonthlyMain - actualMonthlyMain);
     // SUBAGENT pool (#2) = 0. OpenClaw has NO Claude-style sidechains (subagent
     // transcripts), so there is no separate sidechain pool to price. Documented gap.
     const subagentTransformation = 0;
@@ -787,8 +785,8 @@ function computeRealizedSavings(openclawDir, days = 30, now = Date.now()) {
     // Combined arms (headline spans the main pool + the compression add-back +
     // the verbosity add-back; both add-back pools' actual is 0, so their
     // counterfactual == their contribution).
-    const actualMonthly = m(actualWindow);
-    const counterfactualMonthly = m(counterfactualWindow) + compressionMonthly + verbosityMonthly;
+    const actualMonthly = actualMonthlyMain;
+    const counterfactualMonthly = cfMonthlyMain + compressionMonthly + verbosityMonthly;
     const transformationPct = counterfactualMonthly > 0 ? transformation / counterfactualMonthly : 0;
     // --- Attribution breakdown (waterfall over the efficiency levers) ---
     // Morph the counterfactual into the actual one lever at a time. Routing first
@@ -797,10 +795,11 @@ function computeRealizedSavings(openclawDir, days = 30, now = Date.now()) {
     // exactly to the MAIN transformation; compression is the third (disjoint) lever.
     let sRoute = 0, sCache = 0;
     if (mainTransformation > 0) {
-        const vRoute = pricePool(cfF, cfCR, O, afterShares, proxy, openclawDir) +
-            priceCacheWrite(CW, CW1h, CW5m, afterShares, proxy, openclawDir);
-        sRoute = m(counterfactualWindow - vRoute); // before->after mix (incl. cache-write)
-        sCache = m(vRoute - actualWindow); // remaining gap = caching
+        // Per-session: typical baseline cache split repriced at the actual mix, then x count.
+        const vRouteS = pricePool(tFi, tCr, tOut, afterShares, proxy, openclawDir) +
+            priceCacheWrite(tCw, 0, tCw, afterShares, proxy, openclawDir);
+        sRoute = (oldCps - vRouteS) * sessionsPerMonth; // before->after mix (incl. cache-write)
+        sCache = (vRouteS - nowCps) * sessionsPerMonth; // remaining gap = caching
     }
     const breakdown = [
         { key: "routing", label: "Smarter model routing (incl. cache-write)", monthlyUsd: round2(sRoute) },
@@ -819,9 +818,10 @@ function computeRealizedSavings(openclawDir, days = 30, now = Date.now()) {
     // verbosity) are aggregate — not per-session in nature — so they stay out of
     // the per-session panel. Matches Python's before_cps = counterfactual_monthly / recent_n
     // where counterfactual_monthly is main-only.
-    const mainCfMonthly = m(counterfactualWindow);
-    const beforeCps = mainCfMonthly / after.length;
-    const afterCps = actualMonthly / after.length;
+    // Per-session arms = the FROZEN typical-session anchors directly (stable across runs).
+    // before_cps depends only on frozen inputs; after_cps moves only with efficiency.
+    const beforeCps = oldCps;
+    const afterCps = nowCps;
     return {
         ready: true,
         status: "ok",
