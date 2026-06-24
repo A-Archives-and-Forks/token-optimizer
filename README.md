@@ -216,16 +216,16 @@ Savings come from four non-overlapping pools, tracked in two tiers:
 
 **Two numbers, kept separate:**
 
-- **Counted (~$411/mo)**, logged action by action. Every time Token Optimizer swapped in a lighter model, trimmed a bulky result, or skipped a repeat read, it added it up: smarter habits ~$299/mo, while-you-work compression ~$112/mo. This is the slice metered event by event, so it is smaller and exact.
-- **Big picture (~$2,351/mo)**, the full counterfactual. Had you worked the way you did before Token Optimizer (~95% Opus), you would have paid about ~$12,410/mo versus ~$10,059/mo now. The gap is mostly a lighter model mix (95% Opus down to 56%, ~$1,419/mo), plus cheaper subagents (~$801/mo), metered context (~$101/mo), and better cache reuse (~$30/mo).
+- **Counted (~$313/mo)**, logged action by action. Every time Token Optimizer swapped in a lighter model, trimmed a bulky result, or skipped a repeat read, it added it up: smarter habits ~$260/mo, while-you-work compression ~$53/mo. This is the slice metered event by event, so it is smaller and exact.
+- **Big picture (~$1,877/mo, ~18%)**, the full counterfactual. Had you worked the way you did before Token Optimizer (~95% Opus), you would have paid about ~$10,585/mo versus ~$8,708/mo now. The gap is mostly a lighter model mix (95% Opus down to 60%, ~$1,076/mo for main routing + caching), plus cheaper subagents (~$741/mo) and the metered compression add-back (~$60/mo).
 
 These numbers are never summed. Counted is the floor with hard receipts. Big picture is a model priced against your frozen pre-Token-Optimizer baseline. [See the full methodology →](BENCHMARK.md)
 
 <p align="center">
-  <img src="skills/token-optimizer/assets/real-savings.svg" alt="30-day savings report: ~$411 counted, ~$2,351 big picture" width="900">
+  <img src="skills/token-optimizer/assets/real-savings.svg" alt="30-day savings report: ~$313 counted, ~$1,877 big picture" width="900">
 </p>
 
-Based on 798 sessions over 30 days, priced against a frozen pre-Token-Optimizer baseline (~95% Opus). Your number is your own. [See the methodology →](BENCHMARK.md)
+Based on 684 sessions over 30 days (snapshot ending 2026-06-15), priced against a frozen pre-Token-Optimizer baseline (~95% Opus). Your number is your own. [See the methodology →](BENCHMARK.md)
 
 <p align="center">
   <img src="skills/token-optimizer/assets/user-profiles.svg" alt="What happens inside a 1M session" width="800">
@@ -245,7 +245,7 @@ Under the hood, **PreToolUse hooks** intercept every Read and Bash call before i
 | Structure Map | Unchanged file re-reads return a structural skeleton | ~30% (up to 99% per file) |
 | Bash Compression | CLI output condensed to essentials | ~10% |
 | Search Compression | grep/web results condensed to top hits + counts | ~15% |
-| Lean-Output Nudges | Steers model to concise output when context fills | 30-41% output reduction |
+| Lean-Output Nudges | Steers model to concise output when context fills | 10-15% typical, up to 30-41% output reduction |
 | Quality Nudges | Warns when context quality drops | Prevents compaction loss |
 | Loop Detection | Catches retry loops before they burn tokens | Measured per loop |
 | Activity Mode | Adapts compaction to your session phase | Prevents decision loss |
@@ -288,7 +288,7 @@ Disable: `TOKEN_OPTIMIZER_BASH_COMPRESS_SEARCH=0`
 
 ### Lean-Output Nudges
 
-When context fills past 55% and quality drops, a short nudge tells the model to reason deeply but keep visible output lean. Live A/B testing showed 30-41% actual output token reduction on real prompts. Cache-safe: injected as `additionalContext`, never modifies the existing prefix.
+When context fills past 55% and quality drops, a short nudge tells the model to reason deeply but keep visible output lean. Live A/B testing showed a 10-15% typical reduction in output tokens, up to 30-41%, on real prompts. Cache-safe: injected as `additionalContext`, never modifies the existing prefix.
 
 Disable: `TOKEN_OPTIMIZER_VERBOSITY_STEER=0`
 
@@ -403,7 +403,7 @@ python3 measure.py setup-smart-compact    # checkpoint + restore hooks
 
 Output tokens are the most expensive part of your session. They cost 5x more than input tokens on Opus and are billed per generation, not per cache read. A verbose response to a simple question burns dollars you never needed to spend.
 
-Token Optimizer handles this automatically with **lean-output nudges**. When your context fills past 55% and quality starts dropping, a short nudge tells the model to reason deeply but keep visible output lean. Live A/B testing showed **30-41% actual output token reduction** on real prompts.
+Token Optimizer handles this automatically with **lean-output nudges**. When your context fills past 55% and quality starts dropping, a short nudge tells the model to reason deeply but keep visible output lean. Live A/B testing showed a **10-15% typical reduction in output tokens, up to 30-41%**, on real prompts.
 
 **How it works:**
 
