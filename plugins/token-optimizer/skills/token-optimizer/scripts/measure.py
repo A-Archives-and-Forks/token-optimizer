@@ -16849,6 +16849,9 @@ def _find_session_version_for_pid(pid):
         result = subprocess.run(
             ["ps", "-o", "lstart=", "-p", str(pid)],
             capture_output=True, text=True, timeout=5,
+            # Force C locale so ps emits English lstart regardless of host
+            # locale (e.g. he_IL.UTF-8 emits Hebrew month names). GitHub #73.
+            env={**os.environ, "LC_ALL": "C", "LC_TIME": "C"},
         )
         if result.returncode != 0:
             return None
@@ -16949,6 +16952,11 @@ def _collect_posix_claude_sessions(process_name="claude"):
         result = subprocess.run(
             ["ps", "-eo", "pid,tty,lstart,etime,command"],
             capture_output=True, text=True, timeout=10,
+            # Force C locale so lstart is always English 5-field format. Under
+            # non-English locales (e.g. he_IL.UTF-8) ps emits localized dates
+            # with a different field count, breaking the positional parse below
+            # and dropping every session. GitHub #73.
+            env={**os.environ, "LC_ALL": "C", "LC_TIME": "C"},
         )
     except (subprocess.SubprocessError, OSError):
         return None
@@ -17467,6 +17475,9 @@ def health_selfcheck():
             res = subprocess.run(
                 ["ps", "-eo", "pid,tty,lstart,etime,command"],
                 capture_output=True, text=True, timeout=10,
+                # Match the production collectors: force C locale so this
+                # diagnostic mirrors what _collect_posix_claude_sessions sees. GitHub #73.
+                env={**os.environ, "LC_ALL": "C", "LC_TIME": "C"},
             )
             ok = res.returncode == 0 and len(res.stdout.strip().split("\n")) > 1
             check("ps -eo pid,tty,lstart,etime,command", ok,
@@ -17807,6 +17818,20 @@ def _auto_remove_bad_env_vars(settings=None):
 
 def setup_hook(dry_run=False):
     """Install the SessionEnd hook for automatic usage collection and dashboard refresh."""
+    # setup-hook targets ~/.claude/settings.json with a Claude Code hook that
+    # uses {"async": true}. Async hooks are a Claude Code feature; Codex skips
+    # them (see codex_doctor) and other runtimes use their own installers. So
+    # never write this hook under a non-Claude runtime — Codex must go through
+    # codex-install, which writes a synchronous .codex/hooks.json entry. GitHub #73-adjacent.
+    if detect_runtime() != "claude":
+        # Informational on every path (including dry-run) so a non-Claude
+        # invocation isn't a silent no-op.
+        print(
+            "[Token Optimizer] setup-hook targets Claude Code (settings.json). "
+            "For Codex use codex-install; other runtimes use their own installer."
+        )
+        return
+
     # Load existing settings
     settings = {}
     if SETTINGS_PATH.exists():
@@ -17911,7 +17936,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.18"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.19"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -31908,7 +31933,7 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
     Returns the JSON string if a nudge was emitted, empty string otherwise.
 
     Tiered messaging:
-      55-74% fill + degraded quality  → gentle nudge
+      25-74% fill + degraded quality  → gentle nudge
       75-89% fill                     → strong nudge with specific directives
       90%+ fill                        → suppressed (adding tokens makes it worse)
 
@@ -31957,7 +31982,7 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
                 "Reason as deeply as you need — but keep your visible output lean: no preamble, "
                 "no restating the request, no explanations unless asked. Every token saved extends the session."
             )
-        elif fill_pct >= 55 and score < 75:
+        elif fill_pct >= 25 and score < 75:
             nudge = (
                 f"[Token Optimizer] Context at {fill_pct:.0f}% capacity, quality {score:.0f}/100. "
                 "Reason fully, then keep your output lean — skip restating the request and "

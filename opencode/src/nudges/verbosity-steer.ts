@@ -4,7 +4,7 @@
  * measure.py.
  *
  * Tiered messaging:
- *   55-74% fill + degraded quality (<75)  → gentle nudge
+ *   25-74% fill + degraded quality (<75)  → gentle nudge
  *   75-89% fill                           → strong nudge with specific directives
  *   90%+ fill                             → suppressed (adding tokens makes it worse)
  *
@@ -17,7 +17,7 @@ import type { SessionStore } from "../storage/session-store.js";
 
 const COOLDOWN_SEC = 300; // 5 minutes
 const SESSION_CAP = 3;
-const GENTLE_FILL_THRESHOLD = 55;
+const GENTLE_FILL_THRESHOLD = 25;
 const STRONG_FILL_THRESHOLD = 75;
 const CRITICAL_FILL_THRESHOLD = 90;
 const QUALITY_THRESHOLD = 75;
@@ -56,7 +56,7 @@ export function checkVerbositySteer(
     return { shouldNudge: true, message, tier: "strong" };
   }
 
-  // Gentle tier: 55%+ fill with degraded quality
+  // Gentle tier: 25%+ fill with degraded quality
   if (fillPct >= GENTLE_FILL_THRESHOLD && qualityScore < QUALITY_THRESHOLD) {
     const message =
       `[Token Optimizer] Context at ${Math.round(fillPct)}% capacity, quality ${Math.round(qualityScore)}/100. ` +

@@ -99,7 +99,7 @@ export const V5_FEATURES: Record<V5FeatureId, V5Feature> = {
     id: "verbosity_steer",
     label: "Verbosity Steering",
     description:
-      "Inject a tiered conciseness nudge on UserPromptSubmit when context is under pressure (55%+ fill with degraded quality, or 75%+ fill). Includes cooldown and critical-fill suppression.",
+      "Inject a tiered conciseness nudge on UserPromptSubmit when context is under pressure (25%+ fill with degraded quality, or 75%+ fill). Includes cooldown and critical-fill suppression.",
     defaultEnabled: false,
     risk: "medium",
     // Deferred: requires a session-visible notification surface for inline

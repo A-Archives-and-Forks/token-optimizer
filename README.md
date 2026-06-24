@@ -288,7 +288,7 @@ Disable: `TOKEN_OPTIMIZER_BASH_COMPRESS_SEARCH=0`
 
 ### Lean-Output Nudges
 
-When context fills past 55% and quality drops, a short nudge tells the model to reason deeply but keep visible output lean. Live A/B testing showed a 10-15% typical reduction in output tokens, up to 30-41%, on real prompts. Cache-safe: injected as `additionalContext`, never modifies the existing prefix.
+When context fills past 25% and quality drops, a short nudge tells the model to reason deeply but keep visible output lean. Live A/B testing showed a 10-15% typical reduction in output tokens, up to 30-41%, on real prompts. Cache-safe: injected as `additionalContext`, never modifies the existing prefix.
 
 Disable: `TOKEN_OPTIMIZER_VERBOSITY_STEER=0`
 
@@ -403,7 +403,7 @@ python3 measure.py setup-smart-compact    # checkpoint + restore hooks
 
 Output tokens are the most expensive part of your session. They cost 5x more than input tokens on Opus and are billed per generation, not per cache read. A verbose response to a simple question burns dollars you never needed to spend.
 
-Token Optimizer handles this automatically with **lean-output nudges**. When your context fills past 55% and quality starts dropping, a short nudge tells the model to reason deeply but keep visible output lean. Live A/B testing showed a **10-15% typical reduction in output tokens, up to 30-41%**, on real prompts.
+Token Optimizer handles this automatically with **lean-output nudges**. When your context fills past 25% and quality starts dropping, a short nudge tells the model to reason deeply but keep visible output lean. Live A/B testing showed a **10-15% typical reduction in output tokens, up to 30-41%**, on real prompts.
 
 **How it works:**
 
