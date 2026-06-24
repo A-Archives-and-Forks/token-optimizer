@@ -33,8 +33,8 @@ The detectors split into static config checks and session-analysis checks.
 | Loop detection | Session | Many messages with trivially small output, the signature of a stuck loop. |
 | Abandoned sessions | Session | Sessions that start with a turn or two then stop, wasting the startup cost. |
 
-<Aside type="caution" title="OpenClaw gets extra scrutiny">
-When OpenClaw is detected, Fleet Auditor layers on security checks: an outdated gateway, malicious ClawHub skills, and disabled rate limiting. These are scored high severity because a compromised instance burns tokens until you notice. See [Waste detectors](/features/waste-detectors/).
+<Aside type="note" title="OpenClaw runs its own sixteen">
+When OpenClaw is detected, Fleet Auditor runs OpenClaw's native set of sixteen detectors, tuned to its scheduled-agent surface: heartbeat and cron model waste, over-frequency, stale crons, empty and abandoned runs, and the behavioral checks retuned for OpenClaw data. See [Waste detectors](/features/waste-detectors/).
 </Aside>
 
 ## Subagent cost breakdown and costly-prompt ranking

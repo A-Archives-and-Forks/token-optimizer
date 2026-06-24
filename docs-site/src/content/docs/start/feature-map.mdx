@@ -40,6 +40,7 @@ Runtime savers that cut new content as it enters your window. All on by default.
 | Bash output compression | Rewrites safe read-only CLI output to compact summaries, credential-safe | On | [Bash output compression](/features/bash-compression/) |
 | Delta mode | Re-reads of changed files return only the diff | On | [Read cache](/features/read-cache/) |
 | Structure map | Large code re-reads return a function-and-class skeleton | On (soft-block) | [Read cache](/features/read-cache/) |
+| First-read skeleton | Large first reads unlikely to be edited soon return a skeleton, full original archived (`expand`); promotion gated on real edit-rate history | On | [Benchmarks](/reference/benchmarks/) |
 | Read cache management | Clear or inspect the per-session read cache (`read-cache-clear`, `read-cache-stats`) | On demand | [Read cache](/features/read-cache/) |
 | Tool result archive | Large tool results saved to disk, retrievable with `expand` after compaction | On | [Tool result archive](/features/tool-result-archive/) |
 | Search result compression | Long grep/search output condensed to top hits + counts | On | [Bash compression](/features/bash-compression/) |
@@ -57,6 +58,8 @@ Keep your work alive across auto-compact, crashes, and fresh sessions.
 | Progressive checkpoints | Captures at multiple fill and quality thresholds, not just emergencies | On | [Smart compaction](/features/smart-compaction/) |
 | Milestone checkpoints | Snapshots before agent fan-out (`checkpoint-trigger`) | On | [Smart compaction](/features/smart-compaction/) |
 | Compact instructions | Mode-aware PRESERVE/DROP guidance injected at compaction time | On (dynamic) | [Smart compaction](/features/smart-compaction/) |
+| Activity Mode | Classifies the session into one of five modes from recent tool calls so compaction keeps what that phase needs | On | [Quality signals](/features/quality-signals/) |
+| Decision Extraction | Preserves up to ten key decisions per session across compactions | On | [Quality signals](/features/quality-signals/) |
 | Cold-resume-lean | Reopen a stale session from its checkpoint for free (`resume-lean`) | On demand | [Session continuity](/features/session-continuity/) |
 | Fresh-session nudge | Offers a clean restart when a long session degrades | On | [Session continuity](/features/session-continuity/) |
 | Prompt continuity | Injects a topic-matched hint from a prior session on a new prompt | On | [Session continuity](/features/session-continuity/) |

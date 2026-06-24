@@ -17,6 +17,8 @@ It has two substitution behaviors:
 
 **Structure map** handles large code files read again whether or not they changed. It replaces the full source with a compact skeleton: function signatures, class hierarchy, imports, and module docstrings. A 720KB Python file (about 180,000 tokens) becomes a 250-token skeleton. On a 180K-token file re-read five times, that is roughly 900K tokens saved in one session.
 
+Both of those act on *re-reads*. A related feature, the **first-read skeleton**, serves a skeleton on the *first* read of a large file that history shows is unlikely to be edited soon, with the full original archived and retrievable via `expand`. It is gated on real edit-rate proof per file cohort and is documented with its promotion and tripwire rules on the [Benchmarks page](/reference/benchmarks/#first-read-skeleton-promotion).
+
 Structure map supports Python, JavaScript and TypeScript, JSON, YAML, TOML, and Markdown, and it uses the Python standard-library AST only, with no third-party parser.
 
 ## The four modes

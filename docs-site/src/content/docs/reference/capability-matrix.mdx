@@ -33,7 +33,9 @@ Each runtime serves its dashboard on a fixed port, so multiple runtimes run side
 | Bash output compression | Yes | Yes | Experimental opt-in | Experimental opt-in | No | No | No | Part (gated on CLI ≥1.0.24) | No |
 | Delta read substitution | Yes | Yes | No | No | No | No | No | No (blocked #2585) | No (blocked #2585) |
 | Structure-map substitution | Yes | Yes | No | No | No | No | No | No (blocked #2585) | No (blocked #2585) |
-| Per-prompt quality steering | Yes | Yes | Via UserPromptSubmit | Via UserPromptSubmit | Yes | verify | No | No (regressed #3727) | No (regressed #3727) |
+| First-read skeleton (skeleton on first read) | Yes | Yes | No | No | No | No | No | No (blocked #2585) | No (blocked #2585) |
+| Per-prompt quality / lean-output steering | Yes | Yes | Via UserPromptSubmit | Via UserPromptSubmit | Yes | verify | No | No (regressed #3727) | No (regressed #3727) |
+| Quality nudges and loop detection | Yes | Yes | verify | verify | No | No | No | No (regressed #3727) | No (regressed #3727) |
 | Cache-health watchdog | Yes | Yes | Part | Part | Part | Part | Part | Part | Part |
 | Cost tracking | Yes (Claude) | Yes | Yes (GPT-5.x) | Yes | Yes (30+ models) | Yes (30+ models, 4 tiers) | Yes (model-agnostic) | Yes (AI Credits) | Yes (per-request nanoAIU) |
 | Fleet Auditor | Yes | Yes | Yes (cross-system) | Yes | No (verify) | Via own dashboard | No | No | No |
