@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -21,6 +22,12 @@ SUPPORTED_EVENTS = (
     "SessionEnd", "StopFailure", "SubagentStart", "SubagentStop",
 )
 
+# A Codex marketplace install lives in a versioned directory
+# (.../token-optimizer/<X.Y.Z>/) that the marketplace replaces on upgrade.
+# Used to decide whether the baked hook command must resolve the active version
+# at runtime instead of pinning it (which dies on the next update — see #75).
+_SEMVER_DIR_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
@@ -28,10 +35,29 @@ def _repo_root() -> Path:
 
 def _hook_command(script: str, *args: str, redirect_quiet: bool = False) -> str:
     root = _repo_root()
-    launcher = shlex.quote(str(root / "hooks" / "python-launcher.sh"))
-    runner = shlex.quote(str(root / "hooks" / "run.py"))
     command_args = " ".join(shlex.quote(arg) for arg in (script, *args))
-    command = f"TOKEN_OPTIMIZER_RUNTIME=codex bash {launcher} {runner} {command_args}"
+    if _SEMVER_DIR_RE.match(root.name):
+        # Marketplace install: root is .../token-optimizer/<X.Y.Z>/, which is
+        # deleted when Codex installs a newer version. Pinning it here makes
+        # hooks.json point at a missing directory after every upgrade, so each
+        # Codex tool call fails (#75). Resolve the newest installed version at
+        # runtime from the stable parent dir, falling back to the baked path.
+        base = shlex.quote(str(root.parent))
+        fallback = shlex.quote(str(root) + "/")
+        # Only consider semver-named subdirs so a stray sibling (latest/, backup/,
+        # __pycache__/) can't be picked by `sort -V | tail` over the real version.
+        resolve = (
+            f"R=\"$(ls -d {base}/*/ 2>/dev/null | grep -E '/[0-9]+[.][0-9]+[.][0-9]+/$' "
+            f'| sort -V | tail -n 1)"; '
+            f'[ -n "$R" ] || R={fallback}; '
+            f'TOKEN_OPTIMIZER_RUNTIME=codex exec bash "${{R}}hooks/python-launcher.sh" '
+            f'"${{R}}hooks/run.py" {command_args}'
+        )
+        command = f"bash -c {shlex.quote(resolve)}"
+    else:
+        launcher = shlex.quote(str(root / "hooks" / "python-launcher.sh"))
+        runner = shlex.quote(str(root / "hooks" / "run.py"))
+        command = f"TOKEN_OPTIMIZER_RUNTIME=codex bash {launcher} {runner} {command_args}"
     if redirect_quiet:
         command += " >/dev/null 2>&1"
     return command
