@@ -11,6 +11,8 @@ export interface TokenOptimizerConfig {
   relevanceThreshold: number;
   checkpointCooldownSeconds: number;
   checkpointMaxChars: number;
+  freshNudgeQualityThreshold: number;
+  freshNudgeMinFillPct: number;
   features: {
     qualityNudges: boolean;
     loopDetection: boolean;
@@ -77,6 +79,16 @@ export function resolveConfig(options?: PluginOptions): TokenOptimizerConfig {
     relevanceThreshold: floatEnv("TOKEN_OPTIMIZER_RELEVANCE_THRESHOLD", 0.6),
     checkpointCooldownSeconds: intEnv("TOKEN_OPTIMIZER_CHECKPOINT_COOLDOWN_SECONDS", 90),
     checkpointMaxChars: intEnv("TOKEN_OPTIMIZER_CHECKPOINT_MAX_CHARS", 2000),
+    // Fresh-session nudge firing thresholds. Overridable via PluginOptions like
+    // every other tunable (previously env-only, inconsistent with the rest).
+    freshNudgeQualityThreshold: intEnv(
+      "TOKEN_OPTIMIZER_FRESH_NUDGE_QUALITY",
+      typeof opts.freshNudgeQualityThreshold === "number" ? opts.freshNudgeQualityThreshold : 70,
+    ),
+    freshNudgeMinFillPct: intEnv(
+      "TOKEN_OPTIMIZER_FRESH_NUDGE_MIN_FILL",
+      typeof opts.freshNudgeMinFillPct === "number" ? opts.freshNudgeMinFillPct : 50,
+    ),
     features: {
       qualityNudges: features.qualityNudges !== false && boolEnv("TOKEN_OPTIMIZER_NUDGES", true),
       loopDetection: features.loopDetection !== false && boolEnv("TOKEN_OPTIMIZER_LOOP_DETECTION", true),

@@ -273,8 +273,11 @@ export const TokenOptimizerPlugin: Plugin = async (
         state.previousResourceHealth,
         state.freshNudgeFired,
         config.features.qualityNudges,
+        config.features.continuity,
         state.currentModel,
         state.lastContextWindow || undefined,
+        config.freshNudgeQualityThreshold,
+        config.freshNudgeMinFillPct,
       );
       if (freshNudge.shouldNudge && freshNudge.message) {
         state.freshNudgeFired = true;

@@ -154,10 +154,19 @@ export function freshSessionSavingsEstimate(fillPct: number, model?: string, ses
  * @param previousScore       score from the previous turn (null = no prior score yet)
  * @param freshNudgeFired     whether the nudge already fired this session
  * @param nudgesEnabled       whether quality nudges are enabled in config
+ * @param continuityEnabled   whether checkpoint continuity is enabled. The nudge's
+ *                            whole pitch ("start fresh, your place is saved") only
+ *                            holds when continuity actually restores the checkpoint
+ *                            in the new session. With continuity off, suppress the
+ *                            nudge so the ordinary quality nudge (/compact) takes
+ *                            over instead of promising a restore that never happens.
  * @param model               optional model id — fallback for context-window lookup
  * @param sessionWindow       the EXACT context-window value the fill% was measured
  *                            against; threads through to freshSessionSavingsEstimate
  *                            so the token count is consistent with the fill% display
+ * @param qualityThreshold    score below which (with fill) the nudge may fire; defaults
+ *                            to the env-tunable module constant, overridable via config
+ * @param minFillPct          fill% at/above which the nudge may fire; same default rule
  */
 export function checkFreshSessionNudge(
   currentScore: number,
@@ -165,10 +174,19 @@ export function checkFreshSessionNudge(
   previousScore: number | null,
   freshNudgeFired: boolean,
   nudgesEnabled: boolean,
+  continuityEnabled: boolean,
   model?: string,
   sessionWindow?: number,
+  qualityThreshold: number = FRESH_NUDGE_QUALITY_THRESHOLD,
+  minFillPct: number = FRESH_NUDGE_MIN_FILL_PCT,
 ): FreshNudgeResult {
   if (!nudgesEnabled) return { shouldNudge: false, message: null };
+
+  // The nudge promises "Token Optimizer has checkpointed your task, so a new
+  // session picks up where you stopped." That is only true when continuity is on.
+  // If the user disabled it, do not inject that promise into the system prompt --
+  // bail so the ordinary quality nudge handles the long+degraded session instead.
+  if (!continuityEnabled) return { shouldNudge: false, message: null };
 
   // Post-compaction suppression: no prior score means this is a fresh/just-compacted
   // session. Let the ordinary nudge seed the baseline first.
@@ -178,7 +196,7 @@ export function checkFreshSessionNudge(
   if (freshNudgeFired) return { shouldNudge: false, message: null };
 
   // Both conditions must hold: long session AND degraded quality.
-  if (!(currentScore < FRESH_NUDGE_QUALITY_THRESHOLD && fillPct >= FRESH_NUDGE_MIN_FILL_PCT)) {
+  if (!(currentScore < qualityThreshold && fillPct >= minFillPct)) {
     return { shouldNudge: false, message: null };
   }
 
