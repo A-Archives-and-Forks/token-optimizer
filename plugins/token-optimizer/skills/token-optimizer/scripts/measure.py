@@ -6745,7 +6745,10 @@ def generate_coach_data(focus=None, components=None, trends=None):
             # Only flag detectors when they affect a significant percentage (>5%)
             # of messages. 7 loops out of 972 messages is noise, not a pattern.
             occurrence_count = f.get("occurrence_count", 1)
-            if total_messages_scanned > 50:
+            # Config checks (always_show) have no occurrence rate — they must
+            # bypass the message-frequency noise gate or they'd be suppressed
+            # for any session with more than ~20 messages.
+            if not f.get("always_show") and total_messages_scanned > 50:
                 pct = occurrence_count / total_messages_scanned * 100
                 if pct < 5:
                     continue  # skip noise-level findings
@@ -6767,12 +6770,17 @@ def generate_coach_data(focus=None, components=None, trends=None):
                     pass
 
             severity = "medium" if f.get("confidence", 0) >= 0.7 else "low"
+            savings = (
+                "Config fix"
+                if f.get("always_show")
+                else f"~{f.get('savings_tokens', 0):,} tokens"
+            )
             patterns_bad.append({
                 "name": f["name"].replace("_", " ").title(),
                 "severity": severity,
                 "detail": detail,
                 "fix": f["suggestion"],
-                "savings": f"~{f['savings_tokens']:,} tokens",
+                "savings": savings,
             })
             score -= 3
     except ImportError:
@@ -17936,7 +17944,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.19"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.20"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845

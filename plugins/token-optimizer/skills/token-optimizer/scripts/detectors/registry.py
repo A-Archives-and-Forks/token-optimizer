@@ -1,4 +1,4 @@
-"""Detector registry: session-level waste detectors with run helper."""
+"""Detector registry: session and config detectors with run helper."""
 
 from detectors.retry_churn import detect_retry_churn
 from detectors.tool_cascade import detect_tool_cascade
@@ -9,8 +9,10 @@ from detectors.bad_decomposition import detect_bad_decomposition
 from detectors.wasteful_thinking import detect_wasteful_thinking
 from detectors.output_waste import detect_output_waste
 from detectors.cache_instability import detect_cache_instability
+from detectors.respond_to_bash import detect_respond_to_bash
 
 ALL_DETECTORS = [
+    {"name": "respond_to_bash_commands", "fn": detect_respond_to_bash},
     {"name": "retry_churn", "fn": detect_retry_churn},
     {"name": "tool_cascade", "fn": detect_tool_cascade},
     {"name": "looping", "fn": detect_looping},
@@ -26,20 +28,38 @@ _TRIAGE_MIN_TOKENS = 5000
 
 
 def run_all_detectors(session_data):
-    """Run all session-level detectors. Returns sorted findings list."""
+    """Run all session and config detectors. Returns sorted findings list."""
     findings = []
     for d in ALL_DETECTORS:
         try:
             results = d["fn"](session_data)
-            findings.extend(r for r in (results or []) if r.get("confidence", 0) > 0.3)
+            for r in (results or []):
+                if r.get("always_show") or r.get("confidence", 0) > 0.3:
+                    findings.append(r)
         except Exception as e:
             import sys
             print(f"[token-optimizer] detector {d['name']} failed: {type(e).__name__}: {e}", file=sys.stderr)
             continue
     findings.sort(key=lambda f: f.get("confidence", 0), reverse=True)
-    return findings
+    # Deduplicate config-check findings (always_show=True) only. Session-data
+    # detectors may legitimately emit multiple distinct findings with one name.
+    seen_config = set()
+    deduped = []
+    for f in findings:
+        if f.get("always_show"):
+            name = f.get("name")
+            if name not in seen_config:
+                seen_config.add(name)
+                deduped.append(f)
+        else:
+            deduped.append(f)
+    return deduped
 
 
 def triage(findings):
-    """Filter findings to actionable ones."""
-    return [f for f in findings if f.get("savings_tokens", 0) > _TRIAGE_MIN_TOKENS]
+    """Filter findings to actionable ones. Config checks (always_show) bypass
+    the token floor since they have no measured per-session saving."""
+    return [
+        f for f in findings
+        if f.get("always_show") or f.get("savings_tokens", 0) > _TRIAGE_MIN_TOKENS
+    ]
