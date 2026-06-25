@@ -1,6 +1,6 @@
 # Token Optimizer for OpenClaw
 
-Version: `2.4.6`
+Version: `2.4.13`
 
 **Your AI is getting dumber and you can't see it.**
 
