@@ -5035,10 +5035,15 @@ var DB = (function() {
         if (f.risk_level === 'low') { riskBg = 'var(--c-badge-info)'; riskLabel = 'LOW RISK'; }
         else if (f.risk_level === 'moderate') { riskBg = 'var(--c-badge-amber)'; riskLabel = 'MODERATE RISK'; }
 
+        // A feature the user set via env var is theirs to control -- never stamp
+        // RECOMMENDED on it (that would contradict the "cannot toggle" note). Issue #77.
+        var envManaged = f.source === 'env';
         var recBadge = managedByHooks
           ? '<span style="background:var(--c-badge-info);color:#000;font-size:12px;padding:3px 10px;border-radius:4px;margin-left:10px;font-weight:700;vertical-align:middle;">HOOK-MANAGED</span>'
           : unavailable
           ? '<span style="background:var(--c-border);color:var(--c-text-dim);font-size:12px;padding:3px 10px;border-radius:4px;margin-left:10px;vertical-align:middle;">CODEX API GAP</span>'
+          : envManaged
+          ? '<span style="background:var(--c-border);color:var(--c-text-dim);font-size:12px;padding:3px 10px;border-radius:4px;margin-left:10px;vertical-align:middle;">ENV-MANAGED</span>'
           : f.recommended
           ? '<span style="background:var(--c-badge-savings);color:#000;font-size:12px;padding:3px 10px;border-radius:4px;margin-left:10px;font-weight:700;vertical-align:middle;">RECOMMENDED</span>'
           : '<span style="background:var(--c-border);color:var(--c-text-dim);font-size:12px;padding:3px 10px;border-radius:4px;margin-left:10px;vertical-align:middle;">OPT-IN</span>';
@@ -5292,6 +5297,10 @@ var DB = (function() {
     // --- v5 feature toggles ---
     el.querySelectorAll('[data-v5-name]').forEach(function(input) {
       input.addEventListener('change', function(e) {
+        // Env-managed / hook-managed / unavailable rows render the checkbox as
+        // disabled. Native clicks are blocked, but a programmatic change must not
+        // POST a config write the env var would silently shadow. Issue #77.
+        if (e.target.disabled) { return; }
         var fname = e.target.dataset.v5Name;
         var newState = e.target.checked;
         var row = e.target.closest('.hook-row');

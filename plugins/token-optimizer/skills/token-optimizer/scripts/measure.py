@@ -1751,13 +1751,18 @@ def measure_components():
         "lines": count_lines(claude_local) if claude_local.exists() else 0,
     }
 
-    # settings.json env vars (token-relevant) — use cached settings
-    if _cached_settings:
-        env = _cached_settings.get("env", {})
-        found_vars = {var: env[var] for var in TOKEN_RELEVANT_ENV_VARS if var in env}
-        components["settings_env"] = {"found": found_vars, "settings_exists": True}
-    else:
-        components["settings_env"] = {"found": {}, "settings_exists": settings_path.exists()}
+    # settings.json env vars (token-relevant). Resolve across project local/shared
+    # and global local/shared settings, not just global ~/.claude/settings.json, so
+    # a flag a user marked at the project level is not missed (issue #77 class).
+    found_vars = {}
+    for var in TOKEN_RELEVANT_ENV_VARS:
+        val = _settings_env_value(var)
+        if val is not None:
+            found_vars[var] = val
+    components["settings_env"] = {
+        "found": found_vars,
+        "settings_exists": bool(_cached_settings) or settings_path.exists(),
+    }
 
     # settings.local.json existence
     settings_local = CLAUDE_DIR / "settings.local.json"
@@ -1766,9 +1771,11 @@ def measure_components():
         "global_exists": settings_local.exists(),
         "project_exists": project_settings_local.exists(),
         "exists": settings_local.exists() or project_settings_local.exists(),
-        "includeGitInstructions": _cached_settings.get("includeGitInstructions", True) if _cached_settings else True,
-        "effortLevel": _cached_settings.get("effortLevel", None) if _cached_settings else None,
-        "defaultModel": _cached_settings.get("model", None) if _cached_settings else None,
+        # Resolve across all settings files (project overrides global) so a
+        # project-level includeGitInstructions / model is honoured (issue #77 class).
+        "includeGitInstructions": _resolve_settings_value("includeGitInstructions", True),
+        "effortLevel": _resolve_settings_value("effortLevel", None),
+        "defaultModel": _resolve_settings_value("model", None),
     }
 
     # compactInstructions from settings.json
@@ -2136,10 +2143,15 @@ def detect_context_window():
       7. Claude fallback: 1M (Opus 4.6+/4.7 and Sonnet 4.6 are 1M GA since March 2026)
     """
     global _context_window_cache
+    # Resolve context flags from process env AND settings.json (issue #77 class):
+    # a user who set these in settings.json env would otherwise get a mis-detected
+    # window, corrupting fill-% and every downstream recommendation.
+    _disable_1m = _resolve_feature_env("CLAUDE_CODE_DISABLE_1M_CONTEXT") or ""
+    _ctx_size_override = (_resolve_feature_env("TOKEN_OPTIMIZER_CONTEXT_SIZE") or "").strip()
     cache_key = (
         detect_runtime(),
-        os.environ.get("CLAUDE_CODE_DISABLE_1M_CONTEXT", ""),
-        os.environ.get("TOKEN_OPTIMIZER_CONTEXT_SIZE", ""),
+        _disable_1m,
+        _ctx_size_override,
         os.environ.get("CODEX_MODEL", ""),
         os.environ.get("OPENAI_MODEL", ""),
         os.environ.get("CLAUDE_MODEL", ""),
@@ -2154,9 +2166,9 @@ def detect_context_window():
         _context_window_cache = (cache_key, value)
         return value
 
-    if os.environ.get("CLAUDE_CODE_DISABLE_1M_CONTEXT") == "1":
+    if str(_disable_1m).strip().lower() in _TRUTHY_ENV_VALUES:
         return remember((200_000, "env: CLAUDE_CODE_DISABLE_1M_CONTEXT"))
-    raw = os.environ.get("TOKEN_OPTIMIZER_CONTEXT_SIZE", "").strip()
+    raw = _ctx_size_override
     if raw:
         try:
             return remember((int(raw), "env: TOKEN_OPTIMIZER_CONTEXT_SIZE"))
@@ -3849,6 +3861,18 @@ def _serve_dashboard(filepath, port=8080, host="127.0.0.1"):
                 enabled = bool(body.get("enabled", False))
                 if name not in V5_FEATURES:
                     self._json_response(400, {"error": f"Unknown v5 feature: {name}"})
+                    return
+                # An env-managed feature can't be toggled from the dashboard: a
+                # config.json write would be silently shadowed by the env var,
+                # leaving the UI out of sync with runtime. Reject it honestly
+                # rather than pretend the toggle took effect. Issue #77.
+                if _resolve_feature_env(V5_FEATURES[name]["env_var"]) is not None:
+                    self._json_response(409, {
+                        "ok": False,
+                        "msg": f"{V5_FEATURES[name]['label']} is set via an environment "
+                               f"variable and cannot be toggled from the dashboard. "
+                               f"Change {V5_FEATURES[name]['env_var']} in your settings.",
+                    })
                     return
                 ok = _set_v5_feature(name, enabled)
                 label = V5_FEATURES[name]["label"]
@@ -6292,7 +6316,7 @@ def generate_auto_recommendations(components, trends=None, days=30):
     # --- Rule 14: Git instructions in system prompt ---
     settings_local = components.get("settings_local", {})
     include_git = settings_local.get("includeGitInstructions", True) if isinstance(settings_local, dict) else True
-    if os.environ.get("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS") == "1":
+    if str(_resolve_feature_env("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS") or "") == "1":
         include_git = False
     if include_git:
         deep.append(
@@ -6306,11 +6330,9 @@ def generate_auto_recommendations(components, trends=None, days=30):
         )
 
     # --- Rule 15: claude.ai MCP servers ---
-    settings_env_found = components.get("settings_env", {}).get("found", {})
-    claudeai_val = settings_env_found.get(
-        "ENABLE_CLAUDEAI_MCP_SERVERS",
-        os.environ.get("ENABLE_CLAUDEAI_MCP_SERVERS", ""),
-    )
+    # Resolve across process env + all settings files (project overrides global)
+    # so a project-level opt-out suppresses this nudge too. Issue #77 class.
+    claudeai_val = _resolve_feature_env("ENABLE_CLAUDEAI_MCP_SERVERS") or ""
     if str(claudeai_val).lower() != "false":
         # Estimate: each cloud-synced server adds ~300-500 tokens (tool defs + instructions)
         mcp_info = components.get("mcp_tools", {})
@@ -6669,10 +6691,9 @@ def generate_coach_data(focus=None, components=None, trends=None):
             "detail": "effortLevel: \"high\" — deliberate quality choice. Uses ~15-25% more output tokens than \"medium\".",
         })
 
-    # Check settings env vars for optimization opportunities
-    settings_env = components.get("settings_env", {}).get("found", {})
-    claudeai_val = settings_env.get("ENABLE_CLAUDEAI_MCP_SERVERS",
-                                     os.environ.get("ENABLE_CLAUDEAI_MCP_SERVERS", ""))
+    # Check settings env vars for optimization opportunities. Resolve across
+    # process env + all settings files so a project-level opt-out is honoured.
+    claudeai_val = _resolve_feature_env("ENABLE_CLAUDEAI_MCP_SERVERS") or ""
     if not is_codex and str(claudeai_val).lower() != "false" and mcp_servers > 3:
         questions.append("Cloud-synced MCP servers from claude.ai may be adding overhead. Have you reviewed which servers are cloud-synced vs local?")
 
@@ -17944,7 +17965,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.21"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.22"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -28001,18 +28022,136 @@ V5_FEATURES = {
 }
 
 
+_TRUTHY_ENV_VALUES = ("1", "true", "yes", "on")
+
+
+# settings.json files Claude Code injects env vars from, highest precedence first.
+# A user who "marks" a flag here expects Token Optimizer to honour it -- but the
+# process that regenerates the dashboard (often the long-lived daemon) does NOT
+# inherit Claude Code's per-session env injection, so os.environ alone misses it.
+# Reading these files directly closes that gap (issue #77).
+def _settings_env_paths():
+    # Path.cwd() raises FileNotFoundError if the working directory was deleted out
+    # from under a long-lived process (plausible for the daemon). Degrade to the
+    # global settings only rather than crashing every caller. Issue #77.
+    paths = []
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        cwd = None
+    if cwd is not None:
+        paths.append(cwd / ".claude" / "settings.local.json")
+        paths.append(cwd / ".claude" / "settings.json")
+    paths.append(CLAUDE_DIR / "settings.local.json")
+    paths.append(CLAUDE_DIR / "settings.json")
+    return tuple(paths)
+
+
+# Parsed settings files, memoized by mtime. The detection paths read the same
+# <=4 files dozens of times per dashboard run; without this each call re-opened
+# and re-parsed them (issue #77 perf). Keying on st_mtime_ns keeps it correct in
+# a long-lived daemon: an edited file is re-read, an unchanged one is not.
+_settings_file_cache = {}
+
+
+def _load_settings_file(path):
+    """Return the parsed dict for a settings.json-style file, or None if it is
+    absent, not a regular file, unreadable, malformed, or not a JSON object.
+
+    is_file() (not exists()) is deliberate: it is False for a directory, broken
+    symlink, or FIFO, so a hostile repo cannot plant a named pipe at
+    .claude/settings.json and hang the dashboard on open(). UnicodeDecodeError
+    (a ValueError, not an OSError) is caught so a non-UTF-8 file degrades to None
+    instead of crashing the run.
+    """
+    try:
+        if not path.is_file():
+            return None
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        return None
+    key = str(path)
+    cached = _settings_file_cache.get(key)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    parsed = None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            parsed = loaded
+    except (json.JSONDecodeError, UnicodeDecodeError, PermissionError, OSError):
+        parsed = None
+    _settings_file_cache[key] = (mtime, parsed)
+    return parsed
+
+
+def _settings_env_value(var_name):
+    """Return the value of an env var as configured in any settings.json `env`
+    block (project local/shared first, then global), or None if absent.
+
+    Lets feature-enablement detection see flags a user set in settings.json even
+    when the generating process did not inherit that env injection. Issue #77.
+    """
+    for path in _settings_env_paths():
+        loaded = _load_settings_file(path)
+        if loaded is None:
+            continue
+        env = loaded.get("env")
+        if isinstance(env, dict) and var_name in env:
+            val = env[var_name]
+            return str(val) if val is not None else None
+    return None
+
+
+def _resolve_feature_env(env_var):
+    """Effective env-var value for a feature: real process env wins (it already
+    includes settings.json injection when present), else fall back to reading
+    settings.json directly. Returns None when the var is set nowhere."""
+    env_val = os.environ.get(env_var)
+    if env_val is not None:
+        return env_val
+    return _settings_env_value(env_var)
+
+
+def _resolve_settings_value(key, default=None):
+    """Return a top-level settings.json key (e.g. includeGitInstructions, model)
+    resolving project local/shared over global local/shared, first match wins.
+    Lets recommendations honour a setting the user marked at the project level,
+    not just in global ~/.claude/settings.json. Issue #77 (same class)."""
+    for path in _settings_env_paths():
+        loaded = _load_settings_file(path)
+        if loaded is None:
+            continue
+        if key in loaded:
+            return loaded[key]
+    return default
+
+
+def _env_val_enables(feature_name, env_val):
+    """Interpret a feature's env-var value as enabled/disabled. Mirrors the REAL
+    runtime gates so the dashboard never disagrees with what actually fires:
+    binary flags use the usual truthy set; structure_map is a tri-state flag whose
+    telemetry only activates on the exact string `beta` (see plugin_env.
+    is_v5_flag_enabled / read_cache._is_v5_structure_map_beta). Accepting `1` here
+    would show the badge green while logging never fires -- a lie. Issue #77."""
+    norm = str(env_val).strip().lower()
+    if feature_name == "structure_map_beta":
+        return norm == "beta"
+    return norm in _TRUTHY_ENV_VALUES
+
+
 def _is_v5_feature_enabled(feature_name):
     """Check if a v5 feature is enabled. Env var wins, then config, then default."""
     feat = V5_FEATURES.get(feature_name)
     if not feat:
         return False
 
-    # Env var: "0"/"1" for binary, "beta" for structure map
-    env_val = os.environ.get(feat["env_var"])
+    # Env var (process env or settings.json): "0"/"1" for binary, plus "beta" for
+    # structure map. Highest priority so power-user overrides always win.
+    env_val = _resolve_feature_env(feat["env_var"])
     if env_val is not None:
-        if feature_name == "structure_map_beta":
-            return env_val == "beta"
-        return env_val == "1"
+        return _env_val_enables(feature_name, env_val)
 
     # Config.json
     config_val = _read_config_flag(feat["config_key"], None)
@@ -28098,12 +28237,20 @@ def _get_v5_feature_status():
         except OSError:
             codex_hooks_text = ""
     for name, feat in V5_FEATURES.items():
-        env_val = os.environ.get(feat["env_var"])
+        # Resolve env from the process AND settings.json so the dashboard sees
+        # flags a user "marked" even when this process (e.g. the daemon) did not
+        # inherit Claude Code's env injection. Issue #77.
+        env_val = _resolve_feature_env(feat["env_var"])
         config_val = _read_config_flag(feat["config_key"], None)
         enabled = _is_v5_feature_enabled(name)
         source = "default"
+        recommended = feat["recommended"]
         if env_val is not None:
+            # The user has taken manual control via an env var. Don't nag them to
+            # enable it (and the dashboard toggle can't override an env var anyway),
+            # regardless of whether the value enables or disables the feature.
             source = "env"
+            recommended = False
         elif config_val is not None:
             source = "config"
         status[name] = {
@@ -28114,7 +28261,7 @@ def _get_v5_feature_status():
             "how": feat["how"],
             "risk": feat["risk"],
             "risk_level": feat.get("risk_level", "none"),
-            "recommended": feat["recommended"],
+            "recommended": recommended,
             "enabled": enabled,
             "source": source,
             "env_var": feat["env_var"],
@@ -28178,18 +28325,21 @@ def _get_v5_savings_recommendation():
             if info["recommended"]:
                 total_impact += info["impact_pct"]
 
-    # Also include non-recommended but safe features for a secondary estimate
+    # Also include non-recommended but safe features for a secondary estimate.
+    # An env-managed feature is excluded: if the user set it off via env that is a
+    # deliberate opt-out, not headroom we should pitch back to them. Issue #77.
+    _excluded_sources = {"codex api gap", "codex experimental hook", "env"}
     additional_impact = sum(
         f["impact_pct"] for f in disabled
         if not f["recommended"]
         and f["risk_level"] in ("none", "low")
-        and f.get("source") not in {"codex api gap", "codex experimental hook"}
+        and f.get("source") not in _excluded_sources
     )
     aggressive_impact = total_impact + additional_impact + sum(
         f["impact_pct"] for f in disabled
         if not f["recommended"]
         and f["risk_level"] == "moderate"
-        and f.get("source") not in {"codex api gap", "codex experimental hook"}
+        and f.get("source") not in _excluded_sources
     )
 
     has_savings = total_impact > 0 or aggressive_impact > 0
