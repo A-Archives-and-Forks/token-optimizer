@@ -512,26 +512,50 @@ export interface ToolEventData {
  * Handle agent:tool:before for Read events.
  * Returns { block: true, message: string } to block, or null to allow.
  */
+/**
+ * Read the read-cache config.json once. Used as the fallback source when the
+ * corresponding env var is absent (e.g. stripped by the gateway). Returns {} on
+ * any error so callers can treat "no config" and "unreadable config" alike.
+ */
+function readReadCacheConfigFile(): Record<string, unknown> {
+  const configPath = path.join(HOME, ".openclaw", "token-optimizer", "read-cache", "config.json");
+  try {
+    if (fs.existsSync(configPath)) {
+      const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
+    }
+  } catch { /* ignore */ }
+  return {};
+}
+
 function isReadCacheDisabled(): boolean {
   const envVal = process.env.TOKEN_OPTIMIZER_READ_CACHE;
   if (envVal === "0") return true;
   if (envVal === undefined) {
     // Env var missing (possibly stripped). Check config file.
-    const configPath = path.join(HOME, ".openclaw", "token-optimizer", "read-cache", "config.json");
-    try {
-      if (fs.existsSync(configPath)) {
-        const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-        if (config.read_cache_enabled === false) return true;
-      }
-    } catch { /* ignore */ }
+    if (readReadCacheConfigFile().read_cache_enabled === false) return true;
   }
   return false;
+}
+
+/**
+ * Resolve read-cache mode (warn/block) with the same two-layer rule as
+ * isReadCacheDisabled: env var wins, config file is the fallback when env is
+ * absent. Previously env-only, so a user's config-file read_cache_mode was
+ * silently ignored and defaulted to "warn".
+ */
+export function resolveReadCacheMode(): string {
+  const envVal = process.env.TOKEN_OPTIMIZER_READ_CACHE_MODE;
+  if (envVal !== undefined) return envVal.toLowerCase();
+  const cfgVal = readReadCacheConfigFile().read_cache_mode;
+  if (typeof cfgVal === "string" && cfgVal.trim()) return cfgVal.toLowerCase();
+  return "warn";
 }
 
 export function handleReadBefore(event: ToolEventData): { block: boolean; message: string } | null {
   if (isReadCacheDisabled()) return null;
 
-  const mode = (process.env.TOKEN_OPTIMIZER_READ_CACHE_MODE ?? "warn").toLowerCase();
+  const mode = resolveReadCacheMode();
   const rawPath = event.toolInput.file_path ?? "";
   if (!rawPath) return null;
 

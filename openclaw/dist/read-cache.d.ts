@@ -77,6 +77,13 @@ export interface ToolEventData {
     agentId: string;
     sessionId: string;
 }
+/**
+ * Resolve read-cache mode (warn/block) with the same two-layer rule as
+ * isReadCacheDisabled: env var wins, config file is the fallback when env is
+ * absent. Previously env-only, so a user's config-file read_cache_mode was
+ * silently ignored and defaulted to "warn".
+ */
+export declare function resolveReadCacheMode(): string;
 export declare function handleReadBefore(event: ToolEventData): {
     block: boolean;
     message: string;

@@ -113,7 +113,7 @@ exports.V5_FEATURES = {
     verbosity_steer: {
         id: "verbosity_steer",
         label: "Verbosity Steering",
-        description: "Inject a tiered conciseness nudge on UserPromptSubmit when context is under pressure (55%+ fill with degraded quality, or 75%+ fill). Includes cooldown and critical-fill suppression.",
+        description: "Inject a tiered conciseness nudge on UserPromptSubmit when context is under pressure (25%+ fill with degraded quality, or 75%+ fill). Includes cooldown and critical-fill suppression.",
         defaultEnabled: false,
         risk: "medium",
         // Deferred: requires a session-visible notification surface for inline
