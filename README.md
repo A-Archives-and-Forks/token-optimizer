@@ -216,8 +216,8 @@ Savings come from four non-overlapping pools, tracked in two tiers:
 
 **Two numbers, kept separate:**
 
-- **Counted (~$313/mo)**, logged action by action. Every time Token Optimizer swapped in a lighter model, trimmed a bulky result, or skipped a repeat read, it added it up: smarter habits ~$260/mo, while-you-work compression ~$53/mo. This is the slice metered event by event, so it is smaller and exact.
-- **Big picture (~$1,877/mo, ~18%)**, the full counterfactual. Had you worked the way you did before Token Optimizer (~95% Opus), you would have paid about ~$10,585/mo versus ~$8,708/mo now. The gap is mostly a lighter model mix (95% Opus down to 60%, ~$1,076/mo for main routing + caching), plus cheaper subagents (~$741/mo) and the metered compression add-back (~$60/mo).
+- **Counted (\~$313/mo)**, logged action by action. Every time Token Optimizer swapped in a lighter model, trimmed a bulky result, or skipped a repeat read, it added it up: smarter habits \~$260/mo, while-you-work compression \~$53/mo. This is the slice metered event by event, so it is smaller and exact.
+- **Big picture (\~$1,877/mo, \~18%)**, the full counterfactual. Had you worked the way you did before Token Optimizer (\~95% Opus), you would have paid about \~$10,585/mo versus \~$8,708/mo now. The gap is mostly a lighter model mix (95% Opus down to 60%, \~$1,076/mo for main routing + caching), plus cheaper subagents (\~$741/mo) and the metered compression add-back (\~$60/mo).
 
 These numbers are never summed. Counted is the floor with hard receipts. Big picture is a model priced against your frozen pre-Token-Optimizer baseline. [See the full methodology →](BENCHMARK.md)
 
@@ -225,7 +225,7 @@ These numbers are never summed. Counted is the floor with hard receipts. Big pic
   <img src="skills/token-optimizer/assets/real-savings.svg" alt="30-day savings report: ~$313 counted, ~$1,877 big picture" width="900">
 </p>
 
-Based on 684 sessions over 30 days (snapshot ending 2026-06-15), priced against a frozen pre-Token-Optimizer baseline (~95% Opus). Your number is your own. [See the methodology →](BENCHMARK.md)
+Based on 684 sessions over 30 days (snapshot ending 2026-06-15), priced against a frozen pre-Token-Optimizer baseline (\~95% Opus). Your number is your own. [See the methodology →](BENCHMARK.md)
 
 <p align="center">
   <img src="skills/token-optimizer/assets/user-profiles.svg" alt="What happens inside a 1M session" width="800">
