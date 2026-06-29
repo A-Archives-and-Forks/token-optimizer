@@ -116,6 +116,13 @@ rm -rf "$tmp"
 
 **Windows users:** Use the plugin install only. Do not run `install.sh` on Windows. If you hit `EBUSY` errors, close all Claude Code and Git Bash windows, kill lingering `git.exe` processes, delete `C:\Users\<you>\.claude\token-optimizer` and `C:\Users\<you>\.claude\plugins\marketplaces\alexgreensh-token-optimizer`, then retry.
 
+**If `install.sh` fails with `$'\r': command not found`** (a clone made before LF line endings were enforced converted the script to CRLF), strip the carriage returns once and re-run — the repo now ships a `.gitattributes` that prevents this on fresh clones:
+```bash
+sed -i 's/\r$//' ~/.claude/token-optimizer/install.sh
+# already have the repo? re-normalize line endings in place:
+git -C ~/.claude/token-optimizer add --renormalize . && git -C ~/.claude/token-optimizer checkout -- .
+```
+
 </details>
 
 ## What You Get
