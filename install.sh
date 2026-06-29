@@ -345,6 +345,64 @@ fail_verified_install() {
     fail "$1"
 }
 
+# ── Skill payload completeness check (U1, issue #57) ──────────
+# A partial sparse-checkout can leave skills/ present but the files inside it
+# missing, so SKILL.md emits "[file not found]" refs and the runtime loads
+# stale behavior. The existing `[ -d skills ]` guards only check directory
+# existence; this helper verifies the *payload* — SKILL.md, scripts/measure.py,
+# and every references/*.md SKILL.md actually cites. The reference list is
+# derived from SKILL.md itself (grep, not hardcoded) so it never drifts when a
+# reference is added or renamed.
+#
+# Returns 0 if every required file exists, 1 if any is missing. Never suppressed
+# with 2>/dev/null or || true — a missing payload must be visible.
+
+verify_skill_payload() {
+    local skill_root="${INSTALL_DIR}/skills/token-optimizer"
+    local skill_md="${skill_root}/SKILL.md"
+    local measure_py="${skill_root}/scripts/measure.py"
+
+    # Fast pre-filter: the skill directory and the two anchor files must exist.
+    [ -d "$skill_root" ] || return 1
+    [ -f "$skill_md" ] || return 1
+    [ -f "$measure_py" ] || return 1
+
+    # Derive the references/*.md files SKILL.md actually references and verify
+    # each one is present. sort -u dedups; the while loop reads one path per line.
+    local ref
+    while IFS= read -r ref; do
+        [ -n "$ref" ] || continue
+        [ -f "${skill_root}/${ref}" ] || return 1
+    done < <(grep -oE 'references/[A-Za-z0-9._-]+\.md' "$skill_md" | sort -u)
+
+    return 0
+}
+
+# Repair a partial skill payload via the existing sparse-checkout disable path,
+# re-verifying after each attempt. Aborts loudly via fail_verified_install if
+# the payload is still incomplete after repair — never wires hooks against a
+# partial tree. The completeness check itself is never suppressed.
+repair_and_verify_skill_payload() {
+    if verify_skill_payload; then
+        return 0
+    fi
+    warn "Incomplete skill payload detected (missing referenced files). Repairing sparse checkout..."
+    git -C "$INSTALL_DIR" sparse-checkout set \
+        skills/ hooks/ .claude-plugin/ .codex-plugin/ .codex/ \
+        2>/dev/null || git -C "$INSTALL_DIR" sparse-checkout disable 2>/dev/null || true
+    if verify_skill_payload; then
+        info "Skill payload restored"
+        return 0
+    fi
+    warn "Sparse checkout set did not restore skill payload. Disabling sparse checkout..."
+    git -C "$INSTALL_DIR" sparse-checkout disable 2>/dev/null || true
+    if verify_skill_payload; then
+        info "Skill payload restored (sparse checkout disabled)"
+        return 0
+    fi
+    fail_verified_install "Incomplete skill payload: required files under ${INSTALL_DIR}/skills/token-optimizer/ are still missing after sparse-checkout repair. Re-clone from: https://github.com/${GITHUB_REPO}"
+}
+
 fetch_release_checksums() {
     [ -n "$CHECKSUM_ASSET_URL" ] || return 1
     curl -fsSL -o "$CHECKSUM_FILE" "$CHECKSUM_ASSET_URL" 2>/dev/null && [ -s "$CHECKSUM_FILE" ]
@@ -514,7 +572,14 @@ if [ -d "${INSTALL_DIR}/.git" ]; then
             git -C "$INSTALL_DIR" sparse-checkout disable 2>/dev/null || true
         fi
         [ -d "${INSTALL_DIR}/skills" ] || fail_verified_install "Could not restore skills/ directory. Try re-cloning from: https://github.com/${GITHUB_REPO}"
+        # Verify the skill payload (not just the directory) after the dir repair.
+        repair_and_verify_skill_payload
     fi
+
+    # Verify skill payload completeness even when skills/ exists — a partial
+    # sparse-checkout can leave the directory present but referenced files
+    # missing (issue #57). This is the primary guard for the bug.
+    repair_and_verify_skill_payload
 elif [ -d "$INSTALL_DIR" ]; then
     BACKUP="${INSTALL_DIR}.backup.$(date +%Y%m%d_%H%M%S)"
     warn "Non-git install found at ${INSTALL_DIR}"
