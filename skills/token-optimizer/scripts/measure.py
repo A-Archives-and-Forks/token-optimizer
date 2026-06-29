@@ -210,6 +210,9 @@ def _opencode_audit_notice() -> None:
     print('  opencode.json -> "plugin": ["token-optimizer-opencode"]')
     print("  or drop the build into ~/.config/opencode/plugins/")
     print()
+    print("The skill content OpenCode loads lives in ~/.claude/skills; to refresh it")
+    print("(e.g. if SKILL.md references look stale), re-run the installer: install.sh")
+    print()
     print("To force this skill onto a specific runtime, set TOKEN_OPTIMIZER_RUNTIME.")
 
 # Sentinel file written inside an archived symlinked skill, recording the
@@ -17965,7 +17968,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.23"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.25"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845

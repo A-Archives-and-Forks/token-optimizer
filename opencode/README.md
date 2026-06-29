@@ -43,6 +43,27 @@ token-optimizer/install.sh --opencode
 Requires [bun](https://bun.sh) (OpenCode's own runtime). Re-run after a
 `git pull` to update.
 
+## Update
+
+The npm plugin (`token-optimizer-opencode`) is **runtime-only**: it ships the
+hook bridge and tooling OpenCode loads at startup. The **skill content**
+(SKILL.md, references, scripts) lives in `~/.claude/skills/token-optimizer/`,
+which OpenCode loads directly. Updating the npm plugin does NOT refresh that
+tree — they are independent channels.
+
+To refresh the skill content (after a `git pull`, or if SKILL.md references
+look stale / `[file not found]`), re-run the **standard** installer — the
+Claude-side flow with no `--opencode` flag. It owns the `~/.claude/skills`
+tree:
+
+```bash
+token-optimizer/install.sh
+```
+
+That flow verifies the skill payload is complete and repairs a partial
+checkout in place. (`install.sh --opencode` only rebuilds the OpenCode runtime
+bundle in `~/.config/opencode/plugins/` — it does not touch the skill tree.)
+
 ## Configure
 
 OpenCode's `plugin` array takes **package-name strings only** — it does not
