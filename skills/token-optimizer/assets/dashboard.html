@@ -2605,6 +2605,24 @@ var DB = (function() {
       how: "A PreToolUse hook intercepts safe read-only commands and routes them through a compression wrapper. Only whitelisted commands (git status/log/diff, pytest, jest, npm install, ls) are touched. Compound commands (anything with &&, ;, |, $()) are never touched.",
       risk: "Low. Compression is lossy by design: 'git diff' truncates to 30 lines on large diffs, 'pytest' shows pass/fail counts but strips individual passing tests, 'git log' drops merge commit details. For routine checks this is fine. For careful diff review or debugging specific test failures, set TOKEN_OPTIMIZER_BASH_COMPRESS=0 to disable temporarily.",
       env_var: 'TOKEN_OPTIMIZER_BASH_COMPRESS'
+    },
+    first_read_shadow: {
+      default: true, recommended: true, impact_pct: 0, risk_level: 'low',
+      label: 'First-Read Skeleton (master switch)',
+      what: "Master switch for the first-read skeleton feature. Off disables BOTH active skeleton serving and shadow measurement -- first reads pass through untouched.",
+      value: "Controls whether Token Optimizer ever shortens a large file on its FIRST read (not just re-reads). Turn off to opt out of first-read substitution entirely.",
+      how: "When on, large first reads of supported CODE files (python/typescript, 16KB-256KB) in validated cohorts may be served as a skeleton; everything else is measured only. When off, the entire first-read path is skipped.",
+      risk: "Low. The full file is always one `expand <key>`, ranged Read, or direct Edit away, and the original is archived before any substitution (fail-open).",
+      env_var: 'TOKEN_OPTIMIZER_FIRST_READ_SHADOW'
+    },
+    first_read_active: {
+      default: true, recommended: true, impact_pct: 15, risk_level: 'low',
+      label: 'First-Read Skeleton (serve, not just measure)',
+      what: "When on, validated CODE cohorts are served a structural skeleton (signatures/imports) on first read instead of the full file. When off, those cohorts are measured only and served full.",
+      value: "A large first-read code file comes back as a compact API skeleton, with the full content one `expand` away. As of v5.11.27 markdown/prose is NOT skeletoned -- only code.",
+      how: "Requires the master switch on. The full original is archived first and recoverable via `expand <key>`, a ranged Read, or a direct Edit. A runtime tripwire auto-demotes a cohort back to measure-only if its live edit-rate exceeds the gate.",
+      risk: "Low. Code skeletons preserve structure; the full file is always recoverable. Set TOKEN_OPTIMIZER_FIRST_READ_ACTIVE=0 (or toggle here) to serve full content while keeping measurement.",
+      env_var: 'TOKEN_OPTIMIZER_FIRST_READ_ACTIVE'
     }
   };
 

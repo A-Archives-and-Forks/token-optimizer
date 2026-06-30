@@ -164,20 +164,20 @@ Production figures come from Claude Code CLI sessions (the author's primary plat
 ## More detail
 
 <details>
-<summary>First-read skeletons (6 cohorts active)</summary>
+<summary>First-read skeletons (code only — 4 cohorts active)</summary>
 
-Large files read for the first time and unlikely to be edited soon are served as a skeleton, with the full original archived and recoverable via `expand`. A file type is only promoted to active serving after proof from real history: edit-within-5-turns under 15%, across 20 or more reads in 5 or more sessions.
+Large **code** files read for the first time and unlikely to be edited soon are served as a skeleton, with the full original archived and recoverable via `expand`, a ranged Read, or a direct Edit. A file type is only promoted to active serving after proof from real history: edit-within-5-turns under 15%, across 20 or more reads in 5 or more sessions.
 
 Measured across a historical first-read corpus (5,814 sessions, 30,771 reads):
 
 | Language | Size | Reads | Edit rate | Skeleton ratio | Saved |
 |---|---|---|---|---|---|
-| markdown | 16-64KB | 1,329 | 2.9% | 97.1% | 10.3M |
 | python | 16-64KB | 763 | 1.4% | 96.1% | 6.4M |
-| typescript | 16-64KB | 220 | 0.9% | 97.4% | 1.5M |
 | python | 64-256KB | 66 | 1.5% | 98.5% | 1.5M |
+| typescript | 16-64KB | 220 | 0.9% | 97.4% | 1.5M |
+| markdown | 16-64KB | 1,329 | 2.9% | 97.1% | 10.3M (now measure-only) |
 
-A live tripwire watches every active cohort. If its real edit-after-skeleton rate crosses 15%, it auto-demotes. The full original is always archived first (fail-open: if archiving fails, the full file is served unchanged).
+As of **v5.11.27** the markdown cohorts are demoted to measure-only: a markdown skeleton is headings-only, so it drops load-bearing prose, and the edit-rate gate proves "rarely edited" rather than "prose not needed." Markdown first-reads now return full content (still measured in shadow). Active serving is code-only — Python and TypeScript. A live tripwire watches every active cohort; if its real edit-after-skeleton rate crosses 15%, it auto-demotes. The full original is always archived first (fail-open: if archiving fails, the full file is served unchanged).
 
 </details>
 

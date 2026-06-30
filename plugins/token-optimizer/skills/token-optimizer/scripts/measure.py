@@ -91,7 +91,7 @@ except ImportError:  # pragma: no cover - Python < 3.11 fallback
     tomllib = None
 
 from hook_io import read_stdin_hook_input as _read_stdin_hook_input_shared
-from plugin_env import resolve_plugin_data_dir
+from plugin_env import resolve_plugin_data_dir, interpret_flag_value
 from utf8_io import enforce_utf8_io, reexec_in_utf8_mode
 from runtime_env import claude_home, detect_runtime, runtime_home, runtime_name_for_humans
 
@@ -9019,23 +9019,20 @@ def _get_compression_coverage(days=30):
 # tripwire. Kept as literals here (the dashboard/CLI module must not import the
 # hot-path read hook). A drift test pins the two lists together.
 _FIRST_READ_ACTIVE_COHORTS = frozenset({
-    ("markdown", "16-64KB"),
     ("python", "16-64KB"),
     ("python", "64-256KB"),
     ("typescript", "16-64KB"),
-    ("markdown", "64-256KB"),
     ("typescript", "64-256KB"),
 })
 
 # Interpolated cohorts: promoted on a thin sample because the SAME language
-# already passed the full gate in an ADJACENT band (markdown/typescript 16-64KB
-# passed → their 64-256KB bands graduate). They carry a HIGHER exposure risk
+# already passed the full gate in an ADJACENT band (typescript 16-64KB passed →
+# its 64-256KB band graduates). They carry a HIGHER exposure risk
 # (fewer historical reads) so the runtime tripwire judges them on a SMALLER
 # sample floor — a demotion can fire after just _TRIPWIRE_MIN_SAMPLES_INTERP
 # active skeletons instead of the full-gate floor. Mirror of read_cache's
 # interpolated tier; the drift test pins them together.
 _INTERPOLATED_COHORTS = frozenset({
-    ("markdown", "64-256KB"),
     ("typescript", "64-256KB"),
 })
 
@@ -17968,7 +17965,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.26"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.27"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -27999,6 +27996,7 @@ V5_FEATURES = {
     "structure_map_beta": {
         "env_var": "TOKEN_OPTIMIZER_STRUCTURE_MAP",
         "config_key": "v5_structure_map_beta",
+        "env_truthy_value": "beta",  # tri-state: only the exact token enables
         "default": False,
         "label": "Structure Map Measurement",
         "what": "Logs compression events when structure map fires, so you can track actual savings via compression-stats.",
@@ -28019,6 +28017,32 @@ V5_FEATURES = {
         "impact_pct": 10,  # benchmark showed 38% on compressible commands, adjusted for session mix
         "how": "A PreToolUse hook intercepts safe read-only commands and routes them through a compression wrapper. Only whitelisted commands (git status/log/diff, pytest, jest, npm install, ls) are touched. Compound commands (anything with &&, ;, |, $()) are never touched.",
         "risk": "Low. Compression is lossy by design: 'git diff' truncates to 30 lines on large diffs, 'pytest' shows pass/fail counts but strips individual passing tests, 'git log' drops merge commit details. For routine checks this is fine. For careful diff review or debugging specific test failures, set TOKEN_OPTIMIZER_BASH_COMPRESS=0 to disable temporarily.",
+        "risk_level": "low",
+        "recommended": True,
+    },
+    "first_read_shadow": {
+        "env_var": "TOKEN_OPTIMIZER_FIRST_READ_SHADOW",
+        "config_key": "v5_first_read_shadow",
+        "default": True,
+        "label": "First-Read Skeleton (master switch)",
+        "what": "Master switch for the first-read skeleton feature. Off disables BOTH the active skeleton serving and the shadow measurement -- first reads pass through untouched.",
+        "value": "Controls whether Token Optimizer ever shortens a large file on its FIRST read (not just re-reads). Turn off to opt out of first-read substitution entirely.",
+        "impact_pct": 0,  # gate, not an independent saver; savings attributed to first_read_active
+        "how": "When on, large first reads of supported CODE files (python/typescript, 16KB-256KB) in validated cohorts may be served as a skeleton; everything else is measured only. When off, the entire first-read path is skipped.",
+        "risk": "Low. The full file is always one `expand <key>`, ranged Read, or direct Edit away, and the original is archived before any substitution (fail-open: if archiving fails, the full file is served).",
+        "risk_level": "low",
+        "recommended": True,
+    },
+    "first_read_active": {
+        "env_var": "TOKEN_OPTIMIZER_FIRST_READ_ACTIVE",
+        "config_key": "v5_first_read_active",
+        "default": True,
+        "label": "First-Read Skeleton (serve, not just measure)",
+        "what": "When on, validated CODE cohorts are served a structural skeleton (signatures/imports) on first read instead of the full file. When off, those cohorts are measured only and served full.",
+        "value": "A large first-read code file (e.g. a 180KB module) comes back as a compact API skeleton, with the full content one `expand` away. As of v5.11.27 markdown/prose is NOT skeletoned -- only code.",
+        "impact_pct": 15,
+        "how": "Requires the master switch (above) on. The full original is archived first and recoverable via `expand <key>`, a ranged Read, or a direct Edit. A runtime tripwire auto-demotes a cohort back to measure-only if its live edit-rate exceeds the safety gate.",
+        "risk": "Low. Code skeletons preserve structure; the full file is always recoverable. Set TOKEN_OPTIMIZER_FIRST_READ_ACTIVE=0 (or toggle here) to serve full content while keeping measurement.",
         "risk_level": "low",
         "recommended": True,
     },
@@ -28132,36 +28156,45 @@ def _resolve_settings_value(key, default=None):
 
 
 def _env_val_enables(feature_name, env_val):
-    """Interpret a feature's env-var value as enabled/disabled. Mirrors the REAL
-    runtime gates so the dashboard never disagrees with what actually fires:
-    binary flags use the usual truthy set; structure_map is a tri-state flag whose
-    telemetry only activates on the exact string `beta` (see plugin_env.
-    is_v5_flag_enabled / read_cache._is_v5_structure_map_beta). Accepting `1` here
-    would show the badge green while logging never fires -- a lie. Issue #77."""
-    norm = str(env_val).strip().lower()
-    if feature_name == "structure_map_beta":
-        return norm == "beta"
-    return norm in _TRUTHY_ENV_VALUES
+    """Back-compat shim: interpret a feature's value via the shared gate.
+
+    Retained for any external/test caller. Resolves tri-state via the registry's
+    env_truthy_value and coerces the shared interpreter's "unrecognized" (None)
+    to the feature default, preserving the historical bool return. New code
+    should call plugin_env.interpret_flag_value directly. Issue #77 / #79."""
+    feat = V5_FEATURES.get(feature_name) or {}
+    r = interpret_flag_value(env_val, env_truthy_value=feat.get("env_truthy_value"))
+    return r if r is not None else bool(feat.get("default", False))
 
 
 def _is_v5_feature_enabled(feature_name):
-    """Check if a v5 feature is enabled. Env var wins, then config, then default."""
+    """Check if a v5 feature is enabled. Env var wins, then config, then default.
+
+    Value interpretation is delegated to plugin_env.interpret_flag_value so the
+    dashboard reader, the read-hook (is_v5_flag_enabled), and the env path all
+    share ONE gate and can never disagree (issue #79). An unrecognized value at
+    a source falls through to the next; the registry default is the final
+    fallback. The structure_map tri-state still enables only on the exact "beta"
+    token (carried as env_truthy_value in the registry)."""
     feat = V5_FEATURES.get(feature_name)
     if not feat:
         return False
+    tv = feat.get("env_truthy_value")
 
-    # Env var (process env or settings.json): "0"/"1" for binary, plus "beta" for
-    # structure map. Highest priority so power-user overrides always win.
+    # Env var (process env or settings.json) wins.
     env_val = _resolve_feature_env(feat["env_var"])
     if env_val is not None:
-        return _env_val_enables(feature_name, env_val)
+        r = interpret_flag_value(env_val, env_truthy_value=tv)
+        if r is not None:
+            return r
 
-    # Config.json
+    # Config.json (user, then plugin-data, via _read_config_flag).
     config_val = _read_config_flag(feat["config_key"], None)
     if config_val is not None:
-        return bool(config_val)
+        r = interpret_flag_value(config_val, env_truthy_value=tv)
+        if r is not None:
+            return r
 
-    # Default
     return feat["default"]
 
 

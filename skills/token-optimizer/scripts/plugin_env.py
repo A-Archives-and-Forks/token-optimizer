@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -165,6 +166,68 @@ def resolve_snapshot_dir() -> Path:
 _TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
 _FALSY_ENV = frozenset({"0", "false", "no", "off", ""})
 
+_warned_flag_values: set = set()
+
+
+def _warn_unrecognized_flag_value(flag_name: str, value, config_path) -> None:
+    """One-time stderr warning for an unrecognized config flag value.
+
+    Diagnostics go to stderr only (stdout must stay clean for hook contracts).
+    Deduped per (flag, type) so a misconfigured config.json warns once, not on
+    every hook invocation. The raw value is NEVER echoed in full — only its type
+    and length — so a secret mistakenly placed as a flag value can't leak into
+    logs/CI captures (issue #79). The dedup key is a string so an unhashable
+    JSON value (list/dict) can't crash the caller.
+    """
+    sig = (flag_name, type(value).__name__)
+    if sig in _warned_flag_values:
+        return
+    _warned_flag_values.add(sig)
+    try:
+        try:
+            length = len(value)
+        except TypeError:
+            length = "n/a"
+        print(
+            f"[Token Optimizer] WARNING: {config_path}: flag '{flag_name}' has an "
+            f"unrecognized value (type={type(value).__name__}, length={length}); "
+            f"expected a boolean or one of {sorted(_TRUTHY_ENV | _FALSY_ENV)}. "
+            "Ignoring and using the next source/default.",
+            file=sys.stderr,
+        )
+    except Exception:
+        pass
+
+
+def interpret_flag_value(value, *, env_truthy_value: str | None = None):
+    """Single source of truth for reading ONE feature-flag value.
+
+    Accepts an env string OR a config JSON bool/number/string. Returns:
+      * True / False when the value decisively enables or disables, or
+      * None when the value is unrecognized/unset, so the CALLER falls through
+        to its next source (env -> config -> default).
+
+    Binary flags accept "1"/"true"/"yes"/"on" as True and "0"/"false"/"no"/
+    "off"/"" as False, case-insensitively; a genuine JSON bool/number is taken
+    as-is. Tri-state flags (env_truthy_value set, e.g. structure-map "beta") are
+    ALWAYS decisive: only the exact token (case-insensitive) enables, everything
+    else disables. Both readers (this module's hot path and measure.py's
+    dashboard) call this so they can never disagree (issue #79).
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value).strip()
+    if env_truthy_value is not None:
+        return s.lower() == env_truthy_value.strip().lower()
+    low = s.lower()
+    if low in _TRUTHY_ENV:
+        return True
+    if low in _FALSY_ENV:  # includes ""
+        return False
+    return None
+
 
 def is_v5_flag_enabled(
     flag_name: str,
@@ -180,22 +243,17 @@ def is_v5_flag_enabled(
     3. Plugin-data config: <plugin-data>/config/config.json
     4. default
 
-    Env parsing: when env_truthy_value is None (default), accepts the common
-    boolean strings "1"/"true"/"yes"/"on" as True (case-insensitive) and
-    "0"/"false"/"no"/"off"/"" as False; any other value falls through to
-    config/default. When env_truthy_value is supplied (tri-state flags like
-    structure-map "beta"), only an exact string match returns True.
+    Value interpretation is delegated to interpret_flag_value so the env path,
+    the config path, and measure.py's dashboard reader all share one gate. An
+    unrecognized value at any source falls through to the next (warned once for
+    config sources); the default is the final fallback.
     """
     env_val = os.environ.get(env_var)
     if env_val is not None:
-        if env_truthy_value is not None:
-            return env_val == env_truthy_value
-        normalized = env_val.strip().lower()
-        if normalized in _TRUTHY_ENV:
-            return True
-        if normalized in _FALSY_ENV:
-            return False
-        # Unrecognized value: don't guess, fall through to config/default.
+        r = interpret_flag_value(env_val, env_truthy_value=env_truthy_value)
+        if r is not None:
+            return r
+        # Unrecognized env value: don't guess, fall through to config/default.
 
     config_paths = [_USER_CONFIG_DIR / "config.json"]
     plugin_data = resolve_plugin_data_dir()
@@ -205,6 +263,11 @@ def is_v5_flag_enabled(
     for config_path in config_paths:
         cfg = _safe_load_json(config_path)
         if isinstance(cfg, dict) and flag_name in cfg:
-            return bool(cfg[flag_name])
+            r = interpret_flag_value(cfg[flag_name], env_truthy_value=env_truthy_value)
+            if r is not None:
+                return r
+            # Unrecognized string / unusable JSON type: warn once, fall through.
+            _warn_unrecognized_flag_value(flag_name, cfg[flag_name], config_path)
+            continue
 
     return default
