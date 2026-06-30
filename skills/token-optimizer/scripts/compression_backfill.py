@@ -63,7 +63,6 @@ PROMOTION_MIN_SESSIONS = 5  # spread across >=N distinct sessions, not one loop
 # one's language really does have a passing adjacent band in the live report, so
 # an interpolated promotion can never rest on a language that itself never passed.
 _INTERPOLATED_COHORTS = frozenset({
-    ("markdown", "64-256KB"),
     ("typescript", "64-256KB"),
 })
 # Adjacency in band space (ordered): a cohort's adjacent bands are its neighbors.

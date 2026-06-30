@@ -115,11 +115,11 @@ Two features prevent waste instead of removing it, and both log a savings event 
 
 ## First-read skeleton promotion
 
-Large files on first read that are unlikely to be edited soon are served as a skeleton, with the full original archived and retrievable via `expand`. A cohort (language plus size band) is only promoted to active serving after proof from real history: the edit-within-5-turns rate must stay under 15% across 20 or more reads in 5 or more distinct sessions.
+Large **code** files on first read that are unlikely to be edited soon are served as a skeleton, with the full original archived and retrievable via `expand`, a ranged Read, or a direct Edit. A cohort (language plus size band) is only promoted to active serving after proof from real history: the edit-within-5-turns rate must stay under 15% across 20 or more reads in 5 or more distinct sessions.
 
 A live tripwire watches every active cohort. If a cohort's live edit-after-skeleton rate ever crosses 15%, it auto-demotes to measure-only and logs a `cohort_demoted` event. Demotions are sticky to prevent flapping; re-promotion is explicit (`measure.py cohorts promote <lang:band>`) or happens on the next history backfill. The full original is always archived before any skeleton is served, and if archiving fails the full file is served unchanged (fail-open).
 
-Six cohorts are active by default. Two graduated by interpolation (zero edits in history plus a passing adjacent band) and are judged on a smaller tripwire floor, which the dashboard flags so the thinner basis is visible.
+As of v5.11.27 the active cohorts are **code only** — Python (16-64KB, 64-256KB) and TypeScript (16-64KB, 64-256KB), four in total, of which TypeScript 64-256KB graduated by interpolation (zero edits in history plus a passing adjacent band) and is judged on a smaller tripwire floor that the dashboard flags. Markdown cohorts were demoted to measure-only: a headings-only outline drops load-bearing prose, and the edit-rate gate does not capture whether the prose itself was needed. The two controlling flags are visible and toggleable in `measure.py v5 status`.
 
 ## Quality grades
 

@@ -279,6 +279,14 @@ When Claude re-reads a code file it already saw, the Read call is blocked and re
 
 Disable: `TOKEN_OPTIMIZER_READ_CACHE_MODE=shadow`
 
+### First-Read Skeleton
+
+On the **first** read of a large **code** file (Python or TypeScript, 16KB–256KB) in a history-validated cohort, the Read returns a structural skeleton (signatures/imports) instead of the full file, with a one-line notice and the full content always one step away: `expand <key>`, a ranged Read (`offset`/`limit`), or a direct Edit. The original is archived before any substitution, fail-open — if archiving can't happen, the full file is served.
+
+This applies to **code only**. Markdown and other prose are **not** skeletoned on first read (as of v5.11.27): a headings-only outline drops load-bearing prose, so docs always come back complete. A runtime tripwire auto-demotes a code cohort back to measure-only if its live edit-rate climbs.
+
+Disable serving (keep measurement): `TOKEN_OPTIMIZER_FIRST_READ_ACTIVE=0`. Disable entirely: `TOKEN_OPTIMIZER_FIRST_READ_SHADOW=0`. Both are also visible and toggleable via `measure.py v5 status` and the dashboard Manage tab.
+
 ### Bash Output Compression
 
 Rewrites common CLI commands to return compressed summaries. Covers lint, log tails, tree, docker pull, long listings, build output, and test runners. A 564-token pytest output becomes 115 tokens.

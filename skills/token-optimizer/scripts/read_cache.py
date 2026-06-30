@@ -124,13 +124,17 @@ def _is_first_read_active_enabled():
 #     adjacent passing band (json/yaml/javascript) stay measure-only until they
 #     accumulate enough history or are promoted via `measure.py cohorts promote`.
 FIRST_READ_ACTIVE_COHORTS = frozenset({
-    ("markdown", "16-64KB"),
     ("python", "16-64KB"),
     ("python", "64-256KB"),
     ("typescript", "16-64KB"),
-    ("markdown", "64-256KB"),    # interpolated (md 16-64KB passed, 0% edits)
     ("typescript", "64-256KB"),  # interpolated (ts 16-64KB passed, 0% edits)
 })
+# NOTE (#79): markdown cohorts were demoted to shadow (measure-only) on
+# 2026-06-30. A code skeleton (signatures/imports) is structure-preserving, but
+# the markdown skeleton is headings-only — prose docs read for understanding
+# lose load-bearing content, and the edit-rate promotion gate does not capture
+# read-need. Markdown still flows through the shadow path so telemetry is kept;
+# re-promote only behind a prose-aware summary. Reversible: re-add the tuples.
 
 # Interpolated cohorts: a thin-sample subset of the active set, graduated on an
 # adjacent passing band rather than their own full gate. Tracked as a named
@@ -138,7 +142,6 @@ FIRST_READ_ACTIVE_COHORTS = frozenset({
 # can flag the higher-exposure tier. Serving is identical (they ARE active); the
 # distinction only changes the runtime tripwire's sample floor in measure.py.
 _INTERPOLATED_COHORTS = frozenset({
-    ("markdown", "64-256KB"),
     ("typescript", "64-256KB"),
 })
 
@@ -878,7 +881,8 @@ def _serve_first_read_skeleton(
     try:
         from archive_result import derive_archive_key, archive_original, build_archive_pointer
         key = derive_archive_key(session_id, file_path, stat.st_mtime_ns)
-        if archive_original(content, session_id, key, "Read", quiet=quiet) is None:
+        if archive_original(content, session_id, key, "Read", quiet=quiet,
+                            file_path=file_path, language=language) is None:
             return False
         body = build_archive_pointer(result.replacement_text, len(content), key)
     except Exception:

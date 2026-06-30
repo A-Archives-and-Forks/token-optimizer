@@ -460,12 +460,19 @@ def build_archive_pointer(preview: str, original_chars: int, key: str) -> str:
 
 
 def archive_original(content: str, session_id: str | None, key: str,
-                     tool_name: str, quiet: bool = True) -> str | None:
+                     tool_name: str, quiet: bool = True,
+                     file_path: str | None = None,
+                     language: str | None = None) -> str | None:
     """Persist a full original (credential-redacted) under `key`; return the key.
 
     Reusable by non-MCP / PreToolUse compressors so nothing is ever lost. Mirrors
     the MCP archive path (same dir layout + manifest) so expand_archived retrieves
     it unchanged. Fail-open: returns None on any failure (caller serves raw).
+
+    `file_path`/`language` (issue #79): when the caller knows which file is being
+    degraded (the first-read skeleton path does), record it so a degraded read is
+    self-identifiable from the archive without transcript archaeology. Additive
+    and always present (null when unknown) so the record schema stays uniform.
     """
     try:
         if not key or not re.match(r"^[a-zA-Z0-9_-]+$", key):
@@ -474,9 +481,14 @@ def archive_original(content: str, session_id: str | None, key: str,
         if not _ensure_private_archive_dir(archive_dir):
             return None
         safe_response = _redact_credentials(content)
+        # Redact the path too — a path can embed a token/secret (e.g. a URL-ish
+        # segment). Stored uniformly: null when the caller didn't supply one.
+        safe_path = _redact_credentials(file_path) if file_path else None
         meta = {
             "tool_name": tool_name,
             "tool_use_id": key,
+            "file_path": safe_path,
+            "language": language,
             "chars": len(safe_response),
             "original_chars": len(content),
             "tokens_est": int(len(safe_response) / CODE_CHARS_PER_TOKEN),
