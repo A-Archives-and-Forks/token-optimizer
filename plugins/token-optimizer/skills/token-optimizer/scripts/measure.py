@@ -138,18 +138,63 @@ _CLAUDE_TARGET_CMDS = frozenset(
         # port/label identity from the runtime ternaries, which default to
         # Claude for unknown runtimes — wrong identity under a foreign host.
         "dashboard",
+        # read-only scan (block under foreign runtime; issue #57 HANDOFF-1).
+        # These derive their data from _find_all_jsonl_files() / measure_components()
+        # which read CLAUDE_DIR/projects (~/.claude) directly with NO OpenCode
+        # branch, so under a foreign runtime they would scan the wrong tree.
+        # Blocking is at command-DISPATCH level only (the `args[0] in ...` guard
+        # in __main__); internal function callers (copilot-rollup -> usage_trends(),
+        # hermes-summary -> usage_trends(), copilot-summary -> _copilot_summary())
+        # are NOT subcommands and stay unaffected. Verified: none of these 14 is
+        # invoked as a top-level subcommand under opencode/copilot (the OpenCode
+        # plugin is a native TS build; the Copilot bridge only shells out to
+        # `copilot-rollup`). See tests/test_foreign_runtime_scan_block.py.
+        "collect", "conversation", "quality", "health", "kill-stale",
+        "drift", "coach", "trends", "savings", "snapshot", "compare",
+        "git-context", "dashboard-diagnose", "validate-impact",
     }
 )
 # Back-compat alias (pre-Copilot name).
 _OPENCODE_CLAUDE_TARGET_CMDS = _CLAUDE_TARGET_CMDS
 
 # Runtimes that must never scan or mutate the Claude Code setup (~/.claude).
-# OpenCode (issue #57) and GitHub Copilot can both end up invoking this skill
-# (OpenCode loads ~/.claude/skills by default; Copilot via direct invocation
-# from a Copilot session). The Claude-targeting commands above are blocked for
-# all of them; runtime-data commands are unaffected because RUNTIME_DIR
-# resolves to the foreign runtime's own home.
-_FOREIGN_RUNTIMES = frozenset({"opencode", "copilot"})
+# OpenCode (issue #57), GitHub Copilot, and Hermes can all end up invoking
+# this skill (OpenCode loads ~/.claude/skills by default; Copilot via direct
+# invocation from a Copilot session; Hermes via its plugin which loads the
+# shared skill tree). The Claude-targeting commands above are blocked for all
+# of them; runtime-data commands are unaffected because RUNTIME_DIR resolves
+# to the foreign runtime's own home. Hermes is a foreign runtime by design
+# (HERMES_HOME routes runtime_home() to ~/.hermes; it has a full session
+# adapter: hermes_session.py, _collect_hermes_sessions, hermes_doctor.py) —
+# before this, trends/savings/quality/drift/coach fell through to the
+# CLAUDE_DIR scan path in measure_components()/_find_all_jsonl_files() and
+# produced empty output against the wrong tree (the #57 isolation leak).
+_FOREIGN_RUNTIMES = frozenset({"opencode", "copilot", "hermes"})
+
+# Per-runtime exemptions: foreign-runtime subcommands that a NATIVE flow
+# invokes as a TOP-LEVEL subcommand AND that are runtime-aware (do not scan
+# ~/.claude). These are exempted from the dispatch-level block below.
+#
+# Hermes exempts ``dashboard``: hermes_hook_bridge.run_dashboard()
+# (hermes/__init__.py:419 -> hermes_hook_bridge.py:222) shells to
+# ``python3 measure.py dashboard`` with TOKEN_OPTIMIZER_RUNTIME=hermes as the
+# ``hermes token-optimizer`` CLI command. The dashboard is hermes-aware — its
+# daemon identity is runtime-suffixed (port 24844, label
+# com.token-optimizer.hermes-dashboard; see _DAEMON_PORT_BY_RUNTIME), and
+# measure_components() routes to _measure_hermes_components() (no ~/.claude
+# scan), and _find_all_jsonl_files() returns [] under hermes (sessions come
+# from state.db via hermes-rollup, not ~/.claude/projects JSONL). So allowing
+# it does not violate the #57 isolation principle.
+#
+# OpenCode and Copilot exempt NOTHING: their native flows (the OpenCode TS
+# plugin; copilot_hook_bridge.py) never invoke a _CLAUDE_TARGET_CMDS
+# subcommand as a top-level command — they shell to copilot-rollup /
+# copilot-summary / copilot-doctor / copilot-install / copilot-home, all of
+# which are outside _CLAUDE_TARGET_CMDS. Verified by grep of the hook bridges
+# (see findings/xplat-audit.md).
+_FOREIGN_RUNTIME_EXEMPTIONS: dict[str, frozenset[str]] = {
+    "hermes": frozenset({"dashboard"}),
+}
 
 
 def _is_foreign_runtime() -> bool:
@@ -169,6 +214,7 @@ def _copilot_audit_notice() -> None:
     print("  measure.py copilot-rollup    — collect sessions into trends")
     print("  measure.py copilot-doctor    — readiness + hook capability probe")
     print("  measure.py copilot-install   — wire Token Optimizer into ~/.copilot")
+    print("  measure.py copilot-home      — print resolved Copilot home (honors COPILOT_HOME)")
     print()
     print("To force this skill onto a specific runtime, set TOKEN_OPTIMIZER_RUNTIME.")
 
@@ -182,6 +228,7 @@ def _foreign_audit_notice() -> None:
     notices = {
         "opencode": _opencode_audit_notice,
         "copilot": _copilot_audit_notice,
+        "hermes": _hermes_audit_notice,
     }
     handler = notices.get(detect_runtime())
     if handler is not None:
@@ -206,12 +253,33 @@ def _opencode_audit_notice() -> None:
     print("  - Live context-quality, savings, and continuity tracking via session hooks")
     print("  - Dashboard / status: run the `token_dashboard` or `token_status` tool")
     print()
-    print("Install or verify the OpenCode plugin:")
-    print('  opencode.json -> "plugin": ["token-optimizer-opencode"]')
-    print("  or drop the build into ~/.config/opencode/plugins/")
+    print("Install or refresh the OpenCode plugin (builds the native TS plugin")
+    print("into ~/.config/opencode/plugins/, NOT the ~/.claude skill tree):")
+    print("  install.sh --opencode")
+    print("  or via npm:  opencode plugin token-optimizer-opencode")
     print()
-    print("The skill content OpenCode loads lives in ~/.claude/skills; to refresh it")
-    print("(e.g. if SKILL.md references look stale), re-run the installer: install.sh")
+    print("To force this skill onto a specific runtime, set TOKEN_OPTIMIZER_RUNTIME.")
+
+
+def _hermes_audit_notice() -> None:
+    """Explain why the Claude audit does not run under Hermes, and where to go.
+
+    Printed instead of scanning/mutating ~/.claude when Hermes is detected.
+    Hermes sessions live in ~/.hermes/state.db (read via the hermes_session
+    adapter), not ~/.claude/projects JSONL, so the Claude-targeting scan
+    commands would scan the wrong tree and produce empty output.
+    """
+    print("Token Optimizer — Hermes runtime detected.")
+    print()
+    print("This audit targets a Claude Code / Codex setup (it scans ~/.claude), so it")
+    print("will not run here and will not modify ~/.claude or your Hermes config.")
+    print()
+    print("On Hermes, use the Hermes-native commands instead:")
+    print("  measure.py hermes-summary    — session cost/quality summary")
+    print("  measure.py hermes-rollup     — collect sessions into trends")
+    print("  measure.py hermes-doctor     — readiness + hook capability probe")
+    print("  measure.py hermes-install    — wire Token Optimizer into ~/.hermes/plugins/")
+    print("  measure.py dashboard         — open the Hermes dashboard (port 24844)")
     print()
     print("To force this skill onto a specific runtime, set TOKEN_OPTIMIZER_RUNTIME.")
 
@@ -1012,6 +1080,11 @@ def find_projects_dir():
 
 def get_session_baselines(limit=10):
     """Extract first-message token counts from recent JSONL session logs."""
+    # Hermes (issue #57): sessions live in ~/.hermes/state.db, not
+    # ~/.claude/projects/*.jsonl. Return [] so the dashboard's baselines
+    # row renders empty without scanning CLAUDE_DIR.
+    if _use_hermes_session_adapter():
+        return []
     projects_dir = find_projects_dir()
     if not projects_dir:
         return []
@@ -1351,8 +1424,11 @@ def _scan_plugin_skills_and_commands():
 
 def measure_components():
     """Measure all controllable token overhead components."""
-    if detect_runtime() == "codex":
+    runtime = detect_runtime()
+    if runtime == "codex":
         return _measure_codex_components()
+    if runtime == "hermes":
+        return _measure_hermes_components()
 
     components = {}
     seen_real_paths = set()
@@ -2007,6 +2083,63 @@ def _measure_codex_components():
     return components
 
 
+def _measure_hermes_components():
+    """Measure Hermes-relevant startup/config components without reading Claude config.
+
+    Mirrors ``_measure_codex_components()`` for the Hermes runtime. Hermes has
+    no Claude-style CLAUDE.md / skills / MCP / settings.json startup overhead:
+    its session data lives in ``~/.hermes/state.db`` (read by the
+    hermes_session adapter) and Token Optimizer ships as a plugin under
+    ``~/.hermes/plugins/token-optimizer/``. The dashboard (the one
+    _CLAUDE_TARGET_CMDS subcommand Hermes exempts — see
+    _FOREIGN_RUNTIME_EXEMPTIONS) calls this so it never scans ``~/.claude``
+    (issue #57 cross-platform universality). Returns a minimal but valid
+    component dict so ``calculate_totals`` / ``detect_calibration_gap`` /
+    the dashboard template render without CLAUDE_DIR access.
+    """
+    components: dict = {}
+    home = runtime_home()  # ~/.hermes (or HERMES_HOME when safe)
+
+    # Token Optimizer plugin payload under ~/.hermes/plugins/token-optimizer/.
+    # This is the only Hermes-side controllable overhead the audit can see.
+    plugin_dir = home / "plugins" / "token-optimizer"
+    plugin_tokens = 0
+    plugin_files: list[dict] = []
+    if plugin_dir.is_dir():
+        for f in sorted(plugin_dir.rglob("*.py")):
+            try:
+                # Defense-in-depth (issue #57): skip symlinked entries so a
+                # planted symlink under ~/.hermes/plugins/token-optimizer/
+                # can't leak a path outside the plugin dir into the dashboard.
+                if f.is_symlink():
+                    continue
+                if not f.is_file():
+                    continue
+                tok = estimate_tokens_from_file(f)
+                plugin_tokens += tok
+                plugin_files.append({"path": str(f), "tokens": tok})
+            except OSError:
+                continue
+
+    components["hermes_plugin"] = {
+        "path": str(plugin_dir),
+        "exists": plugin_dir.is_dir(),
+        "tokens": plugin_tokens,
+        "files": plugin_files,
+        "note": "Token Optimizer plugin under ~/.hermes/plugins/token-optimizer/.",
+    }
+
+    # Hermes has no CLAUDE.md / skills / MCP / settings.json startup overhead
+    # in the Claude Code sense. core_system is intentionally 0 because Hermes
+    # base instructions are not exposed for measurement — the dashboard's
+    # "fixed overhead" row renders without scanning ~/.claude.
+    components["core_system"] = {
+        "tokens": 0,
+        "note": "Hermes base instructions are not exposed for measurement; no ~/.claude scan.",
+    }
+    return components
+
+
 def calculate_totals(components):
     """Calculate total controllable and estimated overhead."""
     controllable = 0
@@ -2190,6 +2323,17 @@ def detect_context_window():
         model = os.environ.get("CODEX_MODEL") or os.environ.get("OPENAI_MODEL") or _codex_config_model()
         model_note = f" for {model}" if model else ""
         return remember((CODEX_DEFAULT_EFFECTIVE_CONTEXT_WINDOW, f"Codex conservative effective window{model_note} (override: TOKEN_OPTIMIZER_CONTEXT_SIZE)"))
+    # Hermes (issue #57): Hermes does not expose a model field in
+    # ~/.claude/config.json or settings.json. Use env override or a
+    # conservative default WITHOUT reading CLAUDE_DIR files.
+    if detect_runtime() == "hermes":
+        model = os.environ.get("HERMES_MODEL", "").lower()
+        if model:
+            if "haiku" in model:
+                return remember((200_000, f"hermes env: {model} (Haiku = 200K)"))
+            if _is_1m_model(model):
+                return remember((1_000_000, f"hermes env: {model} (1M)"))
+        return remember((200_000, "hermes default (200K. Override: TOKEN_OPTIMIZER_CONTEXT_SIZE)"))
     # Detect from model string in environment
     model = os.environ.get("CLAUDE_MODEL", "").lower()
     if not model:
@@ -4894,6 +5038,19 @@ def _collect_management_data(components=None, trends=None):
             "v5_features": _get_v5_feature_status(),
         }
 
+    # Hermes (issue #57): Hermes has no Claude-style skills/MCP/settings.json
+    # management surface. Return a minimal hermes-mode dict so the Manage tab
+    # renders without scanning CLAUDE_DIR/_backups, settings.json, or
+    # claude_desktop_config.json.
+    if detect_runtime() == "hermes":
+        return {
+            "mode": "hermes",
+            "skills": {"active": [], "archived": []},
+            "mcp_servers": {"active": [], "disabled": [], "cloud": []},
+            "plugins": [],
+            "v5_features": _get_v5_feature_status(),
+        }
+
     backups_dir = CLAUDE_DIR / "_backups"
 
     # Active skills
@@ -7213,6 +7370,16 @@ def _find_all_jsonl_files(days=30):
     """Find all JSONL session files across all projects within the given day window."""
     if _use_codex_session_adapter():
         return codex_session.find_all_jsonl_files(days)
+
+    # Hermes (issue #57 cross-platform universality): Hermes sessions live in
+    # ~/.hermes/state.db and are ingested into trends.db via hermes-rollup /
+    # _collect_hermes_sessions — they are NOT stored as ~/.claude/projects
+    # JSONL. Returning [] here keeps the JSONL fallback path of
+    # _collect_trends_data() (reached by the hermes-exempted `dashboard`
+    # command when trends.db is empty) from scanning ~/.claude, and is
+    # defense-in-depth for the dispatch-blocked scan subcommands.
+    if _use_hermes_session_adapter():
+        return []
 
     projects_base = CLAUDE_DIR / "projects"
     if not projects_base.exists():
@@ -15430,6 +15597,64 @@ def _collect_hermes_sessions(days=90, quiet=False, rebuild=False):
     return new_count
 
 
+def _resolve_copilot_home_wsl_aware(mnt_root=None):
+    """Resolve the Copilot home with a WSL-root /mnt/ exception (issue #78).
+
+    Precedence:
+      1. COPILOT_HOME set + absolute + under /mnt/ + not a symlink → use it
+         (deliberate cross-filesystem opt-in for WSL-root installs where the
+         Windows Copilot home /mnt/c/Users/<you>/.copilot is NOT under
+         $HOME=/root and so is rejected by runtime_env._is_safe_home_dir).
+      2. Otherwise → runtime_env.copilot_home() (the strict safe-home guard:
+         COPILOT_HOME confined under $HOME, else $HOME/.copilot).
+
+    The /mnt/ exception is narrow and safe:
+      - User explicitly set COPILOT_HOME (opt-in, never autodetect).
+      - Path must be absolute (no relative traversal).
+      - Path must be under /mnt/ (the WSL Windows-mount root; /mnt/wsl/,
+        /mnt/c/, /mnt/d/ …). Not arbitrary filesystem locations.
+      - Path must not be a symlink (no traversal tricks).
+      - Path must exist and be a directory (no pointing at a file or nowhere).
+
+    ``mnt_root`` is a Path override for the WSL mount root, defaulting to
+    ``/mnt``. It is a FUNCTION PARAMETER (not an env var) so it can ONLY be
+    set by code calling this function directly (tests pass a temp dir since
+    macOS can't create /mnt/c/...). The ``copilot-home`` subcommand never
+    passes it, so production always uses the real ``/mnt`` — there is no env
+    var a user could set to widen the /mnt/ confinement.
+
+    Returns a Path. Never raises — falls back to copilot_home() on any error.
+    """
+    from runtime_env import copilot_home as _ch  # noqa: PLC0415
+
+    raw = os.environ.get("COPILOT_HOME", "").strip()
+    if not raw:
+        return _ch()
+    try:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            return _ch()
+        resolved = candidate.resolve(strict=False)
+        # The /mnt/ prefix is the WSL Windows-mount root. Requiring it keeps
+        # the exception narrow: a COPILOT_HOME pointing at /etc, /tmp, /var,
+        # or anywhere else outside /mnt/ still goes through the strict guard.
+        # Resolve mnt_root too so a /tmp → /private/tmp symlink on macOS
+        # doesn't break the is_relative_to check (both sides must be resolved).
+        # mnt_root is a function param (not env) so production is always /mnt.
+        root = Path(mnt_root) if mnt_root is not None else Path("/mnt")
+        mnt_root_resolved = root.resolve(strict=False)
+        if not resolved.is_relative_to(mnt_root_resolved):
+            return _ch()
+        if candidate.exists():
+            if not candidate.is_dir() or candidate.is_symlink():
+                return _ch()
+        else:
+            return _ch()
+        return resolved
+    except (OSError, ValueError):
+        return _ch()
+
+
 def _write_copilot_restore_context(sessions, quiet=False):
     """Maintain the continuity file the sessionStart hook injects.
 
@@ -17264,6 +17489,18 @@ def _collect_health_data():
     """
     system = platform.system()
     runtime = detect_runtime()
+    # Hermes (issue #57): Hermes sessions are not `claude` processes.
+    # Probing `claude --version` and `ps | grep claude` under hermes is
+    # semantically wrong and would report stale/empty data. Return a
+    # hermes-mode minimal dict so the dashboard's health row renders
+    # without probing the Claude CLI.
+    if runtime == "hermes":
+        return {
+            "installed_version": None,
+            "running_sessions": [],
+            "automated": [],
+            "runtime": "hermes",
+        }
     process_name = "codex" if runtime == "codex" else "claude"
 
     installed_version = None
@@ -17965,7 +18202,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.29"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.30"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -21415,6 +21652,10 @@ def _find_current_session_jsonl():
     if _use_codex_session_adapter():
         return codex_session.find_current_session_jsonl()
 
+    # Hermes: no ~/.claude/projects JSONL to scan (sessions live in state.db).
+    if _use_hermes_session_adapter():
+        return None
+
     projects_base = CLAUDE_DIR / "projects"
     if not projects_base.exists():
         return None
@@ -21435,6 +21676,10 @@ def _find_session_jsonl_by_id(session_id):
         return None
     if _use_codex_session_adapter():
         return codex_session.find_session_jsonl_by_id(safe_id)
+
+    # Hermes: no ~/.claude/projects JSONL to scan (sessions live in state.db).
+    if _use_hermes_session_adapter():
+        return None
 
     projects_base = CLAUDE_DIR / "projects"
     if not projects_base.exists():
@@ -32286,16 +32531,30 @@ if __name__ == "__main__":
             i += 1
     args = _filtered_args
 
-    # --- OpenCode guardrail (issue #57) -----------------------------------
-    # OpenCode loads ~/.claude/skills by default, so it can invoke this skill
-    # even though the user is working in OpenCode, not Claude Code. The Claude
-    # audit/fix commands below scan and (for skill/mcp/plugin-cleanup) MUTATE
-    # ~/.claude — the wrong target in that situation. Redirect those to a safe
-    # notice instead of touching ~/.claude. Runtime-data commands are unaffected:
-    # they use RUNTIME_DIR, which now resolves to OpenCode's data dir.
+    # --- Foreign-runtime guardrail (issue #57, cross-platform universality) -
+    # OpenCode loads ~/.claude/skills by default, Copilot and Hermes can be
+    # invoked from their own sessions, so any of them can reach this skill even
+    # though the user is NOT in Claude Code. The Claude audit/fix commands below
+    # scan and (for skill/mcp/plugin-cleanup) MUTATE ~/.claude — the wrong
+    # target in that situation. Redirect those to a safe per-runtime notice
+    # instead of touching ~/.claude. Runtime-data commands are unaffected: they
+    # use RUNTIME_DIR, which resolves to the foreign runtime's own home.
+    #
+    # Per-runtime exemptions (_FOREIGN_RUNTIME_EXEMPTIONS): a foreign runtime
+    # may exempt a _CLAUDE_TARGET_CMDS subcommand when a NATIVE flow invokes it
+    # as a top-level command AND the command is runtime-aware (no ~/.claude
+    # scan). Hermes exempts `dashboard` (hermes_hook_bridge.run_dashboard shells
+    # to `measure.py dashboard`; the dashboard is hermes-aware — see the
+    # exemption table docstring). Exempted commands fall through to their
+    # normal handler; everything else gets the audit notice + exit 0.
     if _is_foreign_runtime() and (not args or args[0] in _CLAUDE_TARGET_CMDS):
-        _foreign_audit_notice()
-        sys.exit(0)
+        _runtime = detect_runtime()
+        _exempt = _FOREIGN_RUNTIME_EXEMPTIONS.get(_runtime, frozenset())
+        if args and args[0] in _exempt:
+            pass  # exempt — fall through to the normal command handler
+        else:
+            _foreign_audit_notice()
+            sys.exit(0)
 
     if not args or args[0] == "report":
         full_report()
@@ -32324,11 +32583,79 @@ if __name__ == "__main__":
         import copilot_doctor
         sys.exit(copilot_doctor.main(args[1:]))
     elif args[0] == "copilot-install":
-        import copilot_install
+        # Intercept copilot-install to support a --home <path> flag that
+        # overrides the copilot home (issue #78). copilot_install.main() uses
+        # argparse with a fixed action+dry-run signature, so we parse --home
+        # out here and call copilot_install.install(home=...) directly,
+        # mirroring main()'s output format. Without this, a WSL-root user who
+        # sets COPILOT_HOME=/mnt/c/Users/<you>/.copilot would see the banner
+        # (from copilot-home) show the right path but the actual install
+        # still writes to /root/.copilot (runtime_env._is_safe_home_dir
+        # rejects /mnt/c/... because it's not under $HOME=/root). The --home
+        # flag lets install.sh forward the WSL-aware resolved path so the
+        # install and the banner agree.
+        import copilot_install  # noqa: PLC0415
+
+        rest = list(args[1:])
+        override_home: str | None = None
+        dry_run = False
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "--home" and i + 1 < len(rest):
+                override_home = rest[i + 1]
+                i += 2
+                continue
+            if tok == "--dry-run":
+                dry_run = True
+            i += 1
+        if override_home is not None:
+            try:
+                result = copilot_install.install(dry_run=dry_run, home=Path(override_home))
+                verb = "Would install" if dry_run else "Installed"
+                print(f"{verb} Token Optimizer for GitHub Copilot CLI.")
+                print(f"  Hook config: {result['hook_file']}")
+                print(f"  Modules: {len(result['copied'])} copied"
+                      + (f", {len(result['skipped'])} missing: {result['skipped']}" if result["skipped"] else ""))
+                print("  Run `python3 measure.py copilot-doctor` to verify readiness.")
+                sys.exit(0)
+            except RuntimeError as exc:
+                print(f"[Token Optimizer] {exc}", file=sys.stderr)
+                sys.exit(1)
         sys.exit(copilot_install.main(["install"] + args[1:]))
     elif args[0] == "copilot-uninstall":
         import copilot_install
         sys.exit(copilot_install.main(["uninstall"] + args[1:]))
+    elif args[0] == "copilot-home":
+        # Print the resolved Copilot home directory. Honors COPILOT_HOME via
+        # runtime_env.copilot_home → _safe_home_from_env (confined under $HOME
+        # by the safe-home guard). Used by install.sh to show the TRUE hook
+        # destination in its success banner instead of a hardcoded ~/.copilot
+        # path (issue #78: WSL-root installs wrote to /root/.copilot which the
+        # Windows Copilot CLI never reads).
+        #
+        # WSL-root exception (issue #78): when running as root under WSL,
+        # $HOME=/root, so runtime_env._is_safe_home_dir REJECTS a
+        # COPILOT_HOME=/mnt/c/Users/<you>/.copilot path (it's not under /root).
+        # That defeats the entire fix — the user sets COPILOT_HOME to the
+        # Windows profile path we suggested, and it's silently rejected. So
+        # here we apply a WSL-aware override: if COPILOT_HOME is set, absolute,
+        # and points under /mnt/ (the WSL Windows-mount root), accept it as a
+        # deliberate cross-filesystem opt-in. This is SAFE because:
+        #   - The user explicitly set COPILOT_HOME (opt-in, not autodetect).
+        #   - We require an absolute path (no relative traversal).
+        #   - We require it under /mnt/ (the WSL mount root; not arbitrary).
+        #   - We require it not be a symlink (no traversal tricks).
+        # The actual install (copilot_install.py → runtime_env.copilot_home)
+        # still applies the strict _is_safe_home_dir guard, so a HANDOFF TO
+        # REVIEWER is documented in findings/78-implementation.md to relax
+        # that guard for /mnt/ paths under WSL root. Until that lands, this
+        # subcommand at least makes the install.sh banner accurate.
+        from runtime_env import copilot_home as _ch  # noqa: PLC0415
+
+        resolved = _resolve_copilot_home_wsl_aware()
+        print(str(resolved))
+        sys.exit(0)
     elif args[0] == "copilot-rollup":
         # Ingest recent Copilot sessions (CLI + VS Code planes) into trends.db.
         # Fired by the stop hook via copilot_hook_bridge.handle_stop(); extra
@@ -34236,6 +34563,7 @@ if __name__ == "__main__":
         print("  python3 measure.py hermes-install        # Install Hermes plugin into ~/.hermes/plugins/")
         print("  python3 measure.py copilot-doctor        # GitHub Copilot readiness + hook capability check")
         print("  python3 measure.py copilot-install       # Install Copilot hooks into ~/.copilot/hooks/")
+        print("  python3 measure.py copilot-home          # Print resolved Copilot home (honors COPILOT_HOME)")
         print("  python3 measure.py copilot-summary       # Credits-led Copilot session summary")
         print("  python3 measure.py copilot-rollup        # Ingest Copilot sessions into trends DB")
         print("  python3 measure.py codex-compact-prompt # Render/install Codex compact prompt")

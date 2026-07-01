@@ -21,12 +21,18 @@ Audits a Claude Code or Codex setup, identifies context window waste, implements
 > # OpenCode / Copilot set these; detect them WITHOUT touching ~/.claude.
 > # Explicit TOKEN_OPTIMIZER_RUNTIME is authoritative and checked first (matches detect_runtime()).
 > # An explicit override to a Claude/Codex runtime is authoritative (matches detect_runtime); proceed.
+> # Claude plugin env vars (CLAUDE_PLUGIN_ROOT/CLAUDE_PLUGIN_DATA) are checked BEFORE
+> # OPENCODE_* env signals so a genuine Claude session with a stray OPENCODE_* export
+> # is NOT stopped here — it falls through to measure.py, which resolves correctly
+> # (detect_runtime step 3 beats step 4). This mirrors the Python priority order.
 > if [ "${TOKEN_OPTIMIZER_RUNTIME:-}" = "claude" ] || [ "${TOKEN_OPTIMIZER_RUNTIME:-}" = "codex" ]; then
 >   :  # fall through to the measure.py resolver + authoritative gate below
 > elif [ "${TOKEN_OPTIMIZER_RUNTIME:-}" = "opencode" ]; then
 >   echo "Token Optimizer — OpenCode runtime detected."
 > elif [ "${TOKEN_OPTIMIZER_RUNTIME:-}" = "copilot" ]; then
 >   echo "Token Optimizer — GitHub Copilot runtime detected."
+> elif [ -n "${CLAUDE_PLUGIN_ROOT:-}${CLAUDE_PLUGIN_DATA:-}" ]; then
+>   :  # genuine Claude Code session; fall through to measure.py (step 3 beats step 4)
 > elif [ -n "${OPENCODE_BIN:-}${OPENCODE_CONFIG_DIR:-}${OPENCODE_DATA_DIR:-}${OPENCODE_CONFIG:-}${OPENCODE_CLIENT:-}" ]; then
 >   echo "Token Optimizer — OpenCode runtime detected."
 > elif [ -n "${COPILOT_HOME:-}" ]; then
@@ -38,8 +44,11 @@ Audits a Claude Code or Codex setup, identifies context window waste, implements
 >   On OpenCode, Token Optimizer runs as a native plugin; the Claude audit must not run.
 > - Prints **"… GitHub Copilot runtime detected."** → **STOP** and follow the Copilot guidance for the
 >   same reason.
-> - Prints nothing → you are on Claude Code or Codex; continue to resolve `$MEASURE_PY` below. The
->   `measure.py report` runtime gate that follows is the authoritative second check.
+> - Prints nothing → continue to resolve `$MEASURE_PY` below. This env-only pre-gate does NOT
+>   check the process tree, so OpenCode launched without exporting `OPENCODE_*` env vars (e.g. a
+>   bare `opencode` binary or `node /path/to/opencode`) prints nothing here. The
+>   `measure.py report` runtime gate that follows is the **authoritative** second check — it runs
+>   `detect_runtime()` which includes the ancestor-process scan and will catch those cases.
 
 Resolve the script path **once, before any phase or runtime decision**. Every
 command below — including the runtime gate — depends on `$MEASURE_PY`, so it

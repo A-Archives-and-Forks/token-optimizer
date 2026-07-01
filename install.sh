@@ -114,6 +114,11 @@ install_opencode() {
     local bundle="${oc_src}/dist-bundle/token-optimizer.js"
     [ -f "$bundle" ] || fail "Bundle not produced at ${bundle}"
 
+    # WSL-root wrong-home warning (issue #78, generalized): if running as root
+    # under WSL without OPENCODE_CONFIG_DIR, the plugin lands in
+    # /root/.config/opencode which the Windows OpenCode CLI never reads.
+    _wsl_root_wrong_home_warning "OpenCode" ".config/opencode" "OPENCODE_CONFIG_DIR" "--opencode"
+
     local plugin_dir="${HOME}/.config/opencode/plugins"
     mkdir -p "$plugin_dir"
     cp "$bundle" "${plugin_dir}/token-optimizer.js"
@@ -164,8 +169,13 @@ install_hermes() {
     local extra=()
     for a in "$@"; do [ "$a" = "--hermes" ] || extra+=("$a"); done
 
+    # WSL-root wrong-home warning (issue #78, generalized): if running as root
+    # under WSL without HERMES_HOME, the plugin lands in /root/.hermes which
+    # the Windows Hermes CLI never reads.
+    _wsl_root_wrong_home_warning "Hermes" ".hermes" "HERMES_HOME" "--hermes"
+
     info "Installing Token Optimizer into Hermes (~/.hermes/plugins/token-optimizer/)..."
-    if ! python3 "$measure_py" hermes-install "${extra[@]}"; then
+    if ! python3 "$measure_py" hermes-install "${extra[@]+"${extra[@]}"}"; then
         fail "Hermes install failed."
     fi
 
@@ -178,6 +188,98 @@ install_hermes() {
     echo "  Re-run this command after a git pull to update."
     echo ""
     exit 0
+}
+
+# ── WSL-root wrong-home warning (issue #78, generalized cross-platform) ─
+# `bash install.sh` (or --opencode / --hermes / --copilot) on native Windows
+# runs WSL bash as root, so $HOME=/root and the install lands in /root/<subpath>
+# which the Windows-native CLI never reads (it reads %USERPROFILE%\<subpath> =
+# /mnt/c/Users/<you>/<subpath>). Detect this and WARN loudly. Does NOT auto-write
+# to a guessed Windows home — a wrong autodetect that silently writes to a
+# guessed profile is worse than a clear warning. Warn + suggest the per-target
+# home env var; the user opts in.
+#
+# Args (all required):
+#   $1 target_label  : human label ("Copilot", "OpenCode", "Hermes", "Claude Code")
+#   $2 target_subpath: home-relative subdir (".copilot", ".config/opencode",
+#                      ".hermes", ".claude")
+#   $3 home_env_var  : the env var that overrides the home ("COPILOT_HOME",
+#                      "OPENCODE_CONFIG_DIR", "HERMES_HOME", "CLAUDE_CONFIG_DIR")
+#   $4 install_flag  : the install.sh flag to re-run with ("--copilot",
+#                      "--opencode", "--hermes", or "" for the Claude default)
+_wsl_root_wrong_home_warning() {
+    local target_label="$1" target_subpath="$2" home_env_var="$3" install_flag="$4"
+
+    # If the user already set the per-target home env var, they have opted in.
+    # bash indirect expansion (${!var}) is bash 3.2+ compatible and avoids eval.
+    [ -n "${!home_env_var:-}" ] && return 0
+
+    # Overridable paths so tests can mock /proc/version and /mnt/c/Users
+    # without touching the real filesystem. Defaults are the production paths.
+    local proc_version_file="${_TO_PROC_VERSION:-/proc/version}"
+    local wsl_users_dir="${_TO_WSL_USERS_DIR:-/mnt/c/Users}"
+
+    local is_wsl=0 is_root=0
+
+    # WSL detection: WSL_DISTRO_NAME set, or /proc/version mentions microsoft/WSL.
+    if [ -n "${WSL_DISTRO_NAME:-}" ]; then
+        is_wsl=1
+    elif [ -r "$proc_version_file" ] && grep -qiE 'microsoft|wsl' "$proc_version_file" 2>/dev/null; then
+        is_wsl=1
+    fi
+    [ "$is_wsl" = "1" ] || return 0
+
+    # Root detection: uid 0 or $HOME is /root.
+    if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+        is_root=1
+    elif [ "${HOME:-}" = "/root" ]; then
+        is_root=1
+    fi
+    [ "$is_root" = "1" ] || return 0
+
+    warn "Running as root under WSL — ${target_label} files will land in \${HOME}/${target_subpath} = ${HOME}/${target_subpath}"
+    warn "The Windows ${target_label} CLI reads from %USERPROFILE%\\${target_subpath} (e.g. /mnt/c/Users/<you>/${target_subpath}), NOT /root/${target_subpath}."
+
+    # Look for a plausible Windows user profile under /mnt/c/Users/.
+    # Skip Windows system/default/public profiles.
+    local win_user="" win_count=0 entry name
+    if [ -d "$wsl_users_dir" ]; then
+        for entry in "${wsl_users_dir}"/*/; do
+            [ -d "$entry" ] || continue
+            name="$(basename "$entry")"
+            case "$name" in
+                Public|"All Users"|Default|"Default User"|Windows|WpSystem) continue ;;
+            esac
+            [ -n "$name" ] || continue
+            win_user="$name"
+            win_count=$((win_count + 1))
+        done
+    fi
+
+    # Build the re-run command, appending the install flag only when non-empty
+    # (the Claude default install takes no flag).
+    local install_cmd="bash install.sh"
+    [ -n "$install_flag" ] && install_cmd="$install_cmd $install_flag"
+
+    if [ "$win_count" = "1" ]; then
+        warn "Detected one Windows user profile. Re-run with:"
+        warn "  ${home_env_var}=/mnt/c/Users/${win_user}/${target_subpath} ${install_cmd}"
+    elif [ "$win_count" -gt 1 ]; then
+        warn "Multiple Windows user profiles found under /mnt/c/Users/. Set ${home_env_var} to yours, e.g.:"
+        warn "  ${home_env_var}=/mnt/c/Users/<your-windows-user>/${target_subpath} ${install_cmd}"
+    else
+        warn "Set ${home_env_var} to your Windows ${target_label} home, e.g.:"
+        warn "  ${home_env_var}=/mnt/c/Users/<your-windows-user>/${target_subpath} ${install_cmd}"
+    fi
+    warn "Or run from your WSL user (not root), or from a Windows-native shell."
+}
+
+# Back-compat wrapper (issue #78 original name). Tests source this for the
+# Copilot-specific warning; kept so the existing test_copilot_wsl_root.sh
+# still passes unchanged. Delegates to the generalized function with the
+# Copilot target parameters.
+_copilot_wsl_root_warning() {
+    _wsl_root_wrong_home_warning "Copilot" ".copilot" "COPILOT_HOME" "--copilot"
 }
 
 install_copilot() {
@@ -212,15 +314,35 @@ install_copilot() {
         esac
     done
 
-    info "Installing Token Optimizer into GitHub Copilot CLI (~/.copilot/)..."
-    if ! TOKEN_OPTIMIZER_RUNTIME=copilot python3 "$measure_py" copilot-install "${extra[@]}"; then
+    # WSL-root wrong-home warning (issue #78): if running as root under WSL
+    # without COPILOT_HOME, hooks will land in /root/.copilot which the
+    # Windows Copilot CLI never reads. Warn before proceeding so the user
+    # can Ctrl-C and re-run with COPILOT_HOME set.
+    _copilot_wsl_root_warning
+
+    # Resolve the Copilot home via measure.py so the banner shows the TRUE
+    # hook destination. measure.py copilot-home applies a WSL-aware /mnt/
+    # exception (issue #78): under WSL root, $HOME=/root, so the strict
+    # runtime_env._is_safe_home_dir guard would reject a
+    # COPILOT_HOME=/mnt/c/Users/<you>/.copilot path (not under /root). The
+    # WSL-aware resolver accepts /mnt/ paths as a deliberate cross-filesystem
+    # opt-in. We forward the resolved path to copilot-install via --home so
+    # the install and the banner agree (otherwise the install would still
+    # write to /root/.copilot while the banner showed the /mnt/c/... path).
+    # Falls back to ~/.copilot if the query fails.
+    local resolved_copilot_home
+    resolved_copilot_home="$(TOKEN_OPTIMIZER_RUNTIME=copilot python3 "$measure_py" copilot-home 2>/dev/null || true)"
+    [ -n "$resolved_copilot_home" ] || resolved_copilot_home="${HOME}/.copilot"
+
+    info "Installing Token Optimizer into GitHub Copilot CLI (${resolved_copilot_home})..."
+    if ! TOKEN_OPTIMIZER_RUNTIME=copilot python3 "$measure_py" copilot-install --home "$resolved_copilot_home" "${extra[@]+"${extra[@]}"}"; then
         fail "Copilot install failed."
     fi
 
     echo ""
     printf "${BOLD}${GREEN}Token Optimizer for GitHub Copilot installed (beta)!${NC}\n"
     echo ""
-    echo "  Hooks:    ~/.copilot/hooks/token-optimizer.json (loaded by the Copilot CLI)"
+    echo "  Hooks:    ${resolved_copilot_home}/hooks/token-optimizer.json (loaded by the Copilot CLI)"
     echo "  Verify:   TOKEN_OPTIMIZER_RUNTIME=copilot python3 ${measure_py} copilot-doctor"
     echo "  Summary:  TOKEN_OPTIMIZER_RUNTIME=copilot python3 ${measure_py} copilot-summary"
     echo "  VS Code:  enable both github.copilot.chat.agentDebugLog settings for per-request credit costs"
@@ -232,6 +354,14 @@ install_copilot() {
 # Route --opencode / --hermes / --copilot before the Claude Code prerequisite
 # checks (OpenCode needs bun; Hermes and Copilot need python3, not the Claude
 # Code plugin env).
+
+# Allow tests to source this script for function unit-testing (e.g.
+# _copilot_wsl_root_warning) without triggering the install flow or
+# prerequisite checks. Set _TO_INSTALL_SH_TEST_MODE=1 before sourcing.
+if [ "${_TO_INSTALL_SH_TEST_MODE:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 for arg in "$@"; do
     case "$arg" in
         --opencode) install_opencode ;;
@@ -268,6 +398,13 @@ info "git OK"
 if ! command -v curl &>/dev/null; then
     fail "curl not found. Install curl first."
 fi
+
+# WSL-root wrong-home warning (issue #78, generalized): if running as root
+# under WSL without CLAUDE_CONFIG_DIR, the skill tree + settings land in
+# /root/.claude which the Windows Claude Code CLI never reads (it reads
+# %USERPROFILE%\.claude = /mnt/c/Users/<you>/.claude). Warn BEFORE creating
+# $CLAUDE_HOME so the user can Ctrl-C and re-run with CLAUDE_CONFIG_DIR set.
+_wsl_root_wrong_home_warning "Claude Code" ".claude" "CLAUDE_CONFIG_DIR" ""
 
 # Claude home directory (skill-tree home; Claude Code creates this on first
 # run, and OpenCode loads $CLAUDE_HOME/skills directly). Don't hard-fail if

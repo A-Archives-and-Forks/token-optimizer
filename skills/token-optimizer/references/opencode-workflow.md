@@ -51,3 +51,22 @@ TOKEN_OPTIMIZER_RUNTIME=claude python3 "$MEASURE_PY" report
 
 This is opt-in and explicit. The default under OpenCode is to never touch
 `~/.claude`.
+
+## Refreshing the skill tree (OpenCode-only users)
+
+OpenCode loads skill content from `~/.claude/skills`. If SKILL.md or reference
+files look stale, the skill symlink can be refreshed by re-running the
+installer. **However**, the default `install.sh` also installs Claude Code
+hooks into `~/.claude/settings.json` (via `measure.py setup-all-hooks`).
+
+- If you use **both** Claude Code and OpenCode on this host: `bash install.sh`
+  is safe — the hooks are needed for Claude Code anyway.
+- If you use **OpenCode only**: the Claude hooks are unnecessary. After
+  running `install.sh`, remove them with:
+  ```bash
+  python3 ~/.claude/token-optimizer/skills/token-optimizer/scripts/measure.py cleanup-duplicate-hooks
+  ```
+  Or simply re-create the symlink manually:
+  ```bash
+  ln -sfn ~/.claude/token-optimizer/skills/token-optimizer ~/.claude/skills/token-optimizer
+  ```
