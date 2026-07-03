@@ -42,6 +42,11 @@ export interface Warning {
 // A normalized, render-ready view of the active Claude Code session.
 export interface Snapshot {
   hasData: boolean;
+  // false => the extension is running but the Token Optimizer CLI plugin has
+  // never written data on any known runtime (~/.claude or ~/.copilot). Drives
+  // the install funnel instead of the "waiting for a session" empty state.
+  // Defaults true so a transient read error never nags an existing user.
+  pluginDetected: boolean;
   model: string | null;
   effort: string | null; // 'lo' | 'med' | 'hi'
   fillPct: number | null;
@@ -62,6 +67,7 @@ export interface Snapshot {
 export function emptySnapshot(): Snapshot {
   return {
     hasData: false,
+    pluginDetected: true,
     model: null,
     effort: null,
     fillPct: null,

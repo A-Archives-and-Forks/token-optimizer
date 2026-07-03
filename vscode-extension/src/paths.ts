@@ -96,6 +96,27 @@ export function resolveAutoPaths(homeDir: string = os.homedir()): ClaudePaths {
   return resolvePaths(homeDir);
 }
 
+// Has the Token Optimizer CLI plugin ever run on this machine? True when a
+// token-optimizer cache dir exists under any known runtime home (~/.claude or
+// ~/.copilot) — the plugin creates it on first run. Used to tell "installed but
+// idle" (show the normal empty state) from "extension present, plugin missing"
+// (show the install funnel). Directory presence, not freshness: a plugin the
+// user hasn't run today is still installed.
+export function detectPluginInstalled(homeDir: string = os.homedir()): boolean {
+  const candidates = [
+    path.join(homeDir, '.claude', 'token-optimizer'),
+    path.join(homeDir, '.copilot', 'token-optimizer'),
+  ];
+  for (const dir of candidates) {
+    try {
+      if (fs.statSync(dir).isDirectory()) return true;
+    } catch {
+      // absent/unreadable — try the next candidate
+    }
+  }
+  return false;
+}
+
 // Factory: pick the right paths object based on the runtime setting string.
 // 'claude' / 'copilot' are explicit overrides; 'auto' (the default) and any
 // unrecognized value resolve by detecting the most recently active runtime.

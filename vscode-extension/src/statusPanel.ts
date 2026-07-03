@@ -6,9 +6,9 @@ import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { PanelModel } from './format';
 
-export type PanelAction = 'openDashboard' | 'refresh';
+export type PanelAction = 'openDashboard' | 'refresh' | 'install' | 'installDocs';
 
-const VALID_ACTIONS = new Set<PanelAction>(['openDashboard', 'refresh']);
+const VALID_ACTIONS = new Set<PanelAction>(['openDashboard', 'refresh', 'install', 'installDocs']);
 
 export class StatusPanel {
   private panel: vscode.WebviewPanel | undefined;
@@ -110,6 +110,32 @@ export class StatusPanel {
   .panel-social { display: inline-flex; gap: 12px; align-items: center; margin-left: auto; }
   .panel-social a { color: color-mix(in srgb, var(--vscode-foreground) 62%, transparent); display: inline-flex; transition: color .15s; }
   .panel-social a:hover { color: var(--vscode-foreground); }
+  /* ---- install funnel ---- */
+  .fn-hero { font-size: 21px; font-weight: 700; letter-spacing: -.015em; line-height: 1.15; margin: 6px 0 4px;
+             color: var(--vscode-charts-green, #4ec94e); }
+  .fn-hero-sub { font-size: 12.5px; color: color-mix(in srgb, var(--vscode-foreground) 74%, transparent);
+                 margin: 0 0 16px; line-height: 1.5; }
+  .fn-lead { font-size: 12.5px; color: color-mix(in srgb, var(--vscode-foreground) 78%, transparent); margin: 2px 0 16px; line-height: 1.5; }
+  .levels { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
+  .level { display: flex; gap: 10px; align-items: flex-start; }
+  .level .ic { font-size: 15px; line-height: 1.2; flex: 0 0 auto; }
+  .level .lt { font-weight: 600; }
+  .level .ld { color: color-mix(in srgb, var(--vscode-foreground) 66%, transparent); font-size: 12px; }
+  .savings { background: color-mix(in srgb, var(--vscode-charts-green, #4ec94e) 12%, transparent);
+             border: 1px solid color-mix(in srgb, var(--vscode-charts-green, #4ec94e) 40%, transparent);
+             border-radius: 7px; padding: 11px 13px; margin-bottom: 18px; font-size: 12.5px; line-height: 1.5; }
+  .savings b { color: var(--vscode-charts-green, #4ec94e); }
+  .savings .fine { display:block; margin-top:7px; color: color-mix(in srgb, var(--vscode-foreground) 60%, transparent); font-size: 11px; }
+  table.tiers { width:100%; border-collapse:collapse; margin:9px 0 3px; }
+  table.tiers td { padding:5px 0; border-top:1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent); font-size:12px; }
+  table.tiers tr:first-child td { border-top:none; }
+  .tiers .tr-sub { color: color-mix(in srgb, var(--vscode-foreground) 52%, transparent); font-size:11px; margin-left:5px; }
+  .tiers .tr-amt { text-align:right; font-weight:600; color: var(--vscode-charts-green, #4ec94e); white-space:nowrap; }
+  .inst-label { font-weight: 600; font-size: 12px; margin: 14px 0 6px; }
+  .inst-tab { font-size: 11px; color: color-mix(in srgb, var(--vscode-foreground) 60%, transparent); margin: 10px 0 4px; text-transform: uppercase; letter-spacing: .04em; }
+  pre.cmd { background: var(--vscode-textCodeBlock-background, rgba(127,127,127,.12)); border-radius: 5px;
+            padding: 8px 10px; margin: 0 0 6px; overflow-x: auto; font-family: var(--vscode-editor-font-family, monospace);
+            font-size: 12px; user-select: all; -webkit-user-select: all; white-space: pre; }
 </style>
 </head>
 <body>
@@ -126,8 +152,42 @@ export class StatusPanel {
     const age = w.age ? ' · ' + esc(w.age) : '';
     return w.pct + '% ' + usage(w.pct) + '<br><span class="pending">' + reset + '<span class="usage-status ' + status + '" title="' + esc(w.detail || '') + '">' + status + '</span>' + age + '</span>';
   }
+  function wireButtons(app) {
+    for (const b of app.querySelectorAll('button[data-act]')) {
+      b.addEventListener('click', () => vscode.postMessage({ action: b.getAttribute('data-act') }));
+    }
+  }
+  function funnelHtml() {
+    let h = '';
+    h += '<h1>Token Optimizer</h1>';
+    h += '<div class="fn-hero">Save 15–20% on every session.</div>';
+    h += '<div class="fn-hero-sub">Three levels of optimization that cut token waste — while keeping output quality intact.</div>';
+    h += '<div class="levels">';
+    h += '<div class="level"><span class="ic">🧱</span><span><span class="lt">Structural waste</span><br><span class="ld">Bloated context, repeated file reads, and giant tool outputs — mapped and compressed. The savings survive compaction.</span></span></div>';
+    h += '<div class="level"><span class="ic">⚡</span><span><span class="lt">Runtime waste</span><br><span class="ld">Right-sizes the model per turn, so routine work runs off the priciest model and you spend premium tokens only when they matter.</span></span></div>';
+    h += '<div class="level"><span class="ic">🧭</span><span><span class="lt">Behavioral waste</span><br><span class="ld">A coach that nudges lighter habits, so your average session gets cheaper over time and stays there.</span></span></div>';
+    h += '</div>';
+    h += '<div class="savings"><b>How much that adds up to</b> depends on how often you run:';
+    h += '<table class="tiers"><tbody>';
+    h += '<tr><td>Light<span class="tr-sub">~1 session/day</span></td><td class="tr-amt">~$150/mo</td></tr>';
+    h += '<tr><td>Medium<span class="tr-sub">~5/day</span></td><td class="tr-amt">~$600/mo</td></tr>';
+    h += '<tr><td>Power<span class="tr-sub">~15+/day</span></td><td class="tr-amt">up to ~$1,900/mo</td></tr>';
+    h += '</tbody></table>';
+    h += '<span class="fine">API-equivalent. The Power row is metered on real 30-day data ($10,585 → $8,708/mo); lighter rows scale that per-session saving by how often you run. On a Claude subscription the value is rate-limit headroom, not cash back. Your numbers vary.</span></div>';
+    h += '<div class="inst-label">Install the CLI plugin (30 seconds):</div>';
+    h += '<div class="inst-tab">Claude Code</div>';
+    h += '<pre class="cmd">/plugin marketplace add alexgreensh/token-optimizer\\n/plugin install token-optimizer@alexgreensh-token-optimizer</pre>';
+    h += '<div class="inst-tab">Codex</div>';
+    h += '<pre class="cmd">codex plugin marketplace add alexgreensh/token-optimizer</pre>';
+    h += '<div class="actions">';
+    h += '<button class="primary" data-act="install">Copy Claude Code command</button>';
+    h += '<button data-act="installDocs">All platforms &amp; docs</button>';
+    h += '</div>';
+    return h;
+  }
   function render(m) {
     const app = document.getElementById('app');
+    if (m && m.funnel) { app.innerHTML = funnelHtml(); wireButtons(app); return; }
     if (!m || !m.hasData) { app.innerHTML = '<div class="empty">No active Claude Code session in this window yet.</div>'; return; }
     let h = '';
     h += '<h1>Token Optimizer</h1>';
@@ -156,9 +216,7 @@ export class StatusPanel {
     h += '<a href="https://linkedin.com/in/alexgreensh" target="_blank" rel="noopener" title="LinkedIn"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20.45 20.45h-3.56v-5.57c0-1.33-.02-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.34V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 110-4.13 2.06 2.06 0 010 4.13zm1.78 13.02H3.56V9h3.56v11.45zM22.23 0H1.77C.79 0 0 .77 0 1.73v20.54C0 23.23.79 24 1.77 24h20.45c.98 0 1.78-.77 1.78-1.73V1.73C24 .77 23.2 0 22.23 0z"/></svg></a>';
     h += '</span></div>';
     app.innerHTML = h;
-    for (const b of app.querySelectorAll('button[data-act]')) {
-      b.addEventListener('click', () => vscode.postMessage({ action: b.getAttribute('data-act') }));
-    }
+    wireButtons(app);
   }
   window.addEventListener('message', (e) => render(e.data));
 </script>

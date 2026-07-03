@@ -81,7 +81,14 @@ export function healthIcon(score: number | null): string {
 
 // ---- status bar item texts (two adjacent items) ----
 
+// The extension is running but the Token Optimizer CLI plugin has never written
+// data on this machine — surface the install funnel instead of a bare "--%".
+export function isFunnel(s: Snapshot): boolean {
+  return !s.hasData && !s.pluginDetected;
+}
+
 export function primaryItemText(s: Snapshot): string {
+  if (isFunnel(s)) return '$(rocket) Save tokens';
   const fill = s.fillPct != null ? `${s.fillPct}%` : '--%';
   if (!s.contextQ) return `$(pulse) ${fill}`;
   return `$(pulse) ${fill}  ${healthIcon(s.contextQ.score)} ${s.contextQ.grade}`;
@@ -103,6 +110,7 @@ export function secondaryItemText(s: Snapshot): string {
 // ---- rich hover tooltip (markdown) ----
 
 const DASHBOARD_CMD = 'command:tokenOptimizer.openDashboard';
+const INSTALL_CMD = 'command:tokenOptimizer.showStatus';
 
 export function buildTooltip(s: Snapshot, opts: RenderOptions): string {
   const lines: string[] = [];
@@ -111,6 +119,15 @@ export function buildTooltip(s: Snapshot, opts: RenderOptions): string {
     : '**Token Optimizer**';
   lines.push(title);
   lines.push('');
+
+  if (isFunnel(s)) {
+    lines.push('_Save 15–20% on every session — three levels of optimization, quality kept intact._');
+    lines.push('');
+    lines.push('Scales with use: ~**$150/mo** light → up to **~$1,900/mo** power (API-equivalent, metered on real data).');
+    lines.push('');
+    lines.push(`**[Install Token Optimizer →](${INSTALL_CMD})**`);
+    return lines.join('\n');
+  }
 
   if (!s.hasData) {
     lines.push('_No active Claude Code session detected yet._');
@@ -188,6 +205,7 @@ export function buildTooltip(s: Snapshot, opts: RenderOptions): string {
 // it here (not in webview JS) keeps all formatting logic in one tested place.
 export interface PanelModel {
   hasData: boolean;
+  funnel: boolean; // extension present but CLI plugin missing -> show install funnel
   scoped: boolean;
   model: string | null;
   effort: string | null;
@@ -216,6 +234,7 @@ export interface PanelUsageWindow {
 export function buildPanelModel(s: Snapshot, opts: RenderOptions): PanelModel {
   return {
     hasData: s.hasData,
+    funnel: isFunnel(s),
     scoped: s.scoped,
     model: s.model,
     effort: s.effort,

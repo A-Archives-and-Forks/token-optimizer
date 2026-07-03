@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.15
+
+- Improve: the install funnel's savings block is now a per-usage tier ladder (Light ~$150/mo, Medium ~$600/mo, Power up to ~$1,900/mo) instead of a single averaged range, so a user can find their own row. The Power row is metered on real 30-day data; lighter rows scale that per-session saving by session volume. Framing stays API-equivalent with the rate-limit-headroom caveat for subscription users.
+
+## 0.1.14
+
+- Add: install funnel. When the extension is running but the Token Optimizer CLI plugin has never written data on this machine, the status bar shows "Save tokens" and the panel presents the three levels of optimization, the savings stat, and one-click platform-specific install (Copy Claude Code command / all-platforms docs) instead of a bare empty state.
+- Improve: the empty state now distinguishes "plugin installed but idle" (waiting for a session) from "plugin not installed" (the funnel), based on the presence of a `~/.claude` or `~/.copilot` token-optimizer cache dir. A transient read error never flips an installed user into the funnel.
+
 ## 0.1.12
 
 - Add: GitHub Copilot runtime support. Set `tokenOptimizer.runtime` to `copilot` to point the status bar at a Copilot Token Optimizer install (`~/.copilot/token-optimizer/`).

@@ -5,7 +5,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { ClaudePaths } from './paths';
+import { ClaudePaths, detectPluginInstalled } from './paths';
 import { findActiveSession, findActiveCopilotSession, ActiveSession } from './sessionResolver';
 import { JsonlTailer } from './jsonlTail';
 import { buildSnapshot, parseRateLimitsSidecar } from './cacheReader';
@@ -116,6 +116,14 @@ export class DataSource {
       // FIX 3: Log the error instead of swallowing it silently.
       console.error('[Token Optimizer] DataSource.refresh error:', e);
       snap = emptySnapshot();
+    }
+    // Overlay independently of the disk read so a transient parse error can't
+    // flip an installed user into the funnel: detection is pure fs.statSync on
+    // the well-known cache dirs.
+    try {
+      snap.pluginDetected = detectPluginInstalled();
+    } catch {
+      snap.pluginDetected = true; // never nag on a detection failure
     }
     this.onSnapshot(snap);
   }
