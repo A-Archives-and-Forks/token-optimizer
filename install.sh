@@ -114,12 +114,20 @@ install_opencode() {
     local bundle="${oc_src}/dist-bundle/token-optimizer.js"
     [ -f "$bundle" ] || fail "Bundle not produced at ${bundle}"
 
-    # WSL-root wrong-home warning (issue #78, generalized): if running as root
-    # under WSL without OPENCODE_CONFIG_DIR, the plugin lands in
-    # /root/.config/opencode which the Windows OpenCode CLI never reads.
+    # WSL-root wrong-home recovery + warning (issue #78, generalized): if
+    # running as root under WSL without OPENCODE_CONFIG_DIR, the plugin lands in
+    # /root/.config/opencode which the Windows OpenCode CLI never reads. First
+    # try to recover OPENCODE_CONFIG_DIR from the Windows environment (PowerShell
+    # registry read → cmd.exe fallback → single-profile autodetect); if recovery
+    # succeeds the warning self-suppresses.
+    _recover_home_from_windows_env OPENCODE_CONFIG_DIR ".config/opencode"
     _wsl_root_wrong_home_warning "OpenCode" ".config/opencode" "OPENCODE_CONFIG_DIR" "--opencode"
 
-    local plugin_dir="${HOME}/.config/opencode/plugins"
+    # Honor OPENCODE_CONFIG_DIR (recovered above or set by the user) so the
+    # plugin lands where the Windows OpenCode CLI actually reads it. Falls back
+    # to ~/.config/opencode when unset (the non-WSL / non-root default).
+    local opencode_config="${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}"
+    local plugin_dir="${opencode_config}/plugins"
     mkdir -p "$plugin_dir"
     cp "$bundle" "${plugin_dir}/token-optimizer.js"
     info "Installed to ${plugin_dir}/token-optimizer.js"
@@ -170,8 +178,18 @@ install_hermes() {
     for a in "$@"; do [ "$a" = "--hermes" ] || extra+=("$a"); done
 
     # WSL-root wrong-home warning (issue #78, generalized): if running as root
-    # under WSL without HERMES_HOME, the plugin lands in /root/.hermes which
-    # the Windows Hermes CLI never reads.
+    # under WSL without HERMES_HOME, the plugin lands in /root/.hermes which the
+    # Windows Hermes CLI never reads.
+    #
+    # Hermes stays WARN-ONLY here (no env recovery) on purpose: hermes-install
+    # (measure.py) resolves its install dir via runtime_env.hermes_home() →
+    # _safe_home_from_env, which confines HERMES_HOME under $HOME and REJECTS a
+    # /mnt/c/... path under WSL root (unlike copilot-home's WSL-aware /mnt/
+    # exception). Recovering HERMES_HOME would only SUPPRESS this warning while
+    # the install still wrote to /root/.hermes — strictly worse than warning.
+    # End-to-end Hermes recovery needs a runtime_env.hermes_home() /mnt/ exception
+    # (a measure.py change); tracked as a follow-up. Copilot and OpenCode DO
+    # recover because their install dirs honor /mnt/ paths.
     _wsl_root_wrong_home_warning "Hermes" ".hermes" "HERMES_HOME" "--hermes"
 
     info "Installing Token Optimizer into Hermes (~/.hermes/plugins/token-optimizer/)..."
@@ -282,78 +300,16 @@ _copilot_wsl_root_warning() {
     _wsl_root_wrong_home_warning "Copilot" ".copilot" "COPILOT_HOME" "--copilot"
 }
 
-# Recover a home override the user set in the WINDOWS environment but which WSL
-# bash never inherited (issue #78). WSL does not import Windows env vars unless
-# they are listed in WSLENV, so a user who sets COPILOT_HOME in PowerShell / the
-# System env and then runs `bash install.sh --copilot` sees it UNSET inside the
-# script — the install falls back to /root/.copilot and the Windows Copilot CLI
-# never reads the hooks. Here we ask Windows for the value via cmd.exe and
-# translate the Windows path (C:\Users\You\.copilot) to its WSL mount form
-# (/mnt/c/Users/You/.copilot), then export it so the normal resolver + banner
-# pick it up. No-op off WSL, when the var is already set, when cmd.exe is
-# unavailable, or when Windows has no such value.
-#   $1 home_env_var : the env var to recover (e.g. "COPILOT_HOME")
-_recover_home_from_windows_env() {
-    local home_env_var="$1"
-
-    # Already set in this shell → the user opted in correctly; nothing to do.
-    [ -n "${!home_env_var:-}" ] && return 0
-
-    # Only meaningful under WSL (mock /proc/version via _TO_PROC_VERSION in tests).
-    local proc_version_file="${_TO_PROC_VERSION:-/proc/version}"
-    if [ -z "${WSL_DISTRO_NAME:-}" ]; then
-        { [ -r "$proc_version_file" ] && grep -qiE 'microsoft|wsl' "$proc_version_file" 2>/dev/null; } || return 0
-    fi
-
-    # Gate to the ROOT-under-WSL case only — the exact wrong-home scenario (#78):
-    # `bash install.sh` launched from a Windows shell runs WSL as root, so
-    # $HOME=/root and the install lands where the Windows Copilot CLI can't read
-    # it. A NON-root WSL user has a legitimate $HOME, so ~/.copilot is correct and
-    # we must NOT redirect them to a Windows profile. This also confines the
-    # cmd.exe call (and its hang risk) to the narrow case that needs it.
-    local is_root=0
-    if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
-        is_root=1
-    elif [ "${HOME:-}" = "/root" ]; then
-        is_root=1
-    fi
-    [ "$is_root" = "1" ] || return 0
-
-    # Locate cmd.exe (override via _TO_CMD_EXE for tests). Absent on locked-down
-    # or non-Windows hosts → silently skip and let the warning path guide the user.
-    local cmd_exe="${_TO_CMD_EXE:-/mnt/c/Windows/System32/cmd.exe}"
-    [ -x "$cmd_exe" ] || return 0
-
-    # Query Windows. cmd.exe strips \r via tr; echoes the literal "%VAR%" when
-    # the variable is unset on the Windows side.
-    #
-    # Guard with set +e (same pattern as the #57 hook-install guard below): under
-    # `set -euo pipefail` a failing command substitution in a plain assignment is
-    # NOT exempt from set -e, and with pipefail the pipeline inherits cmd.exe's
-    # exit status. So if cmd.exe is present but exits non-zero — WSL interop
-    # disabled via /etc/wsl.conf [interop], or an Exec format error under a
-    # constrained container — the bare `raw=$(...)` would abort the ENTIRE
-    # installer instead of degrading to the warning path this function promises.
-    #
-    # Wrap in `timeout` when available: a cmd.exe that hangs (Defender first-scan,
-    # a corporate cmd.exe AutoRun, WSL-interop cold start) would otherwise block
-    # the installer indefinitely with no output. A timeout is treated like a
-    # non-zero exit → skip recovery and fall through to the warning path.
-    local raw win_val cmd_status timeout_bin=""
-    command -v timeout >/dev/null 2>&1 && timeout_bin="timeout 5"
-    set +e
-    raw="$(${timeout_bin} "$cmd_exe" /c "echo %${home_env_var}%" 2>/dev/null | tr -d '\r')"
-    cmd_status=$?
-    set -e
-    [ "$cmd_status" -eq 0 ] || return 0
-    win_val="$(printf '%s' "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    [ -n "$win_val" ] || return 0
-    [ "$win_val" = "%${home_env_var}%" ] && return 0   # unset on Windows too
-
-    # Translate a Windows drive path to its WSL mount form; accept an already-WSL
-    # path as-is. Anything else (UNC, relative, exotic) is left unrecovered so the
-    # warning path can guide the user rather than exporting a bogus home.
-    local translated=""
+# Translate a Windows drive path (C:\Users\You\.copilot) to its WSL mount form
+# (/mnt/c/Users/You/.copilot). Accept an already-WSL /mnt/ path as-is. Returns 1
+# (and prints nothing) for UNC (\\server\share), relative, or exotic paths so the
+# caller can fall through to the next recovery method instead of exporting a
+# bogus home. Factored out of _recover_home_from_windows_env (issue #78 round 4)
+# so both the PowerShell and cmd.exe recovery paths share one translator.
+#   $1 win_val : the raw Windows-side value (drive path, /mnt path, or other)
+#   stdout     : the translated /mnt/<drive>/... path (only on success, exit 0)
+_translate_windows_path_to_wsl() {
+    local win_val="$1" translated=""
     case "$win_val" in
         [A-Za-z]:\\*|[A-Za-z]:/*)
             local drive rest
@@ -365,12 +321,167 @@ _recover_home_from_windows_env() {
             translated="$win_val"
             ;;
         *)
-            return 0
+            return 1
             ;;
     esac
+    printf '%s' "$translated"
+}
 
-    export "${home_env_var}=${translated}"
-    info "Recovered ${home_env_var} from the Windows environment: ${translated}"
+# Recover a home override the user set in the WINDOWS environment but which WSL
+# bash never inherited (issue #78). WSL does not import Windows env vars unless
+# they are listed in WSLENV, so a user who sets COPILOT_HOME in PowerShell / the
+# System env and then runs `bash install.sh --copilot` sees it UNSET inside the
+# script — the install falls back to /root/.copilot and the Windows Copilot CLI
+# never reads the hooks.
+#
+# v5.11.31 tried `cmd.exe /c "echo %VAR%"`, but cmd.exe launched via WSL interop
+# INHERITS the WSL process's environment block — it does NOT re-read Windows'
+# User/Machine env from the registry. So it echoes the literal %VAR% (unset in
+# the inherited block) and recovery bails. The fix: read the registry directly
+# via PowerShell `[Environment]::GetEnvironmentVariable('VAR','User'|'Machine')`,
+# which queries HKCU\Environment / HKLM\...\Environment independent of the
+# process env block. cmd.exe is kept as a LAST-resort fallback for hosts where
+# powershell.exe is absent/blocked but cmd.exe interop happens to surface the
+# value (e.g. the var was already in the inherited block via WSLENV).
+#
+# Order: PowerShell(User) → PowerShell(Machine) → cmd.exe → single-profile
+# autodetect (only when target_subpath is given and exactly one non-system
+# Windows profile exists). No-op off WSL, when the var is already set, when no
+# Windows-side value is found, or when the value can't be translated. A
+# hung/blocked/non-zero powershell.exe or cmd.exe degrades to the next method,
+# NEVER aborts the installer (guarded under set -euo pipefail).
+#
+#   $1 home_env_var   : the env var to recover (e.g. "COPILOT_HOME")
+#   $2 target_subpath : optional home-relative subdir (".copilot") enabling the
+#                       single-profile autodetect fallback; omit for env-only
+#                       recovery (backward compatible with the v5.11.31 callers)
+_recover_home_from_windows_env() {
+    local home_env_var="$1" target_subpath="${2:-}"
+
+    # Already set in this shell → the user opted in correctly (or WSLENV
+    # forwarded it); nothing to do.
+    [ -n "${!home_env_var:-}" ] && return 0
+
+    # Only meaningful under WSL (mock /proc/version via _TO_PROC_VERSION in tests).
+    local proc_version_file="${_TO_PROC_VERSION:-/proc/version}"
+    if [ -z "${WSL_DISTRO_NAME:-}" ]; then
+        { [ -r "$proc_version_file" ] && grep -qiE 'microsoft|wsl' "$proc_version_file" 2>/dev/null; } || return 0
+    fi
+
+    # Gate to the ROOT-under-WSL case only — the exact wrong-home scenario (#78):
+    # `bash install.sh` launched from a Windows shell runs WSL as root, so
+    # $HOME=/root and the install lands where the Windows CLI can't read it. A
+    # NON-root WSL user has a legitimate $HOME, so ~/.copilot is correct and we
+    # must NOT redirect them to a Windows profile. This also confines the
+    # powershell.exe/cmd.exe calls (and their hang risk) to the narrow case.
+    local is_root=0
+    if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+        is_root=1
+    elif [ "${HOME:-}" = "/root" ]; then
+        is_root=1
+    fi
+    [ "$is_root" = "1" ] || return 0
+
+    # Locate powershell.exe + cmd.exe (override via _TO_POWERSHELL / _TO_CMD_EXE
+    # for tests). Absent on locked-down or non-Windows hosts → skip that method.
+    local powershell_exe="${_TO_POWERSHELL:-/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
+    local cmd_exe="${_TO_CMD_EXE:-/mnt/c/Windows/System32/cmd.exe}"
+    local timeout_bin=""
+    command -v timeout >/dev/null 2>&1 && timeout_bin="timeout 5"
+
+    local raw win_val="" ps_status scope translated
+
+    # ── Primary: PowerShell registry read (User then Machine) ───────────
+    # [Environment]::GetEnvironmentVariable reads HKCU\Environment (User) /
+    # HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment (Machine)
+    # directly, bypassing the inherited process env block that defeats cmd.exe.
+    # Returns an empty string (NOT the literal %VAR%) when the var is unset.
+    # Windows PowerShell 5.1 may emit a UTF-8 BOM (EF BB BF) on its stdout pipe;
+    # strip it via sed so it never corrupts the translated path.
+    if [ -x "$powershell_exe" ]; then
+        for scope in User Machine; do
+            set +e
+            raw="$(${timeout_bin} "$powershell_exe" -NoProfile -NonInteractive -Command "[Environment]::GetEnvironmentVariable('${home_env_var}','${scope}')" 2>/dev/null | tr -d '\r' | sed '1s/^\xEF\xBB\xBF//')"
+            ps_status=$?
+            set -e
+            [ "$ps_status" -eq 0 ] || continue
+            # Take only the first line: PowerShell [Environment]::GetEnvironmentVariable
+            # returns a single string, so multi-line output is noise/error. Without this,
+            # `cut -c1` below would return the first char of EACH line, corrupting the
+            # drive letter (e.g. "c\ne" instead of "c"). Bash 3.2-safe parameter expansion.
+            raw="${raw%%$'\n'*}"
+            win_val="$(printf '%s' "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            [ -n "$win_val" ] || continue
+            break
+        done
+    fi
+
+    # ── Fallback: cmd.exe echo (the v5.11.31 approach) ──────────────────
+    # Only reaches here when powershell.exe is absent/blocked/failed, OR returned
+    # empty for both scopes. cmd.exe sees only the inherited process env block,
+    # so this only helps when the var was already forwarded via WSLENV — exactly
+    # the case PowerShell also covers, but kept as a belt-and-suspenders fallback
+    # for hosts where powershell.exe is unavailable.
+    if [ -z "$win_val" ] && [ -x "$cmd_exe" ]; then
+        set +e
+        raw="$(${timeout_bin} "$cmd_exe" /c "echo %${home_env_var}%" 2>/dev/null | tr -d '\r')"
+        ps_status=$?
+        set -e
+        if [ "$ps_status" -eq 0 ]; then
+            raw="${raw%%$'\n'*}"
+            win_val="$(printf '%s' "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            [ "$win_val" = "%${home_env_var}%" ] && win_val=""   # unset on Windows too
+        fi
+    fi
+
+    # ── Translate + export (shared with the cmd.exe path) ───────────────
+    if [ -n "$win_val" ]; then
+        if translated="$(_translate_windows_path_to_wsl "$win_val")"; then
+            # Defense-in-depth (CE review P0): never export an empty translated
+            # value, and confirm the translation stayed under /mnt/ (rejects a
+            # traversal like C:\..\..\..\etc that resolves outside the mount).
+            if [ -n "$translated" ] && [ "${translated}" != "${translated#/mnt/}" ]; then
+                export "${home_env_var}=${translated}"
+                info "Recovered ${home_env_var} from the Windows environment: ${translated}"
+                return 0
+            fi
+        fi
+        # Untranslatable (UNC/relative/exotic/empty) → fall through to autodetect
+        # or the warning path rather than exporting a bogus home.
+    fi
+
+    # ── Last resort: single-profile autodetect (issue #78) ──────────────
+    # If no env value was recovered AND exactly ONE non-system Windows profile
+    # exists under /mnt/c/Users/, it is defensible to auto-target it — but LOUDLY,
+    # stating exactly where files are going and how to override, so a wrong guess
+    # is visible (never silent). Skipped when target_subpath is empty (env-only
+    # recovery, backward compat) or when multiple profiles make the guess
+    # ambiguous (assafbem is multi-profile; his fix is the env recovery above).
+    if [ -n "$target_subpath" ]; then
+        local wsl_users_dir="${_TO_WSL_USERS_DIR:-/mnt/c/Users}"
+        local win_user="" win_count=0 entry name
+        if [ -d "$wsl_users_dir" ]; then
+            for entry in "${wsl_users_dir}"/*/; do
+                [ -d "$entry" ] || continue
+                name="$(basename "$entry")"
+                case "$name" in
+                    Public|"All Users"|Default|"Default User"|Windows|WpSystem) continue ;;
+                esac
+                [ -n "$name" ] || continue
+                win_user="$name"
+                win_count=$((win_count + 1))
+            done
+        fi
+        if [ "$win_count" = "1" ]; then
+            local guessed="/mnt/c/Users/${win_user}/${target_subpath}"
+            export "${home_env_var}=${guessed}"
+            info "No ${home_env_var} found in Windows env; single Windows profile detected — targeting ${guessed}"
+            info "To override: ${home_env_var}=/mnt/c/Users/<your-user>/${target_subpath} bash install.sh ..."
+            return 0
+        fi
+    fi
+
+    return 0
 }
 
 install_copilot() {
@@ -411,7 +522,7 @@ install_copilot() {
     # install.sh`). If recovery succeeds, COPILOT_HOME is now exported and the
     # warning below self-suppresses. If not, warn so the user can Ctrl-C and
     # re-run with COPILOT_HOME set inline.
-    _recover_home_from_windows_env COPILOT_HOME
+    _recover_home_from_windows_env COPILOT_HOME ".copilot"
     _copilot_wsl_root_warning
 
     # Resolve the Copilot home via measure.py so the banner shows the TRUE

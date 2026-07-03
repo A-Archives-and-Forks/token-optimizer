@@ -18221,7 +18221,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.34"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.35"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -20911,6 +20911,83 @@ _RELEVANCE_FULL_THRESHOLD = _float_env("TOKEN_OPTIMIZER_RELEVANCE_FULL_THRESHOLD
 # Back-compat alias: existing internal references to _RELEVANCE_THRESHOLD keep
 # working and mean the teaser/collection floor (the historical 0.3 default).
 _RELEVANCE_THRESHOLD = _RELEVANCE_TEASER_FLOOR
+
+# GitHub #12 -- cross-product coordination with Total Recall (TR). TR owns
+# durable cross-session memory when it's installed alongside Token Optimizer,
+# so TO's low-relevance continuity teaser is redundant noise in that setup.
+# Detection is best-effort and cached in a module global (computed once per
+# process); every FS/env check is guarded so detection can never raise.
+_TR_INSTALLED_CACHE = None
+
+
+def _total_recall_installed() -> bool:
+    """Best-effort detection of a co-installed Total Recall plugin.
+
+    Checked in order (first decisive signal wins):
+      1. TOTAL_RECALL_INSTALLED env var -- an explicit 0/false/no/off FORCES
+         False (hard override, checked first, even if a binary or marker
+         file exists). An explicit 1/true/yes/on FORCES True without
+         touching the filesystem. Matching is case-insensitive.
+      2. TR brain binary at known default install locations:
+         `${TOTAL_RECALL_HOME}/plugins/total-recall/brain.dist/brain(.exe)`,
+         `~/.claude/total-recall/plugins/total-recall/brain.dist/brain(.exe)`,
+         `~/.total-recall/plugins/total-recall/brain.dist/brain(.exe)`.
+      3. TR coordination marker file at
+         `${TOTAL_RECALL_HOME:-~/.claude/total-recall}/coordination.json`.
+
+    Result is cached in a module global so repeated calls within one process
+    (e.g. one call per prompt-continuity hint in a long session) cost a
+    single filesystem check. Never raises -- any exception during detection
+    is treated as "not found".
+    """
+    global _TR_INSTALLED_CACHE
+    if _TR_INSTALLED_CACHE is not None:
+        return _TR_INSTALLED_CACHE
+
+    result = False
+    try:
+        raw = os.environ.get("TOTAL_RECALL_INSTALLED", "").strip().lower()
+        if raw in ("0", "false", "no", "off"):
+            _TR_INSTALLED_CACHE = False
+            return False
+        if raw in ("1", "true", "yes", "on"):
+            _TR_INSTALLED_CACHE = True
+            return True
+
+        tr_home_env = os.environ.get("TOTAL_RECALL_HOME", "").strip()
+        binary_bases = []
+        if tr_home_env:
+            binary_bases.append(Path(tr_home_env).expanduser())
+        binary_bases.append(Path.home() / ".claude" / "total-recall")
+        binary_bases.append(Path.home() / ".total-recall")
+
+        for home in binary_bases:
+            try:
+                brain = home / "plugins" / "total-recall" / "brain.dist" / "brain"
+                if brain.exists() or brain.with_suffix(".exe").exists():
+                    result = True
+                    break
+            except Exception:
+                continue
+
+        if not result:
+            marker_home = (
+                Path(tr_home_env).expanduser()
+                if tr_home_env
+                else Path.home() / ".claude" / "total-recall"
+            )
+            try:
+                if (marker_home / "coordination.json").exists():
+                    result = True
+            except Exception:
+                pass
+    except Exception:
+        result = False
+
+    _TR_INSTALLED_CACHE = result
+    return result
+
+
 # Data-retention controls (enterprise compliance)
 _QUALITY_CACHE_RETENTION_DAYS = _int_env("TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS", 0)  # 0 = unlimited (default); enterprise sets to e.g. 30
 _CHECKPOINT_EVENT_MAX = _int_env("TOKEN_OPTIMIZER_CHECKPOINT_EVENT_MAX", 1000)
@@ -25418,7 +25495,18 @@ def _continuity_prompt_hint(prompt_text="", session_id=None, cwd=None, max_age_m
     # full-block threshold the rendering below is byte-identical to the pre-fix
     # behavior. The deliberate "continue our work" (_resume_intent) path returns
     # earlier and is intentionally NOT gated down here.
-    if score < _RELEVANCE_FULL_THRESHOLD:
+    #
+    # GitHub #12 -- when Total Recall is installed, it owns durable
+    # cross-session memory, so raise the effective full-block bar to 0.6 and
+    # suppress even the one-line teaser below it (not just the full block --
+    # TR makes the teaser noise too). TR-absent behavior is unchanged.
+    _tr_installed = _total_recall_installed()
+    _effective_full_threshold = (
+        max(0.6, _RELEVANCE_FULL_THRESHOLD) if _tr_installed else _RELEVANCE_FULL_THRESHOLD
+    )
+    if score < _effective_full_threshold:
+        if _tr_installed:
+            return ""
         teaser_topic = ""
         if isinstance(sidecar, dict):
             _task = sidecar.get("active_task") or sidecar.get("topic")
