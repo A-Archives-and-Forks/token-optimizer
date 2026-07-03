@@ -65,6 +65,33 @@ cp "${REPO_ROOT}/.codex-plugin/plugin.json" "${STAGE}/.codex-plugin/plugin.json"
 find "${STAGE}" \( -name '__pycache__' -o -name '.DS_Store' -o -name '*.pyc' -o -name '*.pyo' \) \
   -exec rm -rf {} + 2>/dev/null || true
 
+# --- Codex compatibility (issue #83): Codex warns and SKIPS any hook with
+#     "async": true ("async hooks are not supported yet"), so those hooks never
+#     run for Codex marketplace users. Strip the async flag from the mirrored
+#     hooks.json so Codex runs them synchronously. The root hooks/hooks.json keeps
+#     "async": true for Claude's non-blocking path — the mirror equals the root
+#     modulo the async keys (the parity test normalizes this the same way).
+if [ -f "${STAGE}/hooks/hooks.json" ]; then
+  python3 - "${STAGE}/hooks/hooks.json" <<'PYSTRIP' || { echo "ERROR: failed to strip async from mirrored hooks.json" >&2; exit 4; }
+import json, sys
+p = sys.argv[1]
+with open(p, encoding="utf-8") as f:
+    data = json.load(f)
+def strip_async(o):
+    if isinstance(o, dict):
+        o.pop("async", None)
+        for v in o.values():
+            strip_async(v)
+    elif isinstance(o, list):
+        for v in o:
+            strip_async(v)
+strip_async(data)
+with open(p, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYSTRIP
+fi
+
 # --- Exclude dev-only files not needed by the installed Codex skill. benchmark.py is a
 #     standalone benchmarking tool whose security test fixtures contain intentionally-fake
 #     secret-shaped strings (SLACK_TOKEN=..., GITHUB_TOKEN=ghp_...) that trip GitHub push

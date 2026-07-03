@@ -5714,6 +5714,24 @@ def generate_standalone_dashboard(days=30, quiet=False, force=False):
     except Exception:
         savings_data = {"total_tokens": 0, "total_cost_usd": 0.0, "by_category": {}}
 
+    # Cache-TTL watchdog (opportunity tier — observed waste, potential recovery).
+    # Standalone analysis; never reaches the realized savings headline. Fail-open.
+    # Mirrors generate_dashboard's cache_health wiring so the standalone/daemon
+    # dashboard renders the same cache-health panel as the full audit dashboard.
+    try:
+        cache_health = _cache_ttl_waste_cached(days=30)
+    except Exception:
+        cache_health = {"available": False, "tier": "opportunity"}
+
+    # U7: keep-warm cache-automation sub-block carried inside the cache-health
+    # payload (realized vs spend vs NET, tripwire ratio, the 5 tile states,
+    # predictor transparency). Fail-open so it never blocks dashboard regen.
+    try:
+        if isinstance(cache_health, dict):
+            cache_health["keepwarm"] = keepwarm_cache_health_block(days=30)
+    except Exception:
+        pass
+
     data = {
         "snapshot": snapshot,
         "audit": {},
@@ -5725,6 +5743,7 @@ def generate_standalone_dashboard(days=30, quiet=False, force=False):
         "manage": management,
         "hooks": hook_status,
         "savings": savings_data,
+        "cache_health": cache_health,
         "standalone": True,
         "auto_plan": True,
         "generated_at": datetime.now().isoformat(),
@@ -18202,7 +18221,7 @@ def setup_hook(dry_run=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.33"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.34"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845

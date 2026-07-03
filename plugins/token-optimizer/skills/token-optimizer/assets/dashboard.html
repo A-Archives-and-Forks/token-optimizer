@@ -4172,6 +4172,11 @@ var DB = (function() {
     // waste + potential recovery; NEVER summed into the realized headline.
     // Styled like the opportunity coverage block (dim + "shadow/opportunity"
     // badge) so a would-be recovery can't be misread as realized savings. ----
+    // Cache health panel hidden for now (2026-07-03): it's an opportunity/waste tier,
+    // not what Token Optimizer SAVED (cache savings are already in the headline). Flip
+    // this to false to restore; the cache_health data path stays wired for a future
+    // savings-focused reframe.
+    var CACHE_HEALTH_HIDDEN = true;
     var ch = data.cache_health || {};
     var chHtml = '<div class="card wide" style="margin-top:var(--s-3);"><div class="card-header">' +
       '<span>Cache health</span>' +
@@ -4243,14 +4248,14 @@ var DB = (function() {
       chHtml += '</div>';
     }
     chHtml += '</div>';
-    html += chHtml;
+    if (!CACHE_HEALTH_HIDDEN) html += chHtml;
 
-    // ---- Keep-warm cache automation (U7). Five tile states. Realized $ enters
-    // the realized savings headline via savings_events (category 'keepwarm');
-    // ping spend stays a dedicated cost line; NET (realized - spend) is the
-    // prominent number. Same dark-theme visual language as the cache-health
-    // card above (U9 themes it later — do not restyle). ----
-    var kw = (data.cache_health || {}).keepwarm || null;
+    // ---- Keep-warm cache automation panel: intentionally hidden (2026-07-03).
+    // In probe-only mode it renders $0 realized / $0 spend / $0 NET, which reads
+    // as "zero value" / broken to users. The keepwarm data is still computed
+    // (measure.py keepwarm_cache_health_block) and carried in
+    // data.cache_health.keepwarm; restore the panel by reverting this hunk.
+    var kw = null;
     if (kw) {
       var kwState = kw.state || 'platform-gap';
       var kwBadge = ({
