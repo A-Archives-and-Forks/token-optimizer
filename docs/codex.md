@@ -61,6 +61,41 @@ Inside Codex, invoke Token Optimizer conversationally:
 - **"Run Fleet Auditor"** -- cross-system audit including Codex sessions
 - **"Show the dashboard"** -- analytics dashboard
 
+## Uninstall
+
+```bash
+TOKEN_OPTIMIZER_RUNTIME=codex python3 skills/token-optimizer/scripts/measure.py codex-install --uninstall
+```
+
+This reverses exactly what `codex-install` wrote:
+
+- Strips Token Optimizer hook groups from `~/.codex/hooks.json` (your own
+  hooks and other tools' hooks are left intact).
+- Removes the `# BEGIN/END token-optimizer compact prompt` managed block and
+  the prompt file (`~/.codex/token-optimizer/codex-compact-prompt.md`) from
+  `~/.codex/config.toml`.
+- Removes the `# BEGIN/END token-optimizer status line` `[tui]` block, and
+  uncomments any `status_line`/`terminal_title` settings Token Optimizer
+  commented out on a `--force` install. A `[tui]` header Token Optimizer
+  added is dropped only if the table is left empty; user-authored `[tui]`
+  content is never touched.
+
+Add `--dry-run` to preview without writing. The uninstall is idempotent;
+running it on a clean config is a no-op.
+
+Then remove the marketplace plugin via the Codex TUI (`/plugins`) or:
+
+```bash
+codex plugin marketplace remove alexgreensh/token-optimizer
+```
+
+Codex session/trends data (`~/.codex/token-optimizer/`) is left in place by
+design. To purge it too:
+
+```bash
+rm -rf ~/.codex/token-optimizer
+```
+
 ### CLI commands
 
 ```bash

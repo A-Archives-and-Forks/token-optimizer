@@ -7,13 +7,20 @@ from pathlib import Path
 from typing import Any
 
 
-def atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
-    """Write content to path atomically via tempfile+rename."""
+def atomic_write(path: Path, content: str, mode: int = 0o600, *, crlf: bool = False) -> None:
+    """Write content to path atomically via tempfile+rename.
+
+    When ``crlf`` is True, ``\\n`` in *content* is converted to ``\\r\\n``
+    before writing so that CRLF line endings are preserved through the
+    install/uninstall round-trip.
+    """
+    if crlf:
+        content = content.replace("\n", "\r\n")
     write_path = path.resolve(strict=False) if path.is_symlink() else path
     write_path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{write_path.name}.", dir=str(write_path.parent), text=True)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(content)
         os.chmod(tmp_name, mode)
         os.replace(tmp_name, write_path)
@@ -23,6 +30,23 @@ def atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
         except OSError:
             pass
         raise
+
+
+def read_config_text(path: Path) -> tuple[str, bool]:
+    """Read a TOML config file, returning ``(text_with_lf, uses_crlf)``.
+
+    The text is decoded as UTF-8 with ``\\r\\n`` normalized to ``\\n`` so
+    that downstream regex patterns (which assume LF) work unchanged.
+    ``uses_crlf`` is ``True`` when the original file contained ``\\r\\n``,
+    so callers can pass it to :func:`atomic_write` to restore CRLF on write.
+    Raises ``OSError`` if the file cannot be read.
+    """
+    raw = path.read_bytes()
+    crlf = b"\r\n" in raw
+    text = raw.decode("utf-8")
+    if crlf:
+        text = text.replace("\r\n", "\n")
+    return text, crlf
 
 
 def atomic_write_json(path: Path, data: Any, mode: int = 0o600) -> None:

@@ -403,8 +403,17 @@ def uninstall(project: Path, *, is_global: bool = False, dry_run: bool = False) 
     path = _global_hooks_path() if is_global else _hooks_path(project)
     existing = _load_hooks(path)
     updated = _remove_hooks(existing)
-    details = {"hook_events": sorted(updated.get("hooks", {}).keys())}
-    if not dry_run:
+    details: dict[str, Any] = {"hook_events": sorted(updated.get("hooks", {}).keys())}
+    # Reverse the config.toml writes the installer made: the compact-prompt
+    # managed block + prompt file (issue #78, workstream B2) and the [tui]
+    # status-line managed block. Both are idempotent and scoped to TO's own
+    # managed markers, so user-authored keys are never clobbered.
+    if dry_run:
+        details["compact_prompt"] = codex_compact_prompt.plan_uninstall()
+        details["status_line"] = codex_statusline.plan_uninstall()
+    else:
+        details["compact_prompt"] = codex_compact_prompt.uninstall()
+        details["status_line"] = codex_statusline.uninstall()
         codex_io.atomic_write_json(path, updated)
     return path, "removed", details
 

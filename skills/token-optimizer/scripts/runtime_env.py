@@ -83,17 +83,110 @@ def _is_safe_home_dir(path: Path) -> bool:
         return False
 
 
-def _safe_home_from_env(env_var: str, fallback: Path) -> Path:
-    """Resolve a runtime-home env var without letting it escape user home."""
+def _is_wsl_context() -> bool:
+    """True when this process is running inside Windows Subsystem for Linux.
+
+    Reads ``/proc/version`` and ``/proc/sys/kernel/osrelease`` and looks for
+    the ``microsoft`` / ``WSL`` markers the WSL kernel emits. Never raises.
+
+    This gates the WSL-root ``/mnt/`` opt-in (issue #78) so native-Linux
+    ``/mnt`` mounts stay on the strict safe-home path and behavior there is
+    byte-identical to before. Tests monkeypatch this function for
+    determinism on non-Linux hosts.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    for probe in ("/proc/version", "/proc/sys/kernel/osrelease"):
+        try:
+            with open(probe, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        low = text.lower()
+        if "microsoft" in low or "wsl" in low:
+            return True
+    return False
+
+
+def _wsl_mnt_safe_home(candidate: Path, *, mnt_root: Path | None = None) -> Path | None:
+    """Return ``candidate`` resolved if it passes the WSL ``/mnt/`` opt-in.
+
+    The opt-in (issue #78): a runtime-home env var value that FAILS the
+    strict under-``$HOME`` guard is still accepted when ALL of:
+
+      (a) we are running inside WSL (gated on ``/proc`` markers —
+          native-Linux ``/mnt`` mounts stay on the strict path),
+      (b) the path is absolute (no relative traversal),
+      (c) the resolved path is under ``/mnt/`` (the WSL Windows-mount root;
+          ``/mnt/wsl/``, ``/mnt/c/``, ``/mnt/d/`` … — not arbitrary
+          filesystem locations),
+      (d) the path is not a symlink (no traversal tricks),
+      (e) the path exists and is a directory.
+
+    ``mnt_root`` is a FUNCTION PARAMETER (not an env var) so it can ONLY be
+    set by code calling this directly (tests pass a temp dir since macOS
+    can't create ``/mnt/c/...``). Production always uses the real ``/mnt`` —
+    there is no env var a user could set to widen the confinement.
+
+    Returns the resolved Path on success, ``None`` on any failure (caller
+    falls back to the strict path / default). Never raises.
+    """
+    if not _is_wsl_context():
+        return None
+    try:
+        if not candidate.is_absolute():
+            return None
+        resolved = candidate.resolve(strict=False)
+        root = Path(mnt_root) if mnt_root is not None else Path("/mnt")
+        mnt_root_resolved = root.resolve(strict=False)
+        if not resolved.is_relative_to(mnt_root_resolved):
+            return None
+        # Check the RESOLVED path for existence/dir (not the raw candidate):
+        # a path like /mnt/c/sub/../x/.copilot resolves to /mnt/c/x/.copilot,
+        # which exists and is under /mnt, but candidate.exists() fails when
+        # the intermediate "sub" dir doesn't exist (the OS can't traverse
+        # through a missing component).  The symlink check stays on the raw
+        # candidate so a final-component symlink is still detected.
+        if not resolved.exists():
+            return None
+        if not resolved.is_dir() or candidate.is_symlink():
+            return None
+        return resolved
+    except (OSError, ValueError):
+        return None
+
+
+def _safe_home_from_env(env_var: str, fallback: Path, *, mnt_root: Path | None = None) -> Path:
+    """Resolve a runtime-home env var without letting it escape user home.
+
+    The WSL-root ``/mnt/`` opt-in (issue #78): under WSL only, a value that
+    fails the strict under-``$HOME`` guard is still accepted when it points
+    at an absolute, existing, non-symlink directory under ``/mnt/`` (the WSL
+    Windows-mount root). This is the deliberate cross-filesystem opt-in that
+    lets a WSL-root install (where ``$HOME=/root``) point
+    ``COPILOT_HOME``/``CODEX_HOME``/``HERMES_HOME``/``OPENCODE_*`` at the
+    Windows profile path ``/mnt/c/Users/<you>/.copilot`` (etc.). Native-Linux
+    ``/mnt`` mounts stay on the strict path because the ``/mnt`` opt-in is
+    gated on actual WSL detection (see ``_is_wsl_context``).
+
+    ``mnt_root`` is a test-injection parameter (never set in production) so
+    tests can substitute a temp dir for ``/mnt`` on non-Linux hosts. When the
+    ``/mnt`` path is ACCEPTED, no "rejected" warning is printed — the warning
+    fires only for genuinely-rejected values.
+    """
     raw_val = os.environ.get(env_var, "").strip()
     if not raw_val:
         return fallback
     candidate = Path(raw_val).expanduser()
-    result: Path | None = candidate.resolve(strict=False) if _is_safe_home_dir(candidate) else None
-    if result is None:
-        print(f"[Token Optimizer] Warning: {env_var}={raw_val!r} rejected (not a safe directory). Using default.", file=sys.stderr)
-        return fallback
-    return result  # type: ignore[return-value]
+    if _is_safe_home_dir(candidate):
+        return candidate.resolve(strict=False)
+    # Strict guard rejected it. Try the WSL /mnt opt-in before warning so a
+    # legit WSL-root /mnt/c/Users/<you>/.copilot value is accepted silently.
+    mnt_result = _wsl_mnt_safe_home(candidate, mnt_root=mnt_root)
+    if mnt_result is not None:
+        return mnt_result
+    print(f"[Token Optimizer] Warning: {env_var}={raw_val!r} rejected (not a safe directory). Using default.", file=sys.stderr)
+    return fallback
 
 
 def _opencode_env_signal() -> bool:
@@ -487,14 +580,19 @@ def hermes_home() -> Path:
     return _safe_home_from_env(_HERMES_HOME_ENV, Path.home() / ".hermes")
 
 
-def copilot_home() -> Path:
+def copilot_home(*, mnt_root: Path | None = None) -> Path:
     """Return GitHub Copilot CLI's home directory (~/.copilot by default).
 
     Honors COPILOT_HOME when it points at a safe directory under the user
-    home. This is where Token Optimizer's own Copilot data lives
-    (~/.copilot/token-optimizer/) — never ~/.claude.
+    home, or — under WSL only — an absolute, existing, non-symlink directory
+    under ``/mnt/`` (the WSL-root ``/mnt/`` opt-in, issue #78). This is where
+    Token Optimizer's own Copilot data lives (~/.copilot/token-optimizer/) —
+    never ~/.claude.
+
+    ``mnt_root`` is a test-injection parameter (never set in production) so
+    tests can substitute a temp dir for ``/mnt`` on non-Linux hosts.
     """
-    return _safe_home_from_env(_COPILOT_HOME_ENV, Path.home() / ".copilot")
+    return _safe_home_from_env(_COPILOT_HOME_ENV, Path.home() / ".copilot", mnt_root=mnt_root)
 
 
 def _xdg_base(env_var: str, default_rel: str) -> Path:

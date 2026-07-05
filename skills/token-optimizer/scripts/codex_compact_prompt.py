@@ -19,6 +19,21 @@ COMPACT_FILE_RE = re.compile(r"(?m)^\s*experimental_compact_prompt_file\s*=")
 INLINE_COMPACT_RE = re.compile(r"(?m)^\s*compact_prompt\s*=")
 COMPACT_FILE_LINE_RE = re.compile(r"(?m)^(\s*)experimental_compact_prompt_file\s*=.*$")
 INLINE_COMPACT_LINE_RE = re.compile(r"(?m)^(\s*)compact_prompt\s*=.*$")
+# Lines Token Optimizer commented out on install (force path). The install
+# writes ``<indent># replaced by Token Optimizer: <original line>``; uninstall
+# restores the original by stripping that prefix. Scoped to compact-prompt
+# settings only so the statusline uninstaller's commented lines are untouched.
+_TO_COMMENT_PREFIX_RE = re.compile(
+    r"(?m)^(\s*)# replaced by Token Optimizer: (\s*(?:experimental_compact_prompt_file|compact_prompt)\s*=.*)$"
+)
+# Consume the single blank-line separator install inserts before the block so
+# uninstall is byte-faithful: install writes ``<content>\n\n# BEGIN…# END\n`` and
+# this regex removes ``\n# BEGIN…# END\n``, leaving ``<content>\n`` intact. The
+# leading ``\n?`` only eats the separator newline immediately preceding the
+# block (the user's own line ending is the newline before that one).
+_MANAGED_BLOCK_RE = re.compile(
+    rf"(?ms)\n?^{re.escape(MANAGED_BEGIN)}.*?^{re.escape(MANAGED_END)}\n?"
+)
 
 COMPACT_PROMPT = """Token Optimizer compact prompt for Codex.
 
@@ -126,16 +141,86 @@ def install(force: bool = False) -> str:
     codex_io.atomic_write(prompt_path, COMPACT_PROMPT)
 
     try:
-        config_text = config_path.read_text(encoding="utf-8")
+        config_text, crlf = codex_io.read_config_text(config_path)
     except OSError:
-        config_text = ""
+        config_text, crlf = "", False
 
     if INLINE_COMPACT_RE.search(config_text) and not force:
         raise ValueError("config.toml already has compact_prompt; rerun with --force after reviewing precedence")
 
     updated, action = _replace_or_append_config(config_text, prompt_path, force=force)
-    codex_io.atomic_write(config_path, updated)
+    codex_io.atomic_write(config_path, updated, crlf=crlf)
     return action
+
+
+def _strip_managed_block(config_text: str) -> tuple[str, bool]:
+    """Remove the Token Optimizer managed block; return (text, removed?)."""
+    new, n = _MANAGED_BLOCK_RE.subn("", config_text)
+    return new, n > 0
+
+
+def _restore_commented_settings(config_text: str) -> tuple[str, int]:
+    """Uncomment compact-prompt lines Token Optimizer commented out on install."""
+    new, n = _TO_COMMENT_PREFIX_RE.subn(r"\1\2", config_text)
+    return new, n
+
+
+def plan_uninstall() -> dict[str, str | bool]:
+    """Validate a compact-prompt uninstall without writing files."""
+    prompt_path = _prompt_path()
+    config_path = _config_path()
+    codex_io.validate_codex_path(prompt_path, codex_home())
+    codex_io.validate_codex_path(config_path, codex_home())
+    try:
+        config_text = config_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        config_text = ""
+    _, block_removed = _strip_managed_block(config_text)
+    _, restored = _restore_commented_settings(config_text)
+    return {
+        "action": "removed" if (block_removed or prompt_path.exists()) else "noop",
+        "prompt_path": str(prompt_path),
+        "config_path": str(config_path),
+        "would_remove_prompt": prompt_path.exists(),
+        "would_remove_config_block": block_removed,
+        "would_restore_commented": restored,
+    }
+
+
+def uninstall() -> str:
+    """Remove the Token Optimizer compact prompt and its config.toml block.
+
+    Reverses ``install``: deletes the managed prompt file, strips the
+    ``# BEGIN/END token-optimizer compact prompt`` block from
+    ``config.toml``, and uncomments any compact-prompt settings Token
+    Optimizer commented out on a ``--force`` install. User-authored keys
+    outside the managed block are never touched. Idempotent.
+    """
+    home = codex_home()
+    prompt_path = home / "token-optimizer" / PROMPT_FILENAME
+    config_path = codex_io.ensure_codex_child(home, "config.toml")
+
+    prompt_removed = False
+    try:
+        prompt_path.unlink()
+        prompt_removed = True
+    except FileNotFoundError:
+        pass
+    except OSError:
+        # Best-effort: a missing prompt file is not a fatal uninstall.
+        pass
+
+    try:
+        config_text, crlf = codex_io.read_config_text(config_path)
+    except (OSError, UnicodeDecodeError):
+        return "removed" if prompt_removed else "noop"
+
+    updated, block_removed = _strip_managed_block(config_text)
+    updated, _ = _restore_commented_settings(updated)
+    if updated != config_text:
+        codex_io.atomic_write(config_path, updated, crlf=crlf)
+        return "removed"
+    return "removed" if prompt_removed else "noop"
 
 
 def status() -> str:

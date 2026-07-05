@@ -44,6 +44,18 @@ TABLE_HEADER_RE = re.compile(r"(?m)^[ \t]*\[[^\]\n]+\][ \t]*(?:#.*)?$")
 STATUS_LINE_RE = re.compile(r"(?m)^[ \t]*status_line[ \t]*=")
 TERMINAL_TITLE_RE = re.compile(r"(?m)^[ \t]*terminal_title[ \t]*=")
 SETTING_LINE_RE = re.compile(r"(?m)^([ \t]*)(status_line|terminal_title)([ \t]*=.*)$")
+# Lines Token Optimizer commented out on a --force install. The install writes
+# ``<indent># replaced by Token Optimizer: <original line>``; uninstall restores
+# the original by stripping that prefix. Scoped to status_line/terminal_title
+# only so the compact-prompt uninstaller's commented lines are untouched.
+_TO_COMMENT_PREFIX_RE = re.compile(
+    r"(?m)^([ \t]*)# replaced by Token Optimizer: ([ \t]*(?:status_line|terminal_title)[ \t]*=.*)$"
+)
+# Consume the single blank-line separator install inserts before the block so
+# uninstall is byte-faithful (mirrors codex_compact_prompt._MANAGED_BLOCK_RE).
+_MANAGED_BLOCK_RE = re.compile(
+    rf"(?ms)\n?^{re.escape(MANAGED_BEGIN)}.*?^{re.escape(MANAGED_END)}\n?"
+)
 
 
 def _config_path() -> Path:
@@ -127,12 +139,101 @@ def install(force: bool = False) -> str:
     home = codex_home()
     config_path = codex_io.ensure_codex_child(home, "config.toml")
     try:
-        config_text = config_path.read_text(encoding="utf-8")
+        config_text, crlf = codex_io.read_config_text(config_path)
     except OSError:
-        config_text = ""
+        config_text, crlf = "", False
     updated, action = _replace_or_append_config(config_text, force=force)
-    codex_io.atomic_write(config_path, updated)
+    codex_io.atomic_write(config_path, updated, crlf=crlf)
     return action
+
+
+def _strip_managed_block(config_text: str) -> tuple[str, bool]:
+    """Remove the Token Optimizer status-line managed block; return (text, removed?)."""
+    new, n = _MANAGED_BLOCK_RE.subn("", config_text)
+    return new, n > 0
+
+
+def _restore_commented_settings(config_text: str) -> tuple[str, int]:
+    """Uncomment status_line/terminal_title lines Token Optimizer commented out."""
+    new, n = _TO_COMMENT_PREFIX_RE.subn(r"\1\2", config_text)
+    return new, n
+
+
+def _drop_empty_tui_header(config_text: str) -> str:
+    """Remove a ``[tui]`` header left empty after stripping the managed block.
+
+    When Token Optimizer installed into a config that had no ``[tui]`` table,
+    it appended ``[tui]`` + the managed block. After stripping the block, the
+    bare ``[tui]`` header is TO's own residue — remove it only when the table
+    body is empty (no key=value lines, no other content). A user-populated
+    ``[tui]`` table is never touched.
+    """
+    span = _tui_span(config_text)
+    if span is None:
+        return config_text
+    start, header_end, table_end = span
+    body = config_text[header_end:table_end]
+    # Body is significant if it contains any non-whitespace line, including
+    # comments — user comments are user content and must not be orphaned by
+    # dropping the [tui] header above them (contradicts the docstring promise
+    # that "a user-populated [tui] table is never touched").
+    significant = any(
+        ln.strip()
+        for ln in body.splitlines()
+    )
+    if significant:
+        return config_text
+    # Drop the empty [tui] header and its trailing blank lines.
+    before = config_text[:start]
+    after = config_text[table_end:]
+    # Collapse multiple blank lines left behind to a single separator. When the
+    # [tui] header was at EOF (after is blank), still preserve the trailing
+    # newline of the preceding content so the round-trip is byte-faithful.
+    sep = "\n\n" if before.strip() and after.strip() else ("\n" if before.strip() else "")
+    return before.rstrip("\n") + sep + after.lstrip("\n")
+
+
+def plan_uninstall() -> dict[str, str | bool | list[str]]:
+    """Validate a status-line uninstall without writing files."""
+    config_path = _config_path()
+    codex_io.validate_codex_path(config_path, codex_home())
+    try:
+        config_text = config_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        config_text = ""
+    stripped, block_removed = _strip_managed_block(config_text)
+    stripped, restored = _restore_commented_settings(stripped)
+    return {
+        "action": "removed" if (block_removed or restored) else "noop",
+        "config_path": str(config_path),
+        "would_remove_config_block": block_removed,
+        "would_restore_commented": restored,
+        "would_drop_empty_tui_header": _drop_empty_tui_header(stripped) != stripped,
+    }
+
+
+def uninstall() -> str:
+    """Remove Token Optimizer's ``[tui]`` status-line block from config.toml.
+
+    Reverses ``install``: strips the ``# BEGIN/END token-optimizer status
+    line`` managed block, uncomments any ``status_line``/``terminal_title``
+    settings Token Optimizer commented out on a ``--force`` install, and
+    removes a ``[tui]`` header that Token Optimizer added if the table is
+    left empty. User-authored ``[tui]`` content is never touched. Idempotent.
+    """
+    home = codex_home()
+    config_path = codex_io.ensure_codex_child(home, "config.toml")
+    try:
+        config_text, crlf = codex_io.read_config_text(config_path)
+    except (OSError, UnicodeDecodeError):
+        return "noop"
+    updated, block_removed = _strip_managed_block(config_text)
+    updated, _ = _restore_commented_settings(updated)
+    updated = _drop_empty_tui_header(updated)
+    if updated != config_text:
+        codex_io.atomic_write(config_path, updated, crlf=crlf)
+        return "removed"
+    return "noop"
 
 
 def status() -> str:
