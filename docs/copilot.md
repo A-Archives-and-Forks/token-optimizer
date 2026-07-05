@@ -117,6 +117,30 @@ measure.py copilot-rollup      # ingest sessions into trends.db (auto on stop ho
 measure.py copilot-uninstall   # remove only what we installed
 ```
 
+## Uninstall
+
+```bash
+TOKEN_OPTIMIZER_RUNTIME=copilot python3 skills/token-optimizer/scripts/measure.py copilot-uninstall
+```
+
+Removes only the Token Optimizer hook entry from
+`~/.copilot/hooks/token-optimizer.json`. Your own hooks and other tools'
+hooks are left intact. The uninstall is idempotent; running it on a clean
+config is a no-op.
+
+**Copilot session data is left in place by design.** Token Optimizer reads
+Copilot's session logs (`~/.copilot/session-state/`) but never moves or owns
+them; your log-based scripts are unaffected. To purge Token Optimizer's own
+data (capabilities, in-flight tallies, trends) too:
+
+```bash
+rm -rf ~/.copilot/token-optimizer
+```
+
+For VS Code Copilot per-request cost tracking, disable the two
+`github.copilot.chat.agentDebugLog` settings in VS Code (the installer
+enables them only by printing the names; you flip them).
+
 Rates are configurable when GitHub changes billing:
 `TOKEN_OPTIMIZER_COPILOT_USD_PER_CREDIT` (default 0.01),
 `TOKEN_OPTIMIZER_COPILOT_PREMIUM_RATE` (default 0.04/premium request).

@@ -143,6 +143,124 @@ install_opencode() {
     echo ""
     echo "  Prefer npm? Once published:  opencode plugin token-optimizer-opencode"
     echo ""
+    echo "  Uninstall: bash install.sh --opencode --uninstall"
+    echo ""
+    exit 0
+}
+
+# ── OpenCode uninstall ────────────────────────────────────────
+# `install.sh --opencode --uninstall` removes the bundled
+# token-optimizer.js from ~/.config/opencode/plugins/ (the file the
+# offline installer copied) and reverts the `token-optimizer-opencode`
+# entry it may have added to opencode.json's `plugin` array. Idempotent
+# and --dry-run aware. Does NOT touch the ~/.claude/skills tree (that is
+# owned by the standard installer; see opencode/README "Update").
+
+uninstall_opencode() {
+    local dry_run=0
+    for a in "$@"; do
+        case "$a" in
+            --dry-run) dry_run=1 ;;
+        esac
+    done
+
+    # WSL-root wrong-home recovery (issue #78, generalized): mirror the
+    # install path so a WSL-root uninstall targets the SAME /mnt config dir
+    # the install wrote to, not /root/.config/opencode.
+    _recover_home_from_windows_env OPENCODE_CONFIG_DIR ".config/opencode"
+
+    local opencode_config="${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}"
+    local plugin_dir="${opencode_config}/plugins"
+    local bundle="${plugin_dir}/token-optimizer.js"
+    local config_json="${opencode_config}/opencode.json"
+
+    local removed=()
+    if [ -f "$bundle" ]; then
+        removed+=("$bundle")
+        if [ "$dry_run" -eq 0 ]; then
+            rm -f "$bundle" || fail "Could not remove ${bundle}."
+        fi
+    fi
+
+    # Revert the `token-optimizer-opencode` entry from opencode.json's
+    # `plugin` array if present (the offline installer does not add it, but
+    # a user may have followed the npm path or a future installer may add
+    # it). Idempotent: only that exact package-name string is removed; other
+    # plugin entries are left intact. Uses python3 for safe JSON editing;
+    # if python3 is unavailable, prints a manual-revert hint instead.
+    if [ -f "$config_json" ]; then
+        if command -v python3 &>/dev/null; then
+            local edit_result
+            if [ "$dry_run" -eq 0 ]; then
+                edit_result="$(python3 - "$config_json" <<'PYEDIT' 2>/dev/null || echo "ERR"
+import json, sys
+p = sys.argv[1]
+try:
+    with open(p, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except (json.JSONDecodeError, OSError):
+    sys.exit(0)  # not valid JSON or unreadable -> leave untouched
+plugins = data.get("plugin")
+if not isinstance(plugins, list):
+    sys.exit(0)
+target = "token-optimizer-opencode"
+if target not in plugins:
+    sys.exit(0)
+plugins = [x for x in plugins if x != target]
+if plugins:
+    data["plugin"] = plugins
+else:
+    data.pop("plugin", None)
+with open(p, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+print("removed")
+PYEDIT
+                )"
+            else
+                # Dry-run: just check whether it would be removed.
+                edit_result="$(python3 - "$config_json" <<'PYCHECK' 2>/dev/null || echo "ERR"
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+except (json.JSONDecodeError, OSError):
+    sys.exit(0)
+plugins = data.get("plugin")
+if isinstance(plugins, list) and "token-optimizer-opencode" in plugins:
+    print("would-remove")
+else:
+    print("noop")
+PYCHECK
+                )"
+            fi
+            if [ "$edit_result" = "removed" ] || [ "$edit_result" = "would-remove" ]; then
+                removed+=("${config_json} (plugin entry: token-optimizer-opencode)")
+            fi
+        elif [ "$dry_run" -eq 0 ]; then
+            warn "python3 not found; cannot auto-edit ${config_json}. If it has a \"plugin\" array, remove the \"token-optimizer-opencode\" entry by hand."
+        fi
+    fi
+
+    if [ "${#removed[@]}" -eq 0 ]; then
+        printf "${BOLD}${GREEN}Token Optimizer for OpenCode: nothing to remove.${NC}\n"
+        echo "  No bundle at ${bundle}, no plugin entry in ${config_json}."
+        echo "  (The ~/.claude/skills tree is owned by the standard installer; run 'bash install.sh' to manage it.)"
+        exit 0
+    fi
+
+    if [ "$dry_run" -eq 1 ]; then
+        printf "${BOLD}Dry run — would remove:${NC}\n"
+    else
+        printf "${BOLD}${GREEN}Token Optimizer for OpenCode uninstalled.${NC}\n"
+        echo "  Removed:"
+    fi
+    for r in "${removed[@]}"; do
+        echo "    - $r"
+    done
+    echo ""
+    echo "  Session data (~/.config/opencode/token-optimizer/) is left in place by design."
+    echo "  To purge it too: rm -rf \"${opencode_config}/token-optimizer\""
     exit 0
 }
 
@@ -569,7 +687,13 @@ fi
 
 for arg in "$@"; do
     case "$arg" in
-        --opencode) install_opencode ;;
+        --opencode)
+            # Route --opencode --uninstall to the uninstaller; otherwise install.
+            for a in "$@"; do
+                [ "$a" = "--uninstall" ] && uninstall_opencode "$@"
+            done
+            install_opencode
+            ;;
         --hermes) install_hermes "$@" ;;
         --copilot) install_copilot "$@" ;;
     esac

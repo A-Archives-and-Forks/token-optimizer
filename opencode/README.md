@@ -43,6 +43,33 @@ token-optimizer/install.sh --opencode
 Requires [bun](https://bun.sh) (OpenCode's own runtime). Re-run after a
 `git pull` to update.
 
+## Uninstall
+
+```bash
+token-optimizer/install.sh --opencode --uninstall
+```
+
+Removes `~/.config/opencode/plugins/token-optimizer.js` (the bundle the
+offline installer copied) and reverts the `token-optimizer-opencode` entry
+from `opencode.json`'s `plugin` array if present. Other plugin entries are
+left intact. Add `--dry-run` to preview what would be removed. Idempotent;
+running it on a clean install is a no-op.
+
+If you installed via the npm `plugin` array only (no offline bundle), just
+remove `"token-optimizer-opencode"` from the `plugin` array in your
+`opencode.json` (or `.opencode/opencode.jsonc`) and restart OpenCode.
+
+The `~/.claude/skills/token-optimizer` tree is owned by the standard
+installer (`bash install.sh`, no flag); it is NOT touched by
+`--opencode --uninstall`. To remove it, follow the Claude Code uninstall
+steps in the root [`README.md`](../README.md#uninstall).
+
+OpenCode session/trends data is left in place by design. To purge it too:
+
+```bash
+rm -rf ~/.config/opencode/token-optimizer
+```
+
 ## Update
 
 The npm plugin (`token-optimizer-opencode`) is **runtime-only**: it ships the

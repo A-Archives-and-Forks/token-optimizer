@@ -30,6 +30,48 @@ openclaw plugins install ./
 
 Inside OpenClaw, run `/token-optimizer` for a guided audit with coaching.
 
+## Uninstall
+
+Token Optimizer for OpenClaw is installed and removed through OpenClaw's
+native plugin manager; there is no repo-side removal script. The plugin id
+is `token-optimizer-openclaw`.
+
+```sh
+# Preview what would be removed (no changes written)
+openclaw plugins uninstall token-optimizer-openclaw --dry-run
+
+# Remove the plugin: deletes the managed install directory under
+# $OPENCLAW_STATE_DIR/extensions/, removes the plugin record from
+# plugins.entries, and clears allow/deny + load-path entries.
+openclaw plugins uninstall token-optimizer-openclaw
+
+# Keep the on-disk files (only removes the config records):
+openclaw plugins uninstall token-optimizer-openclaw --keep-files
+```
+
+`openclaw plugins uninstall` is the exact inverse of `openclaw plugins
+install` for a managed install: it removes everything the install created.
+For a from-source install (`openclaw plugins install ./`), the same command
+removes the plugin record; the source checkout under `token-optimizer/openclaw/`
+is yours and is never touched by the uninstaller.
+
+### What is left behind by design
+
+Session data and trends are NOT removed by the plugin uninstaller (they live
+outside the plugin directory, under OpenClaw's state dir). To purge them too:
+
+```sh
+# Token Optimizer's OpenClaw session/trends data (optional, full wipe):
+rm -rf "${OPENCLAW_STATE_DIR:-$HOME/.local/state/openclaw}/token-optimizer"
+```
+
+You can also temporarily disable the plugin without removing it:
+
+```sh
+openclaw plugins disable token-optimizer-openclaw   # stop loading
+openclaw plugins enable  token-optimizer-openclaw   # re-enable
+```
+
 ## What It Does
 
 - **Scans** all agent sessions for token usage, cost, and topic extraction

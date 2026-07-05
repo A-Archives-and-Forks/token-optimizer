@@ -15619,21 +15619,22 @@ def _collect_hermes_sessions(days=90, quiet=False, rebuild=False):
 def _resolve_copilot_home_wsl_aware(mnt_root=None):
     """Resolve the Copilot home with a WSL-root /mnt/ exception (issue #78).
 
-    Precedence:
-      1. COPILOT_HOME set + absolute + under /mnt/ + not a symlink → use it
-         (deliberate cross-filesystem opt-in for WSL-root installs where the
-         Windows Copilot home /mnt/c/Users/<you>/.copilot is NOT under
-         $HOME=/root and so is rejected by runtime_env._is_safe_home_dir).
-      2. Otherwise → runtime_env.copilot_home() (the strict safe-home guard:
-         COPILOT_HOME confined under $HOME, else $HOME/.copilot).
+    Thin wrapper around ``runtime_env.copilot_home`` so the WSL ``/mnt/``
+    opt-in has a SINGLE source of truth (``runtime_env._safe_home_from_env``
+    → ``_wsl_mnt_safe_home``). The opt-in is now STRICTER than the previous
+    shipped version: it is gated on actual WSL detection
+    (``runtime_env._is_wsl_context`` reads ``/proc/version`` /
+    ``/proc/sys/kernel/osrelease`` for the ``microsoft``/``WSL`` markers) so
+    native-Linux ``/mnt`` mounts stay on the strict safe-home path and
+    behavior there is byte-identical to before.
 
-    The /mnt/ exception is narrow and safe:
-      - User explicitly set COPILOT_HOME (opt-in, never autodetect).
-      - Path must be absolute (no relative traversal).
-      - Path must be under /mnt/ (the WSL Windows-mount root; /mnt/wsl/,
-        /mnt/c/, /mnt/d/ …). Not arbitrary filesystem locations.
-      - Path must not be a symlink (no traversal tricks).
-      - Path must exist and be a directory (no pointing at a file or nowhere).
+    Precedence (handled inside ``runtime_env.copilot_home``):
+      1. COPILOT_HOME set + absolute + under $HOME + non-symlink dir → use it
+         (the strict safe-home guard).
+      2. COPILOT_HOME set + absolute + under /mnt/ + non-symlink dir + WSL
+         context → use it (the WSL-root cross-filesystem opt-in).
+      3. Otherwise → $HOME/.copilot (with a "rejected" warning for genuinely
+         rejected values; the /mnt opt-in is accepted silently).
 
     ``mnt_root`` is a Path override for the WSL mount root, defaulting to
     ``/mnt``. It is a FUNCTION PARAMETER (not an env var) so it can ONLY be
@@ -15646,32 +15647,7 @@ def _resolve_copilot_home_wsl_aware(mnt_root=None):
     """
     from runtime_env import copilot_home as _ch  # noqa: PLC0415
 
-    raw = os.environ.get("COPILOT_HOME", "").strip()
-    if not raw:
-        return _ch()
-    try:
-        candidate = Path(raw).expanduser()
-        if not candidate.is_absolute():
-            return _ch()
-        resolved = candidate.resolve(strict=False)
-        # The /mnt/ prefix is the WSL Windows-mount root. Requiring it keeps
-        # the exception narrow: a COPILOT_HOME pointing at /etc, /tmp, /var,
-        # or anywhere else outside /mnt/ still goes through the strict guard.
-        # Resolve mnt_root too so a /tmp → /private/tmp symlink on macOS
-        # doesn't break the is_relative_to check (both sides must be resolved).
-        # mnt_root is a function param (not env) so production is always /mnt.
-        root = Path(mnt_root) if mnt_root is not None else Path("/mnt")
-        mnt_root_resolved = root.resolve(strict=False)
-        if not resolved.is_relative_to(mnt_root_resolved):
-            return _ch()
-        if candidate.exists():
-            if not candidate.is_dir() or candidate.is_symlink():
-                return _ch()
-        else:
-            return _ch()
-        return resolved
-    except (OSError, ValueError):
-        return _ch()
+    return _ch(mnt_root=mnt_root)
 
 
 def _write_copilot_restore_context(sessions, quiet=False):
@@ -17904,6 +17880,21 @@ def kill_stale_sessions(threshold_hours=12, dry_run=False):
 SETTINGS_PATH = CLAUDE_DIR / "settings.json"
 MEASURE_PY_PATH = Path(__file__).resolve()
 HOOK_COMMAND = f"python3 '{MEASURE_PY_PATH}' collect --quiet && python3 '{MEASURE_PY_PATH}' dashboard --quiet"
+# Recognizes Token Optimizer's SessionEnd hook command: a script named
+# ``measure.py`` invoked with the ``collect`` or ``session-end-flush``
+# subcommand as its first positional argument. The path may be single-quoted
+# (``'…/measure.py'`` — the format HOOK_COMMAND uses) and preceded by a
+# python interpreter or a launcher chain. Word boundary on ``measure``
+# prevents matching longer filenames (``other_measure.py``); requiring the
+# subcommand to immediately follow the script (modulo an optional closing
+# quote and whitespace) prevents matching unrelated commands that merely
+# mention ``measure.py`` and ``collect`` in prose
+# (e.g. ``echo 'run measure.py to collect data'``) or glued with a dot
+# (``measure.py.collect``). Shared by _is_hook_installed and
+# _is_token_optimizer_session_end_hook so detection and removal stay in sync.
+_TO_SESSION_END_CMD_RE = re.compile(
+    r"\bmeasure\.py['\"]?\s+(?:collect|session-end-flush)\b"
+)
 
 
 def _is_plugin_installed():
@@ -17952,7 +17943,7 @@ def _is_hook_installed(settings=None):
             hook_list = entry.get("hooks", []) if isinstance(entry, dict) else []
             for hook in hook_list:
                 cmd = hook.get("command", "") if isinstance(hook, dict) else ""
-                if "measure.py" in cmd and ("collect" in cmd or "session-end-flush" in cmd):
+                if isinstance(cmd, str) and _TO_SESSION_END_CMD_RE.search(cmd):
                     return True
 
     # Check plugin cache hooks (marketplace plugin auto-install)
@@ -17969,7 +17960,7 @@ def _is_hook_installed(settings=None):
                         hook_list = entry.get("hooks", []) if isinstance(entry, dict) else []
                         for hook in hook_list:
                             cmd = hook.get("command", "") if isinstance(hook, dict) else ""
-                            if "measure.py" in cmd and ("collect" in cmd or "session-end-flush" in cmd):
+                            if isinstance(cmd, str) and _TO_SESSION_END_CMD_RE.search(cmd):
                                 return True
             except (json.JSONDecodeError, PermissionError, OSError):
                 continue
@@ -18101,16 +18092,82 @@ def _auto_remove_bad_env_vars(settings=None):
     return removed
 
 
-def setup_hook(dry_run=False):
-    """Install the SessionEnd hook for automatic usage collection and dashboard refresh."""
-    # setup-hook targets ~/.claude/settings.json with a Claude Code hook that
-    # uses {"async": true}. Async hooks are a Claude Code feature; Codex skips
-    # them (see codex_doctor) and other runtimes use their own installers. So
-    # never write this hook under a non-Claude runtime — Codex must go through
-    # codex-install, which writes a synchronous .codex/hooks.json entry. GitHub #73-adjacent.
+def _is_token_optimizer_session_end_hook(hook: dict) -> bool:
+    """True when a single hook entry is Token Optimizer's SessionEnd hook.
+
+    Matches the same command signature ``_is_hook_installed`` recognizes:
+    a command invoking ``measure.py`` with the ``collect`` or
+    ``session-end-flush`` subcommand as its first positional argument
+    (``_TO_SESSION_END_CMD_RE``). The path may be quoted. Non-dict entries
+    are left untouched (returned False) so a malformed entry never gets
+    silently dropped.
+    """
+    if not isinstance(hook, dict):
+        return False
+    cmd = hook.get("command", "")
+    if not isinstance(cmd, str):
+        return False
+    return bool(_TO_SESSION_END_CMD_RE.search(cmd))
+
+
+def _remove_token_optimizer_session_end_hooks(settings: dict) -> int:
+    """Strip Token Optimizer's SessionEnd hooks from ``settings`` in place.
+
+    Mirrors the proven filter pattern in ``setup_smart_compact --uninstall``:
+    iterate the ``SessionEnd`` event only, drop hook entries whose command is
+    Token Optimizer's, keep every other hook (the user's own SessionEnd hooks
+    and ALL other hook events are left intact). Empty groups are removed; if
+    ``SessionEnd`` ends up empty, the key is dropped. Returns the count of
+    Token Optimizer hook entries removed. Never raises.
+    """
+    if not isinstance(settings, dict):
+        return 0
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return 0
+    session_end = hooks.get("SessionEnd")
+    if not isinstance(session_end, list) or not session_end:
+        return 0
+    removed = 0
+    new_groups = []
+    for group in session_end:
+        if not isinstance(group, dict):
+            new_groups.append(group)
+            continue
+        hook_list = group.get("hooks")
+        if not isinstance(hook_list, list):
+            new_groups.append(group)
+            continue
+        kept_hooks = [h for h in hook_list if not _is_token_optimizer_session_end_hook(h)]
+        removed += len(hook_list) - len(kept_hooks)
+        if kept_hooks:
+            group["hooks"] = kept_hooks
+            new_groups.append(group)
+    if new_groups:
+        hooks["SessionEnd"] = new_groups
+    else:
+        hooks.pop("SessionEnd", None)
+    return removed
+
+
+def setup_hook(dry_run=False, uninstall=False):
+    """Install or uninstall the SessionEnd hook for automatic usage collection.
+
+    ``uninstall=True`` removes ONLY Token Optimizer's own SessionEnd hook
+    entries from ``settings.json`` (commands containing ``measure.py`` plus
+    ``collect`` or ``session-end-flush``), leaving the user's other SessionEnd
+    hooks and all other hook events intact. Mirrors the proven filter pattern
+    in ``setup_smart_compact --uninstall``. Supports ``--dry-run``.
+
+    setup-hook targets ~/.claude/settings.json with a Claude Code hook that
+    uses {"async": true}. Async hooks are a Claude Code feature; Codex skips
+    them (see codex_doctor) and other runtimes use their own installers. So
+    never write this hook under a non-Claude runtime — Codex must go through
+    codex-install, which writes a synchronous .codex/hooks.json entry. GitHub #73-adjacent.
+    """
     if detect_runtime() != "claude":
-        # Informational on every path (including dry-run) so a non-Claude
-        # invocation isn't a silent no-op.
+        # Informational on every path (including dry-run / uninstall) so a
+        # non-Claude invocation isn't a silent no-op.
         print(
             "[Token Optimizer] setup-hook targets Claude Code (settings.json). "
             "For Codex use codex-install; other runtimes use their own installer."
@@ -18126,6 +18183,33 @@ def setup_hook(dry_run=False):
         except (json.JSONDecodeError, PermissionError, OSError) as e:
             print(f"[Error] Could not read {SETTINGS_PATH}: {e}")
             sys.exit(1)
+
+    if uninstall:
+        removed = _remove_token_optimizer_session_end_hooks(settings)
+        if dry_run:
+            print(f"\n  [Dry run] Would remove {removed} Token Optimizer SessionEnd hook(s) from {SETTINGS_PATH}")
+            print("  Run without --dry-run to apply.\n")
+            return
+        if removed == 0:
+            print("[Token Optimizer] No Token Optimizer SessionEnd hook found in settings.json. Nothing to remove.")
+            return
+        # Backup settings.json before mutating (mirrors the install path).
+        backup_dir = CLAUDE_DIR / "_backups" / "token-optimizer"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = backup_dir / f"settings.json.pre-hook-uninstall-{ts}"
+        if SETTINGS_PATH.exists():
+            import shutil
+            shutil.copy2(str(SETTINGS_PATH), str(backup_path))
+        try:
+            _write_settings_atomic(settings)
+            print(f"[Token Optimizer] Removed {removed} Token Optimizer SessionEnd hook(s) from settings.json.")
+            print(f"  Backup: {backup_path}")
+            print("  Other hooks (yours and other tools') were left intact.")
+        except PermissionError:
+            print(f"[Error] Permission denied writing {SETTINGS_PATH}.")
+            sys.exit(1)
+        return
 
     # Check if hook is installed and whether it needs upgrading
     installed = _is_hook_installed(settings)
@@ -32921,28 +33005,21 @@ if __name__ == "__main__":
     elif args[0] == "copilot-home":
         # Print the resolved Copilot home directory. Honors COPILOT_HOME via
         # runtime_env.copilot_home → _safe_home_from_env (confined under $HOME
-        # by the safe-home guard). Used by install.sh to show the TRUE hook
-        # destination in its success banner instead of a hardcoded ~/.copilot
-        # path (issue #78: WSL-root installs wrote to /root/.copilot which the
-        # Windows Copilot CLI never reads).
+        # by the safe-home guard, plus the WSL-root /mnt/ opt-in). Used by
+        # install.sh to show the TRUE hook destination in its success banner
+        # instead of a hardcoded ~/.copilot path (issue #78: WSL-root installs
+        # wrote to /root/.copilot which the Windows Copilot CLI never reads).
         #
-        # WSL-root exception (issue #78): when running as root under WSL,
-        # $HOME=/root, so runtime_env._is_safe_home_dir REJECTS a
-        # COPILOT_HOME=/mnt/c/Users/<you>/.copilot path (it's not under /root).
-        # That defeats the entire fix — the user sets COPILOT_HOME to the
-        # Windows profile path we suggested, and it's silently rejected. So
-        # here we apply a WSL-aware override: if COPILOT_HOME is set, absolute,
-        # and points under /mnt/ (the WSL Windows-mount root), accept it as a
-        # deliberate cross-filesystem opt-in. This is SAFE because:
-        #   - The user explicitly set COPILOT_HOME (opt-in, not autodetect).
-        #   - We require an absolute path (no relative traversal).
-        #   - We require it under /mnt/ (the WSL mount root; not arbitrary).
-        #   - We require it not be a symlink (no traversal tricks).
-        # The actual install (copilot_install.py → runtime_env.copilot_home)
-        # still applies the strict _is_safe_home_dir guard, so a HANDOFF TO
-        # REVIEWER is documented in findings/78-implementation.md to relax
-        # that guard for /mnt/ paths under WSL root. Until that lands, this
-        # subcommand at least makes the install.sh banner accurate.
+        # WSL-root /mnt/ opt-in (issue #78, closed): when running as root
+        # under WSL, $HOME=/root, so the strict _is_safe_home_dir guard
+        # REJECTS a COPILOT_HOME=/mnt/c/Users/<you>/.copilot path (it's not
+        # under /root). runtime_env._safe_home_from_env now accepts such a
+        # value when ALL of: WSL context detected (gated on /proc markers so
+        # native-Linux /mnt stays strict), path absolute, under /mnt/, not a
+        # symlink, exists and is a directory. The opt-in lives in
+        # runtime_env so copilot_home(), codex_home(), hermes_home(), and the
+        # opencode_*_home() resolvers all share it (single source of truth).
+        # This subcommand delegates via _resolve_copilot_home_wsl_aware().
         from runtime_env import copilot_home as _ch  # noqa: PLC0415
 
         resolved = _resolve_copilot_home_wsl_aware()
@@ -33394,7 +33471,8 @@ if __name__ == "__main__":
         check_hook()
     elif args[0] == "setup-hook":
         dry = "--dry-run" in args
-        setup_hook(dry_run=dry)
+        uninstall = "--uninstall" in args
+        setup_hook(dry_run=dry, uninstall=uninstall)
     elif args[0] == "setup-all-hooks":
         dry = "--dry-run" in args
         verbose = "--verbose" in args or "-v" in args
@@ -34958,6 +35036,7 @@ if __name__ == "__main__":
         print("  python3 measure.py check-hook           # Check if SessionEnd hook is installed")
         print("  python3 measure.py setup-hook           # Install SessionEnd hook")
         print("  python3 measure.py setup-hook --dry-run # Show what would be installed")
+        print("  python3 measure.py setup-hook --uninstall  # Remove Token Optimizer's SessionEnd hook")
         print("  python3 measure.py compact-capture          # Capture session state checkpoint")
         print("  python3 measure.py checkpoint-trigger --milestone pre-fanout  # Milestone checkpoint with guards")
         print("  python3 measure.py compact-restore          # Restore context from checkpoint")
