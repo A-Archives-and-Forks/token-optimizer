@@ -35,7 +35,7 @@ Audits a Claude Code or Codex setup, identifies context window waste, implements
 >   :  # genuine Claude Code session; fall through to measure.py (step 3 beats step 4)
 > elif [ -n "${OPENCODE_BIN:-}${OPENCODE_CONFIG_DIR:-}${OPENCODE_DATA_DIR:-}${OPENCODE_CONFIG:-}${OPENCODE_CLIENT:-}" ]; then
 >   echo "Token Optimizer — OpenCode runtime detected."
-> elif [ -n "${COPILOT_HOME:-}" ]; then
+> elif [ -n "${COPILOT_HOME:-}${TOKEN_OPTIMIZER_COPILOT_HOME:-}" ]; then
 >   echo "Token Optimizer — GitHub Copilot runtime detected."
 > fi
 > ```

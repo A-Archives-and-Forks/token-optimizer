@@ -473,12 +473,17 @@ _translate_windows_path_to_wsl() {
 #   $2 target_subpath : optional home-relative subdir (".copilot") enabling the
 #                       single-profile autodetect fallback; omit for env-only
 #                       recovery (backward compatible with the v5.11.31 callers)
+#   $3 export_as      : optional var name to EXPORT the recovered value under,
+#                       defaulting to $home_env_var. Lets Copilot read Windows'
+#                       legacy COPILOT_HOME but export it as the collision-free
+#                       TOKEN_OPTIMIZER_COPILOT_HOME (issue #78) so we never set
+#                       Copilot's own COPILOT_HOME (which would break its logging).
 _recover_home_from_windows_env() {
-    local home_env_var="$1" target_subpath="${2:-}"
+    local home_env_var="$1" target_subpath="${2:-}" export_as="${3:-$1}"
 
-    # Already set in this shell → the user opted in correctly (or WSLENV
-    # forwarded it); nothing to do.
-    [ -n "${!home_env_var:-}" ] && return 0
+    # Already resolved (either the read var or the export target is set) → the
+    # user opted in correctly (or WSLENV forwarded it); nothing to do.
+    { [ -n "${!home_env_var:-}" ] || [ -n "${!export_as:-}" ]; } && return 0
 
     # Only meaningful under WSL (mock /proc/version via _TO_PROC_VERSION in tests).
     local proc_version_file="${_TO_PROC_VERSION:-/proc/version}"
@@ -559,8 +564,8 @@ _recover_home_from_windows_env() {
             # value, and confirm the translation stayed under /mnt/ (rejects a
             # traversal like C:\..\..\..\etc that resolves outside the mount).
             if [ -n "$translated" ] && [ "${translated}" != "${translated#/mnt/}" ]; then
-                export "${home_env_var}=${translated}"
-                info "Recovered ${home_env_var} from the Windows environment: ${translated}"
+                export "${export_as}=${translated}"
+                info "Recovered ${export_as} from the Windows ${home_env_var}: ${translated}"
                 return 0
             fi
         fi
@@ -592,9 +597,9 @@ _recover_home_from_windows_env() {
         fi
         if [ "$win_count" = "1" ]; then
             local guessed="/mnt/c/Users/${win_user}/${target_subpath}"
-            export "${home_env_var}=${guessed}"
+            export "${export_as}=${guessed}"
             info "No ${home_env_var} found in Windows env; single Windows profile detected — targeting ${guessed}"
-            info "To override: ${home_env_var}=/mnt/c/Users/<your-user>/${target_subpath} bash install.sh ..."
+            info "To override: ${export_as}=/mnt/c/Users/<your-user>/${target_subpath} bash install.sh ..."
             return 0
         fi
     fi
@@ -634,25 +639,31 @@ install_copilot() {
         esac
     done
 
-    # WSL-root wrong-home recovery + warning (issue #78). First try to recover a
-    # COPILOT_HOME the user set in the Windows environment but that WSL bash never
-    # inherited (the most common failure: set in PowerShell, invisible to `bash
-    # install.sh`). If recovery succeeds, COPILOT_HOME is now exported and the
-    # warning below self-suppresses. If not, warn so the user can Ctrl-C and
-    # re-run with COPILOT_HOME set inline.
-    _recover_home_from_windows_env COPILOT_HOME ".copilot"
-    _copilot_wsl_root_warning
+    # WSL-root wrong-home recovery + warning (issue #78). COPILOT_HOME is GitHub
+    # Copilot CLI's OWN variable — setting it to a WSL /mnt path breaks Copilot's
+    # own logging — so Token Optimizer uses its own TOKEN_OPTIMIZER_COPILOT_HOME
+    # and never exports COPILOT_HOME. Recovery order:
+    #   1. TOKEN_OPTIMIZER_COPILOT_HOME from the Windows env, plus single-profile
+    #      autodetect under /mnt/c/Users/ (the common WSL-root case just works).
+    #   2. Legacy COPILOT_HOME from the Windows env (back-compat), but EXPORTED as
+    #      TOKEN_OPTIMIZER_COPILOT_HOME so we never re-set Copilot's own var.
+    # If recovery succeeds, TOKEN_OPTIMIZER_COPILOT_HOME is exported and the warning
+    # self-suppresses. If not (multi-profile, nothing set), warn so the user can
+    # re-run with TOKEN_OPTIMIZER_COPILOT_HOME set inline.
+    _recover_home_from_windows_env TOKEN_OPTIMIZER_COPILOT_HOME ".copilot"
+    _recover_home_from_windows_env COPILOT_HOME "" TOKEN_OPTIMIZER_COPILOT_HOME
+    _wsl_root_wrong_home_warning "Copilot" ".copilot" "TOKEN_OPTIMIZER_COPILOT_HOME" "--copilot"
 
     # Resolve the Copilot home via measure.py so the banner shows the TRUE
-    # hook destination. measure.py copilot-home applies a WSL-aware /mnt/
-    # exception (issue #78): under WSL root, $HOME=/root, so the strict
-    # runtime_env._is_safe_home_dir guard would reject a
-    # COPILOT_HOME=/mnt/c/Users/<you>/.copilot path (not under /root). The
-    # WSL-aware resolver accepts /mnt/ paths as a deliberate cross-filesystem
-    # opt-in. We forward the resolved path to copilot-install via --home so
-    # the install and the banner agree (otherwise the install would still
-    # write to /root/.copilot while the banner showed the /mnt/c/... path).
-    # Falls back to ~/.copilot if the query fails.
+    # hook destination. measure.py copilot-home resolves TOKEN_OPTIMIZER_COPILOT_HOME
+    # (exported just above), then auto-detects the WSL-root Windows profile under
+    # /mnt/c/Users/<you>/.copilot (issue #78): under WSL root $HOME=/root, so the
+    # strict runtime_env._is_safe_home_dir guard rejects a /mnt/... path — the
+    # WSL-aware resolver accepts it as a deliberate cross-filesystem opt-in. We
+    # forward the resolved path to copilot-install via --home so the install and
+    # the banner agree (otherwise the install would still write to /root/.copilot
+    # while the banner showed the /mnt/c/... path). Falls back to ~/.copilot if
+    # the query fails.
     local resolved_copilot_home
     resolved_copilot_home="$(TOKEN_OPTIMIZER_RUNTIME=copilot python3 "$measure_py" copilot-home 2>/dev/null || true)"
     [ -n "$resolved_copilot_home" ] || resolved_copilot_home="${HOME}/.copilot"

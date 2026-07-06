@@ -13,10 +13,13 @@ This module keeps runtime integration deliberately simple:
   the skill from scanning/mutating ~/.claude when the user is actually in OpenCode
   (issue #57). The ancestor signal is evaluated ahead of the Claude plugin-env
   heuristic so a coexisting Claude install on the same host can't shadow it.
-- Copilot activates when COPILOT_HOME is set, a `copilot` ancestor process is
-  detected, or TOKEN_OPTIMIZER_RUNTIME=copilot. The Copilot hook bridge always
-  sets the explicit override; the other signals are a safety net so the skill
-  never scans/mutates ~/.claude while actually running under GitHub Copilot.
+- Copilot activates when COPILOT_HOME or TOKEN_OPTIMIZER_COPILOT_HOME is set, a
+  `copilot` ancestor process is detected, or TOKEN_OPTIMIZER_RUNTIME=copilot.
+  The Copilot hook bridge always sets the explicit override; the other signals
+  are a safety net so the skill never scans/mutates ~/.claude while actually
+  running under GitHub Copilot. COPILOT_HOME is Copilot's OWN variable — TO
+  reads it but never asks users to set it (issue #78); TOKEN_OPTIMIZER_COPILOT_HOME
+  is TO's own collision-free override.
 - Callers can keep legacy variable names while resolving to the correct home.
 
 The goal is to let Token Optimizer share one Python core while platform
@@ -46,7 +49,19 @@ _CLAUDE_PLUGIN_ENVS = ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA")
 _CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 _CODEX_HOME_ENV = "CODEX_HOME"
 _HERMES_HOME_ENV = "HERMES_HOME"
+# COPILOT_HOME is GitHub Copilot CLI's OWN config variable (GitHub docs: it
+# "replaces the entire ~/.copilot path", and Copilot's session-state/,
+# session.db, events.jsonl all live inside it). Token Optimizer must NOT ask
+# users to set it: a WSL /mnt value set for TO's benefit is also read by the
+# native-Windows Copilot CLI and breaks its own session logging (issue #78).
+# So TO exposes its OWN namespaced override and only READS COPILOT_HOME as a
+# back-compat location hint (with a guardrail warning for /mnt values).
 _COPILOT_HOME_ENV = "COPILOT_HOME"
+_TO_COPILOT_HOME_ENV = "TOKEN_OPTIMIZER_COPILOT_HOME"
+# Windows profile names under /mnt/c/Users that are never a real user home.
+_WINDOWS_NONUSER_PROFILES = frozenset(
+    {"public", "all users", "default", "default user", "windows", "wpsystem"}
+)
 # OpenCode launch/config env vars. Their presence in this process's environment
 # is a strong signal we were spawned from within OpenCode. These are OpenCode's
 # own documented variables (config/data/bin/client), not anything we set.
@@ -60,6 +75,20 @@ _OPENCODE_ENV_SIGNALS = (
 # Set to a truthy value to skip the (cheap, best-effort) process-tree scan used
 # as a fallback OpenCode signal. Useful in tests/CI and locked-down sandboxes.
 _PROC_SCAN_DISABLE_ENV = "TOKEN_OPTIMIZER_NO_PROC_SCAN"
+
+# Warnings printed at most once per process. copilot_home()/_safe_home_from_env
+# can be called several times in a single command (doctor, install, hook fire),
+# and repeating the same warning 4x reads as four separate faults (issue #78,
+# assafbem's report). Dedup by exact message text.
+_warned_messages: set[str] = set()
+
+
+def _warn_once(msg: str) -> None:
+    """Print ``msg`` to stderr the first time it is seen this process."""
+    if msg in _warned_messages:
+        return
+    _warned_messages.add(msg)
+    print(msg, file=sys.stderr)
 
 
 def _home_root() -> Path:
@@ -156,6 +185,98 @@ def _wsl_mnt_safe_home(candidate: Path, *, mnt_root: Path | None = None) -> Path
         return None
 
 
+def _wsl_root_context() -> bool:
+    """True when running as root inside WSL — the issue #78 wrong-home case.
+
+    Under `bash install.sh` launched from a Windows shell, WSL runs as root, so
+    ``$HOME=/root`` while the user's real Copilot lives on the Windows profile
+    at ``/mnt/c/Users/<you>/.copilot``. Gated on actual WSL detection so a
+    native-Linux root session is unaffected. Never raises.
+    """
+    if not _is_wsl_context():
+        return False
+    try:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            return True
+    except OSError:
+        pass
+    try:
+        return _home_root() == Path("/root")
+    except (OSError, ValueError):
+        return False
+
+
+def _autodetect_wsl_copilot_home(mnt_root: Path | None = None) -> Path | None:
+    """Find the Windows-profile Copilot home from WSL-root (issue #78).
+
+    When running as root under WSL, ``$HOME/.copilot`` is ``/root/.copilot`` —
+    an empty dir the native-Windows Copilot CLI never reads. The real home is
+    the Windows profile at ``/mnt/c/Users/<you>/.copilot``. Probe for it so the
+    user never has to set an env var (and never has to set the collision-prone
+    COPILOT_HOME that would break Copilot's own logging).
+
+    Returns the resolved Path when EXACTLY ONE Windows profile carrying a
+    ``.copilot`` dir is found. Returns ``None`` when zero (caller falls back to
+    the default) or when several are found (ambiguous — the caller warns and
+    the user disambiguates with TOKEN_OPTIMIZER_COPILOT_HOME). Never raises.
+
+    ``mnt_root`` is a test-injection parameter (never set in production).
+    """
+    if not _wsl_root_context():
+        return None
+    root = Path(mnt_root) if mnt_root is not None else Path("/mnt")
+    try:
+        uniq: list[Path] = []
+        for drive in sorted(root.glob("*")):
+            users = drive / "Users"
+            if not users.is_dir():
+                continue
+            for prof in sorted(users.iterdir()):
+                if prof.name.lower() in _WINDOWS_NONUSER_PROFILES:
+                    continue
+                cand = prof / ".copilot"
+                try:
+                    if cand.is_dir() and not cand.is_symlink():
+                        resolved = cand.resolve(strict=False)
+                        if resolved not in uniq:
+                            uniq.append(resolved)
+                except OSError:
+                    continue
+        if len(uniq) == 1:
+            return uniq[0]
+        return None
+    except (OSError, ValueError):
+        return None
+
+
+def _looks_like_mnt_path(raw: str) -> bool:
+    """True when ``raw`` is an absolute WSL /mnt/ path (the #78 footgun value)."""
+    try:
+        return Path(raw).is_absolute() and raw.replace("\\", "/").startswith("/mnt/")
+    except (OSError, ValueError):
+        return raw.startswith("/mnt/")
+
+
+def _warn_mnt_copilot_home(raw: str) -> None:
+    """Warn that a /mnt COPILOT_HOME breaks native-Windows Copilot (issue #78).
+
+    GitHub Copilot CLI reads COPILOT_HOME itself; a WSL ``/mnt/...`` value —
+    meaningless on native Windows — makes Copilot relocate its own
+    session-state/session.db/events.jsonl into a path that doesn't exist, so it
+    silently stops logging. Steer the user to unset it and rely on
+    auto-detection, or to use Token Optimizer's own TOKEN_OPTIMIZER_COPILOT_HOME.
+    """
+    if not _looks_like_mnt_path(raw):
+        return
+    _warn_once(
+        f"[Token Optimizer] Warning: COPILOT_HOME={raw!r} is a WSL /mnt path. "
+        "GitHub Copilot CLI reads COPILOT_HOME too, and a /mnt value breaks its "
+        "own session logging on native Windows. Unset COPILOT_HOME (Token "
+        "Optimizer auto-detects your Windows Copilot home), or use "
+        "TOKEN_OPTIMIZER_COPILOT_HOME for Token Optimizer only."
+    )
+
+
 def _safe_home_from_env(env_var: str, fallback: Path, *, mnt_root: Path | None = None) -> Path:
     """Resolve a runtime-home env var without letting it escape user home.
 
@@ -185,7 +306,9 @@ def _safe_home_from_env(env_var: str, fallback: Path, *, mnt_root: Path | None =
     mnt_result = _wsl_mnt_safe_home(candidate, mnt_root=mnt_root)
     if mnt_result is not None:
         return mnt_result
-    print(f"[Token Optimizer] Warning: {env_var}={raw_val!r} rejected (not a safe directory). Using default.", file=sys.stderr)
+    _warn_once(
+        f"[Token Optimizer] Warning: {env_var}={raw_val!r} rejected (not a safe directory). Using default."
+    )
     return fallback
 
 
@@ -431,7 +554,12 @@ def _opencode_config_signal() -> bool:
     """
     if any(os.environ.get(v) for v in _CLAUDE_PLUGIN_ENVS):
         return False
-    if os.environ.get(_CODEX_HOME_ENV) or os.environ.get(_HERMES_HOME_ENV) or os.environ.get(_COPILOT_HOME_ENV):
+    if (
+        os.environ.get(_CODEX_HOME_ENV)
+        or os.environ.get(_HERMES_HOME_ENV)
+        or os.environ.get(_COPILOT_HOME_ENV)
+        or os.environ.get(_TO_COPILOT_HOME_ENV)
+    ):
         return False
     # A real Claude Code home (settings.json or projects/) means this is a Claude
     # user; the weak config-dir tier must not flip them to opencode. A live OpenCode
@@ -471,7 +599,7 @@ def _copilot_signal() -> bool:
     inside a Copilot CLI session (issue #57 class of bugs: never let an
     unrecognized host fall through to the Claude default and write ~/.claude).
     """
-    if os.environ.get(_COPILOT_HOME_ENV):
+    if os.environ.get(_COPILOT_HOME_ENV) or os.environ.get(_TO_COPILOT_HOME_ENV):
         return True
     return _ancestor_in_process_tree(_COPILOT_BASENAMES)
 
@@ -583,16 +711,46 @@ def hermes_home() -> Path:
 def copilot_home(*, mnt_root: Path | None = None) -> Path:
     """Return GitHub Copilot CLI's home directory (~/.copilot by default).
 
-    Honors COPILOT_HOME when it points at a safe directory under the user
-    home, or — under WSL only — an absolute, existing, non-symlink directory
-    under ``/mnt/`` (the WSL-root ``/mnt/`` opt-in, issue #78). This is where
-    Token Optimizer's own Copilot data lives (~/.copilot/token-optimizer/) —
-    never ~/.claude.
+    Resolution precedence (issue #78 — COPILOT_HOME is Copilot's OWN variable,
+    so TO must not depend on the user setting it):
 
-    ``mnt_root`` is a test-injection parameter (never set in production) so
-    tests can substitute a temp dir for ``/mnt`` on non-Linux hosts.
+      1. TOKEN_OPTIMIZER_COPILOT_HOME — Token Optimizer's own override. Honored
+         under the strict under-``$HOME`` guard, or the WSL-root ``/mnt/``
+         opt-in. This is the ONLY override users should set to disambiguate a
+         multi-profile Windows host; it never collides with Copilot's config.
+      2. COPILOT_HOME — read for back-compat as a location hint, but a WSL
+         ``/mnt/`` value earns a loud guardrail warning because the native
+         Windows Copilot CLI reads the same var and a /mnt value breaks its own
+         logging.
+      3. WSL-root auto-detect — when running as root under WSL (``$HOME=/root``)
+         and neither override is set, probe ``/mnt/c/Users/*/.copilot`` and use
+         the sole match, so no env var is needed at all.
+      4. ``$HOME/.copilot`` — the default.
+
+    This is where Token Optimizer's own Copilot data lives
+    (``<home>/token-optimizer/``) — never ~/.claude. ``mnt_root`` is a
+    test-injection parameter (never set in production) so tests can substitute a
+    temp dir for ``/mnt`` on non-Linux hosts.
     """
-    return _safe_home_from_env(_COPILOT_HOME_ENV, Path.home() / ".copilot", mnt_root=mnt_root)
+    fallback = Path.home() / ".copilot"
+
+    # 1. TO's own namespaced override wins (no collision with Copilot's config).
+    if os.environ.get(_TO_COPILOT_HOME_ENV, "").strip():
+        return _safe_home_from_env(_TO_COPILOT_HOME_ENV, fallback, mnt_root=mnt_root)
+
+    # 2. Copilot's own COPILOT_HOME — back-compat location hint, guarded.
+    cp_raw = os.environ.get(_COPILOT_HOME_ENV, "").strip()
+    if cp_raw:
+        _warn_mnt_copilot_home(cp_raw)
+        return _safe_home_from_env(_COPILOT_HOME_ENV, fallback, mnt_root=mnt_root)
+
+    # 3. WSL-root: auto-detect the Windows-profile Copilot home (no env var).
+    auto = _autodetect_wsl_copilot_home(mnt_root=mnt_root)
+    if auto is not None:
+        return auto
+
+    # 4. Default.
+    return fallback
 
 
 def _xdg_base(env_var: str, default_rel: str) -> Path:

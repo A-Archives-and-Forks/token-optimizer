@@ -214,7 +214,7 @@ def _copilot_audit_notice() -> None:
     print("  measure.py copilot-rollup    — collect sessions into trends")
     print("  measure.py copilot-doctor    — readiness + hook capability probe")
     print("  measure.py copilot-install   — wire Token Optimizer into ~/.copilot")
-    print("  measure.py copilot-home      — print resolved Copilot home (honors COPILOT_HOME)")
+    print("  measure.py copilot-home      — print resolved Copilot home (auto-detects WSL; override via TOKEN_OPTIMIZER_COPILOT_HOME)")
     print()
     print("To force this skill onto a specific runtime, set TOKEN_OPTIMIZER_RUNTIME.")
 
@@ -15629,12 +15629,14 @@ def _resolve_copilot_home_wsl_aware(mnt_root=None):
     behavior there is byte-identical to before.
 
     Precedence (handled inside ``runtime_env.copilot_home``):
-      1. COPILOT_HOME set + absolute + under $HOME + non-symlink dir → use it
-         (the strict safe-home guard).
-      2. COPILOT_HOME set + absolute + under /mnt/ + non-symlink dir + WSL
-         context → use it (the WSL-root cross-filesystem opt-in).
-      3. Otherwise → $HOME/.copilot (with a "rejected" warning for genuinely
-         rejected values; the /mnt opt-in is accepted silently).
+      1. TOKEN_OPTIMIZER_COPILOT_HOME (TO's own override) — strict under-$HOME
+         guard, or the WSL-root /mnt/ opt-in. The only var users should set.
+      2. COPILOT_HOME (Copilot's own var) — back-compat location hint; a /mnt/
+         value earns a guardrail warning because native-Windows Copilot reads
+         the same var and a /mnt value breaks its own logging (issue #78).
+      3. WSL-root auto-detect — probe /mnt/c/Users/*/.copilot for the sole
+         Windows profile, so no env var is needed.
+      4. Otherwise → $HOME/.copilot.
 
     ``mnt_root`` is a Path override for the WSL mount root, defaulting to
     ``/mnt``. It is a FUNCTION PARAMETER (not an env var) so it can ONLY be

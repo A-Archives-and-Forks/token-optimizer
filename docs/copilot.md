@@ -40,6 +40,36 @@ This writes user-level hooks to `~/.copilot/hooks/token-optimizer.json` only.
 We deliberately never write `.github/hooks/` — repo-level hooks would affect
 your whole team without consent.
 
+### Windows (WSL): let it auto-detect — do NOT set `COPILOT_HOME`
+
+Running `bash install.sh --copilot` from a Windows shell launches WSL as
+**root**, so `$HOME=/root` and a naive install would land in `/root/.copilot`,
+which the native-Windows Copilot CLI never reads. Token Optimizer now
+**auto-detects** your real Windows Copilot home under
+`/mnt/c/Users/<you>/.copilot` — you don't need to set anything. Just run:
+
+```bash
+bash install.sh --copilot
+TOKEN_OPTIMIZER_RUNTIME=copilot python3 skills/token-optimizer/scripts/measure.py copilot-doctor
+```
+
+> **Do not set `COPILOT_HOME` to a `/mnt/...` path.** `COPILOT_HOME` is GitHub
+> Copilot CLI's **own** configuration variable — setting it to a WSL `/mnt`
+> path (meaningless on native Windows) makes Copilot relocate its own
+> `session-state/`, `session.db`, and `events.jsonl` to a path that doesn't
+> exist, so it silently stops logging (and downstream tools like Langfuse lose
+> session output). If you previously set it, **unset it** and re-run.
+
+Only if you have **multiple** Windows user profiles (auto-detect can't guess
+which is yours) set Token Optimizer's own override — never Copilot's:
+
+```bash
+TOKEN_OPTIMIZER_COPILOT_HOME=/mnt/c/Users/<you>/.copilot bash install.sh --copilot
+```
+
+`TOKEN_OPTIMIZER_COPILOT_HOME` steers only Token Optimizer; the Copilot CLI
+never reads it, so it can't disturb Copilot's own logging.
+
 For VS Code per-request costs, enable both `github.copilot.chat.agentDebugLog`
 settings. Note: those debug logs store full prompt text on disk — that is a
 VS Code/Copilot behavior, and it's why the setting is opt-in.
