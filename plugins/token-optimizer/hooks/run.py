@@ -136,7 +136,16 @@ def main() -> int:
 
     # Use the interpreter that ran this wrapper so we inherit the correct
     # Python across macOS/Linux/Windows without relying on PATH.
-    cmd = [sys.executable, str(script_path), *script_args]
+    #
+    # Dispatch through module_runner.py rather than running script_path
+    # directly: CPython never caches __pycache__ bytecode for a script run as
+    # __main__, only for imported modules, so a direct `python script_path`
+    # recompiles the target from source on every single hook invocation. For
+    # measure.py (35k+ lines) that is ~0.3s of pure parse/compile paid on
+    # nearly every tool call. module_runner.py runs it as a module instead, so
+    # the import system's normal bytecode cache applies. See module_runner.py.
+    module_runner = Path(__file__).resolve().parent / "module_runner.py"
+    cmd = [sys.executable, str(module_runner), str(script_path.parent), script_path.stem, *script_args]
 
     # Consent gate: skip data collection until acknowledged.
     # EXEMPT: ensure-health and consent commands bootstrap the consent flag itself.
