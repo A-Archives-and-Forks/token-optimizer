@@ -34,6 +34,11 @@ CREDENTIAL_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
     ("PEM private key",         re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("Database URI",            re.compile(r"(?:postgres|postgresql|mysql|mongodb|mongodb\+srv|redis)://[^:\s/]+:[^@\s]+@", re.I)),
     ("HTTP basic auth URL",     re.compile(r"https?://[^:\s/@]+:[^@\s]+@", re.I)),
+    # Credentials passed as URL query parameters (e.g. ?token=..., ?api_key=...).
+    # The named `keep` group captures the "?name=" prefix so redaction preserves the
+    # parameter name and blanks only the value (see redact_credentials). The value
+    # match stops at the next `&`, whitespace, or quote so following params survive.
+    ("URL auth param",          re.compile(r"(?P<keep>[?&](?:token|key|api[_-]?key|access[_-]?token|auth)=)[^&\s\"']+", re.I)),
 ]
 
 # Bare compiled patterns list for backward compat with bash_compress.py
@@ -52,7 +57,16 @@ def scan_for_credentials(text: str) -> List[Tuple[str, str, int]]:
 
 
 def redact_credentials(text: str) -> str:
-    """Replace credential matches with [CREDENTIAL REDACTED: <type>] placeholders."""
+    """Replace credential matches with [CREDENTIAL REDACTED: <type>] placeholders.
+
+    A pattern may define a named `keep` group for a non-secret prefix that should
+    survive redaction (e.g. the "?token=" part of a URL auth parameter); only the
+    value after it is replaced. Patterns without a `keep` group redact the whole
+    match, unchanged.
+    """
     for label, pat in CREDENTIAL_PATTERNS:
-        text = pat.sub(f"[CREDENTIAL REDACTED: {label}]", text)
+        if "keep" in pat.groupindex:
+            text = pat.sub(rf"\g<keep>[CREDENTIAL REDACTED: {label}]", text)
+        else:
+            text = pat.sub(f"[CREDENTIAL REDACTED: {label}]", text)
     return text
