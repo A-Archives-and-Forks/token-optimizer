@@ -32,15 +32,23 @@ if [ -z "$RUNTIME" ]; then
   fi
 fi
 
-FLEET_PY=""
-for f in "$HOME/.config/opencode/plugins/cache"/*/token-optimizer/*/skills/fleet-auditor/scripts/fleet.py \
-         "$HOME/.codex/skills/fleet-auditor/scripts/fleet.py" \
-         "$HOME/.codex/plugins/cache"/*/token-optimizer/*/skills/fleet-auditor/scripts/fleet.py \
-         "$HOME/.claude/skills/fleet-auditor/scripts/fleet.py" \
-         "$HOME/.claude/plugins/cache"/*/token-optimizer/*/skills/fleet-auditor/scripts/fleet.py; do
-  [ -f "$f" ] && FLEET_PY="$f" && break
-done
-[ -z "$FLEET_PY" ] && { echo "[Error] fleet.py not found. Is Fleet Auditor installed?"; exit 1; }
+# Resolve fleet.py to the NEWEST installed copy across channels so a stale
+# plugin-cache copy never shadows a fresh install (issue #57). find -L follows the
+# install.sh symlink under ~/.claude/skills; cd -P resolves it before reading each
+# copy's plugin.json for its version. find (not bare globs) never errors under zsh.
+FLEET_PY=""; _best_ver=""
+while IFS= read -r _cand; do
+  [ -f "$_cand" ] || continue
+  _root="$(cd -P -- "$(dirname -- "$_cand")/../../.." 2>/dev/null && pwd)"
+  _ver="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_root/.claude-plugin/plugin.json" 2>/dev/null | head -1)"
+  [ -n "$_ver" ] || _ver="0.0.0"
+  if [ -z "$_best_ver" ] || [ "$(printf '%s\n%s\n' "$_ver" "$_best_ver" | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n | tail -n1)" = "$_ver" ]; then
+    _best_ver="$_ver"; FLEET_PY="$_cand"
+  fi
+done <<EOF
+$(find -L "$HOME/.claude/skills" "$HOME/.claude/plugins/cache" "$HOME/.claude/token-optimizer" "$HOME/.codex/skills" "$HOME/.codex/plugins/cache" "$HOME/.config/opencode/plugins" -type f -name fleet.py -path '*fleet-auditor*/scripts/fleet.py' 2>/dev/null)
+EOF
+if [ -z "$FLEET_PY" ]; then echo "[Error] fleet.py not found. Is Fleet Auditor installed?"; exit 1; fi
 echo "Using: $FLEET_PY"
 export TOKEN_OPTIMIZER_RUNTIME="$RUNTIME"
 ```

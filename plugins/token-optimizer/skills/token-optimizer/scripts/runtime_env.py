@@ -78,16 +78,39 @@ _PROC_SCAN_DISABLE_ENV = "TOKEN_OPTIMIZER_NO_PROC_SCAN"
 
 # Warnings printed at most once per process. copilot_home()/_safe_home_from_env
 # can be called several times in a single command (doctor, install, hook fire),
-# and repeating the same warning 4x reads as four separate faults (issue #78,
+# and repeating the same warning reads as separate faults (issue #78,
 # assafbem's report). Dedup by exact message text.
-_warned_messages: set[str] = set()
+#
+# The registry lives on ``sys`` — a guaranteed process-singleton — rather than a
+# module global, because on Windows this module can be imported under two
+# distinct identities (measure.py inserts scripts/ onto sys.path, and case- or
+# separator-normalized path variants resolve to separate module objects). Two
+# module objects mean two module-level sets, so a module global deduped the
+# warning per-copy and it still printed twice. Anchoring the set on ``sys``
+# makes every copy share one registry. (assafbem, native-Windows, #78.)
+_WARN_REGISTRY_ATTR = "_token_optimizer_warned_messages"
+
+
+def _warned_registry() -> set:
+    """Return the process-singleton set of already-emitted warning messages.
+
+    Anchored on ``sys`` so every imported copy of this module (see the Windows
+    dual-identity note above) resolves to the same set. Also the reset/snapshot
+    seam tests use to isolate per-call dedup assertions.
+    """
+    registry = getattr(sys, _WARN_REGISTRY_ATTR, None)
+    if registry is None:
+        registry = set()
+        setattr(sys, _WARN_REGISTRY_ATTR, registry)
+    return registry
 
 
 def _warn_once(msg: str) -> None:
     """Print ``msg`` to stderr the first time it is seen this process."""
-    if msg in _warned_messages:
+    registry = _warned_registry()
+    if msg in registry:
         return
-    _warned_messages.add(msg)
+    registry.add(msg)
     print(msg, file=sys.stderr)
 
 
@@ -306,8 +329,19 @@ def _safe_home_from_env(env_var: str, fallback: Path, *, mnt_root: Path | None =
     mnt_result = _wsl_mnt_safe_home(candidate, mnt_root=mnt_root)
     if mnt_result is not None:
         return mnt_result
+    # Name the most common reason so the fix is obvious (assafbem, #78): a
+    # ``/mnt/...`` value is a WSL mount path and is only honored inside WSL; on
+    # native Windows it points nowhere, so it is rejected. The /mnt opt-in above
+    # already accepted any legitimately-WSL value, so reaching here with a /mnt
+    # path means we are not in that context.
+    hint = ""
+    if _looks_like_mnt_path(raw_val):
+        hint = (
+            " (a /mnt path is WSL-only; on native Windows use a real path like"
+            " C:\\Users\\<you>\\.copilot, or unset it and let auto-detect find it)"
+        )
     _warn_once(
-        f"[Token Optimizer] Warning: {env_var}={raw_val!r} rejected (not a safe directory). Using default."
+        f"[Token Optimizer] Warning: {env_var}={raw_val!r} rejected (not a safe directory). Using default.{hint}"
     )
     return fallback
 
