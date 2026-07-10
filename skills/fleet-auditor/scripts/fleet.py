@@ -151,12 +151,43 @@ DEFAULT_PRICING: dict[str, dict[str, float]] = {
     "gemini-3.1-pro-preview": {"input": 2.0/1e6, "output": 12.0/1e6, "cache_read": 0.20/1e6, "cache_write": 0},
     "gemini-3.1-flash-lite": {"input": 0.25/1e6, "output": 1.50/1e6, "cache_read": 0.025/1e6, "cache_write": 0},
     "gemini-3.1-pro": {"input": 2.0/1e6, "output": 12.0/1e6, "cache_read": 0.20/1e6, "cache_write": 0},
-    "gemini-3-pro": {"input": 2.0/1e6, "output": 12.0/1e6, "cache_read": 0, "cache_write": 0},
-    "gemini-3-flash": {"input": 0.50/1e6, "output": 3.0/1e6, "cache_read": 0, "cache_write": 0},
+    "gemini-3-pro": {"input": 2.0/1e6, "output": 12.0/1e6, "cache_read": 0.20/1e6, "cache_write": 0},
+    "gemini-3-flash": {"input": 0.50/1e6, "output": 3.0/1e6, "cache_read": 0.05/1e6, "cache_write": 0},
     "gemini-2.5-pro": {"input": 1.25/1e6, "output": 10.0/1e6, "cache_read": 0.125/1e6, "cache_write": 0},
     "gemini-2.5-flash": {"input": 0.30/1e6, "output": 2.50/1e6, "cache_read": 0.03/1e6, "cache_write": 0},
     "gemini-2.5-flash-lite": {"input": 0.10/1e6, "output": 0.40/1e6, "cache_read": 0.01/1e6, "cache_write": 0},
 }
+
+# Sonnet 5 introductory pricing ($2/$10; cache_read 0.2, cache_write 2.5[5m]/4.0[1h]) is in
+# effect through 2026-08-31; the STANDARD rate ($3/$15) resumes 2026-09-01. DEFAULT_PRICING
+# holds the canonical standard card; while the window is open we swap the introductory card in so
+# fleet cost/waste dollars stay accurate today AND flip back automatically at UTC midnight (in
+# lockstep with measure.py + the TS ports). Production reads the wall clock;
+# TOKEN_OPTIMIZER_PRICING_AS_OF (YYYY-MM-DD) pins it for tests. The single "sonnet" bucket cannot
+# isolate Sonnet 5, so Sonnet 4.6 is repriced too (accepted 2026-07-10). Mirrors measure.py.
+_SONNET_STANDARD_RATES = {"input": 3.0/1e6, "output": 15.0/1e6, "cache_read": 0.3/1e6, "cache_write": 3.75/1e6, "cache_write_1h": 6.0/1e6}
+_SONNET_INTRO_RATES = {"input": 2.0/1e6, "output": 10.0/1e6, "cache_read": 0.2/1e6, "cache_write": 2.5/1e6, "cache_write_1h": 4.0/1e6}
+_SONNET_INTRO_PRICING_UNTIL = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+
+def _apply_sonnet_intro_pricing(as_of=None):
+    """Swap the sonnet card to the introductory rate while it is in effect (idempotent). A naive
+    `as_of`/env date is treated as UTC. Returns True when introductory pricing is active."""
+    override = os.environ.get("TOKEN_OPTIMIZER_PRICING_AS_OF")
+    if as_of is None and override:
+        try:
+            as_of = datetime.strptime(override, "%Y-%m-%d")
+        except ValueError:
+            as_of = None
+    d = as_of or datetime.now(timezone.utc)
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    intro = d < _SONNET_INTRO_PRICING_UNTIL
+    DEFAULT_PRICING["sonnet"] = dict(_SONNET_INTRO_RATES if intro else _SONNET_STANDARD_RATES)
+    return intro
+
+
+_apply_sonnet_intro_pricing()
 
 _pricing_override: dict | None = None
 

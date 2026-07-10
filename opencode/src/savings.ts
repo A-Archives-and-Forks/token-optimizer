@@ -141,6 +141,11 @@ export interface RealizedSavings {
   savingsPerSession: number;
   beforeCostPerSession: number;
   afterCostPerSession: number;
+  /** Baseline session's native cache-read fraction (0..1) -- explains why identical
+   * tokens+mix can price differently across the arms (issue #87 contradiction #1). */
+  beforeCacheHit: number;
+  /** Current pool cache-hit rate (0..1). */
+  afterCacheHit: number;
   sessionsPerMonth: number;
   beforeMixLabel: string;
   afterMixLabel: string;
@@ -173,6 +178,8 @@ const NOT_READY = (status: string): RealizedSavings => ({
   savingsPerSession: 0,
   beforeCostPerSession: 0,
   afterCostPerSession: 0,
+  beforeCacheHit: 0,
+  afterCacheHit: 0,
   sessionsPerMonth: 0,
   beforeMixLabel: "n/a",
   afterMixLabel: "n/a",
@@ -396,8 +403,11 @@ export function computeRealizedSavings(
   const compressionAddback = m(compressionAddbackWindow);
   const verbosityAddback = m(verbosityAddbackWindow);
 
-  // MAIN transformation = counterfactual − actual (clamped >= 0), monthly.
-  const mainTransformation = Math.max(0, counterfactualMonthly - actualMonthly);
+  // MAIN transformation = counterfactual − actual, UNCLAMPED, monthly. A net-negative main
+  // pool (now marginally costlier than the frozen baseline this period) is carried honestly
+  // into the combined net below rather than clamped to 0 -- clamping it while the arms stayed
+  // honest is what let the headline assert a saving beside net-negative arms (issue #87).
+  const mainTransformation = counterfactualMonthly - actualMonthly;
 
   // SUBAGENT pool (#2) = 0. OpenCode has NO Claude-style sidechains: no
   // is_sidechain column on session_log, no separate subagent transcripts to read.
@@ -405,9 +415,12 @@ export function computeRealizedSavings(
   // sessions distinctly, port _subagent_pool_savings here.
   const subagentTransformation = 0;
 
-  // Headline = main + subagent (0) + compression add-back + verbosity add-back
-  // (four disjoint pools), monthly.
-  const transformation = mainTransformation + subagentTransformation + compressionAddback + verbosityAddback;
+  // Combined net across the four disjoint pools (== combinedCf - actualMonthly). The HEADLINE
+  // is this net, but never negative in the public contract: when net <= 0 it reads 0 and the
+  // dashboard hides the hero (mirrors measure.py's net_negative path). When shown (> 0) it
+  // EQUALS counterfactual - actual exactly, so the top line and the arms can never disagree.
+  const net = mainTransformation + subagentTransformation + compressionAddback + verbosityAddback;
+  const transformation = Math.max(0, net);
 
   // Per-session keys (dashboard reads them) = the FROZEN typical-session anchors
   // directly. before_* = "the old way" (stable across runs); after_* = "now" (moves
@@ -431,13 +444,11 @@ export function computeRealizedSavings(
   // Routing carries the cache-write reprice (#2). Compression is the third lever.
   // Levers are computed on the WINDOW arms then scaled by m() so they telescope to
   // the (monthly) main transformation.
-  let sRoute = 0, sCache = 0;
-  if (mainTransformation > 0) {
-    // Per-session: typical baseline cache split repriced at the actual mix, then x count.
-    const vRouteS = price(tFi, tCr, tOut, afterMix) + price_cw(tCw, afterMix);
-    sRoute = (oldCps - vRouteS) * sessionsPerMonth; // before->after mix (incl CW)
-    sCache = (vRouteS - nowCps) * sessionsPerMonth; // remaining gap = caching
-  }
+  // Always decompose the main pool, even when it is net-negative, so the waterfall sums to
+  // the honest net including a pool that grew (shown honestly as a "-$X" lever).
+  const vRouteS = price(tFi, tCr, tOut, afterMix) + price_cw(tCw, afterMix);
+  const sRoute = (oldCps - vRouteS) * sessionsPerMonth; // before->after mix (incl CW)
+  const sCache = (vRouteS - nowCps) * sessionsPerMonth; // remaining gap = caching
 
   const breakdown: SavingsBreakdownItem[] = [
     { key: "routing", label: "Smarter model routing (lighter mix)", monthlyUsd: sRoute },
@@ -482,6 +493,8 @@ export function computeRealizedSavings(
     savingsPerSession: beforeCps - afterCps,
     beforeCostPerSession: beforeCps,
     afterCostPerSession: afterCps,
+    beforeCacheHit: tPool > 0 ? tCr / tPool : 0,
+    afterCacheHit: curHit,
     sessionsPerMonth,
     beforeMixLabel: mixLabel(beforeMix),
     afterMixLabel: mixLabel(afterMix),

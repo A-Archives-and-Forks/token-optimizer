@@ -1095,17 +1095,24 @@ function renderSavings(data: DashboardData): string {
     : "";
 
   // --- Item 1 + 6: transformation hero with $ AND %, plus old-way vs now arms ---
-  // Clamp the monthly figure at 0 for display (negative = usage grew, shown in per-session line).
-  const heroMonthly = Math.max(0, s.monthlySavingsUsd);
-  const pctDisplay = s.transformationPct > 0
+  // Gate the hero on a GENUINE net win (issue #87): the headline IS the honest net of the
+  // arms (counterfactual - actual), so when that net is <= 0 we show a neutral "roughly flat"
+  // card instead of clamping a positive number beside net-negative arms. No display clamp.
+  const heroReady = s.ready && s.monthlySavingsUsd > 0;
+  const pctDisplay = heroReady && s.transformationPct > 0
     ? `<span style="font-size:28px;color:var(--c-accent-cyan);font-family:var(--font-mono)">&minus;${(s.transformationPct * 100).toFixed(0)}%</span>`
     : "";
+  // Cache-reuse split: shown only when the arms differ, so identical tokens+mix with a
+  // different per-session cost is explainable rather than looking impossible (#87 contra #1).
+  const cacheLine = Math.round(s.beforeCacheHit * 100) !== Math.round(s.afterCacheHit * 100)
+    ? ` &middot; ${Math.round(s.beforeCacheHit * 100)}% &rarr; ${Math.round(s.afterCacheHit * 100)}% cache reuse`
+    : "";
 
-  const hero = s.ready
+  const hero = heroReady
     ? `<div class="card">
         <div class="card-header"><span>Monthly transformation</span> ${installLine}</div>
         <div style="display:flex;align-items:baseline;gap:var(--s-3);padding:var(--s-2) 0;flex-wrap:wrap">
-          <div class="daily-stat-val" style="font-size:64px">${fmtCost(heroMonthly)}</div>
+          <div class="daily-stat-val" style="font-size:64px">${fmtCost(s.monthlySavingsUsd)}</div>
           <div style="color:var(--c-text-dim);font-size:15px">/ month</div>
           ${pctDisplay}
         </div>
@@ -1121,10 +1128,20 @@ function renderSavings(data: DashboardData): string {
           <span class="sba-delta">${s.savingsPerSession >= 0 ? "&minus;" : "+"}${fmtCost(Math.abs(s.savingsPerSession))}/session</span>
         </div>
         <div style="color:var(--c-text-dim);font-size:13px;margin-top:var(--s-2)">
-          ${esc(s.beforeMixLabel)} &rarr; ${esc(s.afterMixLabel)} &middot; ~${Math.round(s.sessionsPerMonth)} sessions/mo
+          ${esc(s.beforeMixLabel)} &rarr; ${esc(s.afterMixLabel)}${cacheLine} &middot; ~${Math.round(s.sessionsPerMonth)} sessions/mo
         </div>
       </div>`
-    : `<div class="card" style="border-left:3px solid var(--c-accent-cyan)">
+    : s.ready
+      ? `<div class="card">
+        <div class="card-header"><span>At or above your baseline this period</span> ${installLine}</div>
+        <div style="color:var(--c-text-dim);font-size:13px;padding:var(--s-2) 0">
+          Your recent sessions cost about what your frozen baseline would have
+          (est. <strong style="color:var(--c-text-main)">${fmtCost(s.actualMonthlyUsd)}/mo</strong> now
+          vs <strong style="color:var(--c-text-dim)">${fmtCost(s.counterfactualMonthlyUsd)}/mo</strong> the old way).
+          The Waste tab shows per-pattern savings you can act on right now.
+        </div>
+      </div>`
+      : `<div class="card" style="border-left:3px solid var(--c-accent-cyan)">
         <div class="card-header"><span>Baseline frozen &mdash; building comparison</span> ${installLine}</div>
         ${s.baselineBuilding ? buildingProgress(s.baselineBuilding) : `<div class="empty-state" style="padding:var(--s-3) 0">
           <span style="color:var(--c-text-dim);font-size:13px">${esc(s.status)}</span>
@@ -1139,7 +1156,7 @@ function renderSavings(data: DashboardData): string {
       </div>`
     : "";
 
-  const levers = s.ready && s.breakdown.length
+  const levers = heroReady && s.breakdown.length
     ? `<div class="card">
         <div class="card-header"><span>Where the savings come from</span></div>
         ${s.breakdown

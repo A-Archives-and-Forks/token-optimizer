@@ -317,15 +317,20 @@ tr:hover td { background: var(--bg-hover); }
     <!-- TRANSFORMATION HERO: the big picture estimated (old way vs now). -->
     <!-- INVARIANT: compressionMeasuredUsd is rendered below as a SEPARATE card    -->
     <!-- and is NEVER summed into monthlySavingsUsd. Do not change this.           -->
+    <!-- Issue #87: the hero shows only on a GENUINE net win (monthlySavingsUsd>0), -->
+    <!-- so the clamped headline can never sit beside net-negative arms. When the   -->
+    <!-- net is <= 0 we show a neutral "roughly flat" card; the measured floor below -->
+    <!-- still reports realized savings.                                            -->
+    ${savings.monthlySavingsUsd > 0 ? `
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:var(--s-6);margin-bottom:var(--s-4);">
       <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-2);">The big picture &middot; estimated</div>
       <div style="display:flex;align-items:baseline;gap:var(--s-2);flex-wrap:wrap;margin-bottom:var(--s-3);">
-        <span style="font-family:monospace;font-size:52px;font-weight:700;line-height:1;color:var(--success)">${fmtCost(Math.max(0, savings.monthlySavingsUsd))}</span>
+        <span style="font-family:monospace;font-size:52px;font-weight:700;line-height:1;color:var(--success)">${fmtCost(savings.monthlySavingsUsd)}</span>
         <span style="font-size:20px;color:var(--text-dim);font-family:monospace;">/mo${savings.transformationPct > 0 ? ` &mdash; ~${Math.round(savings.transformationPct * 100)}% lighter` : ""}</span>
       </div>
       <div style="font-size:13px;color:var(--text-dim);line-height:1.6;margin-bottom:var(--s-4);">
         Had you worked this period the way you did before Token Optimizer, you'd have paid about
-        <strong style="color:var(--text)">${fmtCost(Math.max(0, savings.monthlySavingsUsd))} more</strong>
+        <strong style="color:var(--text)">${fmtCost(savings.monthlySavingsUsd)} more</strong>
         &mdash; est. <strong style="color:var(--text)">${fmtCost(savings.actualMonthlyUsd)}</strong> now vs
         <strong style="color:var(--text)">${fmtCost(savings.counterfactualMonthlyUsd)}</strong> the old way.
         Your volume is held constant on both sides, so this is pure efficiency, not workload growth.
@@ -335,17 +340,17 @@ tr:hover td { background: var(--bg-hover); }
         <div>
           <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-1);">The old way</div>
           <div style="font-family:monospace;font-size:22px;font-weight:700;color:var(--text)">${fmtCost(savings.beforeCostPerSession)}<span style="font-size:12px;color:var(--text-dim)">/session</span></div>
-          <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1)">${esc(savings.beforeMixLabel)}</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1)">${esc(savings.beforeMixLabel)}${Math.round(savings.beforeCacheHit * 100) !== Math.round(savings.afterCacheHit * 100) ? ` &middot; ${Math.round(savings.beforeCacheHit * 100)}% cache reuse` : ""}</div>
         </div>
         <div>
           <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-1);">Now</div>
           <div style="font-family:monospace;font-size:22px;font-weight:700;color:var(--success)">${fmtCost(savings.afterCostPerSession)}<span style="font-size:12px;color:var(--text-dim)">/session</span></div>
-          <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1)">${esc(savings.afterMixLabel)}</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1)">${esc(savings.afterMixLabel)}${Math.round(savings.beforeCacheHit * 100) !== Math.round(savings.afterCacheHit * 100) ? ` &middot; ${Math.round(savings.afterCacheHit * 100)}% cache reuse` : ""}</div>
         </div>
         <div>
-          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-1);">Cut per session</div>
-          <div style="font-family:monospace;font-size:22px;font-weight:700;color:var(--success)">${fmtCost(Math.abs(savings.savingsPerSession))}</div>
-          <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1);">across ~${Math.round(savings.sessionsPerMonth)} sessions/mo</div>
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-1);">${savings.savingsPerSession >= 0 ? "Cut per session" : "Added per session"}</div>
+          <div style="font-family:monospace;font-size:22px;font-weight:700;color:${savings.savingsPerSession >= 0 ? "var(--success)" : "var(--danger)"}">${savings.savingsPerSession >= 0 ? "" : "+"}${fmtCost(Math.abs(savings.savingsPerSession))}</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1);">main-work routing &amp; caching &middot; ~${Math.round(savings.sessionsPerMonth)} sessions/mo</div>
         </div>
         <div>
           <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-1);">Saved to date</div>
@@ -365,6 +370,17 @@ tr:hover td { background: var(--bg-hover); }
         </tbody>
       </table>
     </div>
+    ` : `
+    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:var(--s-6);margin-bottom:var(--s-4);">
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-2);">At or above your baseline this period</div>
+      <div style="font-size:13px;color:var(--text-dim);line-height:1.6;">
+        Your recent sessions cost about what your frozen baseline would have
+        (est. <strong style="color:var(--text)">${fmtCost(savings.actualMonthlyUsd)}</strong> now vs
+        <strong style="color:var(--text)">${fmtCost(savings.counterfactualMonthlyUsd)}</strong> the old way).
+        The measured floor below is what Token Optimizer has counted directly.
+      </div>
+    </div>
+    `}
 
     <!-- MEASURED FLOOR card: the proven, event-by-event subset. -->
     <!-- SEPARATE from the transformation hero. Never summed into the headline.     -->
