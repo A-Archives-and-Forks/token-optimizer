@@ -762,6 +762,11 @@ export interface RealizedSavings {
   beforeCostPerSession: number;
   /** "Now" cost per session (actual / current session count). */
   afterCostPerSession: number;
+  /** Baseline session's native cache-read fraction (0..1). Explains why identical tokens+mix
+   * can price differently across the arms (issue #87 contradiction #1). */
+  beforeCacheHit: number;
+  /** Current pool cache-hit rate (0..1). */
+  afterCacheHit: number;
   sessionsPerMonth: number;
   beforeMixLabel: string;
   afterMixLabel: string;
@@ -806,6 +811,8 @@ const NOT_READY = (status: string): RealizedSavings => ({
   savingsPerSession: 0,
   beforeCostPerSession: 0,
   afterCostPerSession: 0,
+  beforeCacheHit: 0,
+  afterCacheHit: 0,
   sessionsPerMonth: 0,
   beforeMixLabel: "n/a",
   afterMixLabel: "n/a",
@@ -957,8 +964,12 @@ export function computeRealizedSavings(
   const compReprice = inAfter > 0 ? inBefore / inAfter : 1;
   const compressionAddback = Math.max(0, compMeasured * compReprice);
 
-  // MAIN transformation (monthly) = (old_cps - now_cps) x monthly session count. Clamp >= 0.
-  const mainTransformation = Math.max(0, cfMonthlyMain - actualMonthlyMain);
+  // MAIN transformation (monthly) = (old_cps - now_cps) x monthly session count, UNCLAMPED.
+  // A net-negative main pool (now marginally costlier than the frozen baseline this period)
+  // is carried honestly into the combined net below rather than clamped to 0 -- clamping it
+  // while the "now vs old way" arms stayed honest is what let the headline assert a saving
+  // beside net-negative arms (issue #87). The headline is now the honest net of the arms.
+  const mainTransformation = cfMonthlyMain - actualMonthlyMain;
 
   // SUBAGENT pool (#2) = 0. OpenClaw has NO Claude-style sidechains (subagent
   // transcripts), so there is no separate sidechain pool to price. Documented gap.
@@ -980,13 +991,21 @@ export function computeRealizedSavings(
 
   const compressionMonthly = m(compressionAddback);
   const verbosityMonthly = m(verbosityAddback);
-  const transformation = mainTransformation + subagentTransformation + compressionMonthly + verbosityMonthly;
 
   // Combined arms (headline spans the main pool + the compression add-back +
   // the verbosity add-back; both add-back pools' actual is 0, so their
   // counterfactual == their contribution).
   const actualMonthly = actualMonthlyMain;
   const counterfactualMonthly = cfMonthlyMain + compressionMonthly + verbosityMonthly;
+  // HEADLINE = the honest net of the arms (== counterfactual - actual). Equivalent to
+  // mainTransformation + subagent(0) + compression + verbosity, so the per-lever waterfall
+  // below decomposes exactly this quantity. Can be <= 0 (efficiency flat / baseline cheaper);
+  // the dashboard hides the hero in that case rather than clamping it positive.
+  const net = counterfactualMonthly - actualMonthly;
+  // Public contract: the headline is NEVER negative. When net <= 0 it reads 0 and the
+  // dashboard hides the hero (mirrors measure.py's net_negative path); when shown (> 0) it
+  // EQUALS counterfactual - actual exactly, so the top line and the arms can never disagree.
+  const transformation = Math.max(0, net);
   const transformationPct =
     counterfactualMonthly > 0 ? transformation / counterfactualMonthly : 0;
 
@@ -995,15 +1014,13 @@ export function computeRealizedSavings(
   // (baseline footprint INCLUDING cache-write, repriced from baseline mix to the
   // actual mix), then caching at the actual mix. The two UNROUNDED steps telescope
   // exactly to the MAIN transformation; compression is the third (disjoint) lever.
-  let sRoute = 0, sCache = 0;
-  if (mainTransformation > 0) {
-    // Per-session: typical baseline cache split repriced at the actual mix, then x count.
-    const vRouteS =
-      pricePool(tFi, tCr, tOut, afterShares, proxy, openclawDir) +
-      priceCacheWrite(tCw, 0, tCw, afterShares, proxy, openclawDir);
-    sRoute = (oldCps - vRouteS) * sessionsPerMonth; // before->after mix (incl. cache-write)
-    sCache = (vRouteS - nowCps) * sessionsPerMonth; // remaining gap = caching
-  }
+  // Always decompose the main pool, even when it is net-negative, so the waterfall sums to
+  // the honest net including a pool that grew (shown honestly as a "-$X" lever).
+  const vRouteS =
+    pricePool(tFi, tCr, tOut, afterShares, proxy, openclawDir) +
+    priceCacheWrite(tCw, 0, tCw, afterShares, proxy, openclawDir);
+  const sRoute = (oldCps - vRouteS) * sessionsPerMonth; // before->after mix (incl. cache-write)
+  const sCache = (vRouteS - nowCps) * sessionsPerMonth; // remaining gap = caching
   const breakdown: SavingsBreakdownItem[] = [
     { key: "routing", label: "Smarter model routing (incl. cache-write)", monthlyUsd: round2(sRoute) },
     { key: "context_rereads", label: "Lighter sessions (better cache reuse)", monthlyUsd: round2(sCache) },
@@ -1035,6 +1052,8 @@ export function computeRealizedSavings(
     savingsPerSession: round4(beforeCps - afterCps),
     beforeCostPerSession: round4(beforeCps),
     afterCostPerSession: round4(afterCps),
+    beforeCacheHit: round4(tPool > 0 ? tCr / tPool : 0),
+    afterCacheHit: round4(curHit),
     sessionsPerMonth,
     beforeMixLabel: mixLabel(beforeShares),
     afterMixLabel: mixLabel(afterShares),

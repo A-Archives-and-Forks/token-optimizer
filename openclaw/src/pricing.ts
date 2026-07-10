@@ -106,8 +106,8 @@ export const DEFAULT_PRICING: Record<string, ModelPricing> = {
   "gemini-3.5-flash": { input: 1.5 / 1e6, output: 9.0 / 1e6,  cacheRead: 0.15 / 1e6,  cacheWrite: 0 },
   "gemini-3.1-pro-preview": { input: 2.0 / 1e6, output: 12.0 / 1e6, cacheRead: 0.20 / 1e6, cacheWrite: 0 },
   "gemini-3.1-flash-lite": { input: 0.25 / 1e6, output: 1.5 / 1e6, cacheRead: 0.025 / 1e6, cacheWrite: 0 },
-  "gemini-3-pro":  { input: 2.0 / 1e6,   output: 12.0 / 1e6,  cacheRead: 0,           cacheWrite: 0 },
-  "gemini-3-flash": { input: 0.5 / 1e6,  output: 3.0 / 1e6,   cacheRead: 0,           cacheWrite: 0 },
+  "gemini-3-pro":  { input: 2.0 / 1e6,   output: 12.0 / 1e6,  cacheRead: 0.20 / 1e6,  cacheWrite: 0 },
+  "gemini-3-flash": { input: 0.5 / 1e6,  output: 3.0 / 1e6,   cacheRead: 0.05 / 1e6,  cacheWrite: 0 },
   "gemini-3.1-pro": { input: 2.0 / 1e6,  output: 12.0 / 1e6,  cacheRead: 0.20 / 1e6,  cacheWrite: 0 },
   "gemini-2.5-pro": { input: 1.25 / 1e6, output: 10.0 / 1e6,  cacheRead: 0.125 / 1e6, cacheWrite: 0 },
   "gemini-2.5-flash": { input: 0.3 / 1e6, output: 2.5 / 1e6,  cacheRead: 0.03 / 1e6,  cacheWrite: 0 },
@@ -139,6 +139,28 @@ export const DEFAULT_PRICING: Record<string, ModelPricing> = {
   // Local models (Ollama, free but track tokens)
   "local":         { input: 0,           output: 0,            cacheRead: 0,           cacheWrite: 0 },
 };
+
+// Sonnet 5 introductory pricing ($2/$10; cacheRead 0.2, cacheWrite 2.5[5m]/4.0[1h]) is in
+// effect through 2026-08-31; the STANDARD rate ($3/$15) resumes 2026-09-01. DEFAULT_PRICING
+// above holds the canonical standard card; while the window is open we swap the introductory
+// card in, so dollar figures stay accurate today AND flip back automatically. Production reads
+// the wall clock; TOKEN_OPTIMIZER_PRICING_AS_OF (YYYY-MM-DD) pins it for deterministic tests.
+// The single "sonnet" bucket cannot isolate Sonnet 5, so Sonnet 4.6 is repriced too (accepted
+// 2026-07-10). Mirrors measure.py `_apply_sonnet_intro_pricing`.
+const SONNET_INTRO_UNTIL = Date.parse("2026-09-01T00:00:00Z");
+const SONNET_STANDARD: ModelPricing = { input: 3.0 / 1e6, output: 15.0 / 1e6, cacheRead: 0.3 / 1e6, cacheWrite: 3.75 / 1e6, cacheWrite1h: 6.0 / 1e6 };
+const SONNET_INTRO: ModelPricing = { input: 2.0 / 1e6, output: 10.0 / 1e6, cacheRead: 0.2 / 1e6, cacheWrite: 2.5 / 1e6, cacheWrite1h: 4.0 / 1e6 };
+
+/** Swap the sonnet card to the introductory rate while it is in effect (idempotent). Returns
+ * true when introductory pricing is active. `asOf` (epoch ms) overrides both env and clock. */
+export function applySonnetIntroPricing(asOf?: number): boolean {
+  const env = process.env.TOKEN_OPTIMIZER_PRICING_AS_OF;
+  const now = asOf ?? (env ? Date.parse(env + "T00:00:00Z") : Date.now());
+  const intro = Number.isFinite(now) && now < SONNET_INTRO_UNTIL;
+  DEFAULT_PRICING.sonnet = { ...(intro ? SONNET_INTRO : SONNET_STANDARD) };
+  return intro;
+}
+applySonnetIntroPricing();
 
 /**
  * Load user-configured pricing from OpenClaw's config.

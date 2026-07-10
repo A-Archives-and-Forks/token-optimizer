@@ -14,16 +14,18 @@
  */
 
 import { contextWindowForModel } from "../util/context-window.js";
+import { DEFAULT_PRICING } from "../pricing.js";
 
 // ---------------------------------------------------------------------------
 // Per-model input rates ($/M tokens). Mirrors Python PRICING_TIERS["anthropic"]
-// and the non-Claude model table. Fallback is Sonnet at $3.00/M.
+// and the non-Claude model table. Sonnet is resolved from the DATE-GATED pricing
+// table instead (see modelInputRatePer1M), so it is intentionally omitted here.
+// The sonnet-based fallback for unknown models is likewise the gated rate.
 // ---------------------------------------------------------------------------
 const MODEL_INPUT_RATES: Record<string, number> = {
-  // Anthropic Claude
+  // Anthropic Claude (sonnet gated separately)
   fable: 10.0,
   opus: 5.0,
-  sonnet: 3.0,
   haiku: 1.0,
   // GPT-5 family
   "gpt-5.5-pro": 30.0,
@@ -60,16 +62,20 @@ const MODEL_INPUT_RATES: Record<string, number> = {
   "gemini-2.0-flash-lite": 0.075,
 };
 
-/** Sonnet input rate used as the default fallback ($/M tokens). */
-const FALLBACK_INPUT_RATE_PER_MTOK = 3.0;
-
 /**
  * Look up the API input rate ($/M tokens) for the given model.
  * Substring-matches the lowercase model id against the table — same
- * strategy as contextWindowForModel. Falls back to Sonnet ($3.00/M).
+ * strategy as contextWindowForModel. Falls back to the (date-gated) Sonnet rate.
  */
 export function modelInputRatePer1M(model?: string): number {
-  if (!model) return FALLBACK_INPUT_RATE_PER_MTOK;
+  // Sonnet (and the sonnet-based fallback) derive from the DATE-GATED pricing table so the
+  // nudge's dollar estimate matches the savings dashboard during Sonnet's introductory window
+  // (parity with OpenClaw's freshSessionSavingsUsd + Python's _fresh_session_savings_usd, which
+  // both read the gated table). The simple per-model map still serves every other model.
+  // Sonnet is omitted from MODEL_INPUT_RATES, so any sonnet id (and every unknown model) falls
+  // through to this date-gated rate — keeping the nudge in step with the savings dashboard.
+  const sonnetRate = DEFAULT_PRICING.sonnet.input * 1e6;
+  if (!model) return sonnetRate;
   const lower = model.toLowerCase();
 
   const direct = MODEL_INPUT_RATES[lower];
@@ -81,7 +87,7 @@ export function modelInputRatePer1M(model?: string): number {
     if (lower.includes(key)) return rate;
   }
 
-  return FALLBACK_INPUT_RATE_PER_MTOK;
+  return sonnetRate;
 }
 
 /**

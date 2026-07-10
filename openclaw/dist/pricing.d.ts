@@ -25,6 +25,9 @@ export interface CacheWriteSplit {
 }
 /** Default pricing (USD per token). Verified May 30, 2026. */
 export declare const DEFAULT_PRICING: Record<string, ModelPricing>;
+/** Swap the sonnet card to the introductory rate while it is in effect (idempotent). Returns
+ * true when introductory pricing is active. `asOf` (epoch ms) overrides both env and clock. */
+export declare function applySonnetIntroPricing(asOf?: number): boolean;
 /** Get pricing with user overrides merged on top of defaults. */
 export declare function getPricing(openclawDir?: string): Record<string, ModelPricing>;
 /** Reset cached pricing (for testing or config reload). */

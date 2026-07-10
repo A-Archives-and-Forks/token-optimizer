@@ -419,6 +419,54 @@ PRICING_TIERS = {
     },
 }
 
+# --- Sonnet 5 introductory pricing (date-gated) ------------------------------------------
+# Sonnet 5 launched with INTRODUCTORY pricing ($2/$10 per MTok; cache_read 0.2, cache_write
+# 2.5 [5m] / 4.0 [1h]) in effect through 2026-08-31; the STANDARD rate ($3/$15) resumes
+# 2026-09-01. The PRICING_TIERS literal above holds the canonical STANDARD card; while the
+# introductory window is open we swap the introductory card into the FIRST-PARTY Anthropic tier
+# so dollar savings stay accurate today AND flip back automatically on 2026-09-01 with no manual
+# edit. Vertex/Bedrock introductory status is unverified, so those tiers are left at the standard
+# rate (conservative -- no new drift). The single "sonnet" bucket cannot distinguish Sonnet 5
+# from Sonnet 4.6, so 4.6 is repriced too (accepted 2026-07-10). Verified 2026-07-10 from
+# platform.claude.com/docs/en/about-claude/pricing.
+_SONNET_STANDARD_RATES = {"input": 3.0, "output": 15.0, "cache_read": 0.3,
+                          "cache_write": 3.75, "cache_write_1h": 6.0}
+_SONNET_INTRO_RATES = {"input": 2.0, "output": 10.0, "cache_read": 0.2,
+                       "cache_write": 2.5, "cache_write_1h": 4.0}
+# UTC anchor so the flip happens at the SAME instant as the TS ports (openclaw/opencode gate on
+# a UTC-midnight Date.parse), avoiding a ~day of cross-engine disagreement around the boundary.
+_SONNET_INTRO_PRICING_UNTIL = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+
+def _pricing_as_of():
+    """Date that pricing is resolved against: the wall clock in production, or a pinned date
+    from TOKEN_OPTIMIZER_PRICING_AS_OF (YYYY-MM-DD) so the test suite stays regime-stable across
+    the 2026-09-01 Sonnet flip. Falls back to now() on an unparseable override."""
+    override = os.environ.get("TOKEN_OPTIMIZER_PRICING_AS_OF")
+    if override:
+        try:
+            return datetime.strptime(override, "%Y-%m-%d")  # naive; treated as UTC downstream
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
+
+
+def _apply_sonnet_intro_pricing(as_of=None):
+    """Swap the Anthropic-tier sonnet card to the introductory rate while it is in effect.
+    Idempotent (always recomputes from the canonical standard card, so repeated calls / a
+    date change are safe). Returns True when the introductory rate is active. A naive `as_of`
+    (or env date) is interpreted as UTC so the boundary compares apples to apples."""
+    d = as_of or _pricing_as_of()
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    intro = d < _SONNET_INTRO_PRICING_UNTIL
+    PRICING_TIERS["anthropic"]["claude_models"]["sonnet"] = dict(
+        _SONNET_INTRO_RATES if intro else _SONNET_STANDARD_RATES)
+    return intro
+
+
+_apply_sonnet_intro_pricing()
+
 OPENAI_MODEL_PRICING = {
     # Prices per 1M tokens from OpenAI API pricing/model docs.
     # GPT-5.x family
@@ -461,8 +509,10 @@ GEMINI_MODEL_PRICING = {
     "gemini-3.1-pro-preview": {"input": 2.0, "cache_read": 0.20, "output": 12.0},
     "gemini-3.1-flash-lite": {"input": 0.25, "cache_read": 0.025, "output": 1.50},
     "gemini-3.1-pro": {"input": 2.0, "cache_read": 0.20, "output": 12.0},
-    "gemini-3-pro": {"input": 2.0, "cache_read": 0.0, "output": 12.0},
-    "gemini-3-flash": {"input": 0.50, "cache_read": 0.0, "output": 3.0},
+    # cache_read = 10% of input, consistent with every other Gemini 3.x entry (was 0.0,
+    # which silently zeroed cache-read cost -> understated cost -> mis-stated savings if hit).
+    "gemini-3-pro": {"input": 2.0, "cache_read": 0.20, "output": 12.0},
+    "gemini-3-flash": {"input": 0.50, "cache_read": 0.05, "output": 3.0},
     "gemini-2.5-pro": {"input": 1.25, "cache_read": 0.125, "output": 10.0},
     "gemini-2.5-flash": {"input": 0.30, "cache_read": 0.03, "output": 2.50},
     "gemini-2.5-flash-lite": {"input": 0.10, "cache_read": 0.01, "output": 0.40},
@@ -18307,7 +18357,7 @@ def setup_hook(dry_run=False, uninstall=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.39"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.40"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -31259,7 +31309,9 @@ def _estimate_before_after_savings(days=30):
             days=days, baseline_opus_share=baseline_opus_share, tier=tier)
         sub_actual = float(sub_pool.get("actual_usd", 0.0) or 0.0)
         sub_cf = float(sub_pool.get("counterfactual_usd", 0.0) or 0.0)
-        sub_transformation = float(sub_pool.get("transformation_usd", 0.0) or 0.0)
+        # sub_delta (= sub_cf - sub_actual, unclamped) is computed below with the other pools;
+        # the pool's own pre-clamped transformation_usd is intentionally NOT used, so the
+        # subagent lever nets honestly into the headline (issue #87).
 
         def price(fi, cr, out, shares):
             # Price the fresh+cache_read pool and output (NO cache-write). _cost_per_session
@@ -31357,17 +31409,34 @@ def _estimate_before_after_savings(days=30):
         vs_reprice = (out_before / out_after) if out_after > 0 else 1.0
         verbosity_addback = max(0.0, vs_measured * vs_reprice)
 
-        # MAIN TRANSFORMATION = counterfactual - actual (main pool). The window is 30d, so
-        # this is already the monthly figure. Clamp >= 0: if the "old way" would somehow be
-        # cheaper (net-negative efficiency on the main pool), show no MAIN transformation
-        # rather than a negative -- but the subagent pool can still carry the headline.
-        main_transformation = max(0.0, counterfactual_monthly - actual_monthly)
-        if main_transformation <= 0 and sub_transformation <= 0 and compression_addback <= 0 and verbosity_addback <= 0:
+        # MAIN pool delta (monthly) = counterfactual - actual, UNCLAMPED. The window is 30d,
+        # so this is already the monthly figure. A net-negative main pool (now marginally
+        # costlier than the frozen baseline this period) is carried honestly into the combined
+        # net below rather than clamped to 0. Clamping the main pool while the "now vs old way"
+        # arms stayed honest is exactly what made the headline and the arms disagree in sign
+        # (issue #87): the top line summed only non-negative pools and could assert a saving
+        # while the arms showed a loss. The headline is now the honest net of the same arms.
+        main_transformation = counterfactual_monthly - actual_monthly
+        sub_delta = sub_cf - sub_actual  # subagent pool, UNCLAMPED (parity with the arms)
+        # Combined arms span every pool. The HEADLINE is defined as their honest net, so the
+        # big number and the "est. $X now vs $Y the old way" arms can never disagree.
+        combined_actual = actual_monthly + sub_actual
+        combined_cf = counterfactual_monthly + sub_cf + compression_addback + verbosity_addback
+        net = combined_cf - combined_actual
+        # Gate the entire counterfactual hero on a GENUINE net win. When net <= 0 (efficiency
+        # roughly flat, or the frozen baseline would have been marginally cheaper this period),
+        # surface NO counterfactual claim -- the directly-metered floor card still reports
+        # realized savings -- rather than render a negative headline or a clamped-positive one
+        # beside net-negative arms. monthly_savings_usd defaults to 0 here, so the dashboard
+        # card and the CLI headline (both gated on monthly_savings_usd > 0) stay hidden.
+        if net <= 0:
             return {**zero, "before_sessions": bn, "after_sessions": recent_n,
-                    "actual_monthly_usd": round(actual_monthly, 2),
-                    "counterfactual_monthly_usd": round(counterfactual_monthly, 2),
-                    "main_transformation_usd": 0.0,
-                    "subagent_transformation_usd": 0.0,
+                    "actual_monthly_usd": round(combined_actual, 2),
+                    "counterfactual_monthly_usd": round(combined_cf, 2),
+                    "main_actual_monthly_usd": round(actual_monthly, 2),
+                    "main_counterfactual_monthly_usd": round(counterfactual_monthly, 2),
+                    "main_transformation_usd": round(main_transformation, 2),
+                    "subagent_transformation_usd": round(sub_delta, 2),
                     "compression_transformation_usd": 0.0,
                     "compression_measured_usd": round(comp_measured, 2),
                     "verbosity_transformation_usd": 0.0,
@@ -31388,16 +31457,13 @@ def _estimate_before_after_savings(days=30):
                     "after_tokens": int(t_pool + bcw + bout),
                     "baseline_source": baseline_source,
                     "reason": "net_negative"}
-        # Combined headline = main + subagent + compression add-back + verbosity
-        # add-back (four separate, non-overlapping pools). The pct is over the
-        # COMBINED counterfactual (main cf + subagent cf + compression add-back +
-        # verbosity add-back) so it reflects the full spend base being transformed.
-        # The compression and verbosity pools' actual is 0, so their counterfactual
-        # == their transformation contribution.
-        transformation = main_transformation + sub_transformation + compression_addback + verbosity_addback
-        combined_counterfactual = counterfactual_monthly + sub_cf + compression_addback + verbosity_addback
-        transformation_pct = (transformation / combined_counterfactual
-                              if combined_counterfactual > 0 else 0.0)
+        # Combined headline = the honest net of every pool (== combined_cf - combined_actual,
+        # equivalently main_delta + subagent_delta + compression + verbosity). The per-lever
+        # waterfall below decomposes exactly this quantity, so the breakdown reconciles to the
+        # top line even when a pool grew. pct is over the combined counterfactual (the full
+        # spend base being transformed); guaranteed in (0, 1] here because net > 0.
+        transformation = net
+        transformation_pct = (net / combined_cf if combined_cf > 0 else 0.0)
 
         # --- Attribution breakdown (waterfall over the two behavioral levers) ---
         # The gap is driven by exactly two efficiency levers on a held-constant volume:
@@ -31411,15 +31477,12 @@ def _estimate_before_after_savings(days=30):
         # repriced at today's mix. CW carries the routing reprice (#2), so the routing lever
         # captures the cache-write mix-delta too. Computed per-session, then x recent_n so
         # the levers telescope to the per-session-based main_transformation exactly.
-        if main_transformation > 0:
-            v_route_s = price(bfi, bcr, bout, after_shares) + cw_session_cost(after_shares)
-            s_route = (old_cps - v_route_s) * recent_n   # before->after mix (incl. CW)
-            s_cache = (v_route_s - now_cps) * recent_n   # remaining gap = caching
-        else:
-            # Main pool net-negative (clamped to 0); only the subagent lever carries the
-            # headline. Zero the main levers so the breakdown still sums to the combined.
-            s_route = 0.0
-            s_cache = 0.0
+        # Always decompose the main pool, even when it is net-negative, so the waterfall sums
+        # to the honest net including a pool that grew. s_route + s_cache telescope to
+        # main_transformation regardless of sign; a grown pool shows honestly as a "-$X" lever.
+        v_route_s = price(bfi, bcr, bout, after_shares) + cw_session_cost(after_shares)
+        s_route = (old_cps - v_route_s) * recent_n   # before->after mix (incl. CW)
+        s_cache = (v_route_s - now_cps) * recent_n   # remaining gap = caching
         # s_route + s_cache telescopes to the MAIN transformation; the subagent pool is a
         # third lever whose own (cf - actual) is added so the breakdown sums to the COMBINED
         # headline.
@@ -31429,7 +31492,7 @@ def _estimate_before_after_savings(days=30):
             ("context_rereads", "Lighter sessions (better cache reuse)",
              "Heavier context re-reads (added cost)", s_cache),
             ("subagent_routing", "Cheaper subagents (lighter delegation)",
-             "Subagents shifted to costlier models (added cost)", sub_transformation),
+             "Subagents shifted to costlier models (added cost)", sub_delta),
             ("context_compression", "Lighter context (fewer re-reads, metered)",
              "Lighter context (fewer re-reads, metered)", compression_addback),
             ("verbosity_steer", "Lean output nudges (less output, estimated)",
@@ -31462,19 +31525,24 @@ def _estimate_before_after_savings(days=30):
         # "the old way" (stable across runs); after_* is "now" (moves only with efficiency).
         before_cps = old_cps
         after_cps = now_cps
-        # Combined (main + subagent) spend on each arm: the dashboard/printer headline
-        # ("est. $X now vs $Y the old way") spans both pools, so report the combined
-        # actual/counterfactual while keeping the main-only figures available too.
-        combined_actual = actual_monthly + sub_actual
-        combined_cf = counterfactual_monthly + sub_cf + compression_addback + verbosity_addback
+        # Per-session cache-reuse split. Identical displayed tokens + model mix on both arms
+        # can still price differently because the OLD way used the baseline session's native
+        # cache-read fraction while NOW redistributes the same pool at the current hit rate.
+        # Surfacing both fractions makes that cost delta explainable rather than looking
+        # impossible ("same tokens, same mix, different cost" -- issue #87 contradiction #1).
+        before_cache_hit = (bcr / t_pool) if t_pool > 0 else 0.0
+        after_cache_hit = cur_hit
+        # combined_actual / combined_cf / net are computed above (the headline is their net).
         return {
             "before_cost_per_session": round(before_cps, 4),
             "after_cost_per_session": round(after_cps, 4),
             "savings_per_session": round(before_cps - after_cps, 4),
+            "before_cache_hit": round(before_cache_hit, 4),
+            "after_cache_hit": round(after_cache_hit, 4),
             "sessions_per_month": recent_n,
-            "monthly_savings_usd": round(transformation, 2),  # = main + subagent + compression + verbosity
+            "monthly_savings_usd": round(transformation, 2),  # = honest net (combined_cf - combined_actual)
             "main_transformation_usd": round(main_transformation, 2),
-            "subagent_transformation_usd": round(sub_transformation, 2),
+            "subagent_transformation_usd": round(sub_delta, 2),
             "compression_transformation_usd": round(compression_addback, 2),
             "compression_measured_usd": round(comp_measured, 2),
             "verbosity_transformation_usd": round(verbosity_addback, 2),
