@@ -1830,7 +1830,10 @@ def measure_components():
     rules_always_loaded = 0
     for scope, rules_dir in rules_dirs:
         if rules_dir.exists() and rules_dir.is_dir():
-            for f in sorted(rules_dir.iterdir()):
+            # rglob (not iterdir) so nested rule dirs like .claude/rules/staging/
+            # are counted — Claude Code loads them into context, so iterdir
+            # undercounted the rules component (issue #89).
+            for f in sorted(rules_dir.rglob("*")):
                 if f.is_file() and f.suffix == ".md":
                     rules_count += 1
                     tokens = estimate_tokens_from_file(f)
@@ -1842,7 +1845,7 @@ def measure_components():
                         rules_always_loaded_tokens += tokens
                         rules_always_loaded += 1
                     rules_files.append({
-                        "name": f.name,
+                        "name": str(f.relative_to(rules_dir)),
                         "tokens": tokens,
                         "path_scoped": has_paths,
                         "scope": scope,

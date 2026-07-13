@@ -377,6 +377,12 @@ python3 measure.py expand --list          # List archived tool results
 python3 measure.py expand <tool-use-id>   # Retrieve a specific result
 ```
 
+Some MCP tools are *documented* to return large verbatim payloads (source fetchers, doc retrievers) where a metadata preview defeats the point. Allowlist those so their full result reaches context instead of being replaced (it's still archived, so `expand` works). Set a comma-separated list of `fnmatch` globs matched against the full tool name:
+
+`TOKEN_OPTIMIZER_ARCHIVE_EXEMPT_TOOLS="mcp__context7__*,*github_repository_file"`
+
+Default is empty — nothing is exempt unless you opt a tool in.
+
 ## Session Continuity
 
 Compression matters, but the most important thing Token Optimizer does is keep your work alive across sessions and compactions, automatically.
