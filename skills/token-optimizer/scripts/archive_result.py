@@ -17,6 +17,7 @@ SOURCE OF TRUTH for read_stdin_hook_input: hook_io.py.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -318,6 +319,50 @@ def _resolve_mcp_cap_tokens() -> int | None:
 
     _MCP_CAP_TOKENS_CACHE = None
     return None
+
+
+_EXEMPT_PATTERNS_UNSET: tuple[str, ...] | None = ("\0__unset__",)
+_EXEMPT_PATTERNS_CACHE: tuple[str, ...] | None = _EXEMPT_PATTERNS_UNSET
+
+
+def _resolve_exempt_tool_patterns() -> tuple[str, ...]:
+    """Resolve the per-tool archive allowlist from env or user settings.json.
+
+    Some tools are *documented* to return large verbatim payloads (source
+    fetchers, doc retrievers). Compressing those to a metadata preview defeats
+    the reason they were called, so a user can opt specific tools out of the
+    MCP output replacement (issue #88 follow-up).
+
+    Value is a comma-separated list of fnmatch globs matched against the full
+    tool name, e.g. ``mcp__context7__*,*github_repository_file``. Resolution
+    mirrors _resolve_mcp_cap_tokens: process env first, then the settings.json
+    "env" block. Default is empty — a token optimizer never lets large payloads
+    through unless the user explicitly opts a tool in. Never raises.
+    """
+    global _EXEMPT_PATTERNS_CACHE
+    if _EXEMPT_PATTERNS_CACHE is not _EXEMPT_PATTERNS_UNSET:
+        return _EXEMPT_PATTERNS_CACHE
+
+    raw = os.environ.get("TOKEN_OPTIMIZER_ARCHIVE_EXEMPT_TOOLS", "").strip()
+    if not raw:
+        # settings.json "env" block — for out-of-process callers.
+        try:
+            with open(claude_home() / "settings.json", "r", encoding="utf-8") as f:
+                settings = json.load(f)
+            raw = str(settings.get("env", {}).get("TOKEN_OPTIMIZER_ARCHIVE_EXEMPT_TOOLS", "")).strip()
+        except Exception:
+            raw = ""
+
+    patterns = tuple(p.strip() for p in raw.split(",") if p.strip())
+    _EXEMPT_PATTERNS_CACHE = patterns
+    return patterns
+
+
+def _is_archive_exempt(tool_name: str) -> bool:
+    """True when tool_name matches any configured allowlist glob."""
+    if not tool_name:
+        return False
+    return any(fnmatch.fnmatch(tool_name, pat) for pat in _resolve_exempt_tool_patterns())
 
 
 def _maybe_log_mcp_cap_savings(tool_name: str, original_char_count: int, session_id: str | None) -> None:
@@ -836,6 +881,15 @@ def archive_result(quiet: bool = False) -> None:
     finally:
         if store is not None:
             store.close()
+
+    # Allowlisted tools (issue #88 follow-up) are documented large-payload
+    # fetchers: skip the replacement so the full verbatim result reaches
+    # context. It's still archived to disk above, so `expand <id>` works —
+    # same treatment as _AGENT_RESULT_TOOL_NAMES (archive, don't replace).
+    if "__" in tool_name and _is_archive_exempt(tool_name):
+        if not quiet:
+            print(f"[Tool Archive] {tool_name} is allowlisted; serving full result (archived for expand).", file=sys.stderr)
+        return
 
     # For MCP tools (tool_name contains "__"): output replacement via stdout
     # No pressure gate here: the compressed replacement SAVES tokens.
