@@ -48,6 +48,10 @@ const BASELINE_EARLY_WINDOW_DAYS = 30;
 const BASELINE_MIN_STABLE_SESSIONS = 30;
 const AFTER_MIN_SESSIONS = 10;
 const DAY_MS = 86_400_000;
+// Quality gates: exclude empty/transient sessions that inflate count and skew
+// per-session costs (mirrors measure.py _MIN_INPUT_TOKENS / _MIN_DURATION_MINUTES).
+const MIN_INPUT_TOKENS = 1000;
+const MIN_DURATION_SECONDS = 60;
 
 interface SessionRec {
   ts: number; // epoch ms
@@ -57,6 +61,7 @@ interface SessionRec {
   cw: number; // cache write
   out: number; // output
   cost: number; // stored cost_usd (display / not used in counterfactual math)
+  durationSec: number; // session duration in seconds (quality gate)
 }
 
 function num(v: unknown): number {
@@ -80,6 +85,7 @@ function toRec(row: Record<string, unknown>): SessionRec {
     cw: Math.max(0, num(row.tokens_cache_write)),
     out: Math.max(0, num(row.tokens_output)),
     cost: num(row.cost_usd),
+    durationSec: Math.max(0, num(row.duration_seconds)),
   };
 }
 
@@ -224,7 +230,11 @@ export function computeRealizedSavings(
     }
   }
 
-  const history = rows.map(toRec).filter((r) => r.ts > 0).sort((a, b) => a.ts - b.ts);
+  const history = rows
+    .map(toRec)
+    .filter((r) => r.ts > 0)
+    .filter((r) => r.fi >= MIN_INPUT_TOKENS && r.durationSec >= MIN_DURATION_SECONDS)
+    .sort((a, b) => a.ts - b.ts);
   if (history.length === 0) return NOT_READY("no sessions yet");
 
   const installTs = history[0].ts;

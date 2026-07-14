@@ -54,6 +54,10 @@ const BASELINE_ONBOARDING_DAYS = 1; // skip day 1 (learning-curve sessions)
 const BASELINE_EARLY_WINDOW_DAYS = 30; // the "before" window after onboarding
 const BASELINE_MIN_STABLE_SESSIONS = 30; // need this many before freezing
 const AFTER_MIN_SESSIONS = 10; // need this many recent sessions to compare
+// Quality gates: exclude empty/transient sessions that inflate count and skew
+// per-session costs (mirrors measure.py _MIN_INPUT_TOKENS / _MIN_DURATION_MINUTES).
+const MIN_INPUT_TOKENS = 1000;
+const MIN_DURATION_SECONDS = 60;
 // Winsorization is used ONLY when freezing the baseline's efficiency anchors
 // (mix shares + pool cache-hit pattern); it never touches the headline VOLUME,
 // which aggregates the current window with NO outlier drop (see methodology #1).
@@ -98,6 +102,7 @@ interface SessionRecord {
   cacheWrite1h: number;
   cacheWrite5m: number;
   costUsd: number;
+  durationSec: number; // session duration in seconds (quality gate)
 }
 
 /**
@@ -132,6 +137,7 @@ function sanitizeRecord(raw: {
   cacheWrite1h: unknown;
   cacheWrite5m: unknown;
   costUsd: unknown;
+  durationSec: unknown;
 }): SessionRecord {
   const input = numClamp(raw.input);
   const output = numClamp(raw.output);
@@ -158,6 +164,7 @@ function sanitizeRecord(raw: {
     cacheWrite1h: cw1h,
     cacheWrite5m: cw5m,
     costUsd: numClamp(raw.costUsd),
+    durationSec: numClamp(raw.durationSec),
   };
 }
 
@@ -173,6 +180,7 @@ function toRecord(r: AgentRun): SessionRecord {
     cacheWrite1h: r.cacheWrite1hTokens ?? 0,
     cacheWrite5m: r.cacheWrite5mTokens ?? 0,
     costUsd: r.costUsd,
+    durationSec: r.durationSeconds ?? 0,
   });
 }
 
@@ -208,6 +216,7 @@ function mergeAndPersistHistory(
         cacheWrite1h: r.cacheWrite1h,
         cacheWrite5m: r.cacheWrite5m,
         costUsd: r.costUsd,
+        durationSec: r.durationSec,
       });
       byId.set(rec.sessionId, rec);
     }
@@ -847,7 +856,8 @@ export function computeRealizedSavings(
   } catch {
     fresh = [];
   }
-  const history = mergeAndPersistHistory(openclawDir, fresh);
+  const history = mergeAndPersistHistory(openclawDir, fresh)
+    .filter((r) => r.input >= MIN_INPUT_TOKENS && r.durationSec >= MIN_DURATION_SECONDS);
   if (history.length === 0) return NOT_READY("no sessions yet");
 
   // One proxy for unpriced models, derived from full history, used in both eras.

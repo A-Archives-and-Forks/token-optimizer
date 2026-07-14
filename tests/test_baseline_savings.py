@@ -87,7 +87,7 @@ def _build_env(tmp, *, n_sessions, per_session_input, opus_share, hit=_BASE_HIT)
         conn.execute(
             "INSERT INTO session_log (jsonl_path, date, input_tokens, output_tokens, "
             "cache_hit_rate, cache_create_5m_tokens, cache_create_1h_tokens, "
-            "all_model_usage_json, is_sidechain) VALUES (?,?,?,?,?,?,?,?,0)",
+            "all_model_usage_json, is_sidechain, duration_minutes) VALUES (?,?,?,?,?,?,?,?,0,5.0)",
             (f"/s/{tmp}/{i}.jsonl", today, per_session_input, out_per, hit,
              cw_per, 0, json.dumps({OPUS: opus_tok, SONNET: sonnet_tok})),
         )

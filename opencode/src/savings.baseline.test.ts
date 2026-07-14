@@ -24,6 +24,7 @@ function row(tsMs: number, model: string, fi: number, cr: number, cw: number, ou
     tokens_cache_write: cw,
     tokens_output: out,
     cost_usd: 0,
+    duration_seconds: 300, // 5 min — above the 60s quality gate
   };
 }
 
