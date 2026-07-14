@@ -5660,9 +5660,19 @@ def generate_standalone_dashboard(days=30, quiet=False, force=False):
     if not quiet:
         print("  Collecting per-turn data for recent sessions...")
     session_turns = {}
+    # Bound the preload: the visible table only shows the most recent sessions, but a
+    # busy 7-day window can hold hundreds, and each parse_session_turns re-reads a full
+    # transcript. Cap total preloaded sessions so a fresh (cold-cache) dashboard gen in
+    # the deferred flush worker never turns this into a multi-second parse storm. Older
+    # rows are fetched on demand in served mode.
+    _turn_preload_budget = _int_env("TOKEN_OPTIMIZER_TURN_PRELOAD_MAX", 40)
     try:
         for day in (trends or {}).get("daily", [])[:7]:
+            if len(session_turns) >= _turn_preload_budget:
+                break
             for session in day.get("session_details", []):
+                if len(session_turns) >= _turn_preload_budget:
+                    break
                 session_key = session.get("session_key")
                 jsonl_path = session.get("jsonl_path")
                 if not session_key or session_key in session_turns or not jsonl_path:
@@ -7749,14 +7759,34 @@ def _extract_topic(text):
     return text or None
 
 
+_parse_session_jsonl_cache = {}
+_PARSE_CACHE_MAX = 2000
+
+
 def _parse_session_jsonl(filepath):
     """Parse a single JSONL session file in one streaming pass.
 
     Returns a dict with extracted session metrics, or None if the file
-    is empty or unparseable.
+    is empty or unparseable. Results are memoized by (path, mtime, size)
+    so a single process invocation never re-parses the same unchanged file
+    (e.g. backfill + collect both touching the same transcript).
     """
+    # Memoization: skip re-parse if the file hasn't changed since we last saw it.
+    try:
+        st = os.stat(filepath)
+        cache_key = (str(filepath), st.st_mtime_ns, st.st_size)
+        if cache_key in _parse_session_jsonl_cache:
+            return _parse_session_jsonl_cache[cache_key]
+    except OSError:
+        cache_key = None  # stat failed — parse without caching
+
     if _use_codex_session_adapter(filepath):
-        return codex_session.parse_session_jsonl(filepath)
+        result = codex_session.parse_session_jsonl(filepath)
+        if cache_key is not None:
+            if len(_parse_session_jsonl_cache) >= _PARSE_CACHE_MAX:
+                _parse_session_jsonl_cache.clear()
+            _parse_session_jsonl_cache[cache_key] = result
+        return result
 
     skills_used = {}
     subagents_used = {}
@@ -7927,6 +7957,10 @@ def _parse_session_jsonl(filepath):
         return None
 
     if message_count == 0:
+        if cache_key is not None:
+            if len(_parse_session_jsonl_cache) >= _PARSE_CACHE_MAX:
+                _parse_session_jsonl_cache.clear()
+            _parse_session_jsonl_cache[cache_key] = None
         return None
 
     # v5.4.9: Apply per-requestId MAX dedup. Each entry in request_usage_map
@@ -7975,7 +8009,7 @@ def _parse_session_jsonl(filepath):
         cache_hit_rate = total_cache_read / total_full_input
     gap_stats = _compute_call_gap_stats(api_call_timestamps)
 
-    return {
+    result = {
         "version": version,
         "slug": slug,
         "topic": topic,
@@ -8000,6 +8034,11 @@ def _parse_session_jsonl(filepath):
         "first_ts": first_ts.isoformat() if first_ts else None,
         "is_sidechain": is_sidechain,
     }
+    if cache_key is not None:
+        if len(_parse_session_jsonl_cache) >= _PARSE_CACHE_MAX:
+            _parse_session_jsonl_cache.clear()
+        _parse_session_jsonl_cache[cache_key] = result
+    return result
 
 
 def parse_session_turns(filepath):
@@ -8492,11 +8531,16 @@ def _recompute_session_tokens(conn, rel_tol=0.1, limit=None):
 
 
 def _init_trends_db():
-    """Initialize the trends SQLite DB. Returns a connection."""
+    """Initialize the trends SQLite DB. Returns a connection.
+    
+    Uses Total Recall's DB-lock pattern: WAL mode + 5s busy_timeout + retry.
+    """
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(TRENDS_DB))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA wal_autocheckpoint=1000")
+    conn.execute("PRAGMA journal_size_limit=67108864")
     conn.executescript(_SCHEMA)
     # Migrate existing DBs: add slug/topic columns if missing
     try:
@@ -8789,11 +8833,37 @@ def _make_session_key(jsonl_path):
     return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]
 
 
-def _backfill_session_metrics(conn, days=30, limit=5000):
-    """Populate derived session metrics for rows collected before fields existed."""
+def _retry_db_operation(conn, operation, max_retries=3, initial_backoff=0.1):
+    """Retry a database operation with exponential backoff on lock errors.
+
+    Mirrors Total Recall's DB-lock pattern: busy_timeout + retry with backoff.
+    Fails open on persistent lock errors (returns None, caller handles gracefully).
+    Non-lock OperationalErrors are re-raised so real bugs aren't silently swallowed.
+    """
+    for attempt in range(max_retries):
+        try:
+            return operation()
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e) or "unable to open database" in str(e):
+                if attempt < max_retries - 1:
+                    backoff = initial_backoff * (2 ** attempt)
+                    time.sleep(backoff)
+                    continue
+                return None  # exhausted retries on lock error — fail open
+            raise  # non-lock error — propagate, don't swallow
+
+
+def _backfill_session_metrics(conn, days=30, limit=50):
+    """Populate derived session metrics for rows collected before fields existed.
+    
+    Bounded per-flush work (limit=50) to prevent re-parse storms. Batched
+    UPDATEs in single transaction to minimize lock duration. Retry with backoff
+    on DB lock errors (mirrors Total Recall's pattern).
+    """
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    try:
-        rows = conn.execute(
+    
+    def fetch_rows():
+        return conn.execute(
             """SELECT jsonl_path
                FROM session_log
                WHERE date >= ?
@@ -8808,10 +8878,12 @@ def _backfill_session_metrics(conn, days=30, limit=5000):
                LIMIT ?""",
             (cutoff, limit),
         ).fetchall()
-    except sqlite3.Error:
+    
+    rows = _retry_db_operation(conn, fetch_rows)
+    if rows is None:
         return 0
 
-    updated = 0
+    updates = []
     for row in rows:
         jsonl_path = row[0]
         ttl_1h = 0
@@ -8831,7 +8903,19 @@ def _backfill_session_metrics(conn, days=30, limit=5000):
             sq = score_session_quality(parsed)
             q_score = sq["score"]
             q_grade = sq["grade"]
-        conn.execute(
+        updates.append((ttl_1h, ttl_5m, avg_gap, max_gap, p95_gap, q_score, q_grade, str(jsonl_path)))
+    
+    if not updates:
+        return 0
+    
+    def batch_update():
+        # Batch all UPDATEs into one commit to minimize lock duration (Total
+        # Recall's small-chunk pattern). Deliberately NO explicit BEGIN IMMEDIATE:
+        # a caller (collect_sessions) may have uncommitted inserts on this same
+        # conn — an explicit BEGIN would raise "transaction within a transaction",
+        # and rolling back on that error would DISCARD the caller's pending work.
+        # Sharing the implicit transaction commits our updates and theirs together.
+        conn.executemany(
             """UPDATE session_log
                SET cache_create_1h_tokens = ?,
                    cache_create_5m_tokens = ?,
@@ -8842,12 +8926,13 @@ def _backfill_session_metrics(conn, days=30, limit=5000):
                    quality_score = COALESCE(quality_score, ?),
                    quality_grade = COALESCE(quality_grade, ?)
                WHERE jsonl_path = ?""",
-            (ttl_1h, ttl_5m, avg_gap, max_gap, p95_gap, q_score, q_grade, str(jsonl_path)),
+            updates,
         )
-        updated += 1
-    if updated:
         conn.commit()
-    return updated
+        return len(updates)
+    
+    result = _retry_db_operation(conn, batch_update)
+    return result if result is not None else 0
 
 
 def _extract_session_uuid(session_id):
@@ -16071,8 +16156,14 @@ def collect_sessions(days=90, quiet=False, rebuild=False):
     new_count = 0
     for filepath, mtime, project_name in files:
         if _is_file_collected(conn, filepath):
-            _backfill_session_metrics(conn, days=days, limit=1)
             continue
+
+        # Bounded per-run collection: never parse more than _COLLECT_MAX_PER_RUN new
+        # sessions in one flush. `files` is newest-first, so recent sessions are always
+        # collected and any large backlog drains over subsequent flushes rather than
+        # blocking turn-end. (rebuild re-collects everything, so it opts out.)
+        if _COLLECT_MAX_PER_RUN and not rebuild and new_count >= _COLLECT_MAX_PER_RUN:
+            break
 
         parsed = _parse_session_jsonl(filepath)
         if not parsed:
@@ -16186,6 +16277,16 @@ def collect_sessions(days=90, quiet=False, rebuild=False):
             except sqlite3.Error:
                 pass
 
+    # Bounded backfill of derived metrics for previously-collected sessions that
+    # are missing columns added by a later upgrade (e.g. quality_score, call gaps).
+    # Called ONCE after the collection loop with a small cap (50) so a new column
+    # never re-triggers a full-history re-parse storm. The rolling window converges
+    # over a few flushes instead of blocking turn-end for minutes.
+    try:
+        _backfill_session_metrics(conn, days=days, limit=50)
+    except Exception:
+        pass
+
     # ATOMICITY INVARIANT: _rebuild_aggregate_tables does DELETE-then-reINSERT and must
     # NOT commit internally. The whole wipe+rebuild is one transaction that commits only on
     # the next line, so a _HookTimeout (BaseException) mid-rebuild rolls back cleanly and the
@@ -16205,11 +16306,16 @@ def collect_sessions(days=90, quiet=False, rebuild=False):
 
 
 def conn_total_sessions():
-    """Quick count of total sessions in the DB."""
+    """Quick count of total sessions in the DB.
+    
+    Uses Total Recall's DB-lock pattern: WAL mode + 5s busy_timeout + retry.
+    """
     try:
         conn = sqlite3.connect(str(TRENDS_DB))
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA wal_autocheckpoint=1000")
+        conn.execute("PRAGMA journal_size_limit=67108864")
         cur = conn.execute("SELECT COUNT(*) FROM session_log")
         count = cur.fetchone()[0]
         conn.close()
@@ -18360,7 +18466,7 @@ def setup_hook(dry_run=False, uninstall=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.44"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.45"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -30598,6 +30704,12 @@ _INITIAL_BACKFILL_DAYS = _int_env("TOKEN_OPTIMIZER_INITIAL_BACKFILL_DAYS", 365)
 # the SessionEnd hook's _HookTimeout would commit NOTHING and never write its success
 # marker, re-parsing from scratch every flush in a permanent loop (torture-room blocker).
 _COLLECT_COMMIT_BATCH = _int_env("TOKEN_OPTIMIZER_COLLECT_COMMIT_BATCH", 200)
+# Per-run cap on NEWLY-parsed sessions. A large uncollected backlog (e.g. after an
+# upgrade, or on a machine with thousands of transcripts) would otherwise re-parse
+# every uncollected file on a single flush and block turn-end for a minute+. Files
+# are processed newest-first, so recent sessions are always collected and the old
+# backlog drains a bounded chunk per flush instead of storming. 0 = unbounded.
+_COLLECT_MAX_PER_RUN = _int_env("TOKEN_OPTIMIZER_COLLECT_MAX_PER_RUN", 150)
 # Hard cap on deep-backfill attempts. collect_sessions raises _HookTimeout (a BaseException,
 # NOT caught by `except Exception`) when the 365-day parse exceeds the hook budget, so the
 # success marker would never be written and the deep glob would re-fire on every SessionEnd.
@@ -30906,6 +31018,106 @@ _subagent_pool_memo = {"key": None, "ts": 0.0, "payload": None}
 _SUBAGENT_POOL_TTL = 900.0  # 15 min, matches the cache-health sidecar cadence
 _SUBAGENT_SCAN_MAX_FILES = 4000  # bound the scan so the dashboard never stalls
 
+# Cross-process L2 cache for the subagent-pool scan. The module memo above is
+# per-process only, but every deferred SessionEnd/Stop flush spawns a NEW python
+# process (_defer_session_end_flush), so without a persistent sidecar each flush
+# cold-scans up to _SUBAGENT_SCAN_MAX_FILES transcripts (~13s). This sidecar makes
+# a fresh worker read the 15-min-old result instead of rescanning -- the exact
+# idiom cache_health.json uses (_cache_ttl_waste_cached). (mtime, payload) memo
+# gives a process that reads twice a single stat on the second call.
+_subagent_pool_sidecar_memo = None  # type: ignore[var-annotated]
+
+
+def _subagent_pool_key_str(key):
+    """Stable string form of the (days, share, runtime, tier) tuple for sidecar
+    keying. `tier` is part of the key because subagent-pool costs are priced per
+    pricing tier -- omitting it would serve a prior tier's figures for up to the
+    TTL after a tier change."""
+    return "|".join(str(part) for part in key)
+
+
+def _read_subagent_pool_sidecar(key):
+    """Return the persisted subagent-pool payload for `key` (days, share, runtime)
+    if present AND younger than _SUBAGENT_POOL_TTL, else None. The sidecar holds a
+    DICT of {key_str: payload} so distinct windows (e.g. days=30 and days=since-
+    install) coexist instead of overwriting one another. Fail-open."""
+    global _subagent_pool_sidecar_memo
+    cache_path = SNAPSHOT_DIR / "subagent_pool.json"
+    try:
+        mtime = cache_path.stat().st_mtime
+    except OSError:
+        return None
+    try:
+        if (_subagent_pool_sidecar_memo is not None
+                and _subagent_pool_sidecar_memo[0] == mtime):
+            store = _subagent_pool_sidecar_memo[1]
+        else:
+            store = json.loads(cache_path.read_text(encoding="utf-8"))
+            if not isinstance(store, dict):
+                return None
+            _subagent_pool_sidecar_memo = (mtime, store)
+        entry = store.get(_subagent_pool_key_str(key))
+        if (isinstance(entry, dict)
+                and (time.time() - float(entry.get("_cached_ts", 0)))
+                < _SUBAGENT_POOL_TTL):
+            return {k: v for k, v in entry.items() if not str(k).startswith("_")}
+    except (json.JSONDecodeError, OSError, ValueError, TypeError):
+        return None
+    return None
+
+
+def _write_subagent_pool_sidecar(key, payload):
+    """Merge `payload` under its key_str into the 0600 sidecar dict (atomic write,
+    mkstemp + fchmod + os.replace) so a fresh flush process skips the cold scan.
+    Stale entries (older than the TTL) are pruned on write so the store stays tiny.
+    Best-effort; never raises."""
+    global _subagent_pool_sidecar_memo
+    cache_path = SNAPSHOT_DIR / "subagent_pool.json"
+    try:
+        now = time.time()
+        # Start from the existing store so concurrent windows accumulate.
+        store = {}
+        try:
+            if (_subagent_pool_sidecar_memo is not None
+                    and _subagent_pool_sidecar_memo[0] == cache_path.stat().st_mtime):
+                store = dict(_subagent_pool_sidecar_memo[1])
+            else:
+                loaded = json.loads(cache_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    store = loaded
+        except (json.JSONDecodeError, OSError, ValueError, TypeError):
+            store = {}
+        # Prune stale entries so the store never grows unbounded.
+        store = {
+            k: v for k, v in store.items()
+            if isinstance(v, dict)
+            and (now - float(v.get("_cached_ts", 0))) < _SUBAGENT_POOL_TTL
+        }
+        entry = dict(payload)
+        entry["_cached_ts"] = now
+        store[_subagent_pool_key_str(key)] = entry
+        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".subagent_pool.", suffix=".tmp", dir=str(SNAPSHOT_DIR))
+        try:
+            if hasattr(os, "fchmod"):  # POSIX only; mkstemp is already 0600
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(store, fh)
+            os.replace(tmp_name, str(cache_path))
+            try:
+                _subagent_pool_sidecar_memo = (os.stat(cache_path).st_mtime, store)
+            except OSError:
+                _subagent_pool_sidecar_memo = None
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    except Exception:
+        pass
+
 
 def _opus_baseline_shares(opus_share=0.95):
     """The pre-TO counterfactual mix: ~95% Opus / remainder Sonnet."""
@@ -30978,12 +31190,20 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
         if tier is None:
             tier = _load_pricing_tier()
         key = (round(float(days), 3), round(float(baseline_opus_share), 4),
-               detect_runtime())
+               detect_runtime(), str(tier))
         now = time.time()
         if (not fresh and _subagent_pool_memo["payload"] is not None
                 and _subagent_pool_memo["key"] == key
                 and (now - _subagent_pool_memo["ts"]) < _SUBAGENT_POOL_TTL):
             return _subagent_pool_memo["payload"]
+
+        # L2: cross-process sidecar. A fresh flush worker (new process, empty module
+        # memo) reads the 15-min result here instead of cold-scanning transcripts.
+        if not fresh:
+            _sidecar = _read_subagent_pool_sidecar(key)
+            if _sidecar is not None:
+                _subagent_pool_memo.update(key=key, ts=now, payload=_sidecar)
+                return _sidecar
 
         projects_base = CLAUDE_DIR / "projects"
         if not projects_base.exists():
@@ -31034,6 +31254,7 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
         if not by_model:
             payload = dict(zero, sessions=n_side)
             _subagent_pool_memo.update(key=key, ts=now, payload=payload)
+            _write_subagent_pool_sidecar(key, payload)
             return payload
 
         # actual = each model at its own rate; counterfactual = same tokens at 95% Opus.
@@ -31065,6 +31286,7 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
             "by_model": {k: round(v, 2) for k, v in by_model_cost.items()},
         }
         _subagent_pool_memo.update(key=key, ts=now, payload=payload)
+        _write_subagent_pool_sidecar(key, payload)
         return payload
     except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, OverflowError):
         return zero
