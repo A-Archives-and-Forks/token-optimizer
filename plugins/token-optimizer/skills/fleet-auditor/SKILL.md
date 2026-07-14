@@ -46,7 +46,7 @@ while IFS= read -r _cand; do
     _best_ver="$_ver"; FLEET_PY="$_cand"
   fi
 done <<EOF
-$(find -L "$HOME/.claude/skills" "$HOME/.claude/plugins/cache" "$HOME/.claude/token-optimizer" "$HOME/.codex/skills" "$HOME/.codex/plugins/cache" "$HOME/.config/opencode/plugins" -type f -name fleet.py -path '*fleet-auditor*/scripts/fleet.py' 2>/dev/null)
+$(find -L "$HOME/.claude/skills" "$HOME/.claude/plugins/cache" "$HOME/.claude/token-optimizer" "$HOME/.codex/skills" "$HOME/.codex/plugins/cache" "$HOME/.config/opencode/plugins/cache" "$HOME/.config/opencode/plugins" -type f -name fleet.py -path '*fleet-auditor*/scripts/fleet.py' 2>/dev/null)
 EOF
 if [ -z "$FLEET_PY" ]; then echo "[Error] fleet.py not found. Is Fleet Auditor installed?"; exit 1; fi
 echo "Using: $FLEET_PY"
