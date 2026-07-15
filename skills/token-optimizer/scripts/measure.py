@@ -7810,14 +7810,6 @@ def _parse_session_jsonl(filepath):
     api_calls = 0
     is_sidechain = False          # subagent sidechain transcript (isSidechain:true)
 
-    # Detect outsourcerer delegation sessions by path pattern. These are
-    # Claude Code sessions launched by the outsourcerer skill as delegation
-    # calls (not interactive human work). They inflate session count and
-    # token volume if counted as main-pool human sessions.
-    _fp_lower = filepath.lower()
-    if "outsourcerer" in _fp_lower or "outsourcer" in _fp_lower:
-        is_sidechain = True
-
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -7831,6 +7823,18 @@ def _parse_session_jsonl(filepath):
                 # working session) so the cost comparison can exclude it.
                 if record.get("isSidechain") is True:
                     is_sidechain = True
+
+                # Detect outsourcerer delegation sessions by content marker.
+                # The outsourcerer skill injects an OSRC::PROGRESS protocol
+                # block into every delegation prompt. This is a reliable
+                # content-based marker (unlike path-based detection which
+                # false-positives on developers working ON the outsourcerer
+                # skill itself). These sessions inflate session count and
+                # token volume if counted as main-pool human sessions.
+                if not is_sidechain:
+                    _content = json.dumps(record)
+                    if "OSRC::PROGRESS" in _content or "OSRC::DONE" in _content:
+                        is_sidechain = True
 
                 # Extract version (take the first non-None we see)
                 if version is None:
@@ -8413,17 +8417,13 @@ def _scan_jsonl_is_sidechain(filepath, max_lines=200):
 
     isSidechain:true is stamped on every record of a sidechain transcript, so a
     short head-scan is conclusive. Also detects outsourcerer delegation
-    sessions by path pattern (these are not flagged isSidechain:true in their
-    JSONL but are delegation calls, not human work). Reads at most `max_lines`
-    lines to keep the one-time backfill fast over thousands of files.
-    Missing/unreadable → None (caller leaves the row unclassified rather than
-    guessing).
+    sessions by content marker (OSRC::PROGRESS protocol block injected by the
+    outsourcerer skill into every delegation prompt). These are not flagged
+    isSidechain:true in their JSONL but are delegation calls, not human work.
+    Reads at most `max_lines` lines to keep the one-time backfill fast over
+    thousands of files. Missing/unreadable → None (caller leaves the row
+    unclassified rather than guessing).
     """
-    # Fast path: outsourcerer delegation sessions detected by path
-    _fp_lower = filepath.lower()
-    if "outsourcerer" in _fp_lower or "outsourcer" in _fp_lower:
-        return True
-
     try:
         parsed = 0
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
@@ -8441,6 +8441,9 @@ def _scan_jsonl_is_sidechain(filepath, max_lines=200):
                     continue
                 parsed += 1
                 if rec.get("isSidechain") is True:
+                    return True
+                # Content-based outsourcerer delegation detection
+                if "OSRC::PROGRESS" in line or "OSRC::DONE" in line:
                     return True
         return False
     except (OSError, ValueError):
@@ -8478,23 +8481,22 @@ def _backfill_is_sidechain(conn):
 
 
 def _backfill_outsourcerer_sidechain(conn):
-    """Reclassify existing outsourcerer sessions as is_sidechain=1.
+    """Reclassify existing outsourcerer delegation sessions as is_sidechain=1.
 
-    One-time fix for rows collected before the path-based detection was added.
-    Targets rows where is_sidechain = 0 AND jsonl_path or project contains
-    'outsourcerer'. Idempotent: once all rows are fixed, re-running is a no-op.
-    Returns count of reclassified rows.
+    One-time fix for rows collected before the content-based detection was
+    added. Scans the JSONL of each unclassified human session for the
+    OSRC::PROGRESS protocol marker injected by the outsourcerer skill.
+    Idempotent: once all rows are fixed, re-running scans only rows that
+    were added since the last run. Returns count of reclassified rows.
     """
     rows = conn.execute(
-        "SELECT id, jsonl_path, project FROM session_log "
+        "SELECT id, jsonl_path FROM session_log "
         "WHERE is_sidechain = 0 AND jsonl_path IS NOT NULL"
     ).fetchall()
     updates = []
-    for row_id, jpath, project in rows:
-        path_lower = (jpath or "").lower()
-        proj_lower = (project or "").lower()
-        if "outsourcerer" in path_lower or "outsourcer" in path_lower \
-                or "outsourcerer" in proj_lower or "outsourcer" in proj_lower:
+    for row_id, jpath in rows:
+        verdict = _scan_jsonl_is_sidechain(jpath)
+        if verdict is True:
             updates.append((1, row_id))
     if updates:
         conn.executemany(
@@ -18516,7 +18518,7 @@ def setup_hook(dry_run=False, uninstall=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.45"  # Keep in sync with plugin.json + marketplace.json
+TOKEN_OPTIMIZER_VERSION = "5.11.47"  # Keep in sync with plugin.json + marketplace.json
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845
@@ -29864,7 +29866,9 @@ def _estimate_uncaptured_runtime(days=30, compression=None, savings=None):
             ).fetchone()[0] or 0
             rows = conn.execute(
                 "SELECT subagents_json FROM session_log "
-                "WHERE date >= ? AND subagents_json IS NOT NULL AND subagents_json != ''",
+                "WHERE date >= ? AND subagents_json IS NOT NULL AND subagents_json != '' "
+                "AND COALESCE(is_sidechain, 0) = 0 "
+                + _SESSION_QUALITY_FILTER,
                 (cutoff,),
             ).fetchall()
         finally:
