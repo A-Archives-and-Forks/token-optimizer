@@ -29,7 +29,7 @@ Headroom and RTK both compress bash and command output. That single surface cove
 | **File re-reads, delta mode** (changed files read again this session) | 🟢 Serves only the unified diff; 2,000-token re-read → ~50 tokens | 🔴 | 🔴 |
 | **File re-reads, structure map** (large code files read repeatedly) | 🟢 Skeleton of signatures, classes, and imports; 720KB → 250 tokens | 🔴 | 🔴 |
 | **Large tool results** (Bash/Read/Grep/MCP output over 4K chars) | 🟢 Archived to disk, replaced by an inline pointer the model can expand on demand | 🔴 | 🔴 |
-| **Model output verbosity** (lean-output nudge at high context fill) | 🟢 10-15% typical, up to 30-41% measured, cache-safe tiered steering | 🔴 | 🔴 |
+| **Model output verbosity** (lean-output nudge at high context fill) | 🟢 Cache-safe tiered steering (savings estimated, not metered) | 🔴 | 🔴 |
 | **Structural context** (configs, skills, MCP, MEMORY.md, before the session starts) | 🟢 Per-component audit: unused skills, dead MCP, stale memory, each scored | 🔴 | 🔴 |
 
 RTK reaches the first surface. Headroom reaches the first and the third. Token Optimizer covers all eight, and that is before the behavioral and compaction savings the others do not attempt.

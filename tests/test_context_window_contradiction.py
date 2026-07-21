@@ -48,7 +48,11 @@ def test_nudge_is_suppressed_when_the_window_is_contradicted():
     assert 'if cached.get("context_window_contradicted"):' in SRC
     suppress_at = SRC.index('if cached.get("context_window_contradicted"):')
     # It must bail before the tier logic that would emit a percentage-based nudge.
-    tier_at = SRC.index('f"[Token Optimizer] Context at {fill_pct:.0f}% capacity')
+    # Anchor updated 2026-07-22 when the nudge wording changed ("Context at N%
+    # capacity" -> "Context N%"). The invariant is unchanged: suppression first,
+    # tiers after. If this index() ever raises, the wording moved again -- repoint
+    # the anchor, do not delete the assertion.
+    tier_at = SRC.index('f"[Token Optimizer] Context {fill_pct:.0f}%{window_note}, quality')
     assert suppress_at < tier_at, "suppression must precede the nudge tiers"
 
 

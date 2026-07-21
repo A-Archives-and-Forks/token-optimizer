@@ -182,7 +182,7 @@ Most token tools compress command output. That covers 15-25% of your context. Th
 | **File re-reads, delta mode** | 🟢 Diff only; 2,000-token re-read → ~50 | 🔴 | 🔴 |
 | **File re-reads, structure map** | 🟢 Skeleton of signatures and imports; 720KB → 250 tokens | 🔴 | 🔴 |
 | **Large tool results** (over 4K chars) | 🟢 Archived to disk, expandable on demand | 🔴 | 🔴 |
-| **Model output verbosity** | 🟢 10-15% typical, up to 30-41% measured, cache-safe | 🔴 | 🔴 |
+| **Model output verbosity** | 🟢 Lean-output nudge, cache-safe (savings estimated, not metered) | 🔴 | 🔴 |
 | **Structural context** (configs, skills, MCP, memory) | 🟢 Per-component audit, each source scored | 🔴 | 🔴 |
 
 RTK reaches the first surface. Headroom reaches the first and the third. Token Optimizer covers all eight, then keeps going into what happens around compression:
@@ -267,7 +267,7 @@ Under the hood, **PreToolUse hooks** intercept every Read and Bash call before i
 | Structure Map | Unchanged file re-reads return a structural skeleton | ~30% (up to 99% per file) |
 | Bash Compression | CLI output condensed to essentials | ~10% |
 | Search Compression | grep/web results condensed to top hits + counts | ~15% |
-| Lean-Output Nudges | Steers model to concise output when context fills | 10-15% typical, up to 30-41% output reduction |
+| Lean-Output Nudges | Steers model to concise output when context fills | Estimated 10-15%; not counterfactually measured |
 | Quality Nudges | Warns when context quality drops | Prevents compaction loss |
 | Loop Detection | Catches retry loops before they burn tokens | Measured per loop |
 | Activity Mode | Adapts compaction to your session phase | Prevents decision loss |
@@ -318,7 +318,7 @@ Disable: `TOKEN_OPTIMIZER_BASH_COMPRESS=0` (search compression is part of bash c
 
 ### Lean-Output Nudges
 
-When context fills past 20% and quality drops, a short nudge tells the model to reason deeply but keep visible output lean. Live A/B testing showed a 10-15% typical reduction in output tokens, up to 30-41%, on real prompts. Cache-safe: injected as `additionalContext`, never modifies the existing prefix.
+When context fills past 20% and quality drops, a short nudge tells the model to reason deeply but keep visible output lean. The saving is **estimated at 10-15%, not measured**: the counterfactual (what the model would have written without the nudge) cannot be observed, so Token Optimizer reports this in the estimated tier and never folds it into metered savings. Cache-safe: injected as `additionalContext`, never modifies the existing prefix.
 
 No on/off switch today (not a `v5` feature). Tune the trigger point with `TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL` (default `20`).
 
@@ -439,7 +439,7 @@ python3 measure.py setup-smart-compact    # checkpoint + restore hooks
 
 Output tokens are the most expensive part of your session. They cost 5x more than input tokens on Opus and are billed per generation, not per cache read. A verbose response to a simple question burns dollars you never needed to spend.
 
-Token Optimizer handles this automatically with **lean-output nudges**. When your context fills past 20% and quality starts dropping, a short nudge tells the model to reason deeply but keep visible output lean. Live A/B testing showed a **10-15% typical reduction in output tokens, up to 30-41%**, on real prompts.
+Token Optimizer handles this automatically with **lean-output nudges**. When your context fills past 20% and quality starts dropping, a short nudge tells the model to reason deeply but keep visible output lean. The reduction is **estimated at 10-15% and is not counterfactually measured**, so it is reported in the estimated tier, separately from metered savings.
 
 **How it works:**
 
