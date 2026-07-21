@@ -33462,18 +33462,33 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
                 )
             return ""
 
-        # Determine nudge tier
+        # Determine nudge tier.
+        #
+        # Wording is deliberate, and it changed on 2026-07-22 after the old text
+        # had fired 1,227 times with no measurable effect on output length:
+        #   - A number beats an adjective. "Lean" is unfalsifiable to a model;
+        #     "under 120 words" is checkable, so it actually binds.
+        #   - Positive directive first ("answer first"), because a list of
+        #     prohibitions still leaves the model guessing what TO do.
+        #   - Reasoning is explicitly protected in both tiers. Cutting thinking
+        #     to save output tokens trades a cheap token for a wrong answer.
+        #   - No motivational filler. The old text ended "Every token saved
+        #     extends the session", which costs tokens to say and changes
+        #     nothing about behaviour.
+        #   - The two tiers now differ in kind, not just in tone: the strong
+        #     tier sets a hard ceiling and drops closing summaries entirely.
         if fill_pct >= 75:
             nudge = (
-                f"[Token Optimizer] Context at {fill_pct:.0f}% capacity{window_note}, quality {score:.0f}/100. "
-                "Reason as deeply as you need — but keep your visible output lean: no preamble, "
-                "no restating the request, no explanations unless asked. Every token saved extends the session."
+                f"[Token Optimizer] Context {fill_pct:.0f}%{window_note}, quality {score:.0f}/100. "
+                "Think as long as you need. Then answer in under 80 words: answer first, "
+                "no preamble, no restating the request, no recap of what you just did, "
+                "no closing summary. Where code or a command is the answer, give it and stop."
             )
         elif fill_pct >= _VERBOSITY_NUDGE_MIN_FILL and score < 75:
             nudge = (
-                f"[Token Optimizer] Context at {fill_pct:.0f}% capacity{window_note}, quality {score:.0f}/100. "
-                "Reason fully, then keep your output lean — skip restating the request and "
-                "omit unnecessary preamble. Every token saved extends the session."
+                f"[Token Optimizer] Context {fill_pct:.0f}%{window_note}, quality {score:.0f}/100. "
+                "Think as long as you need. Then answer short and direct: answer first, "
+                "under 120 words, no preamble and no restating the request."
             )
         else:
             return ""
