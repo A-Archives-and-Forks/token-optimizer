@@ -324,7 +324,7 @@ No on/off switch today (not a `v5` feature). Tune the trigger point with `TOKEN_
 
 ### Quality Nudges
 
-Watches context quality in real time. When the score drops 15+ points or crosses below 60, an inline note enters the context. Claude sees it on the next turn and surfaces the warning or adjusts behavior. Cooldown of 5 minutes, max 3 per session.
+Watches context quality in real time. When the score drops more than 15 points or crosses below 60, an inline note enters the context. Claude sees it on the next turn and surfaces the warning or adjusts behavior. Cooldown of 5 minutes, max 3 per session.
 
 Disable: `TOKEN_OPTIMIZER_QUALITY_NUDGES=0`
 

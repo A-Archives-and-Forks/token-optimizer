@@ -33477,18 +33477,25 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
         #     nothing about behaviour.
         #   - The two tiers now differ in kind, not just in tone: the strong
         #     tier sets a hard ceiling and drops closing summaries entirely.
+        #   - The ceiling binds PROSE only. A model asked to write a 300-line
+        #     file under an 80-word cap must either ignore the cap (and learn
+        #     the nudge is noise) or truncate the deliverable. Exempting
+        #     requested code and artifacts keeps the cap credible without
+        #     capping the work product.
         if fill_pct >= 75:
             nudge = (
                 f"[Token Optimizer] Context {fill_pct:.0f}%{window_note}, quality {score:.0f}/100. "
-                "Think as long as you need. Then answer in under 80 words: answer first, "
-                "no preamble, no restating the request, no recap of what you just did, "
-                "no closing summary. Where code or a command is the answer, give it and stop."
+                "Think as long as you need. Then answer in under 80 words of prose: answer "
+                "first, no preamble, no restating the request, no recap of what you just did, "
+                "no closing summary. Code, diffs, or commands the task asks for do not count "
+                "against the cap — where one is the answer, give it and stop."
             )
         elif fill_pct >= _VERBOSITY_NUDGE_MIN_FILL and score < 75:
             nudge = (
                 f"[Token Optimizer] Context {fill_pct:.0f}%{window_note}, quality {score:.0f}/100. "
-                "Think as long as you need. Then answer short and direct: answer first, "
-                "under 120 words, no preamble and no restating the request."
+                "Think as long as you need. Then answer first, in under 120 words of prose, "
+                "no preamble, no restating the request. Code or file contents the task asks "
+                "for do not count against the cap."
             )
         else:
             return ""

@@ -14,7 +14,7 @@ Two are user-visible alerters: Quality Nudges warn when the session is degrading
 ![Live quality nudges and automatic loop detection before context degradation or retry-loop waste](/images/quality-nudges-loops.svg)
 
 
-**Quality Nudges** watch the running context quality score. When the score drops 15 or more points in a single measurement, or crosses below 60, a short inline note enters the context. The model surfaces it on the next turn, prompting a timely `/compact` before the session degrades further. The note is suppressed on the first check immediately after a compaction (to avoid false alarms right after the context was just cleaned).
+**Quality Nudges** watch the running context quality score. When the score drops more than 15 points in a single measurement, or crosses below 60, a short inline note enters the context. The model surfaces it on the next turn, prompting a timely `/compact` before the session degrades further. The note is suppressed on the first check immediately after a compaction (to avoid false alarms right after the context was just cleaned).
 
 **Loop Detection** watches for repetition across the last four user messages and the last five tool results. It does not compute semantic similarity. A message loop is flagged when those recent messages all sit within 20% of their average length, a cheap proxy for the same request being retyped. Retry churn is flagged when at least three of the recent tool results are short failures from the same tool. Each signal carries a fixed confidence, 0.7 for a message loop and 0.75 for retry churn, and a warning fires only when the strongest signal is at least 0.6. When it fires, a short warning enters the context. Post-hoc analysis of real sessions found that loop sessions average 47,000 wasted tokens before the user notices. The notes use fixed templates and never echo your content back.
 
@@ -28,7 +28,7 @@ All four run automatically via hooks. No manual invocation is needed.
 
 | Feature | Hook | Trigger |
 |---|---|---|
-| Quality Nudges | `UserPromptSubmit` (quality-cache) | Quality score drops 15+ points or crosses below 60 |
+| Quality Nudges | `UserPromptSubmit` (quality-cache) | Quality score drops more than 15 points or crosses below 60 |
 | Loop Detection | `UserPromptSubmit` (quality-cache) | Last 4 user messages within 20% of average length, or 3+ short failures from one tool in the last 5 results |
 | Activity Mode | `PostToolUse` | Every tool call, no threshold |
 | Decision Extraction | `PostToolUse` | Tool output over 500 characters |
@@ -106,8 +106,8 @@ python3 measure.py v5 enable loop_detection
 
 | Feature | Parameter | Value |
 |---|---|---|
-| Quality Nudges | Drop threshold | 15 points |
-| Quality Nudges | Floor threshold | 60 (score below this also fires) |
+| Quality Nudges | Drop threshold | more than 15 points in one measurement |
+| Quality Nudges | Floor threshold | 60 (crossing below this also fires) |
 | Quality Nudges | Cooldown | 5 minutes |
 | Quality Nudges | Session cap | 3 nudges |
 | Quality Nudges | Post-compact suppression | Yes (first check after compact skipped) |
