@@ -63,7 +63,7 @@ Every active compression feature is on by default on Claude Code, where the PreT
 
 ## How to turn off
 
-Turn off the whole behavior of one feature with its `v5 disable` verb above, or with its environment variable for a one-off. The two read-cache behaviors share `TOKEN_OPTIMIZER_READ_CACHE` (both off) and `TOKEN_OPTIMIZER_READ_CACHE_DELTA` (delta only). Bash compression uses `TOKEN_OPTIMIZER_BASH_COMPRESS`, which also gates search-result compression (there is no separate search variable). Quality nudges and loop detection use `TOKEN_OPTIMIZER_QUALITY_NUDGES` and `TOKEN_OPTIMIZER_LOOP_DETECTION`. Lean-output nudges currently have no disable path: they are not a `v5` feature and read no environment variable. All are defined in the [configuration reference](/reference/configuration/).
+Turn off the whole behavior of one feature with its `v5 disable` verb above, or with its environment variable for a one-off. The two read-cache behaviors share `TOKEN_OPTIMIZER_READ_CACHE` (both off) and `TOKEN_OPTIMIZER_READ_CACHE_DELTA` (delta only). Bash compression uses `TOKEN_OPTIMIZER_BASH_COMPRESS`, which also gates search-result compression (there is no separate search variable). Quality nudges and loop detection use `TOKEN_OPTIMIZER_QUALITY_NUDGES` and `TOKEN_OPTIMIZER_LOOP_DETECTION`. Lean-output nudges have no on/off switch: they are not a `v5` feature. Their trigger point is tunable with `TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL` (default `20`). All are defined in the [configuration reference](/reference/configuration/).
 
 ## Risk rating
 

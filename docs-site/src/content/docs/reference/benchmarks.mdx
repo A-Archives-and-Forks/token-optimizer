@@ -117,7 +117,7 @@ This is the metered floor (a 30-day snapshot ending 2026-06-15; your dashboard r
 
 ### Output-token reduction (estimated tier)
 
-Every row above is input-side: context Token Optimizer removed before it reached the model. One feature works on the other, more expensive side of the bill. The **Lean-Output Nudge** fires when context fills past 25% and quality starts dropping: a short, cache-safe note (injected as `additionalContext`, never rewriting the existing prefix) tells the model to reason deeply but keep its visible output lean. Live A/B testing on real prompts measured a **10 to 15% typical reduction in output tokens, up to 30 to 41%** at the high end.
+Every row above is input-side: context Token Optimizer removed before it reached the model. One feature works on the other, more expensive side of the bill. The **Lean-Output Nudge** fires when context fills past 20% and quality starts dropping: a short, cache-safe note (injected as `additionalContext`, never rewriting the existing prefix) tells the model to reason deeply but keep its visible output lean. Live A/B testing on real prompts measured a **10 to 15% typical reduction in output tokens, up to 30 to 41%** at the high end.
 
 This sits in the estimated tier, not the metered floor, on purpose. Output tokens are billed at $25/MTok on Opus, five times the input rate, so the lever is large, but the counterfactual (how many tokens the model would have produced without the nudge) is modeled per session rather than metered event by event. The feature also shipped after the 2026-06-15 snapshot, so it contributes nothing to the measured and transformation figures on this page; your dashboard meters it forward from your own sessions.
 
