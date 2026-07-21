@@ -242,3 +242,60 @@ def test_producer_does_not_flag_an_exactly_full_window():
     contradicted, fill = _degradation(200_000, 200_000)
     assert contradicted == "False"
     assert fill == "100.0"
+
+
+# --- identity-before-inference across the rest of the class -----------------
+#
+# run_verbosity_steer was one of ~10 sites falling back to
+# _find_current_session_jsonl(). Two others resolve a session and then WRITE:
+# compact_capture stores a checkpoint that is later restored into a model's
+# context, and quality_cache writes the computed score into the resolved
+# session's cache. A wrong guess there is worse than a wrong percentage.
+
+def _fn_body(name, span=1400):
+    """Function source with comment lines stripped.
+
+    Comments mention these helper names in prose, and an ordering assertion that
+    matches a comment is measuring documentation, not code. (This bit first.)
+    """
+    src = (SCRIPTS / "measure.py").read_text(encoding="utf-8")
+    body = src[src.index(f"def {name}("):][:span]
+    return "\n".join(
+        line for line in body.splitlines() if not line.strip().startswith("#")
+    )
+
+
+def test_compact_capture_resolves_by_identity_first():
+    body = _fn_body("compact_capture", span=3000)
+    by_id = body.index("_find_session_jsonl_by_id(session_id)")
+    guess = body.index("_find_current_session_jsonl()")
+    assert by_id < guess, "identity lookup must precede the mtime guess"
+
+
+def test_quality_cache_resolves_by_identity_first():
+    body = _fn_body("quality_cache", span=2600)
+    by_id = body.index("_find_session_jsonl_by_id(session_id)")
+    guess = body.index("_find_current_session_jsonl()")
+    assert by_id < guess, "identity lookup must precede the mtime guess"
+
+
+def test_quality_cache_receives_the_hook_session_id():
+    """The payload carries session_id; the caller used to drop it."""
+    src = (SCRIPTS / "measure.py").read_text(encoding="utf-8")
+    assert "session_id_from_hook = payload.get(\"session_id\")" in src
+    assert "session_id=session_id_from_hook" in src
+
+
+def test_identity_lookup_is_actually_selective():
+    """_find_session_jsonl_by_id must not just return the newest transcript.
+
+    If it ignored the id, ordering it before the guess would be decoration.
+    """
+    r = _run(f"""
+p = measure._find_session_jsonl_by_id("definitely-not-a-real-session-id-xyz")
+print("RESULT:1")
+print("FOUND:" + str(p))
+""")
+    assert r.returncode == 0, r.stderr
+    found = r.stdout.split("FOUND:")[1].strip()
+    assert found in ("None", ""), f"unknown id must resolve to nothing, got {found!r}"

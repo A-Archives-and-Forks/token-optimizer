@@ -24981,7 +24981,13 @@ def compact_capture(transcript_path=None, session_id=None, trigger="auto", cwd=N
     if transcript_path:
         filepath = Path(transcript_path)
     else:
-        filepath = _find_current_session_jsonl()
+        # Identity before inference. _find_current_session_jsonl() returns the
+        # most recently active transcript, which on a new session is somebody
+        # else's -- and a checkpoint captured from the wrong session is later
+        # restored into this one's context. Same order checkpoint_trigger uses.
+        filepath = _find_session_jsonl_by_id(session_id) if session_id else None
+        if filepath is None:
+            filepath = _find_current_session_jsonl()
 
     # Build trigger suffix for filename so restore/list logic can rank all semantic checkpoints.
     trigger_suffix = f"-{trigger}" if trigger and trigger != "auto" else ""
@@ -28142,7 +28148,7 @@ def _release_quality_lock(fd):
         pass
 
 
-def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_jsonl=None, force=False, pure_time_throttle=False):
+def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_jsonl=None, force=False, pure_time_throttle=False, session_id=None):
     """Run quality analysis and write score to cache file for status line.
 
     Skips analysis if cache is younger than throttle_seconds (unless force=True).
@@ -28165,7 +28171,11 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
     if session_jsonl:
         filepath = Path(session_jsonl) if Path(session_jsonl).exists() else None
     else:
-        filepath = _find_current_session_jsonl()
+        # Resolve by identity before falling back to an mtime guess: a wrong
+        # guess writes this session's score into another session's cache.
+        filepath = _find_session_jsonl_by_id(session_id) if session_id else None
+        if filepath is None:
+            filepath = _find_current_session_jsonl()
 
     # Per-session cache: each session has its own file to avoid cross-session pollution
     cache_path = _quality_cache_path_for(filepath)
@@ -34900,13 +34910,15 @@ if __name__ == "__main__":
                 pass
             # Read hook payload from stdin if available (provides exact transcript_path)
             session_jsonl = None
+            session_id_from_hook = None
             if not sys.stdin.isatty():
                 try:
                     payload = json.loads(sys.stdin.read(1_000_000))
                     session_jsonl = payload.get("transcript_path")
+                    session_id_from_hook = payload.get("session_id")
                 except (json.JSONDecodeError, OSError):
                     pass
-            score = quality_cache(throttle_seconds=throttle, warn_threshold=warn_threshold, quiet=quiet, session_jsonl=session_jsonl, force=force, pure_time_throttle=throttle_only)
+            score = quality_cache(throttle_seconds=throttle, warn_threshold=warn_threshold, quiet=quiet, session_jsonl=session_jsonl, force=force, pure_time_throttle=throttle_only, session_id=session_id_from_hook)
             # WS2 tripwire piggyback: the --throttle-only invocation fires on the
             # PostToolUse Edit/Write path (where active first-read follow-ups are
             # resolved), so this is the natural place to refresh the per-cohort
