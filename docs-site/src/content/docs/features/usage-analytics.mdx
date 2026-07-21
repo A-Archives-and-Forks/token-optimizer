@@ -70,7 +70,7 @@ python3 measure.py pricing-tier                  # show the current tier
 python3 measure.py pricing-tier vertex-global    # switch tiers
 ```
 
-Accepted tiers: `anthropic` (default), `vertex-global`, `vertex-regional`, `bedrock`, and `subscription`. The choice persists in `config.json`. On a `subscription` tier, dollar savings read near zero by design, because the plan is flat-rate; subscription users measure value in rate-limit quota instead, through [Keep-Warm quota value](/features/keep-warm/#the-subscription-quota-value-story).
+Accepted tiers: `anthropic` (default), `vertex-global`, `vertex-regional`, and `bedrock`. The choice persists in `config.json`. Subscription is not a settable tier: it is a billing mode Token Optimizer detects on its own. Under subscription billing, dollar savings read near zero by design, because the plan is flat-rate; subscription users measure value in rate-limit quota instead, through [Keep-Warm quota value](/features/keep-warm/#the-subscription-quota-value-story).
 
 ## Session health
 

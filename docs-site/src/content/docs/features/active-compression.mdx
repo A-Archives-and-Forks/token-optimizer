@@ -28,7 +28,7 @@ Several of these features are documented in depth on their own pages. This page 
 | Loop detection | On | The agent stuck retrying the same thing | Caught before it burns more turns | None | [Quality signals](/features/quality-signals/) |
 | Lean-output nudges | On | Verbose model output at high context fill | 10-15% typical, up to 30-41% output reduction (live A/B tested) | None | (this page) |
 
-Two more features round out the nine, but they feed the compaction engine rather than shrinking content as it enters context, so they live on the [Quality signals](/features/quality-signals/) page: **Activity Mode** (classifies the session into one of five modes from the last ten tool calls, so compaction keeps what that phase needs) and **Decision Extraction** (preserves up to ten key decisions per session across compactions).
+Two more features round out the nine, but they feed the compaction engine rather than shrinking content as it enters context, so they live on the [Quality signals](/features/quality-signals/) page: **Activity Mode** (classifies the session into one of five modes from the last ten tool calls, so compaction keeps what that phase needs) and **Decision Extraction** (carries the five most recent decisions across each compaction).
 
 ## How to manage all of them
 
@@ -51,7 +51,7 @@ python3 measure.py v5 info delta_mode
 python3 measure.py v5 welcome
 ```
 
-Feature names accepted by `enable` and `disable`: `bash_compress`, `delta_mode`, `structure_map_beta`, `quality_nudges`, `loop_detection`. Toggle state persists to `config.json`.
+Feature names accepted by `enable` and `disable`: `bash_compress`, `delta_mode`, `structure_map_beta`, `quality_nudges`, `loop_detection`, `first_read_shadow`, `first_read_active`. Toggle state persists to `config.json`.
 
 <Aside type="note">
 You can also disable each feature with its own environment variable for a single run or in CI, without changing saved settings. The variables are listed per feature on the linked pages and defined once in the [configuration reference](/reference/configuration/).
@@ -63,7 +63,7 @@ Every active compression feature is on by default on Claude Code, where the PreT
 
 ## How to turn off
 
-Turn off the whole behavior of one feature with its `v5 disable` verb above, or with its environment variable for a one-off. The two read-cache behaviors share `TOKEN_OPTIMIZER_READ_CACHE` (both off) and `TOKEN_OPTIMIZER_READ_CACHE_DELTA` (delta only). Bash compression uses `TOKEN_OPTIMIZER_BASH_COMPRESS`. Search compression uses `TOKEN_OPTIMIZER_BASH_COMPRESS_SEARCH`. Quality nudges and loop detection use `TOKEN_OPTIMIZER_QUALITY_NUDGES` and `TOKEN_OPTIMIZER_LOOP_DETECTION`. Lean-output nudges use `TOKEN_OPTIMIZER_VERBOSITY_STEER`. All are defined in the [configuration reference](/reference/configuration/).
+Turn off the whole behavior of one feature with its `v5 disable` verb above, or with its environment variable for a one-off. The two read-cache behaviors share `TOKEN_OPTIMIZER_READ_CACHE` (both off) and `TOKEN_OPTIMIZER_READ_CACHE_DELTA` (delta only). Bash compression uses `TOKEN_OPTIMIZER_BASH_COMPRESS`, which also gates search-result compression (there is no separate search variable). Quality nudges and loop detection use `TOKEN_OPTIMIZER_QUALITY_NUDGES` and `TOKEN_OPTIMIZER_LOOP_DETECTION`. Lean-output nudges currently have no disable path: they are not a `v5` feature and read no environment variable. All are defined in the [configuration reference](/reference/configuration/).
 
 ## Risk rating
 
@@ -71,7 +71,7 @@ Low overall. Each compression feature fails open: when a substitution might lose
 
 ## Related environment variables
 
-`TOKEN_OPTIMIZER_BASH_COMPRESS`, `TOKEN_OPTIMIZER_BASH_COMPRESS_SEARCH`, `TOKEN_OPTIMIZER_READ_CACHE`, `TOKEN_OPTIMIZER_READ_CACHE_DELTA`, `TOKEN_OPTIMIZER_STRUCTURE_MAP`, `TOKEN_OPTIMIZER_QUALITY_NUDGES`, `TOKEN_OPTIMIZER_LOOP_DETECTION`, `TOKEN_OPTIMIZER_VERBOSITY_STEER`. All defined in the [configuration reference](/reference/configuration/).
+`TOKEN_OPTIMIZER_BASH_COMPRESS`, `TOKEN_OPTIMIZER_READ_CACHE`, `TOKEN_OPTIMIZER_READ_CACHE_DELTA`, `TOKEN_OPTIMIZER_STRUCTURE_MAP`, `TOKEN_OPTIMIZER_QUALITY_NUDGES`, `TOKEN_OPTIMIZER_LOOP_DETECTION`. All defined in the [configuration reference](/reference/configuration/).
 
 ## Platform availability
 

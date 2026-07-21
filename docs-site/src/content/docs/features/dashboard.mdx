@@ -82,7 +82,7 @@ TOKEN_OPTIMIZER_DASHBOARD_HOST=0.0.0.0 python3 measure.py setup-daemon
 The chosen host persists per-runtime across upgrades. Accepted values are `127.0.0.1`, `localhost`, and `0.0.0.0`. Anything else falls back to localhost with a warning.
 
 <Aside type="caution">
-`0.0.0.0` makes the dashboard reachable by any device on your LAN. Use it only on networks you trust. There is no authentication layer in front of the page.
+`0.0.0.0` makes the dashboard reachable by any device on your LAN. Use it only on networks you trust. Mutations (toggle, disable) require a token, but the page itself and its read-only data are served to anyone who can reach the port.
 </Aside>
 
 `daemon-status` runs an identity-verified probe, not just a TCP check, so it can tell your daemon apart from another process holding the port. It returns `DAEMON_RUNNING`, `DAEMON_NOT_RUNNING`, or `DAEMON_FOREIGN`.

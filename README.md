@@ -314,13 +314,13 @@ Disable: `TOKEN_OPTIMIZER_BASH_COMPRESS=0`
 
 When the AI runs grep, rg, or web searches that return long result lists, the output is condensed to the top hits plus a count. A 500-line grep result becomes 20 lines plus a summary.
 
-Disable: `TOKEN_OPTIMIZER_BASH_COMPRESS_SEARCH=0`
+Disable: `TOKEN_OPTIMIZER_BASH_COMPRESS=0` (search compression is part of bash compression; it has no separate switch)
 
 ### Lean-Output Nudges
 
 When context fills past 25% and quality drops, a short nudge tells the model to reason deeply but keep visible output lean. Live A/B testing showed a 10-15% typical reduction in output tokens, up to 30-41%, on real prompts. Cache-safe: injected as `additionalContext`, never modifies the existing prefix.
 
-Disable: `TOKEN_OPTIMIZER_VERBOSITY_STEER=0`
+No disable path today: lean-output nudges are not a `v5` feature and read no environment variable.
 
 ### Quality Nudges
 
@@ -446,7 +446,7 @@ Token Optimizer handles this automatically with **lean-output nudges**. When you
 - The nudge is injected as `additionalContext`, never modifying the existing prefix, so your cache stays intact
 - It only fires when context is filling up, not when you have plenty of room
 - The model still thinks through the problem; it just produces a more concise visible answer
-- Disable any time: `TOKEN_OPTIMIZER_VERBOSITY_STEER=0`
+- No disable path today: this nudge is not a `v5` feature and reads no environment variable
 
 This is one of the 9 active compression features, and it's the one that saves on the output side, where tokens cost the most.
 

@@ -52,7 +52,7 @@ cd ~/.claude/skills/token-optimizer/scripts
 python3 measure.py doctor
 ```
 
-`doctor` reports pass, warn, or fail for each component: hooks, status line, Smart Compaction, dashboard daemon, and quality bar. For a quick context-fill and quality read instead, run `/token-optimizer quick`.
+`doctor` reports each check as either OK or a problem with a suggested fix, covering install mode, Python version, context-window detection, the SessionEnd hook, Smart Compaction, the quality bar, the trends DB, dashboard freshness, stale env vars, broken symlinks, and duplicate installs. For a quick context-fill and quality read instead, run `/token-optimizer quick`.
 
 <Aside type="caution" title="Windows users">
 Use only the `/plugin` install above. Do not also run the script installer. Combining the two creates an `EBUSY: resource busy or locked` error. On Windows, the Python command is `python`, not `python3`. See the Windows notes in [Choosing your install](/install/overview/).
