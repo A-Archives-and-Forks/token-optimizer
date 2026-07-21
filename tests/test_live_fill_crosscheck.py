@@ -28,7 +28,7 @@ SRC = (SCRIPTS / "measure.py").read_text(encoding="utf-8")
 
 def test_host_value_is_still_preferred():
     """The host wins. This layer observes, it does not overrule."""
-    assert 'fill_pct = min(1.0, max(0.0, live["used_percentage"] / 100.0))' in SRC
+    assert "fill_pct = min(1.0, max(0.0, _used / 100.0))" in SRC
     assert "host_fill_pct = fill_pct" in SRC
     # Nothing may reassign fill_pct from our own arithmetic after the host set it.
     block = SRC[SRC.index("if host_fill_pct is not None:"):][:1200]

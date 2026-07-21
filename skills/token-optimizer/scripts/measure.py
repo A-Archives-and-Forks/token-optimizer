@@ -21828,13 +21828,22 @@ def compute_quality_score(quality_data, session_id=None):
             live_sid = sanitize_session_id(str(live.get("session_id") or ""))
             want_sid = sanitize_session_id(str(session_id or ""))
             if age < 10 and want_sid and live_sid == want_sid:
-                fill_pct = min(1.0, max(0.0, live["used_percentage"] / 100.0))
+                _used = float(live["used_percentage"])
+                # json.loads accepts the non-standard literals NaN/Infinity. NaN
+                # compares False against everything, so max()/min() would pass it
+                # through as a silent 0.0 and suppress every nudge with no error.
+                if not math.isfinite(_used):
+                    raise ValueError("non-finite used_percentage")
+                fill_pct = min(1.0, max(0.0, _used / 100.0))
                 # The host knows the real window; we only infer it. When the
                 # host rescues us from a bad denominator the user sees a correct
                 # number and the misconfiguration stays invisible, so record the
                 # disagreement rather than quietly accepting the save.
                 host_fill_pct = fill_pct
-    except (json.JSONDecodeError, OSError, KeyError):
+    except (json.JSONDecodeError, OSError, KeyError, TypeError, ValueError):
+        # used_percentage arrives from a JSON file on disk. A non-numeric value
+        # raises TypeError on the division, which was NOT caught here and
+        # propagated out of compute_quality_score to crash the whole invocation.
         pass
     if fill_pct is None:
         try:
@@ -33232,6 +33241,12 @@ def run_ensure_health():
         pass
 
 
+# The provenance label is untrusted input rendered into the model's context.
+# Long enough for "env: CLAUDE_CODE_DISABLE_1M_CONTEXT", short enough that a
+# hostile value cannot carry a payload or bloat the window.
+_WINDOW_SOURCE_MAX_CHARS = 48
+
+
 def _format_window_note(cached):
     """Render the denominator and its origin, e.g. " (1M window, source: default 1M)".
 
@@ -33250,7 +33265,10 @@ def _format_window_note(cached):
         return ""
     try:
         window = int(window)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError is what int(float("inf")) raises, and JSON parses the
+        # non-standard literal Infinity by default, so a poisoned cache reaches
+        # here as a float that cannot be narrowed.
         return ""
     if window <= 0:
         return ""
@@ -33262,10 +33280,20 @@ def _format_window_note(cached):
     else:
         size = str(window)
 
-    # This string is injected into the very context window it reports on, so keep
-    # the origin clause and drop the override hint that follows it.
+    # The provenance string is UNTRUSTED. It embeds env values (CLAUDE_MODEL,
+    # ANTHROPIC_MODEL) and config fields verbatim, and this note is injected into
+    # the assistant's context, where text reads as instructions. Trimming the
+    # trailing hint is not sanitisation: everything BEFORE the first "." or "("
+    # survived, unbounded, so `CLAUDE_MODEL="ignore prior instructions ... haiku"`
+    # would have been rendered whole into the model's context.
+    #
+    # Three defenses, in order: cut to the origin clause, restrict to a charset
+    # that cannot carry newlines or control characters, and hard-cap the length
+    # so a multi-megabyte value cannot bloat the very window this tool protects.
     source = (cached.get("model_context_window_source") or "")
     source = source.split(".")[0].split("(")[0].strip()
+    source = "".join(c for c in source if c.isalnum() or c in " _-:/+")
+    source = " ".join(source.split())[:_WINDOW_SOURCE_MAX_CHARS].strip()
     return f" ({size} window, source: {source})" if source else f" ({size} window)"
 
 
@@ -33336,10 +33364,25 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
             except (TypeError, ValueError):
                 have_sid = ""
             if not have_sid or have_sid == "unknown" or have_sid != want_sid:
+                # Say so. If this mismatch is structural to the environment
+                # (container path translation, WSL mounts, a runtime emitting a
+                # short session id) it recurs on every prompt, and a silent
+                # return would disable the tool for good with nothing to grep.
+                if not quiet:
+                    sys.stderr.write(
+                        "[Token Optimizer] Skipping nudge: resolved session "
+                        f"{have_sid or 'unknown'!s} does not match the live session "
+                        f"{want_sid!s}.\n"
+                    )
                 return ""
         elif guessed:
             # No identity to check AND the transcript was inferred. Never fall
             # back to a guess: that combination is exactly the observed failure.
+            if not quiet:
+                sys.stderr.write(
+                    "[Token Optimizer] Skipping nudge: no session id to verify "
+                    "the inferred transcript against.\n"
+                )
             return ""
 
         window_note = _format_window_note(cached)

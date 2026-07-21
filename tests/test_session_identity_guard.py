@@ -67,10 +67,15 @@ def test_cache_without_a_session_id_is_not_trusted():
 
 
 def test_guessed_transcript_without_identity_emits_nothing():
-    """The exact observed failure: inferred transcript, no identity to verify."""
+    """The exact observed failure: inferred transcript, no identity to verify.
+
+    Structural only. The behavioral proof lives in
+    tests/test_nudge_guards_behavioral.py, which runs the real function -- a
+    source-grep cannot tell a live guard from a dead one.
+    """
     assert "elif guessed:" in STEER
-    guard = STEER[STEER.index("elif guessed:"):][:400]
-    assert "return \"\"" in guard
+    guard = STEER[STEER.index("elif guessed:"):][:900]
+    assert 'return ""' in guard
 
 
 def test_guard_runs_before_any_message_is_built():
