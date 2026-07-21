@@ -16,11 +16,11 @@ Two are user-visible alerters: Quality Nudges warn when the session is degrading
 
 **Quality Nudges** watch the running context quality score. When the score drops 15 or more points in a single measurement, or crosses below 60, a short inline note enters the context. The model surfaces it on the next turn, prompting a timely `/compact` before the session degrades further. The note is suppressed on the first check immediately after a compaction (to avoid false alarms right after the context was just cleaned).
 
-**Loop Detection** watches for repetition. It compares the last four user messages and the last five tool results for similarity, using a confidence threshold of 0.70. When confidence is met, a short warning enters the context. Post-hoc analysis of real sessions found that loop sessions average 47,000 wasted tokens before the user notices. The notes use fixed templates and never echo your content back.
+**Loop Detection** watches for repetition. It compares the last four user messages and the last five tool results for similarity, using a confidence threshold of 0.6. When confidence is met, a short warning enters the context. Post-hoc analysis of real sessions found that loop sessions average 47,000 wasted tokens before the user notices. The notes use fixed templates and never echo your content back.
 
 **Activity Mode Detection** classifies the current session into one of five modes: code, debug, review, infra, or general. Classification runs on a sliding window of the last ten tool calls after every PostToolUse event. The result feeds the [active compression](/features/active-compression/) compaction engine, which selects mode-aware PRESERVE and DROP priorities when `/compact` runs. The activity log auto-prunes at 30 rows to avoid unbounded growth.
 
-**Decision Extraction** monitors tool outputs in real time for decision statements, patterns like "chose X because Y", "going with Z over W", or "switched to". It runs only on outputs over 500 characters (to skip short noise). Detected decisions are stored in the session database via atomic read-modify-write (SQLite `BEGIN IMMEDIATE`) and injected as a CRITICAL DECISIONS block at compaction time, so the context stays decision-aware after every `/compact`.
+**Decision Extraction** monitors tool outputs in real time for decision statements, patterns like "chose X because Y", "going with Z over W", or "switched to". It runs only on outputs over 500 characters (to skip short noise). Detected decisions are stored in the session database via SessionStore's auto-commit `get_meta`/`set_meta` and injected as a CRITICAL DECISIONS block at compaction time, so the context stays decision-aware after every `/compact`.
 
 ## When features fire
 
@@ -29,7 +29,7 @@ All four run automatically via hooks. No manual invocation is needed.
 | Feature | Hook | Trigger |
 |---|---|---|
 | Quality Nudges | `UserPromptSubmit` (quality-cache) | Quality score drops 15+ points or crosses below 60 |
-| Loop Detection | `UserPromptSubmit` (quality-cache) | Similarity ≥ 0.70 across last 4 user messages or last 5 tool results |
+| Loop Detection | `UserPromptSubmit` (quality-cache) | Similarity ≥ 0.6 across last 4 user messages or last 5 tool results |
 | Activity Mode | `PostToolUse` | Every tool call, no threshold |
 | Decision Extraction | `PostToolUse` | Tool output over 500 characters |
 
@@ -111,14 +111,14 @@ python3 measure.py v5 enable loop_detection
 | Quality Nudges | Cooldown | 5 minutes |
 | Quality Nudges | Session cap | 3 nudges |
 | Quality Nudges | Post-compact suppression | Yes (first check after compact skipped) |
-| Loop Detection | Similarity threshold | 0.70 confidence |
+| Loop Detection | Similarity threshold | 0.6 confidence |
 | Loop Detection | User message window | Last 4 messages |
 | Loop Detection | Tool result window | Last 5 results |
 | Loop Detection | Session cap | 2 warnings |
 | Loop Detection | Note style | Fixed templates, no content echo |
 | Decision Extraction | Minimum output size | 500 characters |
 | Decision Extraction | Session cap | 10 decisions |
-| Decision Extraction | Write method | SQLite `BEGIN IMMEDIATE` (atomic) |
+| Decision Extraction | Write method | SessionStore auto-commit `get_meta`/`set_meta` |
 | Activity Mode | Classification window | Last 10 tool calls |
 | Activity Mode | Activity log prune | 30 rows |
 | Activity Mode | Modes | code, debug, review, infra, general |

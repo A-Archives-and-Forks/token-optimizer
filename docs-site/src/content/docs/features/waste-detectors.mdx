@@ -1,24 +1,25 @@
 ---
 title: Waste detectors
-description: "The waste detectors find idle burns, runaway sessions, and config bloat. Eleven run on Claude Code and Codex; OpenClaw runs its own native set of sixteen, tuned to its scheduled-agent surface."
+description: "The waste detectors find idle burns, runaway sessions, and config bloat. Twelve run on Claude Code and Codex; OpenClaw runs its own native set of sixteen, tuned to its scheduled-agent surface."
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-A waste detector is a single rule that looks at your sessions or your config and flags one specific way tokens leak. Token Optimizer ships eleven that run on Claude Code and Codex. OpenClaw runs its own native set of sixteen detectors, tuned to its scheduled-agent surface: heartbeats, crons, and unattended fleet runs that can burn tokens with no one watching.
+A waste detector is a single rule that looks at your sessions or your config and flags one specific way tokens leak. Token Optimizer ships twelve that run on Claude Code and Codex. OpenClaw runs its own native set of sixteen detectors, tuned to its scheduled-agent surface: heartbeats, crons, and unattended fleet runs that can burn tokens with no one watching.
 
 ## What they do
 
 Each detector takes parsed session data or a config file, looks for one pattern, and returns a finding with a confidence score. The findings feed three surfaces: [Token Coach](/features/token-coach/) names them in conversation, [Fleet Auditor](/features/fleet-auditor/) prices them across systems, and the [setup audit](/features/audit/) folds them into the full report.
 
-Detectors are conservative on purpose. A finding is suppressed below a 0.4 confidence threshold and flagged only when it affects a meaningful share of recent sessions, so the report shows real waste, not noise. Two detectors of the same family never double-count: if a model-routing finding already covers a session, the overlapping check stands down.
+Detectors are conservative on purpose. A finding is suppressed below a 0.3 confidence threshold and flagged only when it affects a meaningful share of recent sessions, so the report shows real waste, not noise. Two detectors of the same family never double-count: if a model-routing finding already covers a session, the overlapping check stands down.
 
-## The eleven detectors on Claude Code and Codex
+## The twelve detectors on Claude Code and Codex
 
 These run on parsed session history and your project config.
 
 | Detector | What it catches |
 |---|---|
+| Respond-to-bash | `respondToBashCommands` left unset in `settings.json`, so Claude Code spends output tokens on an unrequested reply after every slash-command and `!bash` output. |
 | Retry churn | The same tool called with the same input three or more times while it keeps erroring. |
 | Tool cascade | Three or more consecutive tool errors forming a failure chain. |
 | Looping | High similarity between user messages with little forward progress, the signature of a stuck loop. |
@@ -32,7 +33,7 @@ These run on parsed session history and your project config.
 | PDF ingestion | Large PDF or image reads that inflate context when a cached or trimmed read would do. |
 
 <Aside type="note" title="Two detectors run at the hook, not the report">
-Nine of the eleven run on aggregated session history. WebSearch routing is a post-hoc nudge over trend data, and PDF ingestion runs inline at the read-cache hook. All eleven surface through the same coach and audit reports.
+Ten of the twelve run in the report batch (session history or config). WebSearch routing is a post-hoc nudge over trend data, and PDF ingestion runs inline at the read-cache hook. All twelve surface through the same coach and audit reports.
 </Aside>
 
 ## The sixteen OpenClaw detectors
@@ -97,7 +98,7 @@ On a non-Claude runtime, prefix the runtime, for example `TOKEN_OPTIMIZER_RUNTIM
 
 | Setting | Default | Notes |
 |---|---|---|
-| Confidence floor | 0.4 | Findings below this are suppressed. |
+| Confidence floor | 0.3 | Findings below this are suppressed. |
 | Triage minimum | 5,000 tokens | A session must clear this to be triaged. |
 | Significance gate | >5% of sessions | A detector is flagged only when it affects a meaningful share. |
 | Overlap handling | de-duplicated | A weaker detector stands down when a stronger one covers the same session. |
@@ -112,7 +113,7 @@ None specific to the detectors. The read-cache hook that carries the PDF-ingesti
 
 ## Platform availability
 
-The eleven session detectors run on Claude Code and Codex and on any runtime where Token Optimizer collects sessions. The OpenClaw security checks run only when Fleet Auditor detects OpenClaw. See the [capability matrix](/reference/capability-matrix/).
+The twelve session detectors run on Claude Code and Codex and on any runtime where Token Optimizer collects sessions. The OpenClaw security checks run only when Fleet Auditor detects OpenClaw. See the [capability matrix](/reference/capability-matrix/).
 
 ## Related
 

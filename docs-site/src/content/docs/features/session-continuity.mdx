@@ -59,7 +59,7 @@ When you start a fresh session whose context fill is meaningful but whose qualit
 | Condition | Variable | Default |
 |---|---|---|
 | Quality below | `TOKEN_OPTIMIZER_FRESH_NUDGE_QUALITY` | `70` |
-| Fill at least | `TOKEN_OPTIMIZER_FRESH_NUDGE_MIN_FILL` | `50` |
+| Fill at least | `TOKEN_OPTIMIZER_FRESH_NUDGE_MIN_FILL` | `45` |
 
 Both are defined in the [configuration reference](/reference/configuration/#checkpoints-and-continuity). Raise the quality threshold to nudge more often, or lower it to nudge less.
 
@@ -124,7 +124,7 @@ Uninstalling the hooks leaves existing checkpoints on disk. To delete all local 
 | Prompt-continuity budget | 8 seconds | Wall-clock; misses cost nothing |
 | `resume-lean` lookback | recent sessions | Widen with `--days N` |
 | Fresh nudge quality floor | `70` | `TOKEN_OPTIMIZER_FRESH_NUDGE_QUALITY` |
-| Fresh nudge minimum fill | `50` | `TOKEN_OPTIMIZER_FRESH_NUDGE_MIN_FILL` |
+| Fresh nudge minimum fill | `45` | `TOKEN_OPTIMIZER_FRESH_NUDGE_MIN_FILL` |
 | Checkpoint telemetry | off | Set `TOKEN_OPTIMIZER_CHECKPOINT_TELEMETRY=1` for stats |
 | Cold-Resume-Lean cost | zero LLM tokens | Pure file reconstruction |
 
