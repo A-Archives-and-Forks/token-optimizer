@@ -21813,6 +21813,9 @@ def compute_quality_score(quality_data, session_id=None):
         "session data" if quality_data.get("model_context_window") else ctx_window_source
     )
     fill_pct = None
+    # Set when observed tokens exceed the window: that is not a full context, it
+    # is a wrong window, and it must not be reported as a percentage.
+    window_contradicted = False
     try:
         live_fill_path = QUALITY_CACHE_DIR / "live-fill.json"
         if live_fill_path.exists():
@@ -21828,7 +21831,14 @@ def compute_quality_score(quality_data, session_id=None):
         try:
             context_tokens = quality_data.get("context_tokens")
             if context_tokens is not None and model_context_window:
-                fill_pct = min(1.0, max(0.0, float(context_tokens) / float(model_context_window)))
+                raw_ratio = float(context_tokens) / float(model_context_window)
+                # min(1.0, ...) turns "250k tokens in a 200k window" into a
+                # confident-looking 100%. That clamp is what let a misdetected
+                # denominator pass as a real reading (#95). Record the
+                # contradiction first; the clamp still runs so downstream
+                # curve math keeps its 0-1 contract.
+                window_contradicted = raw_ratio > 1.0
+                fill_pct = min(1.0, max(0.0, raw_ratio))
         except (TypeError, ValueError):
             fill_pct = None
     if fill_pct is None:
@@ -21987,6 +21997,7 @@ def compute_quality_score(quality_data, session_id=None):
             "model": model_name or "unknown",
             "model_context_window": quality_data.get("model_context_window") or ctx_window,
             "model_context_window_source": model_context_window_source,
+            "window_contradicted": window_contradicted,
             "band": band_name,
             "detail": f"{round(fill_pct * 100)}% fill, {band_name.lower()} ({curve_name})",
         },
@@ -28212,6 +28223,7 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
     result["model_context_window_source"] = (
         cfd.get("model_context_window_source") or detect_context_window()[1]
     )
+    result["context_window_contradicted"] = bool(cfd.get("window_contradicted"))
 
     # Dampen ResourceHealth swings within a session.
     # Fill_pct fluctuates between measurements (context adds/removes, compaction).
@@ -33257,6 +33269,19 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
         fill_pct = cached.get("fill_pct", 0) or 0
         score = cached.get("score", 100) or 100
         window_note = _format_window_note(cached)
+
+        # The window is provably wrong: more tokens were observed than it can
+        # hold. Say so and stop, rather than nudging on a percentage derived
+        # from it. Deliberately no second guess at the "real" window -- guessing
+        # a denominator is the original defect.
+        if cached.get("context_window_contradicted"):
+            if not quiet:
+                sys.stderr.write(
+                    f"[Token Optimizer] Context window looks misdetected{window_note}: "
+                    "observed tokens exceed it, so the fill percentage is suppressed. "
+                    "Set TOKEN_OPTIMIZER_CONTEXT_SIZE to your real window.\n"
+                )
+            return ""
 
         # Cooldown check
         import time as _vs_time
