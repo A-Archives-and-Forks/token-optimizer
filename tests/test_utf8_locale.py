@@ -22,6 +22,20 @@ SCRIPTS = REPO / "plugins" / "token-optimizer" / "skills" / "token-optimizer" / 
 RUN_PY = REPO / "plugins" / "token-optimizer" / "hooks" / "run.py"
 
 HEB = "/Users/x/פרויקט-שלי"  # "my project" in Hebrew
+# The same string escaped to pure-ASCII source (\uXXXX), for embedding in a
+# `python -c` payload.
+#
+# The child runs under ASCII_ENV, so the command line itself must be ASCII: on
+# Linux with LC_ALL=C the interpreter cannot decode a non-ASCII argv and dies
+# with "Unable to decode the command from the command line" BEFORE any product
+# code runs. macOS always decodes argv as UTF-8, which is why embedding Hebrew
+# directly passed locally for months and only failed once CI ran on Linux.
+#
+# Escaping moves the non-ASCII out of the transport without weakening the test:
+# the child still builds and handles the real Hebrew string at runtime under a
+# hostile locale, which is the behavior under test. The re-exec tests below
+# already sidestep this by writing a real .py file instead of using -c.
+HEB_SRC = HEB.encode("unicode_escape").decode("ascii")
 # A locale env that forces a non-UTF-8 stdio + default encoding on every platform.
 ASCII_ENV = {**os.environ, "PYTHONUTF8": "0", "PYTHONIOENCODING": "ascii", "LC_ALL": "C"}
 
@@ -38,7 +52,7 @@ def test_enforce_utf8_io_allows_non_ascii_print():
     code = (
         "import sys; sys.path.insert(0, '.')\n"
         "from utf8_io import enforce_utf8_io; enforce_utf8_io()\n"
-        f"print('project: {HEB}')\n"
+        f"print('project: {HEB_SRC}')\n"
     )
     r = _run(code, ASCII_ENV)
     assert r.returncode == 0, f"non-ascii print crashed: {r.stderr}"
@@ -50,7 +64,7 @@ def test_enforce_utf8_io_is_idempotent():
         "import sys; sys.path.insert(0, '.')\n"
         "from utf8_io import enforce_utf8_io\n"
         "enforce_utf8_io(); enforce_utf8_io(); enforce_utf8_io()\n"
-        f"print('{HEB}')\n"
+        f"print('{HEB_SRC}')\n"
     )
     r = _run(code, ASCII_ENV)
     assert r.returncode == 0, f"idempotent calls crashed: {r.stderr}"
@@ -64,7 +78,7 @@ def test_hook_io_parses_non_ascii_stdin():
         "import sys; sys.path.insert(0, '.')\n"
         "from hook_io import read_stdin_hook_input\n"
         "d = read_stdin_hook_input()\n"
-        f"assert d.get('cwd') == {HEB!r}, repr(d)\n"
+        f"assert d.get('cwd') == {ascii(HEB)}, repr(d)\n"
         "assert d.get('tool_name') == 'Bash', repr(d)\n"
         "print('OK')\n"
     )
@@ -78,8 +92,8 @@ def test_open_reads_non_ascii_jsonl_with_explicit_encoding():
     code = (
         "import tempfile, os\n"
         "p = tempfile.mktemp()\n"
-        f"open(p, 'w', encoding='utf-8').write('{HEB}')\n"
-        "assert open(p, encoding='utf-8').read() == '" + HEB + "'\n"
+        f"open(p, 'w', encoding='utf-8').write('{HEB_SRC}')\n"
+        "assert open(p, encoding='utf-8').read() == '" + HEB_SRC + "'\n"
         "os.unlink(p); print('OK')\n"
     )
     r = _run(code, ASCII_ENV)
