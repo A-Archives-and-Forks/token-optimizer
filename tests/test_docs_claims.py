@@ -1,4 +1,4 @@
-"""The countable claims in our docs must match the code that backs them.
+"""The countable and threshold claims in our docs must match the code.
 
 This rides the existing tests.yml matrix rather than adding a workflow, so the
 gate runs on every push and PR on the same enforcement path the suite already

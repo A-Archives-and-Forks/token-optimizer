@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the countable claims in our docs against the code that backs them.
+"""Verify the countable and threshold claims in our docs against the code.
 
 Why this exists: on 2026-07-21 an audit found docs-site frozen at v5.11.29 while
 the code had moved to v5.11.53. Four separate numeric claims were wrong, and one
@@ -10,6 +10,14 @@ stale. Guards that nothing enforces are decoration, so this one runs in CI.
 
 What it does: computes ground truth from the source, then scans every doc for
 sentences that state that number and asserts they agree.
+
+On 2026-07-21 the first version checked only COUNTS, and two threshold
+regressions (archive purge 24h vs 48h, loop firing floor 0.7 vs 0.6) sailed
+through while it printed "all countable claims match the code". So thresholds
+are now claims too: numeric constants the docs quote (purge windows, confidence
+floors, fill floors), each extracted from the defining line of source, each
+matched exactly. What this still does NOT verify: prose descriptions of
+behavior, benchmark results, and any claim that is not a number.
 
 Two claim styles, deliberately treated differently:
   - Exact ("12 detectors")  -> must equal ground truth.
@@ -144,6 +152,87 @@ CLAIMS = [
 ]
 
 
+# --------------------------------------------------------------------------
+# Threshold claims: numeric constants the docs quote. Ground truth is the
+# defining line of source, extracted by regex -- loudly, never a fallback, so a
+# refactor that moves the constant breaks the CHECKER instead of silently
+# passing everything. Matched exactly (no "+" semantics). These exist because
+# the count-only first version let two threshold regressions through while
+# printing a success message that read as full verification.
+# --------------------------------------------------------------------------
+
+def _source_value(relpath: str, pattern: str, what: str) -> float:
+    src = (REPO / relpath).read_text(encoding="utf-8")
+    m = re.search(pattern, src)
+    if not m:
+        raise RuntimeError(f"ground truth for {what} not found in {relpath} "
+                           f"(pattern {pattern!r})")
+    return float(m.group(1))
+
+
+_MEASURE = "skills/token-optimizer/scripts/measure.py"
+_ARCHIVER = "skills/token-optimizer/scripts/archive_result.py"
+_REGISTRY = "skills/token-optimizer/scripts/detectors/registry.py"
+_FLEET = "skills/fleet-auditor/scripts/fleet.py"
+
+# Fleet Auditor carries its OWN confidence floor (fleet.py min_confidence = 0.4),
+# a different population from the session-detector floor in registry.py (0.3).
+# The same "Confidence floor | N |" table row appears on both pages, so each
+# claim is scoped to its page -- the same apples-to-oranges lesson as the
+# OpenClaw detector EXCLUDE above.
+_FLEET_PAGE = "docs-site/src/content/docs/features/fleet-auditor"
+THRESHOLD_EXCLUDE = {
+    "detector_floor": (_FLEET_PAGE,),
+}
+THRESHOLD_ONLY = {
+    "fleet_floor": (_FLEET_PAGE,),
+}
+
+# (key, human label, (source file, extraction regex), doc regexes stating it)
+THRESHOLDS = [
+    ("archive_auto_purge_h", "automatic archive purge window (hours)",
+     (_ARCHIVER, r"cleanup_old_archives\(max_age_hours=(\d+)"), [
+        r"purges archives older than (\d+) hours",
+        r"[Aa]utomatic purge after (\d+) hours",
+        r"After (\d+) hours, applied when the hook",
+        r"the automatic (\d+)-hour purge",
+    ]),
+    ("archive_manual_default_h", "manual archive-cleanup default (hours)",
+     (_MEASURE, r'_int_env\("TOKEN_OPTIMIZER_ARCHIVE_RETENTION_HOURS", (\d+)\)'), [
+        r"stricter default of (\d+) hours",
+        r"older than (\d+)h \(default",
+        r"older than (\d+) hours by default",
+        r"\(default (\d+); the automatic",
+        r"trims on a (\d+)-hour default",
+    ]),
+    ("loop_firing_floor", "loop-warning firing floor",
+     (_MEASURE, r'best\["confidence"\] < ([0-9]+(?:\.[0-9]+)?)'), [
+        r"strongest signal is at least ([0-9]+(?:\.[0-9]+)?)",
+        r"[Ss]trongest signal ≥ ([0-9]+(?:\.[0-9]+)?)",
+    ]),
+    ("detector_floor", "detector confidence floor",
+     (_REGISTRY, r'"confidence", 0\) > ([0-9]+(?:\.[0-9]+)?)'), [
+        r"suppressed at or below a ([0-9]+(?:\.[0-9]+)?) confidence threshold",
+        r"Confidence floor \| ([0-9]+(?:\.[0-9]+)?) \|",
+    ]),
+    ("fleet_floor", "fleet-auditor confidence floor",
+     (_FLEET, r"min_confidence = ([0-9]+(?:\.[0-9]+)?)"), [
+        r"Confidence floor \| ([0-9]+(?:\.[0-9]+)?) \|",
+    ]),
+    ("verbosity_min_fill", "lean-output nudge fill floor (%)",
+     (_MEASURE, r'_int_env\("TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL", (\d+)\)'), [
+        r"TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL` \| `(\d+)`",
+        r"TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL` \(default `(\d+)`\)",
+        r"context fills past (\d+)%",
+    ]),
+    ("fresh_nudge_min_fill", "fresh-session nudge fill floor (%)",
+     (_MEASURE, r'_int_env\("TOKEN_OPTIMIZER_FRESH_NUDGE_MIN_FILL", (\d+)\)'), [
+        r"TOKEN_OPTIMIZER_FRESH_NUDGE_MIN_FILL` \| `(\d+)`",
+        r"Fresh nudge minimum fill \| `(\d+)`",
+    ]),
+]
+
+
 def docs() -> list[Path]:
     """Every surface that quotes numbers at a reader: the docs site and all
     six READMEs (root plus the five per-platform ones)."""
@@ -155,9 +244,11 @@ def docs() -> list[Path]:
     return sorted(out)
 
 
-def check() -> list[str]:
+def check() -> tuple[list[str], dict[str, int]]:
     findings: list[str] = []
+    stats = {"count_claims": 0, "threshold_claims": 0, "files": 0}
     files = docs()
+    stats["files"] = len(files)
 
     for key, label, truth_fn, patterns in CLAIMS:
         truth = truth_fn()
@@ -177,6 +268,7 @@ def check() -> list[str]:
             for pat in patterns:
                 for m in re.finditer(pat, text, re.I):
                     stated = int(m.group(1))
+                    stats["count_claims"] += 1
                     approx = m.group(0).rstrip().endswith("+") or "+" in m.group(0)
                     line = text[:m.start()].count("\n") + 1
                     where = f"{rel}:{line}"
@@ -205,18 +297,60 @@ def check() -> list[str]:
             findings.append(
                 f"[{key}] INCONSISTENT: docs state different values for {label} -> {spread}")
 
-    return findings
+    for key, label, (relpath, src_pat), patterns in THRESHOLDS:
+        truth = _source_value(relpath, src_pat, label)
+        tseen: dict[float, list[str]] = {}
+        skip = THRESHOLD_EXCLUDE.get(key, ())
+        only = THRESHOLD_ONLY.get(key)
+
+        for path in files:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            rel = path.relative_to(REPO)
+            if any(str(rel).startswith(prefix) for prefix in skip):
+                continue
+            if only and not any(str(rel).startswith(prefix) for prefix in only):
+                continue
+
+            for pat in patterns:
+                for m in re.finditer(pat, text):
+                    stated = float(m.group(1))
+                    stats["threshold_claims"] += 1
+                    line = text[:m.start()].count("\n") + 1
+                    where = f"{rel}:{line}"
+                    tseen.setdefault(stated, []).append(where)
+                    if abs(stated - truth) > 1e-9:
+                        findings.append(
+                            f"[{key}] {where}: claims '{m.group(0).strip()}' but the "
+                            f"code sets {label} to {truth:g}")
+
+        if len(tseen) > 1:
+            spread = "; ".join(
+                f"{n:g} at {', '.join(locs)}" for n, locs in sorted(tseen.items()))
+            findings.append(
+                f"[{key}] INCONSISTENT: docs state different values for {label} -> {spread}")
+
+    return findings, stats
 
 
 def main() -> int:
     try:
-        findings = check()
+        findings, stats = check()
     except Exception as exc:  # a broken checker must be loud, never silently green
         print(f"docs-claims check FAILED to run: {exc}", file=sys.stderr)
         return 1
 
     if not findings:
-        print("docs claims: all countable claims match the code")
+        print(
+            f"docs claims: OK. Verified {stats['count_claims']} countable claims "
+            f"(detectors, fixtures, categories, commands, families, compressors) and "
+            f"{stats['threshold_claims']} threshold claims (archive purge windows, loop "
+            f"firing floor, detector confidence floor, nudge fill floors) across "
+            f"{stats['files']} docs. NOT verified: prose behavior descriptions, "
+            f"benchmark results, and any claim that is not a number."
+        )
         return 0
 
     print(f"docs claims: {len(findings)} finding(s)\n")

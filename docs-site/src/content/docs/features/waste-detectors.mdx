@@ -11,7 +11,7 @@ A waste detector is a single rule that looks at your sessions or your config and
 
 Each detector takes parsed session data or a config file, looks for one pattern, and returns a finding with a confidence score. The findings feed three surfaces: [Token Coach](/features/token-coach/) names them in conversation, [Fleet Auditor](/features/fleet-auditor/) prices them across systems, and the [setup audit](/features/audit/) folds them into the full report.
 
-Detectors are conservative on purpose. A finding is suppressed below a 0.3 confidence threshold and flagged only when it affects a meaningful share of recent sessions, so the report shows real waste, not noise. Two detectors of the same family never double-count: if a model-routing finding already covers a session, the overlapping check stands down.
+Detectors are conservative on purpose. A finding is suppressed at or below a 0.3 confidence threshold and flagged only when it affects a meaningful share of recent sessions, so the report shows real waste, not noise. Two detectors of the same family never double-count: if a model-routing finding already covers a session, the overlapping check stands down.
 
 ## The twelve detectors on Claude Code and Codex
 
@@ -19,7 +19,7 @@ These run on parsed session history and your project config.
 
 | Detector | What it catches |
 |---|---|
-| Respond-to-bash | `respondToBashCommands` left unset in `settings.json`, so Claude Code spends output tokens on an unrequested reply after every slash-command and `!bash` output. |
+| Respond-to-bash | `respondToBashCommands` not set to `false` in `settings.json` (unset or `true`), so Claude Code spends output tokens on an unrequested reply after every slash-command and `!bash` output. |
 | Retry churn | The same tool called with the same input three or more times while it keeps erroring. |
 | Tool cascade | Three or more consecutive tool errors forming a failure chain. |
 | Looping | High similarity between user messages with little forward progress, the signature of a stuck loop. |
@@ -98,7 +98,7 @@ On a non-Claude runtime, prefix the runtime, for example `TOKEN_OPTIMIZER_RUNTIM
 
 | Setting | Default | Notes |
 |---|---|---|
-| Confidence floor | 0.3 | Findings below this are suppressed. |
+| Confidence floor | 0.3 | Findings at or below this are suppressed. |
 | Triage minimum | 5,000 tokens | A session must clear this to be triaged. |
 | Significance gate | >5% of sessions | A detector is flagged only when it affects a meaningful share. |
 | Overlap handling | de-duplicated | A weaker detector stands down when a stronger one covers the same session. |
