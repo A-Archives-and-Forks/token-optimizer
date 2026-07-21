@@ -27764,6 +27764,14 @@ def _maybe_progressive_checkpoint(fill_pct, cache_path, result, filepath):
 
 
 _NUDGE_COOLDOWN_SECONDS = 300  # 5 minutes between nudges
+
+# Fill % at which the gentle lean-output nudge becomes eligible (it still also
+# requires a degraded quality score -- fill alone never fires it). Lowered from
+# 25 to 20 (Alex, 2026-07-22): verbose output starts costing real money well
+# before the context is a quarter full, and the quality gate keeps a healthy
+# session quiet regardless. Named + env-tunable rather than inline, because the
+# previous magic 25 was documented as three different numbers across the docs.
+_VERBOSITY_NUDGE_MIN_FILL = _int_env("TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL", 20)
 _NUDGE_SESSION_CAP = 3
 # Fresh-session nudge: when a session is BOTH long (high fill) and degraded
 # (quality < threshold), suggest starting a fresh session -- cold-resume-lean
@@ -33316,7 +33324,8 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
     Returns the JSON string if a nudge was emitted, empty string otherwise.
 
     Tiered messaging:
-      25-74% fill + degraded quality  → gentle nudge
+      20-74% fill + degraded quality  → gentle nudge (floor is
+                                        _VERBOSITY_NUDGE_MIN_FILL)
       75-89% fill                     → strong nudge with specific directives
       90%+ fill                        → suppressed (adding tokens makes it worse)
 
@@ -33438,7 +33447,7 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
                 "Reason as deeply as you need — but keep your visible output lean: no preamble, "
                 "no restating the request, no explanations unless asked. Every token saved extends the session."
             )
-        elif fill_pct >= 25 and score < 75:
+        elif fill_pct >= _VERBOSITY_NUDGE_MIN_FILL and score < 75:
             nudge = (
                 f"[Token Optimizer] Context at {fill_pct:.0f}% capacity{window_note}, quality {score:.0f}/100. "
                 "Reason fully, then keep your output lean — skip restating the request and "

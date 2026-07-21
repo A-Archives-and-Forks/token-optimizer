@@ -135,22 +135,34 @@ def _probe(fill, **kw):
 _TP = measure.__file__
 print('AT30:' + ('1' if _probe(30, transcript_path=_TP) else '0'))
 print('AT25:' + ('1' if _probe(25, transcript_path=_TP) else '0'))
-print('AT24:' + ('1' if _probe(24, transcript_path=_TP) else '0'))
 print('AT20:' + ('1' if _probe(20, transcript_path=_TP) else '0'))
+print('AT19:' + ('1' if _probe(19, transcript_path=_TP) else '0'))
+# Fill alone must never fire it: a healthy session stays quiet at any fill
+# below the strong tier, which is the guard that keeps the nudge from
+# becoming background noise.
+measure._read_quality_cache = lambda cp: {
+    'fill_pct': 30, 'score': 90, 'nudge_count': 0, 'last_nudge_time': 0,
+}
+print('HEALTHY30:' + ('1' if measure.run_verbosity_steer(quiet=True, transcript_path=_TP) else '0'))
 # Guard: no transcript_path and no session_id means the transcript was inferred
 # and cannot be verified. A brand-new session must not inherit these numbers.
 print('NOIDENT:' + ('1' if _probe(30) else '0'))
 """
 
 
-def test_lean_nudge_boundary_is_25pct():
+def test_lean_nudge_boundary_is_20pct():
+    """The gentle tier's floor is _VERBOSITY_NUDGE_MIN_FILL, lowered 25 -> 20
+    (Alex, 2026-07-22). The boundary is pinned on both sides so a future edit
+    cannot quietly widen or narrow it, and HEALTHY30 pins the second condition:
+    fill alone never fires the nudge, quality must also be degraded."""
     r = _run(_LEAN_PROBE)
     assert r.returncode == 0, f"lean probe crashed: {r.stderr}"
     out = r.stdout
     assert "AT30:1" in out, f"gentle nudge should fire at 30% fill: {out!r}"
-    assert "AT25:1" in out, f"gentle nudge should fire at exactly 25% fill: {out!r}"
-    assert "AT24:0" in out, f"gentle nudge should NOT fire at 24% fill: {out!r}"
-    assert "AT20:0" in out, f"gentle nudge should NOT fire at 20% fill: {out!r}"
+    assert "AT25:1" in out, f"gentle nudge should fire at 25% fill: {out!r}"
+    assert "AT20:1" in out, f"gentle nudge should fire at exactly 20% fill: {out!r}"
+    assert "AT19:0" in out, f"gentle nudge should NOT fire at 19% fill: {out!r}"
+    assert "HEALTHY30:0" in out, f"a healthy session must not nudge on fill alone: {out!r}"
     # Session identity guard: an inferred transcript with no session_id to verify
     # it against must stay silent, even at a fill that would otherwise nudge.
     # This is the observed bug -- a nudge fired on the first prompt of an empty
