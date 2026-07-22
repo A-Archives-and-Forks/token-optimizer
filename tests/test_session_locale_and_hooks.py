@@ -151,8 +151,8 @@ print('NOIDENT:' + ('1' if _probe(30) else '0'))
 
 
 def test_lean_nudge_boundary_is_20pct():
-    """The gentle tier's floor is _VERBOSITY_NUDGE_MIN_FILL, lowered 25 -> 20
-    (Alex, 2026-07-22). The boundary is pinned on both sides so a future edit
+    """The gentle tier's floor is _VERBOSITY_NUDGE_MIN_FILL, lowered 25 -> 20.
+    The boundary is pinned on both sides so a future edit
     cannot quietly widen or narrow it, and HEALTHY30 pins the second condition:
     fill alone never fires the nudge, quality must also be degraded."""
     r = _run(_LEAN_PROBE)

@@ -760,7 +760,7 @@ def _first_read_compress(
     save_hook_context_enabled: bool = False,
     quiet: bool = True,
 ) -> bool:
-    """First-read skeleton path (U5). Returns True iff it SERVED a skeleton
+    """First-read skeleton path. Returns True iff it SERVED a skeleton
     (active mode emitted a deny+inject and the caller must stop).
 
     For a whole-file first read of a structure-supported file in the size window
@@ -977,11 +977,11 @@ def _resolve_first_read_shadow_on_edit(
     session_id: str,
     store: "SessionStore",
 ) -> None:
-    """Resolve a shadow first-read ledger marker at the Edit/Write hook (R9).
+    """Resolve a shadow first-read ledger marker at the Edit/Write hook.
 
     A shadow-measured first read followed by an edit to the same file is the
     "the model needed the full file" proxy. Emit an Opportunity-tier follow-up
-    event so coverage (U6) can compute the cohort edit-rate
+    event so coverage can compute the cohort edit-rate
     (followups / shadows). Marked resolved so repeated edits count once.
     Fully fail-open.
 

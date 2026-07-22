@@ -204,7 +204,7 @@ PAIRS = [
     # --- accent link/heading text (body, 4.5) ---
     ("Accent on surface", "--c-accent", "--c-surface", 4.5),
     ("Accent on page bg", "--c-accent", "--c-bg", 4.5),
-    # --- keep-warm tile (U7) numbers + states (body, 4.5) ---
+    # --- keep-warm tile numbers + states (body, 4.5) ---
     ("Keep-warm NET positive", "--c-savings", "--c-surface", 4.5),
     ("Keep-warm NET negative", "--c-waste", "--c-surface", 4.5),
     ("Keep-warm demoted note", "--c-warning", "--c-surface", 4.5),

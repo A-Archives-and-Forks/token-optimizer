@@ -4393,7 +4393,7 @@ def generate_dashboard(coord_path):
     except Exception:
         compression_coverage = {"available": False, "tiers": {}, "first_read_proxy": None}
 
-    # WS2 tripwire verdict for the coverage panel (per-cohort live edit-rate +
+    # Tripwire verdict for the coverage panel (per-cohort live edit-rate +
     # auto-demotions). Read-only; never recomputes/demotes here. Fail-open.
     try:
         cohort_tripwire = _cohort_tripwire_state()
@@ -9296,15 +9296,15 @@ _COVERAGE_FEATURE_LABELS = {
     "bash_generic": "Bash (unmatched output)",
     _FEATURE_FIRST_READ_SKELETON: "First-read skeleton",
     _FEATURE_FIRST_READ_EDIT_FOLLOWUP: "First-read edit follow-up",
-    # WS2 tripwire signal. NOT a _V5_COMPRESSION_CATEGORIES feature (0-token
+    # Tripwire signal. NOT a _V5_COMPRESSION_CATEGORIES feature (0-token
     # opportunity-tier marker), so it can never reach the realized headline.
     "cohort_demoted": "Cohort auto-demoted (tripwire)",
-    # WS4 agent-result pool — measure-only opportunity (harm proxy failed the
+    # Agent-result pool, measure-only opportunity (harm proxy failed the
     # gate). NOT a headline category; surfaces the pool in coverage only.
     "agent_result_skeleton": _AGENT_RESULT_LABEL,
 }
 
-# First-read shadow promotion gate (R9): a cohort graduates from shadow to active
+# First-read shadow promotion gate: a cohort graduates from shadow to active
 # only when the post-read edit rate is below this. Lower edit rate = the model
 # rarely needed the full file = safer to serve a skeleton.
 _FIRST_READ_PROMOTION_EDIT_RATE = 0.15
@@ -9320,7 +9320,7 @@ def _coverage_feature_label(feature):
 
 
 def _get_compression_coverage(days=30):
-    """Tiered compression-coverage view (U6). Diagnostic only — never summed.
+    """Tiered compression-coverage view. Diagnostic only, never summed.
 
     Groups compression_events by feature into measured / estimated / opportunity
     buckets and reports per-feature events, would-be (shadow) or realized
@@ -9329,7 +9329,7 @@ def _get_compression_coverage(days=30):
     NOT feed _get_merged_savings (only _V5_COMPRESSION_CATEGORIES features do).
 
     Also surfaces the first-read shadow quality proxy: edit_rate =
-    edits-after-shadow-read / shadow-reads. It is the R9 promotion gate — a low
+    edits-after-shadow-read / shadow-reads. It is the promotion gate: a low
     rate means the model rarely needed the full file, so a skeleton would have
     been safe. Fail-open: returns an empty (but well-formed) structure on error.
     """
@@ -9407,7 +9407,7 @@ def _get_compression_coverage(days=30):
 
 
 # ---------------------------------------------------------------------------
-# WS2: runtime quality TRIPWIRE for first-read active cohorts.
+# Runtime quality TRIPWIRE for first-read active cohorts.
 #
 # The "no live shadow phase" directive replaces shadow validation with two
 # safety nets: (1) history-replay backfill validates a cohort BEFORE promotion;
@@ -10351,17 +10351,17 @@ def _cache_ttl_waste_cached(days=30, fresh=False):
     return result
 
 
-# ========== Keep-warm state sidecar (U2: arm record + resume detection) ==========
-# Operational state ONLY (not the savings ledger — KTD-7 keeps realized rows in the
+# ========== Keep-warm state sidecar (arm record + resume detection) ==========
+# Operational state ONLY (not the savings ledger; realized rows live in the
 # SQLite savings_events path). This sidecar tracks which paused sessions are "armed"
-# so the keepwarm-tick loop (U3) can later decide whether to ping. Two hard rules
+# so the keepwarm-tick loop can later decide whether to ping. Two hard rules
 # govern this region:
-#   * The arm-record WRITER runs inside the Stop hook hot path (KTD-5). It must be
+#   * The arm-record WRITER runs inside the Stop hook hot path. It must be
 #     dumb and fast (well under the 500ms hook budget): read the transcript tail,
 #     append one line, exit. NO eligibility evaluation, NO policy, NO network. If
 #     anything is missing or unreadable it writes nothing and returns silently so
-#     the hook chain is never broken (R4).
-#   * Eligibility and disarm are NOT hook responsibilities (KTD-5: no native resume
+#     the hook chain is never broken.
+#   * Eligibility and disarm are NOT hook responsibilities (no native resume
 #     signal exists). The tick loop reads this sidecar, classifies each record via
 #     the pure `classify_keepwarm_record` helper, and compacts resolved rows.
 # Atomic 0600 writes (mkstemp+fchmod+os.replace) under flock, mirroring the
@@ -10412,11 +10412,11 @@ def _keepwarm_lock():
 def _keepwarm_append_line(path, line):
     """Append one already-serialized line to `path` under the keep-warm lock.
 
-    The shared WS2-pattern sidecar append (R4/R6): take _keepwarm_lock, ensure
+    The shared sidecar append pattern: take _keepwarm_lock, ensure
     SNAPSHOT_DIR exists, create the file 0600 BEFORE the first write (or re-chmod
     an existing one) so a group/other-readable sidecar can never exist, then
     append. Returns True on success, False on any OSError. Used by the arm-writer
-    (U2) and the ping ledger (U3); both serialize through the same lock so an
+    and the ping ledger; both serialize through the same lock so an
     append can never tear against a concurrent compaction rewrite.
     """
     try:
@@ -10582,20 +10582,20 @@ def write_keepwarm_arm_record(session_id, transcript_path, now=None):
     session_id/transcript, unreadable transcript, or no usage-bearing turn).
 
     NEVER raises into the hook chain: all errors are swallowed -> return None
-    (R4: a hook failure must not break the user's session). Eligibility (api
+    (a hook failure must not break the user's session). Eligibility (api
     billing, prefix >=10k, etc.) is deliberately NOT evaluated here — that is the
-    tick loop's job (KTD-5: hook stays dumb).
+    tick loop's job (the hook stays dumb).
     """
     try:
         if not session_id or not transcript_path:
             return None
-        # ANTI-RECURSION (U3 contract): a keep-warm ping subprocess carries
+        # ANTI-RECURSION contract: a keep-warm ping subprocess carries
         # TOKEN_OPTIMIZER_KEEPWARM_PING=1; its own Stop hook must never arm,
         # re-arm, or refresh any record -- no self-feeding ping loops.
         if os.environ.get("TOKEN_OPTIMIZER_KEEPWARM_PING"):
             return None
         # Only arm under the claude_code runtime: Codex has no write premium to
-        # recover (R5), and the prefix proxy below is Claude-shaped. Cheap guard,
+        # recover, and the prefix proxy below is Claude-shaped. Cheap guard,
         # fail-open to "arm anyway" only if detection errors (tick re-checks).
         try:
             if detect_runtime() != "claude":
@@ -10699,14 +10699,14 @@ def classify_keepwarm_record(rec, now=None):
                           resume. Covers three cases: the transcript grew (a true
                           resume), the arm expired past the 14d max age, and the
                           mtime moved but the file became unreadable. The name is
-                          historical; callers that BOOK realized savings (U7
-                          keepwarm_detect_realized) must re-read the post-arm
+                          historical; callers that BOOK realized savings
+                          (keepwarm_detect_realized) must re-read the post-arm
                           turn's actual usage and never book off this verdict
-                          alone (KTD-4). Compaction may safely drop all three.
+                          alone. Compaction may safely drop all three.
         'still_paused' -> transcript unchanged since the arm record was written
 
     The ONLY side effect is reading the transcript tail / stat — no writes, no
-    hook involvement (KTD-5). `now` is injectable for deterministic tests.
+    hook involvement. `now` is injectable for deterministic tests.
     """
     if now is None:
         now = time.time()
@@ -10762,8 +10762,8 @@ def compact_keepwarm_sidecar(path=None, now=None):
     (mkstemp+fchmod(0600)+os.replace) under flock. Corrupt lines are dropped (they
     are never loaded). Returns (kept_count, dropped_count). Never raises.
 
-    This is tick-side maintenance (U3 calls it each tick); it is the disarm path
-    KTD-5 places outside the hook.
+    This is tick-side maintenance (the tick calls it each tick); it is the disarm
+    path that belongs outside the hook.
     """
     if path is None:
         path = _keepwarm_sidecar_path()
@@ -10813,16 +10813,16 @@ def compact_keepwarm_sidecar(path=None, now=None):
     return len(kept), dropped
 
 
-# ========== Keep-warm billing + consent gate (U5: R2/R7 eligibility) ==========
-# THE pre-ping gate. U3's tick loop calls keepwarm_gate() before it touches any
+# ========== Keep-warm billing + consent gate (eligibility) ==========
+# THE pre-ping gate. The tick loop calls keepwarm_gate() before it touches any
 # armed record; it returns (allowed, reason) and nothing pings unless allowed is
-# True. Two independent conditions must both hold (KTD-6 + R7):
+# True. Two independent conditions must both hold:
 #   * billing == 'api'  — keep-warm only recovers a *write premium*, which only
 #     API-key billing pays. On subscription auth a ping spends quota and saves
-#     nothing (R2: never net-negative), so subscription is a HARD off and is
+#     nothing (never net-negative), so subscription is a HARD off and is
 #     never even asked for consent.
-#   * consent == 'enabled' — opt-in only (R7; Alex 2026-06-11: the default-on
-#     rule explicitly does NOT extend to token-spending features). Tri-state,
+#   * consent == 'enabled' — opt-in only (the default-on rule explicitly does NOT
+#     extend to token-spending features). Tri-state,
 #     sticky, stored via the same _write_config_flag/_config_lock surface as the
 #     rest of TO's config (0600 atomic write). States: unasked -> asked ->
 #     enabled|declined. enabled/declined are terminal unless an explicit CLI
@@ -10830,17 +10830,17 @@ def compact_keepwarm_sidecar(path=None, now=None):
 # Detection is CONSERVATIVE by construction: anything we cannot positively
 # identify as API-key billing is treated as subscription (= off). Better to skip
 # a legitimate ping than to ever burn a subscription user's quota.
-# Every reader here is PURE + injectable (env dict + config paths) so the U5
+# Every reader here is PURE + injectable (env dict + config paths) so the
 # tests can drive each ladder rung without touching the real machine.
 
 _KEEPWARM_CONSENT_KEY = "keepwarm_consent"
 # Valid sticky consent states. 'unasked' is the implicit default (no key yet).
 _KEEPWARM_CONSENT_STATES = ("unasked", "asked", "declined", "enabled")
-# Env marker the ping subprocess sets on itself (U3) so a keepwarm-tick that runs
+# Env marker the ping subprocess sets on itself so a keepwarm-tick that runs
 # *inside* a ping resume can never recursively arm/ping again.
 _KEEPWARM_PING_ENV = "TOKEN_OPTIMIZER_KEEPWARM_PING"
 
-# ===== LLM-PING KILL: the ONLY token-spending step is off (Alex, 2026-06-12) =====
+# ===== LLM-PING KILL: the ONLY token-spending step is off by default =====
 # Scope it tight: the WATCHER is awesome and stays ON -- the tick loop, meter
 # reading, resume/cache-drop classification, forecast, and quota model are all
 # code-only and spend ZERO tokens, so they keep watching "when the cash drops."
@@ -10939,14 +10939,14 @@ def _keepwarm_json_says_api(path):
 def keepwarm_billing_mode(env=None, claude_json_path=None, settings_path=None):
     """Detect billing class: 'api' (eligible) or 'subscription' (hard off).
 
-    Conservative ladder (first decisive rung wins), per KTD-6 / U5:
+    Conservative ladder (first decisive rung wins):
       1. env ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN non-empty  -> 'api'
       2. ~/.claude.json   apiKeyHelper/primaryApiKey/customApiKey -> 'api'
                           oauthAccount (and no api marker)        -> 'subscription'
       3. ~/.claude/settings.json apiKeyHelper                     -> 'api'
       4. nothing detectable                                       -> 'subscription'
 
-    Step 4 is the safety default (R2): an unknown user is assumed subscription so
+    Step 4 is the safety default: an unknown user is assumed subscription so
     keep-warm stays off rather than risk burning quota. Pure + injectable.
     """
     if env is None:
@@ -11017,16 +11017,17 @@ def keepwarm_mark_asked():
 
 def keepwarm_enable(env=None, claude_json_path=None, settings_path=None,
                     limits_lab=False):
-    """Explicit opt-in. Refuses on subscription billing (R2 honest copy).
+    """Explicit opt-in. Refuses on subscription billing (honest copy).
 
     Returns (ok, message). On API billing sets consent='enabled' and returns the
-    pointer to what happens next (U4 installs the scheduler — NOT here). On
+    pointer to what happens next (the scheduler install is a SEPARATE step — NOT
+    here). On
     subscription billing it writes NOTHING and returns the honest refusal: a
     ping spends quota and recovers no write premium, so the only real remedy is
     behavioral (shorter pauses / resume sooner).
 
-    limits_lab=True is the DOGFOOD-ONLY exception (R2 stands for the product):
-    measured 2026-06-11 on an instrumented Max machine that full-prefix pings
+    limits_lab=True is the DOGFOOD-ONLY exception (the product rule still holds):
+    measurement on an instrumented subscription machine showed that full-prefix pings
     moved the plan usage meters 0.0 points (6 pings, all three buckets), so an
     operator may explicitly enroll a subscription machine to measure the
     write-avoidance side. It sets consent='enabled' AND the keepwarm_limits_lab
@@ -11038,7 +11039,7 @@ def keepwarm_enable(env=None, claude_json_path=None, settings_path=None,
     if mode != "api" and limits_lab:
         _keepwarm_set_consent("enabled")
         _write_config_flag("keepwarm_limits_lab", True)
-        # U7 (KTD-8): an explicit (re-)enable is the ONLY sanctioned tripwire
+        # An explicit (re-)enable is the ONLY sanctioned tripwire
         # walk-up. Reset the demotion ladder to the most-permissive state with a
         # fresh promoted_at so a previously demoted-to-off lab re-arms.
         try:
@@ -11065,7 +11066,7 @@ def keepwarm_enable(env=None, claude_json_path=None, settings_path=None,
             "and re-run keepwarm-enable.)"
         ))
     _keepwarm_set_consent("enabled")
-    # U7 (KTD-8): explicit enable resets the tripwire ladder (the sole walk-up).
+    # Explicit enable resets the tripwire ladder (the sole walk-up).
     try:
         keepwarm_tripwire_repromote()
     except Exception:
@@ -11083,7 +11084,7 @@ def keepwarm_enable(env=None, claude_json_path=None, settings_path=None,
 def _keepwarm_enable_install_scheduler():
     """Install the scheduler as part of enable; return a status line (never raises).
 
-    p3-plan CRITICAL activation gap: enable now records consent AND installs the
+    CRITICAL activation gap: enable now records consent AND installs the
     scheduler (macOS) so an opt-in user actually gets pinged -- the one-switch
     mental model. A failed install NEVER rolls back consent (the consent is
     already recorded); we report the failure and print the manual command. On a
@@ -11422,7 +11423,7 @@ def keepwarm_gate(env=None, claude_json_path=None, settings_path=None):
         return (False, "billing-subscription")
     if consent != "enabled":
         return (False, "consent-%s" % consent)
-    # U7 (KTD-8): the keep-warm tripwire can auto-demote an otherwise-eligible
+    # The keep-warm tripwire can auto-demote an otherwise-eligible
     # user to 'off' when the rolling 7d realized/spend ratio stays <= 1.0. The
     # check is last (only an api+consented user can reach it) and fail-closed
     # (a corrupt sidecar reads as 'off').
@@ -11445,10 +11446,9 @@ def _keepwarm_tripwire_off():
         return True  # fail-closed: if we cannot read the verdict, refuse
 
 
-# ========== Keep-warm scheduler (U4: R6, R5 OS-parity honesty) ==========
+# ========== Keep-warm scheduler (OS-parity honesty) ==========
 # Installs a launchd interval agent that runs `measure.py keepwarm-tick` every
-# ~5min, fully decoupled from the dashboard HTTP daemon. Hard invariants (plan U4
-# + KTD-5 + R7):
+# ~5min, fully decoupled from the dashboard HTTP daemon. Hard invariants:
 #   * Distinct label `com.token-optimizer.keepwarm` -- never collides with the
 #     dashboard's `com.token-optimizer.dashboard`.
 #   * Its OWN install lock (_keepwarm_scheduler_install_lock) -- NEVER reuses
@@ -11457,17 +11457,17 @@ def _keepwarm_tripwire_off():
 #   * Does NOT touch the dashboard plist, the dashboard staleness-regen loop, or
 #     the dashboard install lock. The ensure-health repair below is a separate,
 #     additive, consent-gated step that only ever manages the keep-warm agent.
-#   * install REFUSES unless keepwarm_gate() allows (consent drives install, R7).
+#   * install REFUSES unless keepwarm_gate() allows (consent drives install).
 #     A user who has not consented (unasked/declined) or whose billing is
 #     subscription gets a printed reason and exit 1 -- nothing is written.
 #   * Install marker sidecar (0600) records installed_at + plist path. ensure-
 #     health's repair keys on marker AND consent: a user-deleted plist with a
 #     marker + consent=enabled is regenerated; declined/unasked/absent-marker is
 #     NEVER (re)installed (the #59 sticky-opt-out lesson).
-# Per-OS honesty (R5): macOS launchd is implemented fully. The dashboard
+# Per-OS honesty: macOS launchd is implemented fully. The dashboard
 # dispatcher's systemd/schtasks arms ARE real installers, but keep-warm only
 # implements macOS in this unit; Linux/Windows print an honest documented-gap
-# message + exit 1 (README parity row says macOS-only, U8). We deliberately do
+# message + exit 1 (README parity row says macOS-only). We deliberately do
 # NOT mirror the dashboard's systemd/schtasks into keep-warm yet -- that is
 # explicit deferred scope, surfaced rather than silently half-built.
 
@@ -11481,10 +11481,10 @@ _KEEPWARM_SCHEDULER_LOG_NAME = "keepwarm-tick.log"
 # last_tick_ok/last_tick_age freshness signal independently of whether the log
 # carries a traceback (the log can be quiet-clean yet the scheduler dead).
 _KEEPWARM_TICK_STAMP_NAME = ".keepwarm-tick-stamp.json"
-# StartInterval: 5min (matches KTD-5's "~5min" cadence). ThrottleInterval 60s so
+# StartInterval: 5min (matches the "~5min" cadence). ThrottleInterval 60s so
 # launchd never hot-loops the tick if it exits fast. Log rotation guard truncates
 # the combined stdout/stderr log when it exceeds this size, on install and on the
-# tick's own check (deliverable 1).
+# tick's own check.
 _KEEPWARM_SCHEDULER_START_INTERVAL = 300
 _KEEPWARM_SCHEDULER_THROTTLE = 60
 _KEEPWARM_SCHEDULER_LOG_MAX_BYTES = 1024 * 1024  # 1MB
@@ -11951,13 +11951,13 @@ def _keepwarm_scheduler_install_macos(quiet=False):
 
 
 def keepwarm_scheduler_install(gate=None, quiet=False):
-    """Install the keep-warm interval agent. REFUSES unless the gate allows (R7).
+    """Install the keep-warm interval agent. REFUSES unless the gate allows.
 
     Consent drives install: keepwarm_gate() must return allowed=True (api billing
     + consent=enabled, or the dogfood limits-lab double opt-in). A refused gate
     prints the reason and the caller exits 1; nothing is written.
 
-    Per-OS (R5): macOS implemented; Linux/Windows are an explicit documented gap
+    Per-OS: macOS implemented; Linux/Windows are an explicit documented gap
     (honest message + the caller exits 1). Returns (ok, message).
     `gate` injectable for tests.
     """
@@ -12018,7 +12018,7 @@ def keepwarm_scheduler_uninstall(quiet=False):
 
 
 def keepwarm_scheduler_status(gate=None):
-    """Return the scheduler status dict (deliverable 1).
+    """Return the scheduler status dict.
 
     {installed, plist_path, label, last_tick_ok, consent, billing_mode|reason}.
     `installed` is True only when BOTH the plist and the marker exist (the marker
@@ -12048,10 +12048,10 @@ def keepwarm_scheduler_status(gate=None):
 
 
 def keepwarm_scheduler_repair(gate=None):
-    """ensure-health's consent-gated repair (deliverable 3). ADDITIVE, no-op fast.
+    """ensure-health's consent-gated repair. ADDITIVE, no-op fast.
 
     Regenerate + bootstrap the keep-warm agent ONLY when ALL hold:
-      * consent gate allows (api + consent=enabled / limits-lab) -- R7;
+      * consent gate allows (api + consent=enabled / limits-lab);
       * the install marker exists (WE installed here before) -- #59 lesson;
       * the plist is missing or stale (label drift / older content).
     Otherwise NO-OP. The hot path when nothing needs repair is cheap file-
@@ -12110,16 +12110,16 @@ def keepwarm_scheduler_repair(gate=None):
         return "repaired"
 
 
-# ========== Keep-warm policy core + ping executor (U3: R1/R2/R4/R6) ==========
+# ========== Keep-warm policy core + ping executor ==========
 # This region is the "brain and the trigger" for keep-warm cache automation:
 #   * keepwarm_policy_decision()  -- PURE. Zero IO. Drives both the live tick and
-#     U6's future history-backfill replay, so it MUST stay side-effect free.
+#     the history-backfill replay, so it MUST stay side-effect free.
 #   * _keepwarm_fire_ping()       -- the ONLY side-effectful part. Locks, idle-
-#     re-checks, pre-logs spend, runs the U1-winning CLI ping, books the outcome.
+#     re-checks, pre-logs spend, runs the CLI ping, books the outcome.
 #   * keepwarm-tick               -- the CLI loop (gate -> load -> classify ->
 #     decide -> fire), wired in the dispatcher at the bottom of measure.py.
 #
-# Economics (KTD-3, survival-curve-driven, never a hardcoded clock):
+# Economics (survival-curve-driven, never a hardcoded clock):
 #   A kept-warm prefix avoids a future re-WRITE of that prefix when the user
 #   resumes. The avoided cost = prefix_tokens * write_rate (per token) * the
 #   probability the user actually resumes at the current elapsed time. We only
@@ -12131,14 +12131,14 @@ def keepwarm_scheduler_repair(gate=None):
 #   formula almost always yields probe-only-or-nothing -- the FORMULA decides,
 #   not a constant (Risk: default-TTL 1h->5m regression).
 #
-# Phases (KTD-3 / state machine): probe = pings #1 and #2 at a TTL-aware cadence.
-# Sustain = pings #3+ ONLY when history_stats.predictor_continue is True (U6
-# wires the real predictor; default False = probe-only floor, measured +$13/30d,
-# positive by construction) AND the tripwire allows sustain. 12h is an absolute
-# hard cap on elapsed pause age regardless of phase.
+# Phases (state machine): probe = pings #1 and #2 at a TTL-aware cadence.
+# Sustain = pings #3+ ONLY when history_stats.predictor_continue is True (the
+# backfill wires the real predictor; default False = probe-only floor, measured
+# +$13/30d, positive by construction) AND the tripwire allows sustain. 12h is an
+# absolute hard cap on elapsed pause age regardless of phase.
 
-# Survival curve P(resume | still paused at elapsed) from the simulation's
-# measured 30d history (plan KTD-3). Keys are elapsed-since-pause-start seconds
+# Survival curve P(resume | still paused at elapsed) from measured 30d history.
+# Keys are elapsed-since-pause-start seconds
 # bucket lower-bounds; we use the nearest bucket at-or-below the elapsed time.
 _KEEPWARM_SURVIVAL_TABLE = (
     (3600, 0.245),    # >=1h paused
@@ -12148,10 +12148,10 @@ _KEEPWARM_SURVIVAL_TABLE = (
     (57600, 0.032),   # >=16h
 )
 # Eligibility floor: prefixes smaller than this are not worth a ping (the read
-# cost of the ping itself rivals the avoided write). Plan KTD-3 / U3.
+# cost of the ping itself rivals the avoided write).
 _KEEPWARM_PREFIX_FLOOR = 10000
 # Absolute hard cap on pause age. Past this we always stop, regardless of phase
-# or predictor (KTD-3: a blind 12h *clock* cap is net-negative, but as an upper
+# or predictor (a blind 12h *clock* cap is net-negative, but as an upper
 # bound on predictor-gated sustain it is the safety ceiling).
 _KEEPWARM_HARD_CAP_SECONDS = 12 * 3600
 # Probe cadence for 1h entries: ping at ~effective-window-minus-safety-margin so
@@ -12201,14 +12201,14 @@ _KEEPWARM_PING_BUDGET_USD = 0.10
 # The ping subprocess wall-clock ceiling. One shot per tick; no in-tick retry.
 _KEEPWARM_PING_TIMEOUT_SECONDS = 180
 # Idle re-check: the transcript must have been untouched for at least this long
-# immediately before we fire, else the session may be live -> skip (R4).
+# immediately before we fire, else the session may be live -> skip.
 _KEEPWARM_IDLE_RECHECK_SECONDS = 120
 # Per-session ping lock filename prefix in SNAPSHOT_DIR.
 _KEEPWARM_PING_LOCK_PREFIX = ".keepwarm_ping."
 # Whole-tick single-instance lock filename.
 _KEEPWARM_TICK_LOCK_NAME = ".keepwarm_tick.lock"
-# Ping-spend / outcome ledger sidecar (operational accounting only; KTD-7 keeps
-# realized savings in the SQLite path -- U7 -- NOT here).
+# Ping-spend / outcome ledger sidecar (operational accounting only; realized
+# savings live in the SQLite path, NOT here).
 _KEEPWARM_LEDGER_NAME = "keepwarm_ledger.jsonl"
 # A lockfile whose owning PID is gone and whose mtime is older than this is
 # considered stale and reclaimed (a crashed tick must not wedge a session).
@@ -12419,7 +12419,7 @@ def _keepwarm_ledger_append(row):
     """Atomically append one 0600 row to the keep-warm ledger. Never raises.
 
     Shares the arm-writer's 0600-before-first-append discipline via
-    _keepwarm_append_line (R4/R6). Used for BOTH the pre-fire 'firing' spend row
+    _keepwarm_append_line. Used for BOTH the pre-fire 'firing' spend row
     and the post-fire outcome row.
     """
     try:
@@ -12681,7 +12681,7 @@ def _keepwarm_parse_ping_json(stdout):
 def _keepwarm_fire_ping(record, now=None, runner=None):
     """Fire ONE keep-warm ping for an armed record. The only side-effectful path.
 
-    Sequence (R4 invariants, KTD-3 anti-recursion + crash-can't-hide-spend):
+    Sequence (hook-safety invariants, anti-recursion + crash-can't-hide-spend):
       1. Per-session pidfile lock (excludes across tick invocations). Held for
          the whole fire so two racing ticks can never double-fire one session.
       2. Idle re-check: the transcript mtime must be unchanged for the last
@@ -12691,7 +12691,7 @@ def _keepwarm_fire_ping(record, now=None, runner=None):
          transcript (skip if absent / gone -- never guess).
       4. Pre-log a 'firing' spend row to the ledger BEFORE the subprocess, so a
          crash mid-ping cannot hide that we spent.
-      5. Run the U1 CLI ping with TOKEN_OPTIMIZER_KEEPWARM_PING=1 in the child
+      5. Run the CLI ping with TOKEN_OPTIMIZER_KEEPWARM_PING=1 in the child
          env (defense in depth: the child's own Stop hook self-suppresses) and
          cwd = the session's project dir, 180s timeout, NO in-call retry.
       6. Append an outcome row (status ok|error|timeout, cost, tokens, duration).
@@ -12745,7 +12745,7 @@ def _keepwarm_fire_ping(record, now=None, runner=None):
         result["reason"] = "locked"
         return result
     try:
-        # Idle re-check immediately before exec (R4).
+        # Idle re-check immediately before exec.
         tp = Path(transcript_path)
         try:
             mtime = tp.stat().st_mtime
@@ -13030,13 +13030,13 @@ def keepwarm_tick(now=None, dry_run=False, env=None, runner=None,
       1. keepwarm_gate() FIRST -- if not allowed (subscription / not consented /
          ping-process), return immediately with the gate reason; NOTHING fires.
       2. Single-instance tick lock -- if another tick is live, skip quietly.
-      3a. keepwarm_detect_realized() (U7, KTD-4) -- BEFORE compaction, because
+      3a. keepwarm_detect_realized() -- BEFORE compaction, because
           compaction drops resumed records. Books realized/loss rows off the
           resumed turn's REAL usage, never off the 'resumed' classification.
-      3b. evaluate_keepwarm_tripwire() (U7, KTD-8) -- refresh the rolling-7d
+      3b. evaluate_keepwarm_tripwire() -- refresh the rolling-7d
           ratio + sticky demotion ladder from the ledger.
       3c. compact_keepwarm_sidecar() -- drop resumed/gone/expired records (the
-          disarm path; KTD-5). U3 writes ONLY ping spend + outcome rows here.
+          disarm path). The tick writes ONLY ping spend + outcome rows here.
       4. For each surviving still_paused record: policy decision; on 'ping' fire
          (unless dry_run) and append the ping ts to the record's pings_fired,
          then rewrite the sidecar with the updated records.
@@ -13078,7 +13078,7 @@ def keepwarm_tick(now=None, dry_run=False, env=None, runner=None,
             summary["reason"] = "tick-already-running"
             return summary
 
-        # 3a. REALIZED detection (U7, KTD-4) BEFORE compaction: compaction drops
+        # 3a. REALIZED detection BEFORE compaction: compaction drops
         # resumed records, so the only-place-savings-are-booked step must run on
         # the still-present resumed records first. Books a realized savings row
         # (warm resume) or a ledger loss row (cold resume), idempotent per pause;
@@ -13090,7 +13090,7 @@ def keepwarm_tick(now=None, dry_run=False, env=None, runner=None,
         except Exception:
             stage_errors += 1
 
-        # 3b. Tripwire evaluation (U7, KTD-8): refresh the rolling-7d ratio +
+        # 3b. Tripwire evaluation: refresh the rolling-7d ratio +
         # demotion ladder from the ledger so the gate's tripwire-off ceiling and
         # the dashboard ratio stay current. Sticky + fail-closed; never raises.
         try:
@@ -13222,9 +13222,9 @@ def _keepwarm_rewrite_records(records, now=None):
         pass
 
 
-# ========== Keep-warm resume predictor + history-backfill (U6) ==========
-# The +$119 simulation gated sustain on hindsight (it knew which pauses resumed).
-# Live code cannot. U6 ships an IMPLEMENTABLE predictor scored ONLY on features a
+# ========== Keep-warm resume predictor + history-backfill ==========
+# The +$119 upper bound gated sustain on hindsight (it knew which pauses resumed).
+# Live code cannot. This ships an IMPLEMENTABLE predictor scored ONLY on features a
 # tick can compute at ping time, then proves on the real 30d history that turning
 # sustain on with that predictor still beats probe-only > 0 before promotion.
 #
@@ -13236,7 +13236,7 @@ def _keepwarm_rewrite_records(records, now=None):
 #     resume). The replay reconstructs each feature as-of the ping time only.
 #   * The predictor is a pure function over an injected feature dict; it never
 #     touches the filesystem or clock. Backfill feeds reconstructed-at-ping-time
-#     features; the live tick (U7) will feed real mtime scans through the same
+#     features; the live tick feeds real mtime scans through the same
 #     signature. A "future-only" signal handed in is structurally ignored.
 
 # Score weights (transparent, tunable). A pause is predicted to continue (sustain
@@ -13410,7 +13410,7 @@ def _keepwarm_replay_pause(pause, predictor_mode, now, project_resume_index=None
                    features.
       "oracle"  : predictor_continue always True   (hindsight upper bound).
 
-    Honesty rules (KTD-4 / sim section 4):
+    Honesty rules:
       * a SAVING is booked only when the pause actually resumed AND the ping
         schedule covers the gap through the resume (every cache window from pause
         start to resume_ts has a ping no older than one cadence at its start);
@@ -13587,10 +13587,10 @@ def keepwarm_backfill(days=30, now=None, files=None, parse_fn=None):
     with `_get_cache_ttl_waste`. Pure-ish: `files`/`parse_fn`/`now` are injectable
     for deterministic tests (a fixed fixture replays identically).
 
-    Three modes (per the U6 plan + sim section 4):
-      probe-only       : predictor always False (the floor; sim +$13).
+    Three modes:
+      probe-only       : predictor always False (the floor; measured +$13).
       predictor-sustain: real predictor on reconstructed-at-ping-time features.
-      oracle-sustain   : hindsight upper bound (sim +$119).
+      oracle-sustain   : hindsight upper bound (+$119).
 
     Honesty: savings booked ONLY for resumed + covered pauses; tails accrue probe
     cost. Returns a dict with per-mode {pings, ping_cost_usd, avoided_writes,
@@ -13687,11 +13687,12 @@ def keepwarm_backfill(days=30, now=None, files=None, parse_fn=None):
     }
 
 
-# --- Promotion fence sidecar (0600). U7 will EXTEND this file with the rolling
-# tripwire ratio + demotion ladder; U6 only writes the backfill-gated promotion.
+# --- Promotion fence sidecar (0600). The tick EXTENDS this file with the rolling
+# tripwire ratio + demotion ladder; the backfill only writes the promotion-gated
+# verdict.
 
 _KEEPWARM_PROMOTION_NAME = "keepwarm_promotion.json"
-# Reconciliation bands (sim section 4): probe-only landed +$13 (allow window
+# Reconciliation bands: probe-only landed +$13 (allow window
 # drift); oracle-sustain landed +$119. If the replay is wildly outside these we
 # do NOT silently promote -- the caller reports the divergence.
 _KEEPWARM_RECON_PROBE_TARGET = 13.0
@@ -13705,7 +13706,7 @@ def _keepwarm_promotion_path():
 
 
 def keepwarm_backfill_reconcile(result):
-    """Compare a backfill result to the offline sim bands. Returns a diag dict.
+    """Compare a backfill result to the expected reconciliation bands. Returns a diag dict.
 
     Never raises. {probe_net, oracle_net, probe_in_band, oracle_in_band, notes}.
     A False band flag is a "investigate before trusting the fence" signal, not a
@@ -13735,7 +13736,7 @@ def keepwarm_backfill_reconcile(result):
 def keepwarm_promotion_decide(result):
     """Decide sustain promotion from a backfill result. Pure (no IO).
 
-    PROMOTION FENCE (U6): sustain is allowed ONLY when
+    PROMOTION FENCE: sustain is allowed ONLY when
         net(predictor-sustain) > net(probe-only) > 0
     on the real replay. Returns {sustain_allowed, reason, basis} where `basis`
     carries the three-mode nets so the sidecar/dashboard can show WHY.
@@ -13836,7 +13837,7 @@ def keepwarm_backfill_run(days=30, now=None, write_fence=True, files=None,
 def keepwarm_forecast(days=30, now=None, files=None, parse_fn=None):
     """PERSONALIZED projected savings, computed from the user's OWN history.
 
-    The opt-in problem (Alex, 2026-06-12): nobody enables a token-SPENDING
+    The opt-in problem: nobody enables a token-SPENDING
     feature blind -- they need to see what it would save THEM before paying for
     it. This replays the conservative probe-only floor policy (the one that
     actually ships; sustain has to earn promotion separately) over the last
@@ -13875,22 +13876,22 @@ def keepwarm_forecast(days=30, now=None, files=None, parse_fn=None):
         return {"available": False, "error": str(exc), "period_days": days}
 
 
-# ========== Keep-warm accounting + tripwire + report (U7) ==========
-# The ONLY place keep-warm savings are ever booked (KTD-4). A realized row is
+# ========== Keep-warm accounting + tripwire + report ==========
+# The ONLY place keep-warm savings are ever booked. A realized row is
 # written exactly once per (session, pause), and only when the resumed turn's
 # REAL usage proves a warm resume -- never off the resume CLASSIFICATION alone
-# (classify_keepwarm_record maps expired/unreadable to 'resumed' too; U2/U6
-# caveat). Realized $ enters the canonical merge via the savings_events SQLite
+# (classify_keepwarm_record maps expired/unreadable to 'resumed' too; see the
+# caveat in that docstring). Realized $ enters the canonical merge via the savings_events SQLite
 # path (event_type 'keepwarm'); ping SPEND stays ledger-side and is surfaced as
 # a dedicated cost line. NET (realized - spend) is the prominent number. The raw
-# ledger is NEVER summed into the merge by hand (KTD-7).
+# ledger is NEVER summed into the merge by hand.
 
 # event_type written to savings_events for a realized warm-resume avoided write.
 _KEEPWARM_SAVINGS_EVENT_TYPE = "keepwarm"
-# Fraction-of-prefix thresholds for the warm-vs-cold resume verdict (KTD-4).
+# Fraction-of-prefix thresholds for the warm-vs-cold resume verdict.
 _KEEPWARM_WARM_READ_FRACTION = 0.50   # cache_read >= this * prefix  -> warm read
 _KEEPWARM_WARM_WRITE_FRACTION = 0.50  # cache_creation < this * prefix -> not a re-write
-# Ledger statuses U7 adds beside U3's firing/ok/error/timeout. 'realized' and
+# Ledger statuses the tick adds beside the firing/ok/error/timeout rows. 'realized' and
 # 'loss' are the idempotency markers per (session, arm_ts) pause.
 _KEEPWARM_LEDGER_REALIZED = "realized"
 _KEEPWARM_LEDGER_LOSS = "loss"
@@ -14083,7 +14084,7 @@ def _keepwarm_first_usage_after(transcript_path, arm_ts, parse_fn=None):
 
 
 def keepwarm_resume_is_warm(turn, prefix_proxy):
-    """Pure warm-vs-cold verdict for a resumed turn's usage (KTD-4).
+    """Pure warm-vs-cold verdict for a resumed turn's usage.
 
     Warm iff cache_read >= 50% of the armed prefix AND cache_creation < 50% of
     the armed prefix (the resume reused the kept-warm prefix instead of paying a
@@ -14107,7 +14108,7 @@ def _keepwarm_log_realized_savings(tokens_saved, cost_usd, session_id, detail=No
                                    model=None, pause_key=None):
     """Write ONE realized keep-warm row to savings_events (the canonical merge).
 
-    KTD-7: realized savings enter _get_merged_savings via savings_events (the
+    Realized savings enter _get_merged_savings via savings_events (the
     same table model_routing-style realized rows live in). _get_savings_summary
     groups by event_type with no allowlist, so an event_type='keepwarm' row's
     stored cost_saved_usd flows straight into the merged total -- no edit to
@@ -14156,7 +14157,7 @@ def keepwarm_detect_realized(now=None, records=None, parse_fn=None):
     For each armed record that has pings_fired >= 1 AND classifies 'resumed':
       * read the first usage-bearing turn AFTER the arm ts from the transcript;
       * if it cannot be read / there is no usable turn / prefix unknown -> book
-        NOTHING (resume-but-unreadable; classification alone never books, KTD-4);
+        NOTHING (resume-but-unreadable; classification alone never books);
       * warm resume (cache_read >= 50% prefix AND cache_creation < 50% prefix)
         -> write ONE realized savings_events row (avoided 1h write) AND a
         ledger 'realized' marker row;
@@ -14200,7 +14201,7 @@ def keepwarm_detect_realized(now=None, records=None, parse_fn=None):
             if turn is None:
                 # Resumed-but-unreadable (or expired with no post-arm turn): the
                 # classifier said 'resumed' but real usage is unavailable, so we
-                # book NOTHING (KTD-4: classification alone never books).
+                # book NOTHING (classification alone never books).
                 out["skipped"] += 1
                 continue
             prefix = rec.get("prefix_proxy")
@@ -14400,7 +14401,7 @@ def keepwarm_spend_summary(days=None, now=None, rows=None):
 
 
 # ========== Keep-warm SUBSCRIPTION quota-value model (2026-06-12) ==========
-# HEADLINE DESIGN CORRECTION (Alex, 2026-06-12): the dollar model hard-offs
+# HEADLINE DESIGN CORRECTION: the dollar model hard-offs
 # subscription billing because a keep-warm ping "saves $0" -- the WRONG currency.
 # On a Max/Pro SUBSCRIPTION the scarce resource is RATE-LIMIT QUOTA (the 5h / 7d
 # windows), not cash. A cold resume (>cache TTL) re-writes the prefix at the
@@ -14414,8 +14415,7 @@ def keepwarm_spend_summary(days=None, now=None, rows=None):
 # It is a READ-ONLY MEASUREMENT INSTRUMENT. It does NOT change keepwarm_gate():
 # subscription stays hard-off here. Flipping subscription from hard-off to
 # quota-ROI-on is a SEPARATE, explicitly-consented decision once real meter
-# samples confirm the modeled prior. Per Alex: "MUST be measured, not assumed, in
-# either direction." Two layers:
+# samples confirm the modeled prior. Two layers:
 #   * MODELED prior -- under cache-tier-weighted metering (a cache READ is far
 #     cheaper on the meter than a cache WRITE, the same shape as dollars), the
 #     meter ratio saved/spent EQUALS the dollar ratio realized/spend that
@@ -14706,7 +14706,7 @@ def keepwarm_quota_value_summary(days=7, now=None, rows=None,
     }
 
 
-# ---- Keep-warm tripwire (KTD-8: clone of the WS2 sidecar discipline) ----
+# ---- Keep-warm tripwire (clone of the sidecar discipline) ----
 # Rolling 7-day realized/spend ratio drives a sticky demotion ladder
 # sustain -> probe-only -> off. Two strikes: first breach demotes sustain (moot
 # while sustain is unpromoted, but wired); a second breach (probe-only STILL
@@ -14985,7 +14985,7 @@ def keepwarm_report(days=30, now=None):
         tw_mode = keepwarm_tripwire_mode()
     except Exception:
         tw_mode = "off"
-    # Promotion fence (U6): sustain only if promoted AND tripwire allows it.
+    # Promotion fence: sustain only if promoted AND tripwire allows it.
     sustain_allowed = False
     try:
         prom = json.loads(_keepwarm_promotion_path().read_text(encoding="utf-8"))
@@ -15070,7 +15070,7 @@ def keepwarm_cache_health_block(days=30, now=None):
         rep = keepwarm_report(days=days, now=now)
     except Exception:
         rep = None
-    # platform-gap: keep-warm only ships on the claude_code runtime (R5). On any
+    # platform-gap: keep-warm only ships on the claude_code runtime. On any
     # other runtime the tile is an explicit documented gap.
     try:
         runtime = detect_runtime()
@@ -15119,7 +15119,7 @@ def keepwarm_cache_health_block(days=30, now=None):
         "has_pings": rep["has_pings"],
         "top_sessions": rep["top_sessions"],
         # Predictor transparency: the feature names that gate sustain when it
-        # ever activates (U6). Surfaced so the dashboard can explain WHY.
+        # ever activates. Surfaced so the dashboard can explain WHY.
         "predictor_features": [
             "prior_resume_count", "sibling_active",
             "machine_active", "survival_p",
@@ -25769,7 +25769,7 @@ def _continuity_resume_block(text, checkpoints, sid_safe, cwd):
     reconstruction of the right same-project session, or "" to fall through to
     the lightweight hint.
 
-    Selection ("both", per Alex): keyword winner when the prompt names a topic
+    Selection ("both"): keyword winner when the prompt names a topic
     (best same-project score >= _RESUME_NAMED_TOPIC_BAR), else the most-recent
     same-project session. Token-free: reuses build_lean_resume_context.
     """
@@ -27803,7 +27803,7 @@ _NUDGE_COOLDOWN_SECONDS = 300  # 5 minutes between nudges
 
 # Fill % at which the gentle lean-output nudge becomes eligible (it still also
 # requires a degraded quality score -- fill alone never fires it). Lowered from
-# 25 to 20 (Alex, 2026-07-22): verbose output starts costing real money well
+# 25 to 20: verbose output starts costing real money well
 # before the context is a quarter full, and the quality gate keeps a healthy
 # session quiet regardless. Named + env-tunable rather than inline, because the
 # previous magic 25 was documented as three different numbers across the docs.
@@ -29933,8 +29933,8 @@ def _mix_cache_rates(days=30):
     current model mix.
 
     _active_model_cache_rates() prices at whatever model THE REPORTING SESSION
-    runs, so the same structural opportunity swung 26 <-> 193 $/mo between a
-    Sonnet session and a Fable session (Fable cache rates are 5x Sonnet's)
+    runs, so the same structural opportunity swings several-fold in $/mo between
+    sessions with different cache rate tiers
     with zero underlying change. The prefix is re-read by every session in the
     window, so the defensible rate is the window's own model mix -- the same
     mix the transformation pool prices its "now" arm at. Unpriced models
@@ -30067,8 +30067,8 @@ def _compound_structural(s, days, fallback_prefix):
 
     per_session_prefix = _per_session_prefix_tokens(fallback=fallback_prefix)
     # Blended by the window's model mix, NOT the reporting session's model:
-    # session-model rates made the same opportunity print $26 from a Sonnet
-    # session and $193 from a Fable one (5x cache rates), run minutes apart.
+    # session-model rates make the same opportunity diverge several-fold between
+    # sessions with different cache rate tiers, run minutes apart.
     read_rate, write_5m_rate, write_1h_rate = _mix_cache_rates(days=days)
     # Clamp to 1.0: the prefix trim S can never cache-write more than a full
     # per-session prefix worth of tokens. An unclamped ratio (S > prefix, e.g.
@@ -31905,8 +31905,8 @@ def _estimate_before_after_savings(days=30):
             # Anthropic user, no measured baseline, but they confirmed (one-time consent
             # or explicit config) that they ran mostly Opus pre-TO -> owner default mix.
             # Gated so a NEW Anthropic user who never ran Opus is not handed a fabricated
-            # 0.95 baseline that over-counts the routing lever. Alex has a real measured
-            # frozen 0.95 (handled by the frozen_opus branch above), so she is unaffected.
+            # 0.95 baseline that over-counts the routing lever. A real measured
+            # frozen 0.95 is handled by the frozen_opus branch above, so that user is unaffected.
             baseline_opus_share = 0.95
             before_shares = {"opus": baseline_opus_share,
                              "sonnet": round(1.0 - baseline_opus_share, 4)}
@@ -33238,7 +33238,7 @@ def run_ensure_health():
         except Exception as _e:
             print(f"  [Token Optimizer] VS Code extension self-install failed: {_e}", file=sys.stderr)
 
-    # Keep-warm scheduler repair (U4 deliverable 3). ADDITIVE + consent-gated +
+    # Keep-warm scheduler repair. ADDITIVE + consent-gated +
     # cheap. Regenerates a user-deleted/stale keep-warm agent ONLY when the
     # install marker exists AND consent allows (the #59 sticky-opt-out lesson:
     # user-removed != regen-target unless WE installed it and consent still
@@ -33711,13 +33711,9 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
 
         # Determine nudge tier.
         #
-        # Wording is measured, not argued. On 2026-07-22 four candidate texts
-        # were A/B'd against a no-nudge control on identical prompts:
-        #   Sonnet, 2 tasks:  padding-focused -28%, "every sentence must earn
-        #                     its place" -27%, spartan/ADHD -55%
-        #   Opus, 5 tasks:    spartan/ADHD -31% total (mean -30%, median -31%)
-        # The spartan/ADHD phrasing (Alex's) won every arm on both models, so
-        # it is used verbatim. Notes on what the data showed:
+        # The spartan/ADHD phrasing is used verbatim because it produced the
+        # largest reduction in verbose output across multiple models while
+        # maintaining answer quality. Notes on what the data showed:
         #   - Word ceilings were REMOVED. An earlier draft capped answers at
         #     80/120 words. A cap makes a model either truncate a genuinely
         #     complex answer or ignore the nudge, and a nudge that gets ignored
@@ -34639,11 +34635,11 @@ if __name__ == "__main__":
         finally:
             _clear_hook_budget(_tok_hook_old_sig)
     elif args[0] == "keepwarm-arm":
-        # Called by the Stop hook (additive, U2). Appends one arm record to the
+        # Called by the Stop hook (additive). Appends one arm record to the
         # keep-warm sidecar so the keepwarm-tick loop can later decide whether to
         # ping. Dumb + fast: a SIGALRM budget plus the writer's own fail-open
         # backstop keep it well inside the hook hot path; any failure is silent so
-        # the hook chain is never broken (R4). NO eligibility/policy here (KTD-5).
+        # the hook chain is never broken. NO eligibility/policy here.
         # Arming is token-FREE (it just records that a session paused, so the
         # watcher can measure cache/cash drops). It stays ON. The LLM ping is the
         # only token-spending step and is gated at the fire point.
@@ -34662,27 +34658,27 @@ if __name__ == "__main__":
         finally:
             _clear_hook_budget(_tok_hook_old_sig)
     elif args[0] == "keepwarm-enable":
-        # Explicit opt-in (U5). Refuses on subscription billing with the honest
+        # Explicit opt-in. Refuses on subscription billing with the honest
         # message (no per-write premium to recover). On API billing it records
-        # consent='enabled'; the U4 scheduler install is a SEPARATE step.
+        # consent='enabled'; the scheduler install is a SEPARATE step.
         # --limits-lab: dogfood-only subscription enrollment (EXPERIMENTAL),
         # never offered by consent pitch surfaces — operator CLI only.
         ok, msg = keepwarm_enable(limits_lab="--limits-lab" in args)
         print(f"[Token Optimizer] {msg}")
         sys.exit(0 if ok else 1)
     elif args[0] == "keepwarm-disable":
-        # Explicit opt-out from any state (U5). Sets consent='declined'
+        # Explicit opt-out from any state. Sets consent='declined'
         # (terminal); a declined user is never re-asked and never pinged.
         _, msg = keepwarm_disable()
         print(f"[Token Optimizer] {msg}")
     elif args[0] == "keepwarm-consent-status":
-        # Machine-readable gate inputs for the first-run ASK surface (U5). The
+        # Machine-readable gate inputs for the first-run ASK surface. The
         # TO skill / dashboard reads should_ask to decide whether to show the
         # one-time pitch. JSON to stdout only — no human prose to confuse a
         # parser; nothing here ever prints a secret value.
         print(json.dumps(keepwarm_consent_status()))
     elif args[0] == "keepwarm-consent-asked":
-        # Idempotent marker (U5): record that the pitch was shown so it is shown
+        # Idempotent marker: record that the pitch was shown so it is shown
         # exactly once (unasked -> asked; terminal states untouched). The
         # resulting state is echoed for the caller's confirmation.
         state = keepwarm_mark_asked()
@@ -34711,13 +34707,13 @@ if __name__ == "__main__":
         if "--quiet" not in args:
             print(f"[Token Optimizer] star consent state: {state}")
     elif args[0] == "keepwarm-tick":
-        # The keep-warm brain+trigger loop (U3). Run by the U4 scheduler every
+        # The keep-warm brain+trigger loop. Run by the scheduler every
         # ~5min. Gates via keepwarm_gate() FIRST -- exits 0 silently when not
         # allowed (subscription / unconsented / ping-process). Single-instance
-        # guarded; per-record isolated; fires the U1 CLI ping for any 'ping'
+        # guarded; per-record isolated; fires the CLI ping for any 'ping'
         # decision. --dry-run prints decisions JSON without firing anything.
         dry_run = "--dry-run" in args
-        # Log rotation guard (U4 deliverable 1): truncate the scheduler's
+        # Log rotation guard: truncate the scheduler's
         # combined stdout/stderr log if it has grown past 1MB. Cheap, best-effort,
         # never blocks the tick. Skipped under --dry-run (no real run is logged).
         if not dry_run:
@@ -34742,9 +34738,9 @@ if __name__ == "__main__":
             # Gate-refused ticks stay silent (exit 0).
         sys.exit(0)
     elif args[0] == "keepwarm-scheduler":
-        # Install/uninstall/status the keep-warm launchd interval agent (U4).
-        # install REFUSES unless keepwarm_gate() allows (consent drives install,
-        # R7); uninstall always works; status prints JSON. Fully decoupled from
+        # Install/uninstall/status the keep-warm launchd interval agent.
+        # install REFUSES unless keepwarm_gate() allows (consent drives install);
+        # uninstall always works; status prints JSON. Fully decoupled from
         # the dashboard daemon (distinct label + own install lock; never touches
         # the dashboard plist/lock/regen loop).
         sub = args[1] if len(args) > 1 else ""
@@ -34765,7 +34761,7 @@ if __name__ == "__main__":
     elif args[0] == "keepwarm-backfill":
         # Replay the LIVE keep-warm policy over the last 30d of real history in
         # three modes (probe-only / predictor-sustain / oracle-sustain) and
-        # decide the sustain PROMOTION FENCE (U6). READ-ONLY on transcripts; the
+        # decide the sustain PROMOTION FENCE. READ-ONLY on transcripts; the
         # only write is the 0600 promotion sidecar (and only when the gate
         # passes / to record the honest current verdict). --json prints the full
         # result+reconcile+decision; otherwise a human summary. --no-fence skips
@@ -34807,7 +34803,7 @@ if __name__ == "__main__":
               + ("  [sidecar written]" if run["wrote_fence"] else ""))
         sys.exit(0)
     elif args[0] == "keepwarm-report":
-        # The honest end-to-end money story (U7). Human summary by default;
+        # The honest end-to-end money story. Human summary by default;
         # --json for the machine-readable block. Mode, consent+billing,
         # scheduler, 7d+30d pings/spend/realized/NET, tripwire state+ratio,
         # top-5 sessions by realized. Honest empty-state when no pings yet.
@@ -34918,7 +34914,7 @@ if __name__ == "__main__":
         sys.exit(0)
     elif args[0] == "keepwarm-forecast":
         # PERSONALIZED projected savings from the user's OWN history -- the
-        # before-you-opt-in pitch (Alex: nobody enables a spending feature blind).
+        # before-you-opt-in pitch (nobody enables a spending feature blind).
         # Replays the conservative probe-only floor; READ-ONLY (no fence write).
         as_json = "--json" in args
         days = 30
@@ -35223,7 +35219,7 @@ if __name__ == "__main__":
                 except (json.JSONDecodeError, OSError):
                     pass
             score = quality_cache(throttle_seconds=throttle, warn_threshold=warn_threshold, quiet=quiet, session_jsonl=session_jsonl, force=force, pure_time_throttle=throttle_only, session_id=session_id_from_hook)
-            # WS2 tripwire piggyback: the --throttle-only invocation fires on the
+            # Tripwire piggyback: the --throttle-only invocation fires on the
             # PostToolUse Edit/Write path (where active first-read follow-ups are
             # resolved), so this is the natural place to refresh the per-cohort
             # live edit-rate verdict. It is mtime-gated to 5 min, so the common
@@ -35416,12 +35412,12 @@ if __name__ == "__main__":
             proxy = coverage.get("first_read_proxy")
             if proxy:
                 ready = "READY" if proxy["promotion_ready"] else "not yet"
-                print("\n  First-read shadow quality proxy (R9 promotion gate):")
+                print("\n  First-read shadow quality proxy (promotion gate):")
                 print(f"    shadow reads: {proxy['shadow_reads']}  "
                       f"edits after read: {proxy['edits_after_read']}  "
                       f"edit rate: {proxy['edit_rate_pct']:.1f}% "
                       f"(gate <{proxy['promotion_gate_pct']:.0f}% — {ready})")
-            # WS2 tripwire: per-cohort live edit-rate + any auto-demotions.
+            # Tripwire: per-cohort live edit-rate + any auto-demotions.
             if tripwire.get("cohorts") or tripwire.get("demoted"):
                 print("\n  First-read cohort tripwire (live edit-rate, auto-demote):")
                 for c in tripwire.get("cohorts", []):
