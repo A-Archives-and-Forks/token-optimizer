@@ -18642,7 +18642,34 @@ def setup_hook(dry_run=False, uninstall=False):
 
 # ========== Persistent Dashboard Daemon ==========
 
-TOKEN_OPTIMIZER_VERSION = "5.11.50"  # Keep in sync with plugin.json + marketplace.json
+def _read_plugin_version(default="0.0.0"):
+    """Read the shipped version from the plugin manifest, once, at import.
+
+    This was a hand-maintained string carrying the comment "keep in sync with
+    plugin.json + marketplace.json". It was not kept in sync: it sat four
+    releases behind the manifests, and had drifted across at least two earlier
+    releases as well, so a fresh install rendered a stale version in the
+    dashboard header. A constant that must be updated by hand on every release
+    will eventually be missed, so the manifest is now the single source.
+
+    Falls back to the default when the manifest is absent, which is the case for
+    a skill-only install with no plugin directory. Never raises: a version
+    string is cosmetic and must not prevent the tool from running.
+    """
+    here = Path(__file__).resolve()
+    for base in here.parents:
+        candidate = base / ".claude-plugin" / "plugin.json"
+        try:
+            if candidate.is_file():
+                value = json.loads(candidate.read_text(encoding="utf-8")).get("version")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        except (OSError, ValueError):
+            return default
+    return default
+
+
+TOKEN_OPTIMIZER_VERSION = _read_plugin_version()
 _DASHBOARD_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 # Per-runtime daemon identity. Each runtime gets a distinct port + label so a
 # dashboard under one runtime never collides with another's. Copilot uses 24845

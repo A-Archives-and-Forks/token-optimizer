@@ -1,0 +1,66 @@
+"""TOKEN_OPTIMIZER_VERSION must equal the shipped manifest version.
+
+Reported externally (PR #96, danikdanik): the constant was hand-maintained with
+a "keep in sync with plugin.json + marketplace.json" comment and had drifted
+four releases behind, so a fresh install rendered a stale version in the
+dashboard header. The reporter noted it had also drifted across at least two
+earlier releases, making it a release-process gap rather than a one-off.
+
+The repo's own version audit did not catch it: it scans manifests and does not
+reach this constant. This test is the gate that was missing.
+"""
+
+import importlib
+import json
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPTS = ROOT / "skills" / "token-optimizer" / "scripts"
+
+
+def _manifest_version():
+    return json.loads(
+        (ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )["version"]
+
+
+def _load():
+    sys.path.insert(0, str(SCRIPTS))
+    sys.modules.pop("measure", None)
+    return importlib.import_module("measure")
+
+
+def test_version_constant_matches_plugin_manifest():
+    assert _load().TOKEN_OPTIMIZER_VERSION == _manifest_version()
+
+
+def test_version_constant_matches_marketplace_manifest():
+    market = json.loads(
+        (ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")
+    )
+    found = json.dumps(market)
+    assert _manifest_version() in found, (
+        "marketplace.json no longer carries the plugin version"
+    )
+
+
+def test_version_is_derived_not_hardcoded():
+    """A literal here is the defect itself: it will drift again."""
+    src = (SCRIPTS / "measure.py").read_text(encoding="utf-8")
+    line = next(
+        l for l in src.splitlines()
+        if l.startswith("TOKEN_OPTIMIZER_VERSION =")
+    )
+    assert '"' not in line.split("=", 1)[1], (
+        "TOKEN_OPTIMIZER_VERSION is a hardcoded literal again; derive it from "
+        "the manifest so a release cannot leave it behind"
+    )
+
+
+def test_version_read_falls_back_without_manifest(tmp_path):
+    """Skill-only installs have no plugin directory and must still run."""
+    assert _load()._read_plugin_version.__doc__
+    mod = _load()
+    assert mod._read_plugin_version(default="0.0.0") == _manifest_version()
