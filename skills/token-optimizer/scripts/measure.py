@@ -31634,16 +31634,9 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
          {fresh_input, cache_read, cache_create, output}. Aggregate F/CR/CW/O by model.
       3. actual_sub = price each model's bundle at its OWN (real) rate.
       4. counterfactual_sub = price the SAME bundles at the ~95% Opus baseline mix.
-      5. Split PER MODEL: a bundle whose counterfactual exceeds its actual cost is
-         cheaper delegation (savings the routing produced); a bundle costlier than
-         the baseline mix (e.g. a Fable subagent at 2x Opus rates) is premium
-         delegation. transformation_usd sums ONLY the cheaper-delegation deltas;
-         premium_delegation_usd sums the premium side. Netting them inside the pool
-         let one afternoon of intentional premium fan-outs silently consume the
-         genuine cheap-delegation savings and drag the headline down in real time,
-         even though premium delegation is a deliberate capability purchase, not a
-         routing regression. The split keeps the headline stable under premium use
-         while the premium spend stays disclosed.
+      5. transformation_usd is the signed counterfactual minus actual difference.
+         premium_delegation_usd separately discloses the gross cost of per-model
+         bundles above the baseline rate, but never replaces the signed pool net.
 
     Returns {actual_usd, counterfactual_usd, transformation_usd,
     premium_delegation_usd, sessions, by_model}.
@@ -31728,7 +31721,6 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
         before_shares = _opus_baseline_shares(baseline_opus_share)
         actual = 0.0
         counterfactual = 0.0
-        cheaper = 0.0
         premium = 0.0
         by_model_cost = {}
         for model, s in by_model.items():
@@ -31744,12 +31736,9 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
                 model, fi, cr, out, cw, cw1h, cw5m, before_shares, tier)
             actual += a
             counterfactual += c
-            # Per-model premium/cheaper split (see docstring): cheap delegation
-            # counts as transformation; premium delegation is disclosed, never
-            # netted against it.
-            if c >= a:
-                cheaper += c - a
-            else:
+            # Keep gross premium visible as supplementary context. The pool's
+            # transformation remains the signed aggregate below.
+            if c < a:
                 premium += a - c
             by_model_cost[_friendly_model(model)] = (
                 by_model_cost.get(_friendly_model(model), 0.0) + a)
@@ -31757,7 +31746,7 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
         payload = {
             "actual_usd": round(actual, 2),
             "counterfactual_usd": round(counterfactual, 2),
-            "transformation_usd": round(cheaper, 2),
+            "transformation_usd": round(counterfactual - actual, 2),
             "premium_delegation_usd": round(premium, 2),
             "sessions": n_side,
             "by_model": {k: round(v, 2) for k, v in by_model_cost.items()},
@@ -31837,7 +31826,7 @@ def _estimate_before_after_savings(days=30):
          tokens but priced at each arm's OWN mix (cache-write bills at the writing model's
          rate, so it is a routing lever). t_pool is exact, so neither arm prices more
          volume than the typical session held.
-      4. MAIN TRANSFORMATION (monthly) = (old_cps - now_cps) * recent_n. Clamped >= 0.
+      4. MAIN TRANSFORMATION (monthly) = (old_cps - now_cps) * recent_n, signed.
 
     Baseline model mix is ~95% Opus: the product owner's confirmed pre-TO mix. We floor
     the frozen baseline's measured opus_share at 0.95 (the early window was already
@@ -32007,11 +31996,9 @@ def _estimate_before_after_savings(days=30):
         # ~95% Opus baseline. Summed into the headline below. Memoized for dashboard perf.
         sub_pool = _subagent_pool_savings(
             days=days, baseline_opus_share=baseline_opus_share, tier=tier)
-        sub_actual = float(sub_pool.get("actual_usd", 0.0) or 0.0)
-        sub_cf = float(sub_pool.get("counterfactual_usd", 0.0) or 0.0)
-        # sub_delta / premium_delegation_cost are resolved below with the other pools,
-        # preferring the pool's own PER-MODEL split (transformation_usd = cheaper
-        # delegation only, premium_delegation_usd = the premium side).
+        sub_window_actual = float(sub_pool.get("actual_usd", 0.0) or 0.0)
+        sub_window_cf = float(sub_pool.get("counterfactual_usd", 0.0) or 0.0)
+        sub_sessions = int(sub_pool.get("sessions", 0) or 0)
 
         def price(fi, cr, out, shares):
             # Price the fresh+cache_read pool and output (NO cache-write). _cost_per_session
@@ -32117,29 +32104,22 @@ def _estimate_before_after_savings(days=30):
         # (issue #87): the top line summed only non-negative pools and could assert a saving
         # while the arms showed a loss. The headline is now the honest net of the same arms.
         main_transformation = counterfactual_monthly - actual_monthly
-        # Premium delegation is an intentional purchase, not a Token Optimizer
-        # regression. Consume the pool's PER-MODEL split: transformation_usd sums
-        # only the bundles cheaper than the baseline mix, premium_delegation_usd
-        # the costlier ones. Deriving both from the aggregate (sub_cf - sub_actual)
-        # nets one against the other, so a burst of intentional premium fan-outs
-        # (a tiny share of window tokens) would erase genuine cheap-delegation
-        # savings and drag the headline down in real time.
-        if "premium_delegation_usd" in sub_pool:
-            sub_delta = max(0.0, float(
-                sub_pool.get("transformation_usd", 0.0) or 0.0))
-            premium_delegation_cost = max(0.0, float(
-                sub_pool.get("premium_delegation_usd", 0.0) or 0.0))
-        else:
-            # Fallback for a payload without the split (e.g. an older cached
-            # shape): aggregate netting, clamped so premium use can only zero
-            # this lever, never subtract from the other pools.
-            raw_sub_delta = sub_cf - sub_actual
-            sub_delta = max(0.0, raw_sub_delta)
-            premium_delegation_cost = max(0.0, -raw_sub_delta)
-        # Combined arms span every pool. The HEADLINE is defined as their honest net, so the
-        # big number and the "est. $X now vs $Y the old way" arms can never disagree.
-        combined_actual = actual_monthly
-        combined_cf = (counterfactual_monthly + sub_delta
+        # Normalize the raw sidechain window to a per-delegated-session rate, then
+        # scale both arms by the same main-session count used by the main pool. This
+        # makes the headline respond to sidechain unit economics, not to how many
+        # delegations happened to arrive during the scan window. Use the raw arms,
+        # which exist in every cache payload version, so cache schema cannot change
+        # the accounting path. The signed delta preserves genuinely costlier routing.
+        sub_scale = (recent_n / sub_sessions) if sub_sessions > 0 else 0.0
+        sub_actual = sub_window_actual * sub_scale
+        sub_cf = sub_window_cf * sub_scale
+        sub_delta = sub_cf - sub_actual
+        premium_delegation_cost = (
+            float(sub_pool.get("premium_delegation_usd", 0.0) or 0.0) * sub_scale)
+        # Combined arms span every estimated pool. Normalizing both sidechain arms
+        # keeps the displayed counterfactual and actual values reconciled to the net.
+        combined_actual = actual_monthly + sub_actual
+        combined_cf = (counterfactual_monthly + sub_cf
                        + compression_addback + verbosity_addback)
         net = combined_cf - combined_actual
         # Gate the entire counterfactual hero on a GENUINE net win. When net <= 0 (efficiency
@@ -32163,7 +32143,10 @@ def _estimate_before_after_savings(days=30):
                     "verbosity_measured_usd": round(vs_measured, 2),
                     "subagent_actual_usd": round(sub_actual, 2),
                     "subagent_counterfactual_usd": round(sub_cf, 2),
-                    "subagent_sessions": int(sub_pool.get("sessions", 0) or 0),
+                    "subagent_sessions": sub_sessions,
+                    "subagent_scale_factor": round(sub_scale, 6),
+                    "subagent_window_actual_usd": round(sub_window_actual, 2),
+                    "subagent_window_counterfactual_usd": round(sub_window_cf, 2),
                     "baseline_opus_share": round(baseline_opus_share, 4),
                     "before_opus": round(baseline_opus_share, 4),
                     "after_opus": round(after_opus, 4),
@@ -32211,8 +32194,8 @@ def _estimate_before_after_savings(days=30):
              "Model mix shifted to costlier models (added cost)", s_route),
             ("context_rereads", "Lighter sessions (better cache reuse)",
              "Heavier context re-reads (added cost)", s_cache),
-            ("subagent_routing", "Cheaper subagents (lighter delegation)",
-             "Subagents shifted to costlier models (added cost)", sub_delta),
+            ("subagent_routing", "Cheaper subagents (normalized rate)",
+             "Costlier subagents (normalized rate)", sub_delta),
             ("context_compression", "Lighter context (fewer re-reads, metered)",
              "Lighter context (fewer re-reads, metered)", compression_addback),
             ("verbosity_steer", "Lean output nudges (less output, estimated)",
@@ -32231,13 +32214,15 @@ def _estimate_before_after_savings(days=30):
             "(~95% Opus, your old cache pattern) -- then scaled by your session count this "
             "period. The per-session difference is split between model routing (including "
             "cache-write, which is billed at the writing model's rate) and caching. Subagent "
-            "(sidechain) routing is counted as a separate pool and added to the headline. A "
+            "(sidechain) routing is averaged per delegated session, then scaled by the same "
+            "main-session count, so delegation volume alone cannot move the headline. A "
             "fourth pool adds the directly-metered tokens Token Optimizer removed from context "
             "(tool archiving, skeletons, lean resumes) -- real volume the old way would have "
             "re-read -- repriced at the baseline mix. A fifth pool adds estimated output-token "
             "savings from lean-output conciseness nudges. The per-session volume anchor is "
             "frozen, so workload size never inflates or zeroes the baseline -- only efficiency, "
-            "your session count, metered removals, and estimated output reduction move it."
+            "the shared session-count anchor, metered removals, and estimated output reduction "
+            "move it."
         )
 
         # Per-session keys = the FROZEN typical-session anchors directly (not a re-division
@@ -32276,7 +32261,10 @@ def _estimate_before_after_savings(days=30):
             "main_actual_monthly_usd": round(actual_monthly, 2),
             "subagent_counterfactual_usd": round(sub_cf, 2),
             "subagent_actual_usd": round(sub_actual, 2),
-            "subagent_sessions": int(sub_pool.get("sessions", 0) or 0),
+            "subagent_sessions": sub_sessions,
+            "subagent_scale_factor": round(sub_scale, 6),
+            "subagent_window_actual_usd": round(sub_window_actual, 2),
+            "subagent_window_counterfactual_usd": round(sub_window_cf, 2),
             "subagent_by_model": sub_pool.get("by_model", {}),
             "transformation_pct": round(transformation_pct, 4),
             "baseline_opus_share": round(baseline_opus_share, 4),
@@ -32614,8 +32602,8 @@ def savings_report(days=30, as_json=False):
         print(f"    Had you worked the way you did before Token Optimizer "
               f"(~{ba.get('before_opus', 0) * 100:.0f}% Opus main work), you'd have paid "
               f"~${ba['monthly_savings_usd']:,.0f} more "
-              f"— est. ${ba.get('actual_monthly_usd', 0):,.0f} now vs ${ba.get('counterfactual_monthly_usd', 0):,.0f} "
-              f"the old way [estimated]")
+              f"(est. ${ba.get('actual_monthly_usd', 0):,.0f} now vs ${ba.get('counterfactual_monthly_usd', 0):,.0f} "
+              f"the old way) [estimated]")
         # Where it comes from: the waterfall attribution (reconciles to the headline).
         ba_breakdown = ba.get("breakdown") or []
         if ba_breakdown:
@@ -32629,13 +32617,12 @@ def savings_report(days=30, as_json=False):
                 # Wrap the caveat so the CLI surfaces the same disclosure as the dashboard.
                 for line in textwrap.wrap(caveat, width=72):
                     print(f"      {line}")
-        # Premium delegation disclosure (same as the dashboard note): deliberate
-        # spend on costlier subagents, shown beside the headline, never netted
-        # against it.
+        # Premium delegation disclosure is supplementary context. Its signed
+        # effect is already included in the normalized sidechain pool above.
         prem = float(ba.get("premium_delegation_cost_usd", 0.0) or 0.0)
         if prem > 0:
-            print(f"    Premium delegation: ${prem:,.0f} this period. Shown "
-                  f"separately and excluded from the transformation above.")
+            print(f"    Costlier delegation: ${prem:,.0f}/mo at the normalized rate. "
+                  f"Included in the sidechain net above.")
 
     pricing = summary.get("pricing_detail") or {}
     p_model = pricing.get("model", "sonnet")

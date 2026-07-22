@@ -194,12 +194,63 @@ def test_premium_sidechain_mix_does_not_raise_main_work_actual_cost(measure):
     assert with_premium_delegation["sessions_per_month"] == 40
 
 
-def test_premium_delegation_is_disclosed_but_cannot_reduce_headline(measure):
-    """A MIXED pool: $200 of cheap-delegation savings alongside $400 of premium
-    delegation. The aggregate (cf - actual) nets to -$200, so aggregate netting
-    would zero the cheap savings AND under-disclose the premium as $200. The
-    per-model split must keep the $200 in the headline and disclose the $400.
-    """
+def test_headline_stable_when_delegated_session_volume_bursts(measure):
+    """More delegated sessions at the same per-session economics must not move the rate."""
+    mod, tmp = measure
+    mod._subagent_pool_savings = lambda **kw: {
+        "actual_usd": 100.0, "counterfactual_usd": 300.0,
+        "transformation_usd": 200.0, "premium_delegation_usd": 0.0,
+        "sessions": 10, "by_model": {"Haiku": 100.0}}
+    normal = _run(mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+
+    # Five times as many identical delegated sessions. Aggregate spend and savings
+    # rise 5x, but per-delegated-session efficiency is unchanged.
+    mod._subagent_pool_savings = lambda **kw: {
+        "actual_usd": 500.0, "counterfactual_usd": 1_500.0,
+        "transformation_usd": 1_000.0, "premium_delegation_usd": 0.0,
+        "sessions": 50, "by_model": {"Haiku": 500.0}}
+    burst = _run(mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+
+    assert burst["monthly_savings_usd"] == pytest.approx(
+        normal["monthly_savings_usd"], abs=0.01), (
+            "headline moved when only delegated-session volume changed")
+
+
+def test_headline_moves_when_delegated_session_efficiency_changes(measure):
+    """The normalized delegated-session rate must still react to unit economics."""
+    mod, tmp = measure
+    mod._subagent_pool_savings = lambda **kw: {
+        "actual_usd": 200.0, "counterfactual_usd": 300.0,
+        "transformation_usd": 100.0, "premium_delegation_usd": 0.0,
+        "sessions": 10, "by_model": {"Haiku": 200.0}}
+    less_efficient = _run(
+        mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+
+    mod._subagent_pool_savings = lambda **kw: {
+        "actual_usd": 100.0, "counterfactual_usd": 300.0,
+        "transformation_usd": 200.0, "premium_delegation_usd": 0.0,
+        "sessions": 10, "by_model": {"Haiku": 100.0}}
+    more_efficient = _run(
+        mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+
+    assert more_efficient["monthly_savings_usd"] > less_efficient["monthly_savings_usd"]
+
+
+def test_costlier_delegated_session_rate_remains_negative(measure):
+    """A genuinely costlier delegated-session pool must not be silently clamped to zero."""
+    mod, tmp = measure
+    mod._subagent_pool_savings = lambda **kw: {
+        "actual_usd": 500.0, "counterfactual_usd": 100.0,
+        "transformation_usd": 0.0, "premium_delegation_usd": 400.0,
+        "sessions": 10, "by_model": {"Fable": 500.0}}
+    result = _run(
+        mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+
+    assert result["subagent_transformation_usd"] == pytest.approx(-1_600.0)
+
+
+def test_costlier_delegation_reduces_headline_and_stays_disclosed(measure):
+    """Signed sidechain economics affect the headline after rate normalization."""
     mod, tmp = measure
     mod._subagent_pool_savings = lambda **kw: {
         "actual_usd": 600.0, "counterfactual_usd": 400.0,
@@ -211,19 +262,17 @@ def test_premium_delegation_is_disclosed_but_cannot_reduce_headline(measure):
         "transformation_usd": 200.0, "premium_delegation_usd": 0.0,
         "sessions": 4, "by_model": {"Haiku": 100.0}}
     cheap_only = _run(mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
-    assert mixed["monthly_savings_usd"] == cheap_only["monthly_savings_usd"], \
-        "premium delegation reduced the headline (aggregate netting is back)"
-    assert mixed["subagent_transformation_usd"] == 200.0
-    assert mixed["premium_delegation_cost_usd"] == 400.0
+    assert mixed["subagent_transformation_usd"] == pytest.approx(-666.67, abs=0.01)
+    assert mixed["monthly_savings_usd"] == 0.0
+    assert mixed["reason"] == "net_negative"
+    assert mixed["premium_delegation_cost_usd"] == pytest.approx(1_333.33, abs=0.01)
+    assert cheap_only["subagent_transformation_usd"] == 2_000.0
+    assert cheap_only["monthly_savings_usd"] > mixed["monthly_savings_usd"]
     assert cheap_only["premium_delegation_cost_usd"] == 0.0
 
 
-def test_headline_stable_when_premium_delegation_added_to_window(measure):
-    """THE regression: adding premium fan-outs to an otherwise identical window
-    must not move the headline at all. Before the per-model split, one afternoon
-    of premium delegation (a ~2% token share) subtracted its full premium from
-    the headline and dragged it down double digits in real time.
-    """
+def test_headline_moves_when_delegated_session_mix_becomes_costlier(measure):
+    """Changing sidechain unit economics must move the normalized headline."""
     mod, tmp = measure
     base_pool = {
         "actual_usd": 100.0, "counterfactual_usd": 300.0,
@@ -238,28 +287,30 @@ def test_headline_stable_when_premium_delegation_added_to_window(measure):
         "transformation_usd": 200.0, "premium_delegation_usd": 200.0,
         "sessions": 12, "by_model": {"Haiku": 100.0, "Fable": 250.0}}
     after = _run(mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
-    assert after["monthly_savings_usd"] == before["monthly_savings_usd"], \
-        "headline drifted when premium delegation was added to the window"
-    assert after["subagent_transformation_usd"] == before["subagent_transformation_usd"] == 200.0
-    assert after["premium_delegation_cost_usd"] == 200.0
+    assert before["subagent_transformation_usd"] == 1_000.0
+    assert after["subagent_transformation_usd"] == 0.0
+    assert after["monthly_savings_usd"] == pytest.approx(
+        before["monthly_savings_usd"] - 1_000.0, abs=0.01)
+    assert after["premium_delegation_cost_usd"] == pytest.approx(666.67, abs=0.01)
 
 
-def test_pool_payload_without_split_falls_back_to_clamped_netting(measure):
-    """A payload predating the per-model split (no premium_delegation_usd key)
-    must fall back to clamped aggregate netting: premium can zero the subagent
-    lever but never subtract from the other pools, and is still disclosed.
-    """
+def test_pool_payload_schema_does_not_change_signed_sidechain_rate(measure):
+    """Old and new cache payload shapes must use the same raw-arm arithmetic."""
     mod, tmp = measure
     mod._subagent_pool_savings = lambda **kw: {
         "actual_usd": 500.0, "counterfactual_usd": 100.0,
         "transformation_usd": 0.0, "sessions": 12, "by_model": {"Fable": 500.0}}
-    premium = _run(mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+    old_payload = _run(
+        mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
     mod._subagent_pool_savings = lambda **kw: {
-        "actual_usd": 0.0, "counterfactual_usd": 0.0,
-        "transformation_usd": 0.0, "sessions": 0, "by_model": {}}
-    none = _run(mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
-    assert premium["monthly_savings_usd"] == none["monthly_savings_usd"]
-    assert premium["premium_delegation_cost_usd"] == 400.0
+        "actual_usd": 500.0, "counterfactual_usd": 100.0,
+        "transformation_usd": 0.0, "premium_delegation_usd": 400.0,
+        "sessions": 12, "by_model": {"Fable": 500.0}}
+    new_payload = _run(
+        mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+    assert old_payload["subagent_transformation_usd"] == pytest.approx(-1_333.33, abs=0.01)
+    assert new_payload["subagent_transformation_usd"] == old_payload["subagent_transformation_usd"]
+    assert new_payload["monthly_savings_usd"] == old_payload["monthly_savings_usd"]
 
 
 def test_now_reacts_to_cache_reuse(measure):
@@ -300,8 +351,8 @@ def test_breakdown_levers_telescope_to_main_transformation(measure):
 
 def test_per_session_reconciles_to_main_not_headline(measure):
     """CRITICAL-1 guard: savings_per_session x sessions == MAIN transformation. The headline
-    monthly_savings_usd additionally folds in subagent/compression/verbosity, so it is >= that.
-    Encodes the real (intentionally non-equal) relationship so prose/UX can't silently drift."""
+    additionally folds in signed subagent, compression, and verbosity transformations.
+    Encodes the intentionally non-equal relationship so prose and UX cannot silently drift."""
     mod, tmp = measure
     # Give the subagent pool a fixed non-zero contribution to prove the headline exceeds
     # the per-session-derived main figure by exactly that pool.
@@ -312,9 +363,11 @@ def test_per_session_reconciles_to_main_not_headline(measure):
     r = _run(mod, tmp, n_sessions=n, per_session_input=4_000_000, opus_share=0.56)
     main = r["main_transformation_usd"]
     assert r["savings_per_session"] * n == pytest.approx(main, abs=0.05)
-    # Headline = main + subagent (+ compression + verbosity, both 0 in the isolated env).
+    # Sidechain rate = ($350 - $100) / 5 delegated sessions, scaled by 50 main sessions.
+    normalized_subagent = 2_500.0
     assert r["monthly_savings_usd"] == pytest.approx(
-        main + 250.0 + r["compression_transformation_usd"] + r["verbosity_transformation_usd"],
+        main + normalized_subagent + r["compression_transformation_usd"]
+        + r["verbosity_transformation_usd"],
         abs=0.05)
     assert r["monthly_savings_usd"] > r["savings_per_session"] * n  # headline strictly exceeds
 
