@@ -8723,6 +8723,41 @@ def _init_trends_db():
         _backfill_outsourcerer_sidechain(conn)
     except (sqlite3.Error, OSError):
         pass
+    # Backfill platform for rows collected before the column was wired into the
+    # INSERT paths. The jsonl_path discriminator is definitive: Claude sessions
+    # live under ~/.claude/projects/, Codex under ~/.codex/sessions/, Hermes
+    # uses "hermes:" dedup keys, and Copilot uses "copilot:" dedup keys. Only
+    # infer when the path unambiguously identifies one platform; anything else
+    # stays NULL. Idempotent (gated by platform IS NULL).
+    try:
+        conn.execute(
+            "UPDATE session_log SET platform = 'claude' "
+            "WHERE platform IS NULL "
+            "AND jsonl_path LIKE '%/.claude/projects/%'"
+        )
+        conn.execute(
+            "UPDATE session_log SET platform = 'codex' "
+            "WHERE platform IS NULL "
+            "AND jsonl_path LIKE '%/.codex/sessions/%'"
+        )
+        conn.execute(
+            "UPDATE session_log SET platform = 'codex' "
+            "WHERE platform IS NULL "
+            "AND jsonl_path LIKE '%/.codex/archived_sessions/%'"
+        )
+        conn.execute(
+            "UPDATE session_log SET platform = 'hermes' "
+            "WHERE platform IS NULL "
+            "AND jsonl_path LIKE 'hermes:%'"
+        )
+        conn.execute(
+            "UPDATE session_log SET platform = 'copilot' "
+            "WHERE platform IS NULL "
+            "AND jsonl_path LIKE 'copilot:%'"
+        )
+        conn.commit()
+    except sqlite3.Error:
+        pass
     # Migrate: add quality columns to daily_stats for existing DBs
     try:
         ds_cols = {r[1] for r in conn.execute("PRAGMA table_info(daily_stats)").fetchall()}
