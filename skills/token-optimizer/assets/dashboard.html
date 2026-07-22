@@ -3283,10 +3283,14 @@ var DB = (function() {
     var tokenNote = isCodex
       ? 'Codex logs use token_count snapshots when present; older sessions fall back to local estimates.'
       : 'Fresh input + cache writes + output (what your invoice bills at full rate).';
-    var cacheLabel = isCodex ? 'Cached Input Share' : 'Avg Cache Hit Rate';
+    var pop = t.population_metrics || {};
+    var eligibleCacheHit = Number(pop.cache_eligible_main_hit_rate);
+    var avgCacheDisplay = Number.isFinite(eligibleCacheHit) && pop.cache_eligible_main_sessions
+      ? Math.round(eligibleCacheHit * 100) : avgCacheHit;
+    var cacheLabel = isCodex ? 'Cached Input Share' : 'Main-work cache hit rate';
     var cacheNote = isCodex
       ? 'Share of logged input tokens Codex says were cached_input_tokens. Similar to a cache hit rate, but Codex does not expose cache-write TTL or write-size fields.'
-      : 'Above 90% is normal for longer sessions. It means prompt caching is working well.';
+      : 'Main-work sessions with 20+ messages. Above 90% is normal for longer sessions.';
     var tokenBreakdownNote = isCodex
       ? 'fresh:' + fn(t.total_fresh_input || 0) + ' · cached input:' + fn(t.total_cache_read || 0) + ' · out:' + fn(t.total_output_tokens || 0)
       : 'fresh:' + fn(t.total_fresh_input || 0) + ' · cache-write:' + fn(t.total_cache_create || 0) + ' · out:' + fn(t.total_output_tokens || 0);
@@ -3306,14 +3310,14 @@ var DB = (function() {
       : '<div style="font-size:11px;color:var(--c-text-dim);margin-top:4px">Cache writes: ' + esc(globalTtlMix) + '</div><div style="font-size:11px;color:var(--c-text-dim);margin-top:4px">' + esc(globalTtlSessionLabel) + '</div><div style="font-size:11px;color:var(--c-text-dim);margin-top:4px">' + esc(ttlPeriodSummary || 'TTL period summary unavailable') + '</div><div style="font-size:11px;color:var(--c-text-dim);margin-top:4px">' + cacheNote + '</div>';
 
     html += '<div class="stat-row" style="grid-template-columns:repeat(3,1fr);margin-bottom:var(--s-3)">' +
-      '<div class="stat-card"><div class="stat-card-value">' + t.session_count + '</div><div class="stat-card-label">Sessions (' + t.period_days + 'd)</div></div>' +
-      '<div class="stat-card"><div class="stat-card-value">' + fn(t.total_tokens || 0) + '</div><div class="stat-card-label">' + tokenLabel + ' (' + t.period_days + 'd)</div><div style="font-size:11px;color:var(--c-text-dim);margin-top:4px">' + tokenNote + '</div><div style="font-size:10px;color:var(--c-text-dim);margin-top:2px">' + tokenBreakdownNote + '</div>' + codexCostNote + '</div>' +
-      '<div class="stat-card"><div class="stat-card-value">' + fn(t.total_messages || 0) + '</div><div class="stat-card-label">Messages (' + t.period_days + 'd)</div></div>' +
+      '<div class="stat-card"><div class="stat-card-value">' + t.session_count + '</div><div class="stat-card-label">All logged sessions (' + t.period_days + 'd)</div><div style="font-size:11px;color:var(--c-text-dim);margin-top:4px">' + (pop.main_work_sessions || 0) + ' main-work · ' + (pop.delegated_sessions || 0) + ' delegated/subagent</div></div>' +
+      '<div class="stat-card"><div class="stat-card-value">' + fn(t.total_tokens || 0) + '</div><div class="stat-card-label">' + tokenLabel + ', all logged (' + t.period_days + 'd)</div><div style="font-size:11px;color:var(--c-text-dim);margin-top:4px">' + tokenNote + '</div><div style="font-size:10px;color:var(--c-text-dim);margin-top:2px">' + tokenBreakdownNote + '</div>' + codexCostNote + '</div>' +
+      '<div class="stat-card"><div class="stat-card-value">' + fn(t.total_messages || 0) + '</div><div class="stat-card-label">Messages, all logged (' + t.period_days + 'd)</div></div>' +
       '</div>' +
       '<div class="stat-row" style="grid-template-columns:repeat(3,1fr)">' +
-      '<div class="stat-card"><div class="stat-card-value">' + Math.round(t.avg_duration_minutes || 0) + 'm</div><div class="stat-card-label">Avg Duration</div></div>' +
-      '<div class="stat-card"><div class="stat-card-value">' + fn((t.avg_input_tokens || 0) + (t.avg_output_tokens || 0)) + '</div><div class="stat-card-label">Avg Tokens/Session</div></div>' +
-      '<div class="stat-card"><div class="stat-card-value" style="color:var(--c-savings-strong, #22c55e)">' + avgCacheHit + (avgCacheHit !== 'N/A' ? '%' : '') + '</div><div class="stat-card-label">' + cacheLabel + '</div>' + cacheExtra + '</div>' +
+      '<div class="stat-card"><div class="stat-card-value">' + Math.round(t.avg_duration_minutes || 0) + 'm</div><div class="stat-card-label">Avg duration, all logged</div></div>' +
+      '<div class="stat-card"><div class="stat-card-value">' + fn((t.avg_input_tokens || 0) + (t.avg_output_tokens || 0)) + '</div><div class="stat-card-label">Avg tokens, all logged sessions</div></div>' +
+      '<div class="stat-card"><div class="stat-card-value" style="color:var(--c-savings-strong, #22c55e)">' + avgCacheDisplay + (avgCacheDisplay !== 'N/A' ? '%' : '') + '</div><div class="stat-card-label">' + cacheLabel + '</div><div style="font-size:11px;color:var(--c-text-dim);margin-top:4px">' + (pop.cache_eligible_main_sessions || 0) + ' cache-building main-work sessions · ' + (pop.cache_ineligible_sessions || 0) + ' short/delegated sessions at ' + Math.round((Number(pop.cache_ineligible_hit_rate) || 0) * 100) + '%</div>' + cacheExtra + '</div>' +
       '</div>';
 
     // Shared data for skills sections
@@ -3927,18 +3931,21 @@ var DB = (function() {
           '<span style="font-size:24px;color:var(--c-text-dim);font-family:var(--font-mono);">/mo</span>' +
           '<span style="font-size:22px;color:var(--c-accent-cyan);font-family:var(--font-mono);opacity:0.9;">&middot; ~' + (Math.round((Number(ba.transformation_pct) || 0) * 100)) + '% less</span>' +
         '</div>' +
-        '<div class="lede">Had you worked the way you did before Token Optimizer (~' + (Math.round((Number(ba.before_opus) || 0) * 100)) + '% Opus, including subagents and the lighter context Token Optimizer keeps for you), you\'d have paid about <strong>' + money(ba.monthly_savings_usd) + ' more</strong> — est. <strong>' + money(ba.actual_monthly_usd) + '</strong> now vs <strong>' + money(ba.counterfactual_monthly_usd) + '</strong> the old way. Your old-way baseline is a <strong>fixed typical session</strong>, captured once from your own history and never re-measured, so it stays put run to run. The monthly figure scales that per-session efficiency by your session count and folds in separately-metered subagent and context savings — the breakdown below adds up to it.</div>' +
+        '<div class="lede">For main work, had you worked the way you did before Token Optimizer (~' + (Math.round((Number(ba.before_opus) || 0) * 100)) + '% Opus and the older cache pattern), you\'d have paid about <strong>' + money(ba.monthly_savings_usd) + ' more</strong>. Estimated main-work cost is <strong>' + money(ba.actual_monthly_usd) + '</strong> now vs <strong>' + money(ba.counterfactual_monthly_usd) + '</strong> the old way, with cheaper delegation and context savings added separately. Premium delegation is excluded. Your old-way baseline is a <strong>fixed typical main-work session</strong>, captured once from your own history and never re-measured.</div>' +
         '<div class="lede" style="margin-top:var(--s-2);">A typical session costs about <strong>' + money(ba.after_cost_per_session) + '/session</strong> now vs <strong>' + money(ba.before_cost_per_session) + '/session</strong> the old way — ' + (Number(ba.savings_per_session) >= 0 ? 'your main-work routing and caching gain, the same every run. Multiplied across your <strong>' + (Number(ba.sessions_per_month) || 0).toLocaleString() + ' sessions</strong> that is the routing slice of the total above; subagent and context savings are added on top.' : 'your main-work sessions ran a touch heavier this period (cache reuse dipped), so the headline above is carried by your subagent and context savings, which more than offset it.') + '</div>' +
         fold('What changed',
           '<p>Your earliest sessions ran heavier' + (beforeMix ? ', mostly ' + esc(beforeMix) : '') + '. Now sessions are lighter, sub-agents are lighter, and routine work runs on cheaper models. That compounds across every session you run.</p>' +
           '<p>Most of the old cost was long sessions re-reading their cached context, turn after turn. Shorter sessions cut that, and Token Optimizer flags when it is happening so you know to start fresh.</p>') +
         baBreakdown(ba) +
+        ((Number(ba.premium_delegation_cost_usd) || 0) > 0
+          ? '<div class="note" style="margin-top:var(--s-2);">Premium delegation: ' + money(ba.premium_delegation_cost_usd) + ' this period. Shown separately and excluded from the Token Optimizer transformation.</div>'
+          : '') +
         '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--s-4) var(--s-5);margin-top:var(--s-4);padding-top:var(--s-4);border-top:1px solid rgba(255,255,255,0.06);">' +
           baCol('The old way', money(ba.before_cost_per_session), fmtTok(ba.before_tokens), beforeMix, 'var(--c-text-main)', true, beforeCache) +
           baCol('Now', money(ba.after_cost_per_session), fmtTok(ba.after_tokens), afterMix, 'var(--c-accent-cyan)', false, afterCache) +
           '<div><div class="label" style="margin-bottom:6px;">' + (Number(ba.savings_per_session) >= 0 ? 'Cut per session' : 'Added per session') + '</div>' +
             '<div style="font-family:var(--font-mono);font-weight:300;font-size:34px;line-height:1;color:' + (Number(ba.savings_per_session) >= 0 ? 'var(--c-accent-cyan);text-shadow:0 0 12px var(--c-accent-glow);' : 'var(--c-warning);') + '">' + (Number(ba.savings_per_session) >= 0 ? '' : '+') + money(Math.abs(Number(ba.savings_per_session) || 0)) + '</div>' +
-            '<div style="margin-top:var(--s-2);font-size:14px;color:var(--c-text-dim);font-family:var(--font-mono);line-height:1.95;">main-work routing &amp; caching &middot; ' + (Number(ba.sessions_per_month) || 0).toLocaleString() + ' sessions this period</div></div>' +
+          '<div style="margin-top:var(--s-2);font-size:14px;color:var(--c-text-dim);font-family:var(--font-mono);line-height:1.95;">main-work routing &amp; caching &middot; ' + (Number(ba.sessions_per_month) || 0).toLocaleString() + ' main-work sessions this period</div></div>' +
         '</div>' +
         fold('How we work this number out',
           '<p>We take a <strong>fixed typical session</strong> — captured once from your own pre-install history and frozen — and price it two ways: the way you work now, and the way you worked before Token Optimizer (~95% Opus, with your old caching pattern). The per-session gap is then scaled by how many sessions you ran this period. The session footprint is identical on both sides and never re-measured, so the old-way baseline stays put and only efficiency (and your session count) moves the total.</p>' +
