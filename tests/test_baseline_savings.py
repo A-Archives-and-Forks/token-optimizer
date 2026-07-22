@@ -110,7 +110,7 @@ def measure(monkeypatch):
     # so stub it to zero for hermetic, deterministic tests of the main-pool math.
     monkeypatch.setattr(mod, "_subagent_pool_savings", lambda **kw: {
         "actual_usd": 0.0, "counterfactual_usd": 0.0, "transformation_usd": 0.0,
-        "sessions": 0, "by_model": {}})
+        "premium_delegation_usd": 0.0, "sessions": 0, "by_model": {}})
     yield mod, tmp
     if "measure" in sys.modules:
         del sys.modules["measure"]
@@ -195,6 +195,60 @@ def test_premium_sidechain_mix_does_not_raise_main_work_actual_cost(measure):
 
 
 def test_premium_delegation_is_disclosed_but_cannot_reduce_headline(measure):
+    """A MIXED pool: $200 of cheap-delegation savings alongside $400 of premium
+    delegation. The aggregate (cf - actual) nets to -$200, so aggregate netting
+    would zero the cheap savings AND under-disclose the premium as $200. The
+    per-model split must keep the $200 in the headline and disclose the $400.
+    """
+    mod, tmp = measure
+    mod._subagent_pool_savings = lambda **kw: {
+        "actual_usd": 600.0, "counterfactual_usd": 400.0,
+        "transformation_usd": 200.0, "premium_delegation_usd": 400.0,
+        "sessions": 12, "by_model": {"Fable": 500.0, "Haiku": 100.0}}
+    mixed = _run(mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+    mod._subagent_pool_savings = lambda **kw: {
+        "actual_usd": 100.0, "counterfactual_usd": 300.0,
+        "transformation_usd": 200.0, "premium_delegation_usd": 0.0,
+        "sessions": 4, "by_model": {"Haiku": 100.0}}
+    cheap_only = _run(mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+    assert mixed["monthly_savings_usd"] == cheap_only["monthly_savings_usd"], \
+        "premium delegation reduced the headline (aggregate netting is back)"
+    assert mixed["subagent_transformation_usd"] == 200.0
+    assert mixed["premium_delegation_cost_usd"] == 400.0
+    assert cheap_only["premium_delegation_cost_usd"] == 0.0
+
+
+def test_headline_stable_when_premium_delegation_added_to_window(measure):
+    """THE regression: adding premium fan-outs to an otherwise identical window
+    must not move the headline at all. Before the per-model split, one afternoon
+    of premium delegation (a ~2% token share) subtracted its full premium from
+    the headline and dragged it down double digits in real time.
+    """
+    mod, tmp = measure
+    base_pool = {
+        "actual_usd": 100.0, "counterfactual_usd": 300.0,
+        "transformation_usd": 200.0, "premium_delegation_usd": 0.0,
+        "sessions": 8, "by_model": {"Haiku": 100.0}}
+    mod._subagent_pool_savings = lambda **kw: dict(base_pool)
+    before = _run(mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+    # Same window plus premium bundles: actual +$250 for work priced $50 at the
+    # baseline mix. Cheap-delegation savings are untouched.
+    mod._subagent_pool_savings = lambda **kw: {
+        "actual_usd": 350.0, "counterfactual_usd": 350.0,
+        "transformation_usd": 200.0, "premium_delegation_usd": 200.0,
+        "sessions": 12, "by_model": {"Haiku": 100.0, "Fable": 250.0}}
+    after = _run(mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+    assert after["monthly_savings_usd"] == before["monthly_savings_usd"], \
+        "headline drifted when premium delegation was added to the window"
+    assert after["subagent_transformation_usd"] == before["subagent_transformation_usd"] == 200.0
+    assert after["premium_delegation_cost_usd"] == 200.0
+
+
+def test_pool_payload_without_split_falls_back_to_clamped_netting(measure):
+    """A payload predating the per-model split (no premium_delegation_usd key)
+    must fall back to clamped aggregate netting: premium can zero the subagent
+    lever but never subtract from the other pools, and is still disclosed.
+    """
     mod, tmp = measure
     mod._subagent_pool_savings = lambda **kw: {
         "actual_usd": 500.0, "counterfactual_usd": 100.0,
