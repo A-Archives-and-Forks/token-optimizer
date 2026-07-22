@@ -31148,6 +31148,14 @@ _SESSION_QUALITY_FILTER = (
     "AND COALESCE(input_tokens, 0) >= {} "
     "AND COALESCE(duration_minutes, 0) >= {} "
 ).format(_MIN_INPUT_TOKENS, _MIN_DURATION_MINUTES)
+# Exact complement of _SESSION_QUALITY_FILTER, built from the same constants so
+# the two predicates can never drift. Selects the below-threshold sessions whose
+# real billed tokens are priced as their own transformation pool (they stay out
+# of the session COUNT, which multiplies the frozen typical-session anchor).
+_SESSION_QUALITY_FILTER_NEGATED = (
+    "AND NOT (COALESCE(input_tokens, 0) >= {} "
+    "AND COALESCE(duration_minutes, 0) >= {}) "
+).format(_MIN_INPUT_TOKENS, _MIN_DURATION_MINUTES)
 # Depth of the ONE-TIME initial backfill (first flush after install/upgrade). A
 # long-time user has months of transcripts still on disk; grab them all so the baseline
 # freezes from their real earliest sessions immediately rather than waiting for a fresh
@@ -31427,13 +31435,18 @@ def _cost_per_session(fi, cw, cr, out, shares, tier):
 
 
 def _mix_from_session_rows(cutoff):
-    """Fallback model mix from session_log's stored per-model usage (H3).
+    """Main-thread model mix from session_log's stored per-model usage.
 
-    Used when model_daily is empty/stale (so _model_mix_shares returns {}) while
-    session_log still has rows. Sums all_model_usage_json (preferred) or
-    model_usage_json across human (non-sidechain) rows since `cutoff` and returns
-    {model: share}. Empty dict when nothing usable -- the caller bails on that
-    rather than silently pricing the actual arm at the sonnet default. Never raises.
+    Prices the transformation's ACTUAL arm, which describes MAIN work only:
+    model_usage_json is the parent-thread usage, while all_model_usage_json also
+    contains rolled-up SUBAGENT tokens (fix #18). Blending subagent usage into
+    the main arm double-dips with the sidechain pool and skews the mix toward
+    whatever models the subagents ran. So the parent-thread JSON is preferred;
+    all_model_usage_json is only a fallback for legacy rows that never stored a
+    parent-only column. Sums usage across human (non-sidechain) rows since
+    `cutoff` and returns {model: share}. Empty dict when nothing usable -- the
+    caller bails on that rather than silently pricing the actual arm at the
+    sonnet default. Never raises.
     """
     totals = {}
     try:
@@ -31442,14 +31455,14 @@ def _mix_from_session_rows(cutoff):
         conn = _init_trends_db()
         try:
             rows = conn.execute(
-                "SELECT all_model_usage_json, model_usage_json FROM session_log "
+                "SELECT model_usage_json, all_model_usage_json FROM session_log "
                 "WHERE date >= ? AND COALESCE(is_sidechain, 0) = 0 "
                 + _SESSION_QUALITY_FILTER, (cutoff,)
             ).fetchall()
         finally:
             conn.close()
-        for amu, mu in rows:
-            usage = _safe_json_dict(amu) or _safe_json_dict(mu)
+        for mu, amu in rows:
+            usage = _safe_json_dict(mu) or _safe_json_dict(amu)
             for model, toks in usage.items():
                 if not model:
                     continue
@@ -31623,8 +31636,9 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
     that Token Optimizer routes: a user's CLAUDE.md may route subagents to Haiku/Sonnet;
     pre-TO they would have run on Opus. This pool prices that delta.
 
-    Method (separate from, and summed with, the main pool — no token overlap because
-    these are different transcripts):
+    Method (separate from, and summed with, the main pool; these are different
+    transcripts, and the main pool prices only its frozen anchor, so the two
+    pools never price the same dollars):
       1. Locate sidechain JSONL for the current `days` window. We scan project dirs
          for both top-level transcripts AND the `{uuid}/subagents/*.jsonl` files,
          filtered by mtime, then keep only files _parse_session_jsonl flags
@@ -31758,6 +31772,78 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
         return zero
 
 
+def _short_session_pool_savings(cutoff, baseline_opus_share=0.95, tier=None):
+    """Below-threshold (short/low-input) main sessions as their own routing pool.
+
+    The quality gates keep sub-minute one-shot sessions out of the session COUNT
+    because that count multiplies a frozen typical-session anchor, and a
+    transient automation call is nowhere near a typical session. But those
+    sessions still bill real tokens, and routing them to lighter models is real
+    transformation, so their volume is priced here directly: each model's
+    PARENT-THREAD bundle (model_usage_breakdown_json, which excludes rolled-up
+    subagent tokens -- those belong to the sidechain pool) at its own rate vs
+    the same bundle at the baseline mix. Both arms keep the sessions' real
+    fresh/cache split; no cache-pattern counterfactual is applied because the
+    frozen baseline's hit rate describes long interactive sessions, not
+    one-shots. Rows without a stored breakdown contribute nothing
+    (conservative). Returns {actual_usd, counterfactual_usd, sessions}.
+    Never raises.
+    """
+    zero = {"actual_usd": 0.0, "counterfactual_usd": 0.0, "sessions": 0}
+    try:
+        if not TRENDS_DB.exists():
+            return zero
+        if tier is None:
+            tier = _load_pricing_tier()
+        conn = _init_trends_db()
+        try:
+            rows = conn.execute(
+                "SELECT model_usage_breakdown_json FROM session_log "
+                "WHERE input_tokens IS NOT NULL AND date >= ? "
+                "AND COALESCE(is_sidechain, 0) = 0 "
+                + _SESSION_QUALITY_FILTER_NEGATED, (cutoff,)
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return zero
+        by_model = {}
+        for (bdj,) in rows:
+            for model, bd in (_safe_json_dict(bdj) or {}).items():
+                if not model or str(model).startswith("<"):
+                    continue
+                slot = by_model.setdefault(
+                    model, {"fi": 0.0, "cw": 0.0, "cw1h": 0.0, "cw5m": 0.0,
+                            "cr": 0.0, "out": 0.0})
+                slot["fi"] += float(bd.get("fresh_input", 0) or 0)
+                slot["cr"] += float(bd.get("cache_read", 0) or 0)
+                slot["cw"] += float(bd.get("cache_create", 0) or 0)
+                slot["cw1h"] += float(bd.get("cache_create_1h", 0) or 0)
+                slot["cw5m"] += float(bd.get("cache_create_5m", 0) or 0)
+                slot["out"] += float(bd.get("output", 0) or 0)
+        if not by_model:
+            return dict(zero, sessions=len(rows))
+        before_shares = _opus_baseline_shares(baseline_opus_share)
+        actual = 0.0
+        counterfactual = 0.0
+        for model, s in by_model.items():
+            cw1h, cw5m = s["cw1h"], s["cw5m"]
+            if cw1h + cw5m <= 0:
+                cw5m = s["cw"]  # no TTL split recorded: bill at 5m (conservative)
+            actual += _subagent_model_cost(
+                model, s["fi"], s["cr"], s["out"], s["cw"], cw1h, cw5m,
+                {model: 1.0}, tier)
+            counterfactual += _subagent_model_cost(
+                model, s["fi"], s["cr"], s["out"], s["cw"], cw1h, cw5m,
+                before_shares, tier)
+        return {"actual_usd": round(actual, 2),
+                "counterfactual_usd": round(counterfactual, 2),
+                "sessions": len(rows)}
+    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError,
+            ArithmeticError):
+        return zero
+
+
 def _baseline_progress():
     """How close THIS user is to a frozen baseline, for the dashboard's "building" state.
 
@@ -31839,6 +31925,8 @@ def _estimate_before_after_savings(days=30):
     Returns {before_cost_per_session, after_cost_per_session, savings_per_session,
              sessions_per_month, monthly_savings_usd (= counterfactual - actual),
              counterfactual_monthly_usd, actual_monthly_usd, transformation_pct,
+             short_session_transformation_usd / _actual_usd / _counterfactual_usd /
+               short_session_count (below-threshold one-shot pool),
              baseline_opus_share, before_opus, after_opus,
              before_tokens, after_tokens, before_sessions, after_sessions,
              baseline_source ("pretool_baseline" | "robust_earliest"),
@@ -31858,7 +31946,11 @@ def _estimate_before_after_savings(days=30):
             "before_tokens": 0, "after_tokens": 0, "before_sessions": 0,
             "after_sessions": 0, "baseline_source": None, "breakdown": [],
             "breakdown_caveat": "", "reason": None, "evidence": "estimated",
-            "verbosity_transformation_usd": 0.0, "verbosity_measured_usd": 0.0}
+            "verbosity_transformation_usd": 0.0, "verbosity_measured_usd": 0.0,
+            "short_session_transformation_usd": 0.0,
+            "short_session_actual_usd": 0.0,
+            "short_session_counterfactual_usd": 0.0,
+            "short_session_count": 0}
     try:
         if not TRENDS_DB.exists():
             return zero
@@ -31990,15 +32082,29 @@ def _estimate_before_after_savings(days=30):
         after_opus = float(after_shares.get("opus", 0.0))
         tier = _load_pricing_tier()  # resolve once; reused across the waterfall levers
 
-        # SUBAGENT (sidechain) pool (#3) -- the big missing lever. Subagents are NOT in
-        # session_log (the main pool above), so this is a SEPARATE, non-overlapping pool
-        # read from sidechain transcripts and priced at each subagent's real model vs the
-        # ~95% Opus baseline. Summed into the headline below. Memoized for dashboard perf.
+        # SUBAGENT (sidechain) pool (#3), read from sidechain transcripts and priced at
+        # each subagent's real model vs the ~95% Opus baseline. Subagent tokens do roll
+        # up into session_log rows (v5.4.9), but the main pool prices only the FROZEN
+        # anchor (rows contribute a count and a hit rate), and the main mix is built
+        # parent-only, so the pools do not double-price these dollars. Summed into the
+        # headline below. Memoized for dashboard perf.
         sub_pool = _subagent_pool_savings(
             days=days, baseline_opus_share=baseline_opus_share, tier=tier)
         sub_window_actual = float(sub_pool.get("actual_usd", 0.0) or 0.0)
         sub_window_cf = float(sub_pool.get("counterfactual_usd", 0.0) or 0.0)
         sub_sessions = int(sub_pool.get("sessions", 0) or 0)
+
+        # SHORT-SESSION pool (below the quality gates): sub-minute / low-input
+        # one-shots are excluded from recent_n because the count multiplies the
+        # frozen typical-session anchor, but their billed tokens are real spend
+        # whose routing delta belongs in the headline. Priced on their own real
+        # volume, parent-thread bundles only (no overlap with the sidechain pool).
+        short_pool = _short_session_pool_savings(
+            cutoff, baseline_opus_share=baseline_opus_share, tier=tier)
+        short_actual = float(short_pool.get("actual_usd", 0.0) or 0.0)
+        short_cf = float(short_pool.get("counterfactual_usd", 0.0) or 0.0)
+        short_delta = short_cf - short_actual
+        short_n = int(short_pool.get("sessions", 0) or 0)
 
         def price(fi, cr, out, shares):
             # Price the fresh+cache_read pool and output (NO cache-write). _cost_per_session
@@ -32104,22 +32210,24 @@ def _estimate_before_after_savings(days=30):
         # (issue #87): the top line summed only non-negative pools and could assert a saving
         # while the arms showed a loss. The headline is now the honest net of the same arms.
         main_transformation = counterfactual_monthly - actual_monthly
-        # Normalize the raw sidechain window to a per-delegated-session rate, then
-        # scale both arms by the same main-session count used by the main pool. This
-        # makes the headline respond to sidechain unit economics, not to how many
-        # delegations happened to arrive during the scan window. Use the raw arms,
-        # which exist in every cache payload version, so cache schema cannot change
-        # the accounting path. The signed delta preserves genuinely costlier routing.
-        sub_scale = (recent_n / sub_sessions) if sub_sessions > 0 else 0.0
-        sub_actual = sub_window_actual * sub_scale
-        sub_cf = sub_window_cf * sub_scale
+        # The sidechain arms already aggregate the full `days` window, so they ARE
+        # the monthly figures and enter the net at face value. Rescaling them by a
+        # session-count ratio would need a delegations-per-session anchor measured
+        # under ONE inclusion rule; the available counts (quality-filtered DB main
+        # sessions vs raw on-disk sidechain transcripts) are measured under
+        # different rules, so any ratio of them is unitless and shrinks or inflates
+        # real delegated spend. Use the raw arms, which exist in every cache
+        # payload version, so cache schema cannot change the accounting path. The
+        # signed delta preserves genuinely costlier routing.
+        sub_actual = sub_window_actual
+        sub_cf = sub_window_cf
         sub_delta = sub_cf - sub_actual
-        premium_delegation_cost = (
-            float(sub_pool.get("premium_delegation_usd", 0.0) or 0.0) * sub_scale)
-        # Combined arms span every estimated pool. Normalizing both sidechain arms
-        # keeps the displayed counterfactual and actual values reconciled to the net.
-        combined_actual = actual_monthly + sub_actual
-        combined_cf = (counterfactual_monthly + sub_cf
+        premium_delegation_cost = float(
+            sub_pool.get("premium_delegation_usd", 0.0) or 0.0)
+        # Combined arms span every estimated pool, so the displayed counterfactual
+        # and actual values reconcile to the net.
+        combined_actual = actual_monthly + sub_actual + short_actual
+        combined_cf = (counterfactual_monthly + sub_cf + short_cf
                        + compression_addback + verbosity_addback)
         net = combined_cf - combined_actual
         # Gate the entire counterfactual hero on a GENUINE net win. When net <= 0 (efficiency
@@ -32141,10 +32249,13 @@ def _estimate_before_after_savings(days=30):
                     "compression_measured_usd": round(comp_measured, 2),
                     "verbosity_transformation_usd": 0.0,
                     "verbosity_measured_usd": round(vs_measured, 2),
+                    "short_session_transformation_usd": round(short_delta, 2),
+                    "short_session_actual_usd": round(short_actual, 2),
+                    "short_session_counterfactual_usd": round(short_cf, 2),
+                    "short_session_count": short_n,
                     "subagent_actual_usd": round(sub_actual, 2),
                     "subagent_counterfactual_usd": round(sub_cf, 2),
                     "subagent_sessions": sub_sessions,
-                    "subagent_scale_factor": round(sub_scale, 6),
                     "subagent_window_actual_usd": round(sub_window_actual, 2),
                     "subagent_window_counterfactual_usd": round(sub_window_cf, 2),
                     "baseline_opus_share": round(baseline_opus_share, 4),
@@ -32194,12 +32305,14 @@ def _estimate_before_after_savings(days=30):
              "Model mix shifted to costlier models (added cost)", s_route),
             ("context_rereads", "Lighter sessions (better cache reuse)",
              "Heavier context re-reads (added cost)", s_cache),
-            ("subagent_routing", "Cheaper subagents (normalized rate)",
-             "Costlier subagents (normalized rate)", sub_delta),
+            ("subagent_routing", "Cheaper subagents (lighter models)",
+             "Costlier subagents (premium models)", sub_delta),
             ("context_compression", "Lighter context (fewer re-reads, metered)",
              "Lighter context (fewer re-reads, metered)", compression_addback),
             ("verbosity_steer", "Lean output nudges (less output, estimated)",
              "Verbosity nudges (less output, estimated)", verbosity_addback),
+            ("short_sessions", "Quick one-shot sessions (lighter mix)",
+             "Quick one-shot sessions (costlier mix)", short_delta),
         ]
         breakdown = sorted(
             ({"key": k, "waterfall_index": i,
@@ -32214,15 +32327,16 @@ def _estimate_before_after_savings(days=30):
             "(~95% Opus, your old cache pattern) -- then scaled by your session count this "
             "period. The per-session difference is split between model routing (including "
             "cache-write, which is billed at the writing model's rate) and caching. Subagent "
-            "(sidechain) routing is averaged per delegated session, then scaled by the same "
-            "main-session count, so delegation volume alone cannot move the headline. A "
-            "fourth pool adds the directly-metered tokens Token Optimizer removed from context "
-            "(tool archiving, skeletons, lean resumes) -- real volume the old way would have "
-            "re-read -- repriced at the baseline mix. A fifth pool adds estimated output-token "
-            "savings from lean-output conciseness nudges. The per-session volume anchor is "
-            "frozen, so workload size never inflates or zeroes the baseline -- only efficiency, "
-            "the shared session-count anchor, metered removals, and estimated output reduction "
-            "move it."
+            "(sidechain) work is a second pool: the window's real delegated tokens priced at "
+            "each subagent's actual model vs the same baseline mix, entering the net at face "
+            "value. A third pool prices sessions below the quality gates (sub-minute "
+            "one-shots) the same way on their own real volume; they stay out of the session "
+            "count. A fourth pool adds the directly-metered tokens Token Optimizer removed "
+            "from context (tool archiving, skeletons, lean resumes) -- real volume the old "
+            "way would have re-read -- repriced at the baseline mix. A fifth pool adds "
+            "estimated output-token savings from lean-output conciseness nudges. The "
+            "per-session volume anchor is frozen, so workload size never inflates or zeroes "
+            "the baseline."
         )
 
         # Per-session keys = the FROZEN typical-session anchors directly (not a re-division
@@ -32253,7 +32367,11 @@ def _estimate_before_after_savings(days=30):
             "compression_measured_usd": round(comp_measured, 2),
             "verbosity_transformation_usd": round(verbosity_addback, 2),
             "verbosity_measured_usd": round(vs_measured, 2),
-            # Headline arms span both pools (combined).
+            "short_session_transformation_usd": round(short_delta, 2),
+            "short_session_actual_usd": round(short_actual, 2),
+            "short_session_counterfactual_usd": round(short_cf, 2),
+            "short_session_count": short_n,
+            # Headline arms span every pool (combined).
             "counterfactual_monthly_usd": round(combined_cf, 2),
             "actual_monthly_usd": round(combined_actual, 2),
             # Main-pool-only arms (for drill-down / back-compat).
@@ -32262,7 +32380,6 @@ def _estimate_before_after_savings(days=30):
             "subagent_counterfactual_usd": round(sub_cf, 2),
             "subagent_actual_usd": round(sub_actual, 2),
             "subagent_sessions": sub_sessions,
-            "subagent_scale_factor": round(sub_scale, 6),
             "subagent_window_actual_usd": round(sub_window_actual, 2),
             "subagent_window_counterfactual_usd": round(sub_window_cf, 2),
             "subagent_by_model": sub_pool.get("by_model", {}),
@@ -32618,11 +32735,11 @@ def savings_report(days=30, as_json=False):
                 for line in textwrap.wrap(caveat, width=72):
                     print(f"      {line}")
         # Premium delegation disclosure is supplementary context. Its signed
-        # effect is already included in the normalized sidechain pool above.
+        # effect is already included in the sidechain pool's net above.
         prem = float(ba.get("premium_delegation_cost_usd", 0.0) or 0.0)
         if prem > 0:
-            print(f"    Costlier delegation: ${prem:,.0f}/mo at the normalized rate. "
-                  f"Included in the sidechain net above.")
+            print(f"    Costlier delegation: ${prem:,.0f}/mo of premium-model "
+                  f"subagent spend. Included in the sidechain net above.")
 
     pricing = summary.get("pricing_detail") or {}
     p_model = pricing.get("model", "sonnet")
