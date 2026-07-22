@@ -482,7 +482,7 @@ def _append_manifest_line(path: Path, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Progressive-disclosure spine (U2): reusable archive-original + pointer.
+# Progressive-disclosure spine: reusable archive-original + pointer.
 #
 # Lets non-MCP / PreToolUse compressors (first-read code, bash, structured
 # data) persist the FULL original and hand the model a retrievable pointer,
@@ -652,7 +652,7 @@ def _compress_mcp_preview(text: str, output_type: str) -> str:
     return text[:_ARCHIVE_PREVIEW_SIZE]
 
 
-# Value-preserving columnar compression thresholds (U3).
+# Value-preserving columnar compression thresholds.
 _TABULAR_MIN_ROWS = 3            # too few rows to be worth a schema header
 _TABULAR_MAX_COLS = 40          # wider than this is not really tabular
 _TABULAR_CELL_CAP = 100         # per-cell char cap (keeps values, bounds width)

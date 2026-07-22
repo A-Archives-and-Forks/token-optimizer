@@ -1866,7 +1866,7 @@ tr.token-spike td:first-child {
   background: var(--c-savings-toast, #2ecc71);
 }
 
-/* ========== THEME TOGGLE (U9) ========== */
+/* ========== THEME TOGGLE ========== */
 .theme-toggle {
   position: fixed; top: 16px; right: 20px; z-index: 300;
   display: inline-flex; align-items: center; gap: 7px;
@@ -1923,7 +1923,7 @@ tr.token-spike td:first-child {
 window.__TOKEN_DATA__ = null;
 </script>
 
-<!-- Theme toggle (U9). aria-pressed reflects light mode; keyboard operable as a
+<!-- Theme toggle. aria-pressed reflects light mode; keyboard operable as a
      native <button>; the boot script above already applied the right theme so
      this only wires the click + label state. -->
 <button type="button" id="theme-toggle" class="theme-toggle"
@@ -4146,7 +4146,7 @@ var DB = (function() {
         '</div></div>';
     }
 
-    // ---- Compression coverage (U6): diagnostic only. Tiers are rendered as
+    // ---- Compression coverage: diagnostic only. Tiers are rendered as
     // separate blocks and NEVER summed; shadow/opportunity rows are visually
     // distinct and labelled so a would-be ratio can't be misread as realized
     // savings. None of these numbers feed the headline above. ----
@@ -4191,7 +4191,7 @@ var DB = (function() {
             'Currently <strong>' + (ready ? 'ready to promote' : 'still measuring') + '</strong>.' +
           '</div></div>';
       }
-      // WS2 runtime tripwire: per-cohort LIVE edit-rate + any auto-demotions.
+      // Runtime tripwire: per-cohort LIVE edit-rate + any auto-demotions.
       var tw = cc.cohort_tripwire || {};
       var twCohorts = tw.cohorts || [];
       var twDemoted = tw.demoted || [];
@@ -6348,7 +6348,7 @@ function getSampleData() {
 
 /* ========== INIT ========== */
 document.addEventListener('DOMContentLoaded', function() {
-  // Theme toggle wiring (U9). The boot script in <head> already applied the
+  // Theme toggle wiring. The boot script in <head> already applied the
   // correct theme before first paint (no FOUC); here we sync the button's
   // label + aria-pressed and handle clicks, persisting the explicit choice.
   (function setupThemeToggle() {

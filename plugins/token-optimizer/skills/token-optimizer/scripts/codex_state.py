@@ -422,7 +422,7 @@ def goal_budgets() -> dict[str, Any]:
 
 
 def state_db_status() -> dict[str, Any]:
-    """Lightweight presence/readability report for the doctor (U5)."""
+    """Lightweight presence/readability report for the doctor."""
     state_db = _find_versioned_db("state", "threads")
     goals_db = _find_versioned_db("goals", "thread_goals")
     return {

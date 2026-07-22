@@ -510,7 +510,7 @@ _PATH_SPLIT = re.compile(r"[\\/]+")
 def _looks_like_opencode_entrypoint(path_token: str) -> bool:
     """True when an argument token is recognizably OpenCode's entry script.
 
-    Deliberately tight (issue #57, KTD-2): we match the *entry script* or the
+    Deliberately tight (issue #57): we match the *entry script* or the
     *installed package*, never a bare occurrence of the word "opencode" anywhere
     in the command line. A Claude Code user whose project is named ``opencode``
     — even one with a stock ``index.js`` — must NOT be flipped into OpenCode
@@ -530,7 +530,7 @@ def _looks_like_opencode_entrypoint(path_token: str) -> bool:
     # The npm package directory — but only when it sits under node_modules / a
     # pnpm store, which is how every real install looks. Requiring that parent
     # rejects a user's own project directory that merely happens to be named
-    # `opencode-ai` (KTD-2 false-positive guard).
+    # `opencode-ai` (false-positive guard).
     segs = [seg.lower() for seg in _PATH_SPLIT.split(p) if seg]
     for i, s in enumerate(segs):
         is_pkg = s == _OPENCODE_PKG or s.startswith(_OPENCODE_PKG + "@")
@@ -564,7 +564,7 @@ def _is_opencode_command(args: str) -> bool:
                 return True
         # `node /abs/path/opencode` — the opencode binary as the IMMEDIATE first argument
         # (rest[0]). Restricting to rest[0] (not a general scan) is what prevents a later
-        # flag value like `--dir /home/me/opencode` from false-matching (KTD-2 guard).
+        # flag value like `--dir /home/me/opencode` from false-matching.
         elif rest and os.path.isabs(rest[0]) and os.path.basename(rest[0]).lower() in _OPENCODE_EXE_BASENAMES:
             return True
         # Named entry scripts (opencode.mjs/.js) and the installed npm package
@@ -633,7 +633,7 @@ def _opencode_process_signal() -> bool:
     Ground truth for "running under OpenCode *right now*" — unlike an env var or
     a marker file, an OpenCode ancestor process can't be left behind by a prior
     session or a merely-installed copy. Evaluated ahead of the soft Claude
-    plugin-env heuristic in ``detect_runtime`` (KTD-3).
+    plugin-env heuristic in ``detect_runtime``.
     """
     return _opencode_in_process_tree()
 

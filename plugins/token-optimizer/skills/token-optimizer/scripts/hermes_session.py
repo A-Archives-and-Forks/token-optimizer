@@ -11,10 +11,10 @@ runtime-agnostic.
 **Cost:** Read from ``estimated_cost_usd`` in the sessions row.  Hermes
 pre-computes this value; if the column is NULL or ``cost_status`` is
 ``'unknown'`` we fall back to TO's own ``_get_model_cost`` pricing on the
-stored token counts.  This mirrors the KTD-3 decision and the Codex session
+stored token counts.  This mirrors the Codex session
 normalizer's approach.
 
-**Quality scoring (U4):** Hermes does not provide per-message token granularity
+**Quality scoring:** Hermes does not provide per-message token granularity
 (``messages.token_count`` is rarely populated).  We therefore score from the
 session-level fields only:
 
@@ -215,7 +215,7 @@ def _resolve_model_family(model: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Quality scoring (U4)
+# Quality scoring
 # ---------------------------------------------------------------------------
 
 def compute_quality_score(
@@ -337,7 +337,7 @@ def compute_quality_score(
 
 
 # ---------------------------------------------------------------------------
-# Session normalizer (U3)
+# Session normalizer
 # ---------------------------------------------------------------------------
 
 def _parse_ts(value: Any) -> str | None:
@@ -532,7 +532,7 @@ def normalize_session(row: dict[str, Any]) -> dict[str, Any] | None:
         "tool_duration_p90_ms": None,
         "task_duration_ms_max": None,
         "ttft_ms_avg": None,
-        # Quality (U4)
+        # Quality
         "quality": quality,
         "quality_score": quality["score"],
         "quality_grade": quality["grade"],
