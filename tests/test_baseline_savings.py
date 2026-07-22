@@ -173,6 +173,41 @@ def test_now_reacts_to_model_mix(measure):
     assert heavy_opus["savings_per_session"] < lean["savings_per_session"]
 
 
+def test_premium_sidechain_mix_does_not_raise_main_work_actual_cost(measure):
+    """Premium delegation is a separate population, not the headline's now arm."""
+    mod, tmp = measure
+    _build_env(tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+    conn = sqlite3.connect(Path(tmp) / "trends.db")
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn.execute(
+        "INSERT INTO session_log (jsonl_path,date,input_tokens,output_tokens,cache_hit_rate,"
+        "all_model_usage_json,is_sidechain,duration_minutes) VALUES (?,?,?,?,?,?,1,?)",
+        ("/s/premium-sidechain.jsonl", today, 100_000_000, 1_000_000, _BASE_HIT,
+         json.dumps({"claude-opus-4-7": 101_000_000}), 1.0),
+    )
+    conn.commit()
+    conn.close()
+    with_premium_delegation = mod._estimate_before_after_savings(days=30)
+    without_delegation = _run(
+        mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+    assert with_premium_delegation["after_cost_per_session"] == without_delegation["after_cost_per_session"]
+    assert with_premium_delegation["sessions_per_month"] == 40
+
+
+def test_premium_delegation_is_disclosed_but_cannot_reduce_headline(measure):
+    mod, tmp = measure
+    mod._subagent_pool_savings = lambda **kw: {
+        "actual_usd": 500.0, "counterfactual_usd": 100.0,
+        "transformation_usd": 0.0, "sessions": 12, "by_model": {"Fable": 500.0}}
+    premium = _run(mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+    mod._subagent_pool_savings = lambda **kw: {
+        "actual_usd": 0.0, "counterfactual_usd": 0.0,
+        "transformation_usd": 0.0, "sessions": 0, "by_model": {}}
+    none = _run(mod, tmp, n_sessions=40, per_session_input=4_000_000, opus_share=0.30)
+    assert premium["monthly_savings_usd"] == none["monthly_savings_usd"]
+    assert premium["premium_delegation_cost_usd"] == 400.0
+
+
 def test_now_reacts_to_cache_reuse(measure):
     """Better current cache reuse -> lower 'now' cost -> more saved."""
     mod, tmp = measure

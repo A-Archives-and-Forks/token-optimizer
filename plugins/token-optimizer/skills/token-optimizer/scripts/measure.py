@@ -16435,6 +16435,8 @@ def _query_trends_db(conn, days):
     """Internal: run all queries against the trends DB. Caller handles errors."""
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
+    population_metrics = _query_dashboard_population_metrics(conn, days)
+
     # Basic stats
     # v5.4.9: "Total tokens" matches Claude Code Desktop methodology exactly:
     # fresh_input + output. Both cache_read and cache_create are excluded from
@@ -16788,6 +16790,31 @@ def _query_trends_db(conn, days):
         "pricing_tier": pricing_tier,
         "pricing_tier_label": tier_label,
         "source": "sqlite",
+        "population_metrics": population_metrics,
+    }
+
+
+def _query_dashboard_population_metrics(conn, days):
+    """Return explicitly labelled dashboard populations from session_log."""
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    row = conn.execute(
+        """SELECT COUNT(*) AS all_n,
+                  SUM(CASE WHEN COALESCE(is_sidechain,0)=0 THEN 1 ELSE 0 END) AS main_n,
+                  SUM(CASE WHEN COALESCE(is_sidechain,0)=1 THEN 1 ELSE 0 END) AS delegated_n,
+                  SUM(CASE WHEN COALESCE(is_sidechain,0)=0 AND COALESCE(message_count,0)>=20 THEN 1 ELSE 0 END) AS eligible_n,
+                  SUM(CASE WHEN COALESCE(is_sidechain,0)=1 OR COALESCE(message_count,0)<20 THEN 1 ELSE 0 END) AS ineligible_n,
+                  AVG(CASE WHEN COALESCE(is_sidechain,0)=0 AND COALESCE(message_count,0)>=20 THEN cache_hit_rate END) AS eligible_hit,
+                  AVG(CASE WHEN COALESCE(is_sidechain,0)=1 OR COALESCE(message_count,0)<20 THEN cache_hit_rate END) AS ineligible_hit
+           FROM session_log WHERE date >= ?""", (cutoff,)
+    ).fetchone()
+    return {
+        "all_sessions": int(row["all_n"] or 0),
+        "main_work_sessions": int(row["main_n"] or 0),
+        "delegated_sessions": int(row["delegated_n"] or 0),
+        "cache_eligible_main_sessions": int(row["eligible_n"] or 0),
+        "cache_ineligible_sessions": int(row["ineligible_n"] or 0),
+        "cache_eligible_main_hit_rate": round(float(row["eligible_hit"] or 0), 4),
+        "cache_ineligible_hit_rate": round(float(row["ineligible_hit"] or 0), 4),
     }
 
 
@@ -31704,7 +31731,11 @@ def _estimate_before_after_savings(days=30):
         # after_shares (the current/actual model mix) is needed both to price the actual
         # arm AND, for a non-Anthropic runtime with no captured baseline, to define the
         # before-arm mix (never fabricate Opus a user never ran). Resolve it up front.
-        after_shares = dict((_model_mix_shares(days=days).get("shares") or {}))
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        # The transformation describes main work only. model_daily combines main and
+        # sidechain tokens, so premium delegation could otherwise make the "now" arm
+        # costlier and lower the headline. Build the mix from non-sidechain rows.
+        after_shares = dict(_mix_from_session_rows(cutoff))
         # H3: an empty after mix would silently price the ACTUAL arm at the sonnet default
         # (via _cost_per_session's fallback), understating actual and INFLATING savings.
         # If model_daily is empty/stale, derive the actual mix from the SAME session_log
@@ -31753,7 +31784,6 @@ def _estimate_before_after_savings(days=30):
         # CURRENT window = human sessions over `days` (sidechains excluded -- they are
         # subagent transcripts, not the user's own billed work). Aggregate the billed
         # token classes; this is the EXACT volume that is held constant across both arms.
-        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         conn = _init_trends_db()
         try:
             recent_rows = conn.execute(
@@ -31925,11 +31955,17 @@ def _estimate_before_after_savings(days=30):
         # (issue #87): the top line summed only non-negative pools and could assert a saving
         # while the arms showed a loss. The headline is now the honest net of the same arms.
         main_transformation = counterfactual_monthly - actual_monthly
-        sub_delta = sub_cf - sub_actual  # subagent pool, UNCLAMPED (parity with the arms)
+        raw_sub_delta = sub_cf - sub_actual
+        # Premium delegation is an intentional purchase, not a Token Optimizer
+        # regression. Count only cheaper delegation in the transformation and
+        # disclose the premium separately.
+        sub_delta = max(0.0, raw_sub_delta)
+        premium_delegation_cost = max(0.0, -raw_sub_delta)
         # Combined arms span every pool. The HEADLINE is defined as their honest net, so the
         # big number and the "est. $X now vs $Y the old way" arms can never disagree.
-        combined_actual = actual_monthly + sub_actual
-        combined_cf = counterfactual_monthly + sub_cf + compression_addback + verbosity_addback
+        combined_actual = actual_monthly
+        combined_cf = (counterfactual_monthly + sub_delta
+                       + compression_addback + verbosity_addback)
         net = combined_cf - combined_actual
         # Gate the entire counterfactual hero on a GENUINE net win. When net <= 0 (efficiency
         # roughly flat, or the frozen baseline would have been marginally cheaper this period),
@@ -32051,6 +32087,7 @@ def _estimate_before_after_savings(days=30):
             "monthly_savings_usd": round(transformation, 2),  # = honest net (combined_cf - combined_actual)
             "main_transformation_usd": round(main_transformation, 2),
             "subagent_transformation_usd": round(sub_delta, 2),
+            "premium_delegation_cost_usd": round(premium_delegation_cost, 2),
             "compression_transformation_usd": round(compression_addback, 2),
             "compression_measured_usd": round(comp_measured, 2),
             "verbosity_transformation_usd": round(verbosity_addback, 2),
@@ -32399,7 +32436,7 @@ def savings_report(days=30, as_json=False):
         print()
         print(f"  YOUR TRANSFORMATION: ~${ba['monthly_savings_usd']:,.0f}/mo")
         print(f"    Had you worked the way you did before Token Optimizer "
-              f"(~{ba.get('before_opus', 0) * 100:.0f}% Opus, including subagents), you'd have paid "
+              f"(~{ba.get('before_opus', 0) * 100:.0f}% Opus main work), you'd have paid "
               f"~${ba['monthly_savings_usd']:,.0f} more "
               f"— est. ${ba.get('actual_monthly_usd', 0):,.0f} now vs ${ba.get('counterfactual_monthly_usd', 0):,.0f} "
               f"the old way [estimated]")
