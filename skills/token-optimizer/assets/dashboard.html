@@ -3860,6 +3860,40 @@ var DB = (function() {
       '</div>' +
       '<div class="last-updated">Updated ' + esc(ts) + ' &middot; refreshes daily</div>';
 
+    // ---- RUNWAY: leads for rate-limited plans, where dollars are the wrong
+    // currency. A flat fee buys a rate-limit budget, so the unit that matters is
+    // how much work fits inside the plan you already paid for. Omitted entirely
+    // when the meter is missing/stale or there is no measurable shift.
+    // Deliberately NOT rendering a headroom ratio: it is a hyperbola near the
+    // cap (a 7% move in the multiplier swings it 3.4x -> 16.3x), so the stable
+    // "extra work" figure leads and the raw window states are shown as-is.
+    var rw = data.runway;
+    if (rw && rw.available && rw.windows && rw.windows.length) {
+      var rwCards = rw.windows.map(function (w) {
+        var capped = w.would_be_capped;
+        return '<div style="flex:1;min-width:220px;background:var(--bg-2,#161616);border-radius:10px;padding:14px 16px;">' +
+          '<div class="label" style="margin-bottom:8px;">' + esc(w.label) + ' window</div>' +
+          '<div style="font-size:26px;font-weight:600;line-height:1.1;">' + w.headroom_pct + '%<span style="font-size:13px;font-weight:400;opacity:.6;"> left</span></div>' +
+          '<div style="font-size:12px;opacity:.55;margin-top:2px;">' + w.used_pct + '% used</div>' +
+          '<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08);font-size:12px;opacity:.75;">' +
+            (capped
+              ? 'Without Token Optimizer this window would already be <strong>capped</strong>.'
+              : 'Without Token Optimizer: <strong>' + w.without_used_pct + '% used</strong>, ' + w.without_headroom_pct + '% left.') +
+          '</div>' +
+        '</div>';
+      }).join('');
+      html += '<div class="card" style="margin-bottom:18px;">' +
+        '<div class="label">Subscription runway <span style="opacity:.5;font-weight:400;">&middot; estimated</span></div>' +
+        '<h2 style="margin:6px 0 4px;">+' + rw.extra_work_pct + '% more work per window</h2>' +
+        '<p style="margin:0 0 14px;opacity:.7;font-size:13px;">A flat monthly plan buys a rate-limit budget, not tokens. Every token kept out of context and every turn routed to a lighter model is budget you get to spend on real work instead. That converts back to money the moment a window runs out and the job has to finish on overage or API spend.</p>' +
+        '<div style="display:flex;gap:12px;flex-wrap:wrap;">' + rwCards + '</div>' +
+        '<div style="margin-top:12px;font-size:11px;opacity:.5;line-height:1.5;">' +
+          'Window state is measured. The counterfactual is estimated: ' + esc(rw.proxy) + ' ' +
+          'Levers: context &times;' + rw.context_multiplier + ' (metered) &middot; routing &times;' + rw.routing_multiplier + ' (your own model-mix shift).' +
+        '</div>' +
+      '</div>';
+    }
+
     // ---- HERO: the before/after transformation (THE headline). Current activity priced at
     // your pre-TO per-session weight + mix vs actual — comprehensive (volume + structural +
     // routing + sub-agents), grounded in your own earliest-vs-recent sessions. ----

@@ -4428,8 +4428,17 @@ def generate_dashboard(coord_path):
         else:
             plan = None
 
+    # Subscription runway: leads the savings surface for rate-limited plans,
+    # where a dollar figure is the wrong currency. None on API-billed setups or
+    # when the meter is missing/stale, and the template simply omits the card.
+    try:
+        runway = runway_snapshot(days=30)
+    except Exception:
+        runway = None
+
     # Assemble data
     data = {
+        "runway": runway,
         "snapshot": snapshot,
         "audit": audit,
         "plan": plan,
@@ -29766,6 +29775,138 @@ def _resolve_structural_baseline(days=30):
     return None
 
 
+def runway_snapshot(days=30, now=None):
+    """Subscription runway: how much of your rate-limit window Token Optimizer
+    hands back, and what the same windows would read without it.
+
+    WHY THIS EXISTS AND NOT A DOLLAR FIGURE. On a subscription you are not
+    buying tokens, you are buying a rate-limit budget for a flat fee. Reporting
+    "$0 saved" to that user measures in the wrong currency (see the same note at
+    _keepwarm_*: a keep-warm ping "saves $0"). The unit that matters is how much
+    work fits inside the plan already paid for, which converts straight back to
+    money the moment a window runs out and the work has to finish on overage or
+    API spend.
+
+    TWO INDEPENDENT LEVERS, MULTIPLIED:
+      context : tokens never sent at all (archive, skeletons, lean resumes).
+                Directly metered from savings_events + compression_events.
+      routing : a lighter model mix burns less of the window per token.
+                Derived from THIS user's own baseline vs current mix -- never a
+                constant. A user who never left Opus correctly sees ~1.0x.
+
+    HONESTY BOUNDARY: the routing lever needs to know how the provider weights
+    models inside the 5h/7d windows. That weighting is not published, so this
+    uses the public input-rate ratios as a documented stand-in and labels the
+    result estimated. `proxy` in the returned dict says so out loud; any surface
+    rendering this MUST carry that through rather than printing a bare number.
+
+    Returns None when there is nothing trustworthy to say: no meter file, a
+    stale meter, or no measurable routing shift. Silence beats a wrong number.
+    Never raises.
+    """
+    try:
+        meters = _keepwarm_read_meters(now=now)
+        if not meters.get("available") or meters.get("stale"):
+            return None
+
+        # --- context lever: measured, never estimated ---
+        consumed = saved = 0
+        try:
+            conn = _init_trends_db()
+            try:
+                cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+                consumed = conn.execute(
+                    "SELECT COALESCE(SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)),0) "
+                    "FROM session_log WHERE date >= date('now', ?)",
+                    (f"-{days} day",)).fetchone()[0] or 0
+                saved = conn.execute(
+                    "SELECT COALESCE(SUM(tokens_saved),0) FROM savings_events "
+                    "WHERE timestamp >= ? AND event_type != 'verbosity_steer'",
+                    (cutoff,)).fetchone()[0] or 0
+                saved += conn.execute(
+                    "SELECT COALESCE(SUM(original_tokens-compressed_tokens),0) "
+                    "FROM compression_events WHERE timestamp >= ? "
+                    "AND (tier IS NULL OR tier = 'measured')", (cutoff,)).fetchone()[0] or 0
+            finally:
+                conn.close()
+        except Exception:
+            return None
+        if consumed <= 0:
+            return None
+        context_mult = (consumed + saved) / consumed
+
+        # --- routing lever: this user's own shift, priced by input rates ---
+        tier_data = PRICING_TIERS.get(_load_pricing_tier(), PRICING_TIERS["anthropic"])
+        models = tier_data.get("claude_models", {})
+
+        def _burn(mix):
+            tot = sum(mix.values()) or 1.0
+            return sum(
+                share * float((models.get(_strip_provider_prefixes(str(m)) or m)
+                               or models.get("sonnet", {})).get("input", 3.0))
+                for m, share in mix.items()) / tot
+
+        baseline = _pretool_baseline_mix() or _earliest_model_mix()
+        current = (_model_mix_shares(days=days).get("shares") or {})
+        if not baseline or not current:
+            return None
+        fam_now = {}
+        for m, share in current.items():
+            fam = _normalize_model_name(m) or "sonnet"
+            fam_now[fam] = fam_now.get(fam, 0.0) + share
+        b, n = _burn(baseline), _burn(fam_now)
+        if b <= 0 or n <= 0:
+            return None
+        routing_mult = b / n
+
+        mult = context_mult * routing_mult
+        # Below ~1.02 there is no story worth telling and rounding noise would
+        # dominate; say nothing rather than dress up a rounding artefact.
+        if mult < 1.02:
+            return None
+
+        windows = []
+        for key, label, span_h in (("five_hour", "5h", 5), ("seven_day", "7d", 168)):
+            used = meters.get("five_hour_pct" if key == "five_hour" else "seven_day_pct")
+            if used is None:
+                continue
+            counterfactual = min(100.0, used * mult)
+            head_now = max(0.0, 100.0 - used)
+            head_cf = max(0.0, 100.0 - counterfactual)
+            windows.append({
+                "key": key, "label": label, "span_hours": span_h,
+                "used_pct": round(used, 1),
+                "headroom_pct": round(head_now, 1),
+                "without_used_pct": round(counterfactual, 1),
+                "without_headroom_pct": round(head_cf, 1),
+                # None when the counterfactual is already capped: "infinity x
+                # more room" is not a sentence anyone should read.
+                "headroom_multiple": round(head_now / head_cf, 1) if head_cf > 0.5 else None,
+                "would_be_capped": head_cf <= 0.5,
+            })
+        if not windows:
+            return None
+
+        return {
+            "available": True,
+            "tier": "estimated",
+            "multiplier": round(mult, 2),
+            "context_multiplier": round(context_mult, 4),
+            "routing_multiplier": round(routing_mult, 3),
+            "extra_work_pct": round((mult - 1) * 100, 1),
+            "tokens_consumed": int(consumed),
+            "tokens_saved": int(saved),
+            "windows": windows,
+            "meter_age_s": meters.get("age_s"),
+            "proxy": ("Model weighting inside the provider's rate-limit windows is "
+                      "not published; public input-rate ratios are used as a "
+                      "stand-in. Window state is measured, the counterfactual is "
+                      "estimated."),
+        }
+    except Exception:
+        return None
+
+
 def _active_model_cache_rates():
     """Return (cache_read, cache_write_5m, cache_write_1h) USD/MTok for the active model.
 
@@ -31493,14 +31634,25 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
          {fresh_input, cache_read, cache_create, output}. Aggregate F/CR/CW/O by model.
       3. actual_sub = price each model's bundle at its OWN (real) rate.
       4. counterfactual_sub = price the SAME bundles at the ~95% Opus baseline mix.
-      5. subagent_transformation = counterfactual_sub - actual_sub (clamped >= 0).
+      5. Split PER MODEL: a bundle whose counterfactual exceeds its actual cost is
+         cheaper delegation (savings the routing produced); a bundle costlier than
+         the baseline mix (e.g. a Fable subagent at 2x Opus rates) is premium
+         delegation. transformation_usd sums ONLY the cheaper-delegation deltas;
+         premium_delegation_usd sums the premium side. Netting them inside the pool
+         let one afternoon of intentional premium fan-outs silently consume the
+         genuine cheap-delegation savings and drag the headline down in real time,
+         even though premium delegation is a deliberate capability purchase, not a
+         routing regression. The split keeps the headline stable under premium use
+         while the premium spend stays disclosed.
 
-    Returns {actual_usd, counterfactual_usd, transformation_usd, sessions, by_model}.
+    Returns {actual_usd, counterfactual_usd, transformation_usd,
+    premium_delegation_usd, sessions, by_model}.
     Memoized for _SUBAGENT_POOL_TTL seconds (keyed on days + baseline share) so the
     dashboard isn't slowed by re-reading transcripts. Never raises.
     """
     zero = {"actual_usd": 0.0, "counterfactual_usd": 0.0,
-            "transformation_usd": 0.0, "sessions": 0, "by_model": {}}
+            "transformation_usd": 0.0, "premium_delegation_usd": 0.0,
+            "sessions": 0, "by_model": {}}
     try:
         if tier is None:
             tier = _load_pricing_tier()
@@ -31576,6 +31728,8 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
         before_shares = _opus_baseline_shares(baseline_opus_share)
         actual = 0.0
         counterfactual = 0.0
+        cheaper = 0.0
+        premium = 0.0
         by_model_cost = {}
         for model, s in by_model.items():
             fi, cw, cr, out = s["fi"], s["cw"], s["cr"], s["out"]
@@ -31586,17 +31740,25 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
                 cw5m = cw
             a = _subagent_model_cost(model, fi, cr, out, cw, cw1h, cw5m,
                                      {model: 1.0}, tier)
-            actual += a
-            counterfactual += _subagent_model_cost(
+            c = _subagent_model_cost(
                 model, fi, cr, out, cw, cw1h, cw5m, before_shares, tier)
+            actual += a
+            counterfactual += c
+            # Per-model premium/cheaper split (see docstring): cheap delegation
+            # counts as transformation; premium delegation is disclosed, never
+            # netted against it.
+            if c >= a:
+                cheaper += c - a
+            else:
+                premium += a - c
             by_model_cost[_friendly_model(model)] = (
                 by_model_cost.get(_friendly_model(model), 0.0) + a)
 
-        transformation = max(0.0, counterfactual - actual)
         payload = {
             "actual_usd": round(actual, 2),
             "counterfactual_usd": round(counterfactual, 2),
-            "transformation_usd": round(transformation, 2),
+            "transformation_usd": round(cheaper, 2),
+            "premium_delegation_usd": round(premium, 2),
             "sessions": n_side,
             "by_model": {k: round(v, 2) for k, v in by_model_cost.items()},
         }
@@ -31847,9 +32009,9 @@ def _estimate_before_after_savings(days=30):
             days=days, baseline_opus_share=baseline_opus_share, tier=tier)
         sub_actual = float(sub_pool.get("actual_usd", 0.0) or 0.0)
         sub_cf = float(sub_pool.get("counterfactual_usd", 0.0) or 0.0)
-        # sub_delta (= sub_cf - sub_actual, unclamped) is computed below with the other pools;
-        # the pool's own pre-clamped transformation_usd is intentionally NOT used, so the
-        # subagent lever nets honestly into the headline (issue #87).
+        # sub_delta / premium_delegation_cost are resolved below with the other pools,
+        # preferring the pool's own PER-MODEL split (transformation_usd = cheaper
+        # delegation only, premium_delegation_usd = the premium side).
 
         def price(fi, cr, out, shares):
             # Price the fresh+cache_read pool and output (NO cache-write). _cost_per_session
@@ -31955,12 +32117,25 @@ def _estimate_before_after_savings(days=30):
         # (issue #87): the top line summed only non-negative pools and could assert a saving
         # while the arms showed a loss. The headline is now the honest net of the same arms.
         main_transformation = counterfactual_monthly - actual_monthly
-        raw_sub_delta = sub_cf - sub_actual
         # Premium delegation is an intentional purchase, not a Token Optimizer
-        # regression. Count only cheaper delegation in the transformation and
-        # disclose the premium separately.
-        sub_delta = max(0.0, raw_sub_delta)
-        premium_delegation_cost = max(0.0, -raw_sub_delta)
+        # regression. Consume the pool's PER-MODEL split: transformation_usd sums
+        # only the bundles cheaper than the baseline mix, premium_delegation_usd
+        # the costlier ones. Deriving both from the aggregate (sub_cf - sub_actual)
+        # nets one against the other, so a burst of intentional premium fan-outs
+        # (a tiny share of window tokens) would erase genuine cheap-delegation
+        # savings and drag the headline down in real time.
+        if "premium_delegation_usd" in sub_pool:
+            sub_delta = max(0.0, float(
+                sub_pool.get("transformation_usd", 0.0) or 0.0))
+            premium_delegation_cost = max(0.0, float(
+                sub_pool.get("premium_delegation_usd", 0.0) or 0.0))
+        else:
+            # Fallback for a payload without the split (e.g. an older cached
+            # shape): aggregate netting, clamped so premium use can only zero
+            # this lever, never subtract from the other pools.
+            raw_sub_delta = sub_cf - sub_actual
+            sub_delta = max(0.0, raw_sub_delta)
+            premium_delegation_cost = max(0.0, -raw_sub_delta)
         # Combined arms span every pool. The HEADLINE is defined as their honest net, so the
         # big number and the "est. $X now vs $Y the old way" arms can never disagree.
         combined_actual = actual_monthly
@@ -31981,6 +32156,7 @@ def _estimate_before_after_savings(days=30):
                     "main_counterfactual_monthly_usd": round(counterfactual_monthly, 2),
                     "main_transformation_usd": round(main_transformation, 2),
                     "subagent_transformation_usd": round(sub_delta, 2),
+                    "premium_delegation_cost_usd": round(premium_delegation_cost, 2),
                     "compression_transformation_usd": 0.0,
                     "compression_measured_usd": round(comp_measured, 2),
                     "verbosity_transformation_usd": 0.0,
@@ -32453,6 +32629,13 @@ def savings_report(days=30, as_json=False):
                 # Wrap the caveat so the CLI surfaces the same disclosure as the dashboard.
                 for line in textwrap.wrap(caveat, width=72):
                     print(f"      {line}")
+        # Premium delegation disclosure (same as the dashboard note): deliberate
+        # spend on costlier subagents, shown beside the headline, never netted
+        # against it.
+        prem = float(ba.get("premium_delegation_cost_usd", 0.0) or 0.0)
+        if prem > 0:
+            print(f"    Premium delegation: ${prem:,.0f} this period. Shown "
+                  f"separately and excluded from the transformation above.")
 
     pricing = summary.get("pricing_detail") or {}
     p_model = pricing.get("model", "sonnet")
