@@ -36508,6 +36508,8 @@ if __name__ == "__main__":
         print("Usage:")
         print("  python3 measure.py quick               # Quick scan: overhead, degradation risk, top offenders")
         print("  python3 measure.py quick --json         # Machine-readable quick scan")
+        print("  python3 measure.py route --task \"...\"    # Model + reasoning-effort advice for one task")
+        print("  python3 measure.py route --task \"...\" --json  # Machine-readable recommendation")
         print("  python3 measure.py doctor               # Health check: verify all components installed")
         print("  python3 measure.py doctor --json        # Machine-readable doctor output")
         print("  python3 measure.py codex-doctor         # Codex adapter readiness check")
