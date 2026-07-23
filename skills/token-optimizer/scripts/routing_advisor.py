@@ -185,7 +185,7 @@ def classify_significance(task):
     Local and deterministic. On any error, returns the safe middle: standard/low.
     """
     try:
-        text = (task or "").lower()
+        text = (task or "")[:8192].lower()
         hard = _count_hits(text, _HARD_RE)
         easy = _count_hits(text, _EASY_RE)
 
@@ -217,7 +217,7 @@ def classify_significance(task):
 def classify_category(task):
     """Coarse task kind: 'reasoning' | 'code' | 'simple'. Never raises."""
     try:
-        text = (task or "").lower()
+        text = (task or "")[:8192].lower()
         r = _count_hits(text, _REASONING_RE)
         c = _count_hits(text, _CODE_RE)
         if r == 0 and c == 0:

@@ -65,6 +65,17 @@ def test_route_positional_task_not_dropped():
     assert data["model"] not in ("haiku", "sol", "luna")
 
 
+def test_route_task_equals_form():
+    # `--task=...` (equals form) must be recognized, not treated as literal text.
+    env = dict(os.environ)
+    args = [sys.executable, str(MEASURE), "route", "--json",
+            "--task=migrate the production database"]
+    out = subprocess.run(args, capture_output=True, text=True, env=env, timeout=60)
+    line = [l for l in out.stdout.splitlines() if l.strip().startswith("{")]
+    data = json.loads(line[-1])
+    assert data["significance"] == "hard"
+
+
 def test_route_text_output():
     out = _route("rename this variable", as_json=False)
     assert "model:" in out.stdout and "effort:" in out.stdout
