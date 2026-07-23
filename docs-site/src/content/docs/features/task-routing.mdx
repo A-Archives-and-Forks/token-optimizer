@@ -1,0 +1,109 @@
+---
+title: Per-task model and effort advice
+description: "route --task answers which model and how much reasoning a single task deserves, in your current platform's own model names and effort knob, with a floor that keeps cheap models on easy work only."
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+Model choice is a decision you make dozens of times a day, usually by habit. Habit is expensive in one direction and risky in the other: every task on the frontier model burns money on typos, and every task on the cheap model eventually puts a production migration through something that cannot carry it. `route` answers the question for one specific task, before you spend.
+
+## What it does
+
+You describe the task. Token Optimizer classifies it locally and answers with a model and an effort level, plus the reasoning behind the call.
+
+```bash
+python3 measure.py route --task "fix a typo in the README"
+#   model:  haiku
+#   effort: low  (thinking budget)
+#   why:    easy task (high confidence, simple) -> budget model at low effort
+```
+
+Classification is local and deterministic. It reads the task text and the detected platform, makes no API call, and sends nothing anywhere. The same words always produce the same answer, so the advice is reproducible rather than a second opinion that drifts.
+
+Three things get decided: **significance** (easy, standard, hard), **confidence** (high, low), and **category** (simple, code, reasoning). Significance picks the tier and the baseline effort, category nudges effort up one step for thinking-heavy work, and low confidence promotes an easy call rather than trusting it.
+
+## It speaks your platform's language
+
+A recommendation you have to translate is a recommendation you will not use. `route` answers in the model names your current platform actually offers and names the real control you turn.
+
+| Platform | Models it names | Effort maps to |
+|---|---|---|
+| Claude Code | haiku, sonnet, opus | thinking budget (native) |
+| Codex | gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol | `model_reasoning_effort` (native) |
+| OpenCode | your configured models | prompt directive (advisory) |
+| Hermes | haiku, sonnet, opus | prompt directive (advisory) |
+| GitHub Copilot | gpt-5.4-mini, gpt-5.4, gpt-5.5, gpt-5.6-sol | prompt directive (advisory) |
+
+The same question on Codex returns `gpt-5.6-luna` at `low` `model_reasoning_effort` for the typo and `gpt-5.6-sol` at `high` for a production migration. Where a platform has no native reasoning control, effort comes back as an explicit directive to state in the prompt, which is the honest answer rather than a knob that does not exist.
+
+On OpenCode the ladder is read from your own `opencode.json` (`model` and `small_model`), so it recommends the models you actually configured. If that config is missing or unreadable, it falls back to sane defaults instead of failing.
+
+## The floor is the guarantee
+
+Cheap-on-small-things is only a saving if it never quietly happens to a big thing. The floor makes that structural rather than hopeful.
+
+A very cheap model, the budget tier, and minimal or low effort can only ever stand for a task classified easy. Anything standard or hard is prevented from landing there, and the check runs last, after every other adjustment, so it does not depend on the model tables staying in sync.
+
+Uncertainty resolves upward at the boundary that matters. A task scored easy but held with low confidence is promoted to standard, because a significant task mistaken for a trivial one is the expensive error. Standard and hard already sit above the cheap floor, so an uncertain one stays put rather than over-spending toward the top.
+
+<Aside type="tip" title="It fails toward safe">
+`route` never raises. If the classifier or the advisor module is unavailable for any reason, it returns a safe middle recommendation with the same shape, so a bad day for the router is never a cheap model on a migration.
+</Aside>
+
+## When it fires
+
+Only when you ask. `route` is a read-only command you run against one task; nothing schedules it and nothing writes a file. For standing guidance that lives where the model reads it every session, see [CLAUDE.md injection](/features/routing-and-coach-injection/), which writes routing advice from your actual usage trends.
+
+## Default state
+
+Always available, on every supported platform, nothing to enable. It reads only your task text and the detected platform, so unlike the injection commands it never touches the Claude tree or any file you own.
+
+## Exact commands
+
+```bash
+cd ~/.claude/skills/token-optimizer/scripts
+python3 measure.py route --task "migrate the production auth database schema"
+python3 measure.py route --task="..."                 # equals form
+python3 measure.py route migrate the production db     # positional, words preserved
+python3 measure.py route --task "..." --json           # machine-readable
+```
+
+The `--json` form returns the full decision, not just the answer: `significance`, `confidence`, `category`, `tier`, `model`, `effort`, `effort_kind`, `effort_knob`, `floor`, and `why`. Useful when you want a script or a hook to route work rather than a human reading a line.
+
+<Steps>
+1. **Describe the task** the way you would to a colleague. Signal words matter more than length.
+2. **Read the `why`.** It names the significance, the confidence, and the category that produced the call, so you can disagree with the reasoning rather than just the answer.
+3. **Turn the knob it names.** On Claude and Codex that is a real control; elsewhere state the effort in your prompt.
+</Steps>
+
+To ask about another platform, prefix the runtime, for example `TOKEN_OPTIMIZER_RUNTIME=codex python3 measure.py route --task "..."`.
+
+## Defaults and thresholds
+
+| Setting | Default | Notes |
+|---|---|---|
+| Default state | always on | A read-only command; nothing to install. |
+| Easy | budget tier, low effort | The only level allowed a very cheap model. |
+| Standard | mid tier, medium effort | The floor for anything not clearly easy. |
+| Hard | capable tier, high effort | Security, migrations, concurrency, architecture. |
+| Low confidence | promotes easy to standard | Only at the easy boundary. |
+| Category nudge | +1 effort step | Code and reasoning work, non-easy tasks only. |
+| Task text read | first 8192 characters | Long tasks are capped, not rejected. |
+
+## Risk rating
+
+None. `route` reads your task text and the detected platform and prints a recommendation. It writes no file, changes no config, makes no network call, and does not switch your model for you. The recommendation is advice you act on, so the decision stays yours.
+
+## Related environment variables
+
+`TOKEN_OPTIMIZER_RUNTIME` selects which platform's model names and effort knob the answer is expressed in. Defined in the [configuration reference](/reference/configuration/).
+
+## Platform availability
+
+All supported platforms: Claude Code, Codex, OpenCode, Hermes, and GitHub Copilot. See the [capability matrix](/reference/capability-matrix/).
+
+## Related
+
+- [CLAUDE.md injection](/features/routing-and-coach-injection/): standing routing advice written where the model reads it, from your actual trends.
+- [Token Coach](/features/token-coach/): the 30-day view of how your model mix is actually trending.
+- [Waste detectors](/features/waste-detectors/): finds model misrouting after the fact, across sessions.

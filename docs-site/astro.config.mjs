@@ -167,6 +167,7 @@ export default defineConfig({
             { label: "Token Coach", slug: "features/token-coach" },
             { label: "Waste detectors", slug: "features/waste-detectors" },
             { label: "Fleet Auditor", slug: "features/fleet-auditor" },
+            { label: "Per-task model and effort advice", slug: "features/task-routing" },
             { label: "CLAUDE.md injection", slug: "features/routing-and-coach-injection" },
             { label: "Memory health", slug: "features/memory-health" },
             { label: "Attention optimizer", slug: "features/attention-optimizer" },
