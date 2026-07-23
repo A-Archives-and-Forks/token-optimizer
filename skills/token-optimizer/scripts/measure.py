@@ -484,6 +484,11 @@ OPENAI_MODEL_PRICING = {
     "gpt-5.4-nano": {"input": 0.20, "cache_read": 0.02, "output": 1.25},
     "gpt-5.5": {"input": 5.0, "cache_read": 0.50, "output": 30.0},
     "gpt-5.5-pro": {"input": 30.0, "cache_read": 30.0, "output": 180.0},  # cache_read N/A per OpenAI; billed at full input rate
+    # GPT-5.6 three-tier Codex family (Sol flagship / Terra workhorse / Luna cheap).
+    # Verified 2026-07-23 from OpenAI GPT-5.6 preview pricing; cache_read = 10% of input (90% read discount).
+    "gpt-5.6-sol": {"input": 5.0, "cache_read": 0.50, "output": 30.0},
+    "gpt-5.6-terra": {"input": 2.5, "cache_read": 0.25, "output": 15.0},
+    "gpt-5.6-luna": {"input": 1.0, "cache_read": 0.10, "output": 6.0},
     # GPT-4.x family
     "gpt-4.1": {"input": 2.0, "cache_read": 0.50, "output": 8.0},
     "gpt-4.1-mini": {"input": 0.40, "cache_read": 0.10, "output": 1.60},
@@ -806,6 +811,9 @@ def _normalize_openai_model_name(model):
     if not value or value in {"codex", "openai", "unknown"}:
         return None
     aliases = (
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
         "gpt-5.5-pro",
         "gpt-5.4-mini",
         "gpt-5.4-nano",
@@ -7376,6 +7384,45 @@ def generate_coach_data(focus=None, components=None, trends=None):
     return result
 
 
+def _resolve_platform_models(runtime):
+    """Resolve a platform's real tier->model ladder from ITS OWN config, or None.
+
+    Only user-configured platforms need this; None means "use the routing table".
+    - opencode: reads opencode.json (`model` / `small_model`, provider-qualified).
+      small_model -> budget, model -> mid/capable/frontier. Absent field or
+      unreadable config -> None (table fallback).
+    - hermes: a Claude runtime with no per-tier model config, so the Claude ladder
+      in the table is already correct -> None.
+    Never raises.
+    """
+    try:
+        if runtime != "opencode":
+            return None
+        from runtime_env import opencode_config_home
+        cfg_path = opencode_config_home() / "opencode.json"
+        if not cfg_path.is_file():
+            return None
+        with cfg_path.open("r", encoding="utf-8") as handle:
+            cfg = json.load(handle)
+        if not isinstance(cfg, dict):
+            return None
+
+        def _leaf(value):
+            # "anthropic/claude-sonnet-4" -> "claude-sonnet-4"; keep advisory-friendly.
+            if not (isinstance(value, str) and value.strip()):
+                return None
+            return value.strip().rsplit("/", 1)[-1]
+
+        main = _leaf(cfg.get("model"))
+        small = _leaf(cfg.get("small_model")) or main
+        main = main or small
+        if not main:
+            return None
+        return {"budget": small, "mid": main, "capable": main, "frontier": main}
+    except Exception:
+        return None
+
+
 def _cmd_route(args):
     """Recommend a model and reasoning effort for a task on the CURRENT platform.
 
@@ -7399,7 +7446,8 @@ def _cmd_route(args):
         task = " ".join(a for a in args[1:] if a != "--json")
     try:
         import routing_advisor
-        rec = routing_advisor.recommend(task, detect_runtime())
+        _rt = detect_runtime()
+        rec = routing_advisor.recommend(task, _rt, models=_resolve_platform_models(_rt))
     except Exception as _e:
         # Router module unavailable: a real, non-cheap default with the same
         # keys as a normal recommendation so JSON consumers never KeyError.
@@ -7433,11 +7481,12 @@ def generate_model_routing_block(trends=None):
 
     runtime = detect_runtime()
     row = routing_advisor.platform_row(runtime)
-    models = row["models"]
+    resolved = _resolve_platform_models(runtime)
+    models = resolved if isinstance(resolved, dict) else row["models"]
 
-    easy_m, easy_e = routing_advisor.baseline("easy", runtime)
-    std_m, std_e = routing_advisor.baseline("standard", runtime)
-    hard_m, hard_e = routing_advisor.baseline("hard", runtime)
+    easy_m, easy_e = routing_advisor.baseline("easy", runtime, models=resolved)
+    std_m, std_e = routing_advisor.baseline("standard", runtime, models=resolved)
+    hard_m, hard_e = routing_advisor.baseline("hard", runtime, models=resolved)
     knob = row["effort_knob"]
 
     lines = [

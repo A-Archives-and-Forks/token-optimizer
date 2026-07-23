@@ -80,3 +80,40 @@ def test_route_text_output():
     out = _route("rename this variable", as_json=False)
     assert "model:" in out.stdout and "effort:" in out.stdout
     assert out.returncode == 0
+
+
+def _route_env(task, env):
+    args = [sys.executable, str(MEASURE), "route", "--task", task, "--json"]
+    out = subprocess.run(args, capture_output=True, text=True, env=env, timeout=60)
+    line = [l for l in out.stdout.splitlines() if l.strip().startswith("{")]
+    assert line, out.stdout + out.stderr
+    return json.loads(line[-1])
+
+
+def test_opencode_reads_configured_models(tmp_path):
+    # opencode ladder is resolved from opencode.json (model / small_model), not the table.
+    cfg_dir = tmp_path / "opencode"
+    cfg_dir.mkdir()
+    (cfg_dir / "opencode.json").write_text(
+        '{"model":"anthropic/claude-opus-4","small_model":"anthropic/claude-haiku-4"}',
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["TOKEN_OPTIMIZER_RUNTIME"] = "opencode"
+    env["XDG_CONFIG_HOME"] = str(tmp_path)
+    env.pop("OPENCODE_CONFIG_DIR", None)
+
+    easy = _route_env("fix a typo", env)
+    assert easy["model"] == "claude-haiku-4", easy          # small_model -> budget
+    hard = _route_env("migrate the production auth database schema", env)
+    assert hard["model"] == "claude-opus-4", hard           # model -> capable/frontier
+
+
+def test_opencode_absent_config_falls_back_to_table(tmp_path):
+    # No opencode.json under the config home -> table default (haiku), never a crash.
+    env = dict(os.environ)
+    env["TOKEN_OPTIMIZER_RUNTIME"] = "opencode"
+    env["XDG_CONFIG_HOME"] = str(tmp_path)   # empty; no opencode/opencode.json
+    env.pop("OPENCODE_CONFIG_DIR", None)
+    easy = _route_env("fix a typo", env)
+    assert easy["model"] == "haiku", easy

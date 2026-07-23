@@ -108,6 +108,53 @@ def test_category_word_boundary():
     assert ra.classify_category("draw an airplane") == "simple"
 
 
+# --- codex GPT-5.6 ladder (Sol flagship > Terra > Luna) -----------------------
+
+def test_codex_ladder_tiers_are_correct_way_up():
+    # Regression: the flagship (Sol) must NOT sit in the budget slot, and the
+    # cheap tier (Luna) must NOT sit at the top. Easy -> luna, hard -> sol.
+    easy = ra.recommend("fix a typo in the readme", "codex")
+    assert easy["model"] == "gpt-5.6-luna", easy
+    hard = ra.recommend("design a distributed auth migration with payments", "codex")
+    assert hard["model"] == "gpt-5.6-sol", hard
+
+
+def test_sol_is_not_very_cheap_but_luna_is():
+    assert ra.is_very_cheap("gpt-5.6-luna") is True
+    assert ra.is_very_cheap("gpt-5.6-sol") is False
+    assert ra.is_very_cheap("gpt-5.6-terra") is False
+
+
+# --- config-resolved model ladder (opencode/hermes) ---------------------------
+
+def test_config_models_override_is_used_and_floor_holds():
+    custom = {"budget": "tiny", "mid": "mid-m", "capable": "big", "frontier": "huge"}
+    easy = ra.recommend("fix a typo", "opencode", models=custom)
+    assert easy["model"] == "tiny"
+    for task in NON_EASY_TASKS:
+        r = ra.recommend(task, "opencode", models=custom)
+        if r["significance"] != "easy":
+            # floor: a non-easy task never lands on the budget model.
+            assert r["model"] != "tiny", (task, r)
+            assert r["tier"] != "budget", (task, r)
+
+
+def test_malformed_or_absent_models_fall_back_to_table():
+    table_budget = ra.ROUTING_TABLES["opencode"]["models"]["budget"]
+    for bad in (None, {}, {"budget": "x"}, {"budget": "", "mid": "m", "capable": "c", "frontier": "f"}, "nope", 5):
+        r = ra.recommend("fix a typo", "opencode", models=bad)
+        assert r["model"] == table_budget, (bad, r)
+
+
+def test_baseline_accepts_models_override():
+    custom = {"budget": "tiny", "mid": "mid-m", "capable": "big", "frontier": "huge"}
+    assert ra.baseline("easy", "opencode", models=custom)[0] == "tiny"
+    assert ra.baseline("hard", "opencode", models=custom)[0] == "big"
+    # malformed -> table
+    assert ra.baseline("easy", "opencode", models={"budget": "x"})[0] == \
+        ra.ROUTING_TABLES["opencode"]["models"]["budget"]
+
+
 # --- fail-open on odd input ---------------------------------------------------
 
 def test_recommend_never_raises():
