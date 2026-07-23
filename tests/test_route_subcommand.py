@@ -53,6 +53,18 @@ def test_route_codex_uses_native_names():
     assert data["model"].startswith("gpt-")
 
 
+def test_route_positional_task_not_dropped():
+    # Task passed positionally (no --task flag) must not be silently stripped.
+    env = dict(os.environ)
+    args = [sys.executable, str(MEASURE), "route", "--json",
+            "migrate", "the", "production", "auth", "database", "schema"]
+    out = subprocess.run(args, capture_output=True, text=True, env=env, timeout=60)
+    line = [l for l in out.stdout.splitlines() if l.strip().startswith("{")]
+    data = json.loads(line[-1])
+    assert data["significance"] == "hard"
+    assert data["model"] not in ("haiku", "sol", "luna")
+
+
 def test_route_text_output():
     out = _route("rename this variable", as_json=False)
     assert "model:" in out.stdout and "effort:" in out.stdout

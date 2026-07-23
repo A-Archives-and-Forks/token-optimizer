@@ -35,6 +35,15 @@ TIER_ORDER = ("budget", "mid", "capable", "frontier")
 VERY_CHEAP_MODELS = frozenset({"haiku", "sol", "luna"})
 
 
+def is_very_cheap(model):
+    """True if a model name is one of the very-cheap models, matched on name
+    parts so a platform-qualified name (e.g. gpt-5.6-sol) is still caught."""
+    if not model:
+        return False
+    parts = re.split(r"[^a-z0-9]+", str(model).lower())
+    return any(p in VERY_CHEAP_MODELS for p in parts)
+
+
 def _rank(value, order, default):
     try:
         return order.index(value)
@@ -290,7 +299,7 @@ def recommend(task, runtime):
         # explicitly so the guarantee does not depend on the tables staying in
         # sync.
         if effective != "easy":
-            if model in VERY_CHEAP_MODELS or tier == "budget":
+            if is_very_cheap(model) or tier == "budget":
                 tier = _at_least(tier, "mid", TIER_ORDER)
                 model = row["models"].get(tier, row["models"]["mid"])
             effort = _at_least(effort, min_effort, EFFORT_ORDER)

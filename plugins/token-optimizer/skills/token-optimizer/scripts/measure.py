@@ -7391,13 +7391,17 @@ def _cmd_route(args):
         if i + 1 < len(args):
             task = args[i + 1]
     else:
-        task = " ".join(a for a in args[1:] if not a.startswith("--"))
+        # Positional task: keep every token except the recognized --json flag so
+        # task words that happen to start with "--" are not silently dropped.
+        task = " ".join(a for a in args[1:] if a != "--json")
     try:
         import routing_advisor
         rec = routing_advisor.recommend(task, detect_runtime())
     except Exception as _e:
+        # Router module unavailable: a real, non-cheap default rather than a
+        # placeholder model name.
         rec = {
-            "model": "standard", "effort": "medium", "significance": "standard",
+            "model": "sonnet", "effort": "medium", "significance": "standard",
             "confidence": "low", "effort_knob": "effort",
             "why": f"router unavailable ({type(_e).__name__}); safe default",
         }
