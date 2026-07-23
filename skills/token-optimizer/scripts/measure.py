@@ -19020,7 +19020,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         clean = self.path.lstrip("/").split("?")[0]
         if clean == "api/health":
-            self._json_response(200, {{"ok": True, "server": "token-optimizer-daemon"}})
+            self._json_response(200, {{"ok": True, "server": "token-optimizer-daemon", "version": TOKEN_OPTIMIZER_DAEMON_VERSION}})
             return
         if clean == "api/token":
             # v5.11.1 (#59): the token endpoint is loopback-locked in BOTH modes.
@@ -21164,7 +21164,8 @@ def _ensure_dashboard_daemon(force=False):
 
     Returns one of: 'noop-foreign', 'noop-disabled', 'noop-unsupported',
     'noop-healthy', 'noop-throttled', 'installed', 'install-failed',
-    'restarted', 'restart-failed'. Never raises.
+    'restarted', 'restart-stale', 'restart-failed'. ('restart-stale' propagates
+    up from _restart_dashboard_daemon's landing-verification.) Never raises.
     """
     # Cheapest gates first -- all pure/stat, no subprocess.
     if _is_foreign_runtime() or detect_runtime() != "claude":
@@ -21238,14 +21239,65 @@ def _ensure_dashboard_daemon(force=False):
         return "install-failed"
 
 
+def _daemon_served_version(port=None, total_timeout=2.0):
+    """Return the version string the LIVE daemon reports on /api/health, or None
+    if it can't be determined (no daemon, no HTTP, old daemon without the version
+    field, or timeout). Bounded total wait; never raises.
+
+    Used to verify a restart actually LANDED rather than trusting the service
+    manager's exit code -- an orphan we couldn't reap, or a job that failed to
+    bind, leaves the OLD version serving even though kickstart returned 0. A
+    None result means "unknown" and callers MUST treat it as a safe degrade
+    (assume restarted), never as proof of staleness: a pre-fix orphan has no
+    version field, and the reaper already kills those regardless.
+    """
+    if port is None:
+        port = DAEMON_PORT
+    import urllib.request
+    deadline = time.time() + total_timeout
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/health", timeout=1
+            ) as resp:
+                body = resp.read(2048).decode("utf-8", "replace")
+            data = json.loads(body)
+            ver = data.get("version")
+            if ver:
+                return str(ver)
+            # Reachable daemon but no version field -> old (pre-fix) code.
+            return None
+        except Exception:
+            time.sleep(0.2)
+            continue
+    return None
+
+
 def _restart_dashboard_daemon(system):
-    """Restart an installed-but-dead dashboard daemon via its service manager.
+    """Restart a dashboard daemon via its service manager, reaping any orphaned
+    port-holder first and verifying the restart actually landed.
 
     Factored out of run_ensure_health's auto-update block so the ensure path can
-    reuse the exact same kickstart/restart/Run calls. Returns 'restarted' or
-    'restart-failed'. Never raises.
+    reuse the exact same reap/kickstart/restart/Run calls. Returns 'restarted',
+    'restart-stale' (service restart ran but the OLD version is still serving),
+    or 'restart-failed'. Never raises.
+
+    WHY REAP FIRST: `launchctl kickstart -k` only restarts the launchd job's OWN
+    child. An orphaned dashboard-server.py -- from a prior label, a manual
+    launch, or ANOTHER runtime (Codex/OpenCode) on the same port -- survives the
+    restart and keeps binding DAEMON_PORT, serving the dashboard from its old
+    hardcoded measure.py path (the silent version-skew drift). Reaping the port
+    holder BEFORE restart frees the port so the service manager's fresh child
+    can bind. The reaper only SIGTERMs our own dashboard-server.py and never a
+    foreign process, so this is safe.
     """
     try:
+        # Reap our own orphaned port-holder first (never a foreign process).
+        try:
+            _reclaim_posix_daemon_port()
+        except Exception:
+            pass
+
         if system == "Darwin":
             uid = subprocess.run(
                 ["id", "-u"], capture_output=True, text=True
@@ -21271,9 +21323,49 @@ def _restart_dashboard_daemon(system):
             )
         else:
             return "restart-failed"
+
+        # Verify the restart LANDED: the process now serving DAEMON_PORT must
+        # report the CURRENT version. None (unknown -- no HTTP, or a pre-fix
+        # orphan without the version field) is a SAFE DEGRADE to 'restarted',
+        # never a false 'restart-stale'; the reap above already handles those.
+        served = _daemon_served_version()
+        if served is not None and served != TOKEN_OPTIMIZER_VERSION:
+            return "restart-stale"
         return "restarted"
     except Exception:
         return "restart-failed"
+
+
+def _apply_daemon_restart_outcome(restart_status):
+    """Apply escalation + resolve the honest log message for a restart result.
+
+    Extracted from run_ensure_health's auto-update block so the escalation
+    decision is unit-testable. Returns a (level, message) tuple; the caller logs
+    `message` to stdout for the success levels ('ok', 'ok-reinstall') and to
+    stderr otherwise ('stale', 'failed'). Never raises.
+
+    On 'restart-stale' the service restart ran but the OLD version is still
+    serving the port -- an orphan the service manager couldn't reap. Escalate by
+    killing the port holder DIRECTLY, THEN forcing a clean reinstall. Reaping
+    first is essential: an alive-but-wrong-version orphan makes the port read as
+    healthy, so _ensure_dashboard_daemon(force=True) would no-op ('noop-healthy')
+    without the reap.
+    """
+    if restart_status == "restarted":
+        return ("ok", f"Auto-updated daemon to v{TOKEN_OPTIMIZER_VERSION}")
+    if restart_status == "restart-stale":
+        try:
+            _reclaim_posix_daemon_port()
+        except Exception:
+            pass
+        escalated = _ensure_dashboard_daemon(force=True)
+        if escalated in ("installed", "restarted"):
+            return ("ok-reinstall",
+                    f"Auto-updated daemon to v{TOKEN_OPTIMIZER_VERSION} (via reinstall)")
+        return ("stale",
+                f"daemon still serving a stale version after auto-update "
+                f"({escalated}); run: measure.py setup-daemon")
+    return ("failed", "daemon restart failed after auto-update")
 
 
 # ========== Context Quality Analyzer (v2.0) ==========
@@ -33503,14 +33595,16 @@ def run_ensure_health():
                         )
                         for p, e in write_failures:
                             sys.stderr.write(f"  {p}: {e}\n")
-                    # Restart the daemon so the new script takes effect. Reuse
-                    # the shared per-OS restart helper (single source of truth for
-                    # kickstart / systemctl restart / schtasks End+Run).
-                    if _restart_dashboard_daemon(_normalized_platform()) == "restarted":
-                        print(f"  [Token Optimizer] Auto-updated daemon to v{TOKEN_OPTIMIZER_VERSION}")
+                    # Restart the daemon so the new script takes effect, then
+                    # apply escalation + honest logging. Extracted to
+                    # _apply_daemon_restart_outcome for testability (the reap /
+                    # kickstart / verify path is the single source of truth).
+                    _level, _msg = _apply_daemon_restart_outcome(
+                        _restart_dashboard_daemon(_normalized_platform()))
+                    if _level in ("ok", "ok-reinstall"):
+                        print(f"  [Token Optimizer] {_msg}")
                     else:
-                        print("  [Token Optimizer] daemon restart failed after auto-update",
-                              file=sys.stderr)
+                        print(f"  [Token Optimizer] {_msg}", file=sys.stderr)
     except Exception as _e:
         print(f"  [Token Optimizer] daemon auto-update check failed: {_e}", file=sys.stderr)
 
