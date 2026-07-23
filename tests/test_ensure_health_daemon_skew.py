@@ -23,6 +23,14 @@ sys.path.insert(0, str(SCRIPTS))
 import measure  # noqa: E402
 
 
+def _claude_runtime(monkeypatch):
+    """Force the escalation's do-no-harm gate to allow reinstall (Claude, enabled)."""
+    monkeypatch.setattr(measure, "_is_foreign_runtime", lambda: False)
+    monkeypatch.setattr(measure, "detect_runtime", lambda: "claude")
+    monkeypatch.setattr(measure, "_read_config_flag", lambda k, d=None: False)
+    monkeypatch.setattr(measure, "_normalized_platform", lambda: "Darwin")
+
+
 def test_restarted_reports_ok_without_reinstall(monkeypatch):
     calls = []
     monkeypatch.setattr(measure, "_reclaim_posix_daemon_port", lambda *a, **k: calls.append("REAP"))
@@ -36,6 +44,7 @@ def test_restarted_reports_ok_without_reinstall(monkeypatch):
 
 
 def test_stale_reaps_before_forcing_reinstall(monkeypatch):
+    _claude_runtime(monkeypatch)
     calls = []
     monkeypatch.setattr(measure, "_reclaim_posix_daemon_port", lambda *a, **k: calls.append("REAP"))
     monkeypatch.setattr(measure, "_ensure_dashboard_daemon", lambda *a, **k: (calls.append("FORCE"), "installed")[1])
@@ -50,6 +59,7 @@ def test_stale_reaps_before_forcing_reinstall(monkeypatch):
 
 
 def test_stale_reinstall_restarted_also_ok(monkeypatch):
+    _claude_runtime(monkeypatch)
     monkeypatch.setattr(measure, "_reclaim_posix_daemon_port", lambda *a, **k: None)
     monkeypatch.setattr(measure, "_ensure_dashboard_daemon", lambda *a, **k: "restarted")
 
@@ -59,6 +69,7 @@ def test_stale_reinstall_restarted_also_ok(monkeypatch):
 
 
 def test_stale_reinstall_failure_is_no_false_success(monkeypatch):
+    _claude_runtime(monkeypatch)
     monkeypatch.setattr(measure, "_reclaim_posix_daemon_port", lambda *a, **k: None)
     monkeypatch.setattr(measure, "_ensure_dashboard_daemon", lambda *a, **k: "noop-throttled")
 
@@ -70,6 +81,8 @@ def test_stale_reinstall_failure_is_no_false_success(monkeypatch):
 
 
 def test_stale_escalation_survives_reaper_exception(monkeypatch):
+    _claude_runtime(monkeypatch)
+
     def boom(*a, **k):
         raise RuntimeError("reap failed")
 
@@ -80,6 +93,34 @@ def test_stale_escalation_survives_reaper_exception(monkeypatch):
     level, msg = measure._apply_daemon_restart_outcome("restart-stale")
 
     assert level == "ok-reinstall"
+
+
+def test_stale_does_not_reap_on_non_claude_runtime(monkeypatch):
+    """Do-no-harm gate: never reap a daemon we can't replace (Codex etc)."""
+    _claude_runtime(monkeypatch)
+    monkeypatch.setattr(measure, "detect_runtime", lambda: "codex")
+    calls = []
+    monkeypatch.setattr(measure, "_reclaim_posix_daemon_port", lambda *a, **k: calls.append("REAP"))
+    monkeypatch.setattr(measure, "_ensure_dashboard_daemon", lambda *a, **k: calls.append("FORCE") or "installed")
+
+    level, msg = measure._apply_daemon_restart_outcome("restart-stale")
+
+    assert level == "stale"
+    assert calls == [], "must NOT reap when the reinstall would no-op (would leave user daemon-less)"
+
+
+def test_stale_does_not_reap_when_daemon_disabled(monkeypatch):
+    _claude_runtime(monkeypatch)
+    monkeypatch.setattr(measure, "_read_config_flag",
+                        lambda k, d=None: True if k == "daemon_disabled" else d)
+    calls = []
+    monkeypatch.setattr(measure, "_reclaim_posix_daemon_port", lambda *a, **k: calls.append("REAP"))
+    monkeypatch.setattr(measure, "_ensure_dashboard_daemon", lambda *a, **k: calls.append("FORCE") or "installed")
+
+    level, msg = measure._apply_daemon_restart_outcome("restart-stale")
+
+    assert level == "stale"
+    assert calls == [], "daemon_disabled: must not reap-and-abandon"
 
 
 def test_restart_failed_reports_failed(monkeypatch):

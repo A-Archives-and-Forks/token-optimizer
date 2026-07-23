@@ -21239,10 +21239,11 @@ def _ensure_dashboard_daemon(force=False):
         return "install-failed"
 
 
-def _daemon_served_version(port=None, total_timeout=2.0):
-    """Return the version string the LIVE daemon reports on /api/health, or None
-    if it can't be determined (no daemon, no HTTP, old daemon without the version
-    field, or timeout). Bounded total wait; never raises.
+def _daemon_served_version(port=None, total_timeout=None):
+    """Return the version string OUR live daemon reports on /api/health, or None
+    if it can't be determined (no daemon, no HTTP, a foreign listener, an old
+    daemon without the version field, or timeout). Bounded total wait; never
+    raises.
 
     Used to verify a restart actually LANDED rather than trusting the service
     manager's exit code -- an orphan we couldn't reap, or a job that failed to
@@ -21250,9 +21251,22 @@ def _daemon_served_version(port=None, total_timeout=2.0):
     None result means "unknown" and callers MUST treat it as a safe degrade
     (assume restarted), never as proof of staleness: a pre-fix orphan has no
     version field, and the reaper already kills those regardless.
+
+    IDENTITY: only trusts the response when `server == "token-optimizer-daemon"`,
+    mirroring _verify_daemon_port's magic-string check, so a foreign listener on
+    the port that happens to return JSON with a "version" key is ignored.
+
+    BUDGET: default wait is short (TOKEN_OPTIMIZER_DAEMON_VERIFY_TIMEOUT, 2.0s)
+    because this runs inside the SessionStart hook. A slow-cold-start install
+    (large trends DB) can exceed it, in which case the probe returns None and
+    the caller safe-degrades -- the reap already did the real work; the probe is
+    belt-and-suspenders. Operators who want a stronger landing check can raise
+    the env knob.
     """
     if port is None:
         port = DAEMON_PORT
+    if total_timeout is None:
+        total_timeout = _float_env("TOKEN_OPTIMIZER_DAEMON_VERIFY_TIMEOUT", 2.0)
     import urllib.request
     deadline = time.time() + total_timeout
     while time.time() < deadline:
@@ -21262,10 +21276,13 @@ def _daemon_served_version(port=None, total_timeout=2.0):
             ) as resp:
                 body = resp.read(2048).decode("utf-8", "replace")
             data = json.loads(body)
+            if data.get("server") != "token-optimizer-daemon":
+                # A foreign listener on our port -> not ours; unknown, degrade.
+                return None
             ver = data.get("version")
             if ver:
                 return str(ver)
-            # Reachable daemon but no version field -> old (pre-fix) code.
+            # Reachable OUR daemon but no version field -> old (pre-fix) code.
             return None
         except Exception:
             time.sleep(0.2)
@@ -21290,8 +21307,18 @@ def _restart_dashboard_daemon(system):
     holder BEFORE restart frees the port so the service manager's fresh child
     can bind. The reaper only SIGTERMs our own dashboard-server.py and never a
     foreign process, so this is safe.
+
+    IDEMPOTENCY / RACE GUARD: if the port is ALREADY serving the current version
+    -- e.g. a sibling SessionStart just restarted it -- do nothing and report
+    success. Without this, two near-simultaneous sessions race: session B's reap
+    would SIGTERM session A's freshly-bound correct daemon, causing a restart
+    flap. Checking the served version first makes the whole restart idempotent.
     """
     try:
+        # Already current (a sibling session fixed it)? Do not reap/restart.
+        if _daemon_served_version() == TOKEN_OPTIMIZER_VERSION:
+            return "restarted"
+
         # Reap our own orphaned port-holder first (never a foreign process).
         try:
             _reclaim_posix_daemon_port()
@@ -21350,10 +21377,27 @@ def _apply_daemon_restart_outcome(restart_status):
     first is essential: an alive-but-wrong-version orphan makes the port read as
     healthy, so _ensure_dashboard_daemon(force=True) would no-op ('noop-healthy')
     without the reap.
+
+    DO-NO-HARM GATE: only escalate when the forced reinstall can ACTUALLY run.
+    _ensure_dashboard_daemon early-returns a noop under a non-Claude runtime
+    (e.g. Codex, which has its own daemon), a `daemon_disabled` opt-out, or an
+    unsupported platform -- and `force` bypasses only the throttle, not those
+    gates. Reaping and then no-op'ing the reinstall would leave the user with NO
+    daemon (worse than a stale-but-alive one). In those cases, leave the running
+    daemon in place and log honestly.
     """
     if restart_status == "restarted":
         return ("ok", f"Auto-updated daemon to v{TOKEN_OPTIMIZER_VERSION}")
     if restart_status == "restart-stale":
+        if (_is_foreign_runtime()
+                or detect_runtime() != "claude"
+                or _read_config_flag("daemon_disabled", False)
+                or _normalized_platform() not in ("Darwin", "Linux", "Windows")):
+            # A forced reinstall would no-op here -- do not reap a daemon we
+            # cannot replace. Leave the stale-but-alive daemon running.
+            return ("stale",
+                    "daemon serving a stale version after auto-update; "
+                    "run: measure.py setup-daemon")
         try:
             _reclaim_posix_daemon_port()
         except Exception:
@@ -33626,6 +33670,13 @@ def run_ensure_health():
                   "Opt out anytime: measure.py setup-daemon --uninstall")
         elif _daemon_ensure == "restarted":
             print("  [Token Optimizer] Restarted the dashboard daemon.")
+        elif _daemon_ensure == "restart-stale":
+            # The dead-daemon restart came back still serving a stale version --
+            # surface it instead of swallowing it silently until the throttle
+            # window (a crashed-on-bind daemon would otherwise go unreported).
+            print("  [Token Optimizer] dashboard daemon restarted but still "
+                  "serving a stale version; run: measure.py setup-daemon",
+                  file=sys.stderr)
     except Exception as _e:
         print(f"  [Token Optimizer] dashboard daemon self-heal failed: {_e}", file=sys.stderr)
 
