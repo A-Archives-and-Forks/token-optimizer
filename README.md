@@ -154,6 +154,7 @@ Quickest path (Claude Code plugin install):
 - 🔍 **Progressive Disclosure**: large outputs archived, expand on demand
 - 🧠 **Context Intel Digest**: post-compaction re-orientation without re-reads
 - 🔀 **Model Routing Nudges**: steers to the right tier for the task
+- 🎯 **Per-Task Model + Effort Advisor**: `route --task "..."` answers in your platform's own model names and effort knob, with a floor that keeps cheap models on easy work only
 
 **When you ask for it:**
 
@@ -564,6 +565,40 @@ Generate model routing instructions from your actual usage data and inject them 
 python3 measure.py inject-routing --dry-run   # Preview
 python3 measure.py inject-routing              # Inject
 ```
+
+### Per-Task Model + Effort Advisor
+
+Ask, before you spend: which model and how much reasoning does *this* task deserve? The advisor
+classifies the task locally (no API call, deterministic) and answers in your current platform's
+own vocabulary.
+
+```bash
+python3 measure.py route --task "fix a typo in the README"
+#   model:  haiku
+#   effort: low  (thinking budget)
+#   why:    easy task (high confidence, simple) -> budget model at low effort
+
+python3 measure.py route --task "migrate the production auth database schema"
+#   model:  opus
+#   effort: high  (thinking budget)
+#   why:    hard task (high confidence, simple) -> capable model at high effort
+
+python3 measure.py route --task "..." --json    # machine-readable
+```
+
+**Speaks each platform natively.** On Codex the same command returns Codex model names and its
+real knob: `gpt-5.6-luna` at `low` `model_reasoning_effort` for the typo, `gpt-5.6-sol` at `high`
+for the migration. Claude maps effort to thinking budget; Codex to `model_reasoning_effort`;
+OpenCode, Hermes and Copilot get it as an explicit prompt directive.
+
+**The floor is the guarantee.** A very cheap model or a minimal/low effort can only ever stand for
+a genuinely easy task. Anything classified standard or hard is structurally prevented from landing
+on the budget tier, and an uncertain call is promoted rather than under-spent. Cheap on the small
+stuff is only a saving if it never quietly happens to the big stuff.
+
+**Uses your real models where they're yours to pick.** OpenCode's ladder is read from your
+`opencode.json` (`model` / `small_model`), so it recommends the models you actually configured
+rather than a generic default.
 
 </details>
 
