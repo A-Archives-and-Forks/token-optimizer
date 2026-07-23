@@ -1,6 +1,6 @@
 {
   "name": "token-optimizer",
-  "version": "5.11.56",
+  "version": "5.11.57",
   "description": "Audit, monitor, and reduce Codex context waste with continuity helpers and explicit outline tools.",
   "skills": "./skills/",
   "interface": {
