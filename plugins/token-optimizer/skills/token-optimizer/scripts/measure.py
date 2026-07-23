@@ -7386,10 +7386,13 @@ def _cmd_route(args):
     import json as _json
     as_json = "--json" in args
     task = ""
+    _eq = [a for a in args if a.startswith("--task=")]
     if "--task" in args:
         i = args.index("--task")
         if i + 1 < len(args):
             task = args[i + 1]
+    elif _eq:
+        task = _eq[-1][len("--task="):]
     else:
         # Positional task: keep every token except the recognized --json flag so
         # task words that happen to start with "--" are not silently dropped.
@@ -7398,11 +7401,13 @@ def _cmd_route(args):
         import routing_advisor
         rec = routing_advisor.recommend(task, detect_runtime())
     except Exception as _e:
-        # Router module unavailable: a real, non-cheap default rather than a
-        # placeholder model name.
+        # Router module unavailable: a real, non-cheap default with the same
+        # keys as a normal recommendation so JSON consumers never KeyError.
         rec = {
             "model": "sonnet", "effort": "medium", "significance": "standard",
-            "confidence": "low", "effort_knob": "effort",
+            "confidence": "low", "category": "simple", "tier": "mid",
+            "effort_kind": "advisory", "effort_knob": "effort",
+            "floor": {"min_tier": "mid", "min_effort": "medium"},
             "why": f"router unavailable ({type(_e).__name__}); safe default",
         }
     if as_json:
@@ -7452,12 +7457,16 @@ def generate_model_routing_block(trends=None):
             trends = _collect_trends_data(days=30)
         except Exception:
             trends = None
-    model_mix = (trends or {}).get("model_mix", {})
-    total = sum(model_mix.values()) if model_mix else 0
-    if total:
-        top = ", ".join(f"{round(v / total * 100)}% {k}"
-                        for k, v in sorted(model_mix.items(), key=lambda kv: -kv[1])[:3])
-        lines.append(f"- Your last 30 days: {top}.")
+    try:
+        model_mix = (trends or {}).get("model_mix", {})
+        total = sum(model_mix.values()) if isinstance(model_mix, dict) else 0
+        if total:
+            top = ", ".join(f"{round(v / total * 100)}% {k}"
+                            for k, v in sorted(model_mix.items(), key=lambda kv: -kv[1])[:3])
+            lines.append(f"- Your last 30 days: {top}.")
+    except Exception:
+        # Malformed trends never break the routing policy block.
+        pass
 
     return "\n".join(lines)
 
