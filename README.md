@@ -321,9 +321,9 @@ Disable: `TOKEN_OPTIMIZER_BASH_COMPRESS=0` (search compression is part of bash c
 
 ### Lean-Output Nudges
 
-When context fills past 20% and quality drops, a short nudge tells the model to reason deeply but keep visible output lean. The saving is **estimated at 10-15%, not measured**: the counterfactual (what the model would have written without the nudge) cannot be observed, so Token Optimizer reports this in the estimated tier and never folds it into metered savings. Cache-safe: injected as `additionalContext`, never modifies the existing prefix.
+When context fills past 25%, a short nudge tells the model to reason deeply but keep visible output lean. Fill is the only condition — quality no longer gates it, so an ordinary healthy session gets the nudge too, not just a long degraded one. The saving is **estimated at 10-15%, not measured**: the counterfactual (what the model would have written without the nudge) cannot be observed, so Token Optimizer reports this in the estimated tier and never folds it into metered savings. Cache-safe: injected as `additionalContext`, never modifies the existing prefix.
 
-No on/off switch today (not a `v5` feature). Tune the trigger point with `TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL` (default `20`).
+No on/off switch today (not a `v5` feature). Tune the trigger point with `TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL` (default `25`).
 
 ### Quality Nudges
 
@@ -442,14 +442,14 @@ python3 measure.py setup-smart-compact    # checkpoint + restore hooks
 
 Output tokens are the most expensive part of your session. They cost 5x more than input tokens on Opus and are billed per generation, not per cache read. A verbose response to a simple question burns dollars you never needed to spend.
 
-Token Optimizer handles this automatically with **lean-output nudges**. When your context fills past 20% and quality starts dropping, a short nudge tells the model to reason deeply but keep visible output lean. The reduction is **estimated at 10-15% and is not counterfactually measured**, so it is reported in the estimated tier, separately from metered savings.
+Token Optimizer handles this automatically with **lean-output nudges**. When your context fills past 25%, a short nudge tells the model to reason deeply but keep visible output lean. Fill is the only trigger; context quality is not a condition. The reduction is **estimated at 10-15% and is not counterfactually measured**, so it is reported in the estimated tier, separately from metered savings.
 
 **How it works:**
 
 - The nudge is injected as `additionalContext`, never modifying the existing prefix, so your cache stays intact
 - It only fires when context is filling up, not when you have plenty of room
 - The model still thinks through the problem; it just produces a more concise visible answer
-- No on/off switch today; tune the trigger point with `TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL` (default `20`)
+- No on/off switch today; tune the trigger point with `TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL` (default `25`)
 
 This is one of the 9 active compression features, and it's the one that saves on the output side, where tokens cost the most.
 

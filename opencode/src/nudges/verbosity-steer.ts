@@ -4,7 +4,7 @@
  * measure.py.
  *
  * Tiered messaging:
- *   25-74% fill + degraded quality (<75)  → gentle nudge
+ *   25-74% fill (quality is not a condition)  → gentle nudge
  *   75-89% fill                           → strong nudge with specific directives
  *   90%+ fill                             → suppressed (adding tokens makes it worse)
  *
@@ -20,7 +20,6 @@ const SESSION_CAP = 3;
 const GENTLE_FILL_THRESHOLD = 25;
 const STRONG_FILL_THRESHOLD = 75;
 const CRITICAL_FILL_THRESHOLD = 90;
-const QUALITY_THRESHOLD = 75;
 
 export interface VerbositySteerResult {
   shouldNudge: boolean;
@@ -56,8 +55,12 @@ export function checkVerbositySteer(
     return { shouldNudge: true, message, tier: "strong" };
   }
 
-  // Gentle tier: 25%+ fill with degraded quality
-  if (fillPct >= GENTLE_FILL_THRESHOLD && qualityScore < QUALITY_THRESHOLD) {
+  // Gentle tier: 25%+ fill, on fill alone. The old second condition
+  // (quality < 75) meant this only ever reached sessions that had already
+  // degraded -- i.e. very long ones -- so most users never saw it. Cost scales
+  // with fill regardless of how clean the context is; the session cap and
+  // cooldown are what keep it from becoming noise.
+  if (fillPct >= GENTLE_FILL_THRESHOLD) {
     const message =
       `[Token Optimizer] Context at ${Math.round(fillPct)}% capacity, quality ${Math.round(qualityScore)}/100. ` +
       "Reason fully, then keep your output lean — skip restating the request and " +
