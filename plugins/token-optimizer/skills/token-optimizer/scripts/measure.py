@@ -28231,12 +28231,15 @@ def _maybe_progressive_checkpoint(fill_pct, cache_path, result, filepath):
 
 _NUDGE_COOLDOWN_SECONDS = 300  # 5 minutes between nudges
 
-# Fill % at which the gentle lean-output nudge becomes eligible (it still also
-# requires a degraded quality score -- fill alone never fires it). Lowered from
-# 25 to 20: verbose output starts costing real money well
-# before the context is a quarter full, and the quality gate keeps a healthy
-# session quiet regardless. Named + env-tunable rather than inline, because the
-# previous magic 25 was documented as three different numbers across the docs.
+# Fill % at which the gentle lean-output nudge fires. Fill ALONE is the
+# trigger: the old second condition (quality score < 75) meant the gentle tier
+# only reached people whose sessions had already degraded, i.e. very long ones,
+# so ordinary sessions never saw it at all. Cost scales with fill regardless of
+# how clean the context is -- a healthy session a quarter full is still paying
+# for verbose output -- and the 3-nudge cap plus the 5-minute cooldown are what
+# keep it from becoming background noise. Named + env-tunable rather than
+# inline, because the previous magic 25 was documented as three different
+# numbers across the docs.
 def _verbosity_nudge_min_fill() -> int:
     """Resolve the gentle-tier floor, clamped to the range where it means
     anything.
@@ -28248,7 +28251,7 @@ def _verbosity_nudge_min_fill() -> int:
     becomes unreachable and the feature silently does nothing. Both are
     misconfigurations a user would never see, so clamp loudly instead.
     """
-    raw = _int_env("TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL", 20)
+    raw = _int_env("TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL", 25)
     clamped = max(1, min(raw, 74))
     if clamped != raw:
         print(
@@ -34278,8 +34281,9 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
     Returns the JSON string if a nudge was emitted, empty string otherwise.
 
     Tiered messaging:
-      20-74% fill + degraded quality  → gentle nudge (floor is
-                                        _VERBOSITY_NUDGE_MIN_FILL)
+      25-74% fill                     → gentle nudge (floor is
+                                        _VERBOSITY_NUDGE_MIN_FILL; fill alone,
+                                        quality does not gate it)
       75-89% fill                     → strong nudge with specific directives
       90%+ fill                        → suppressed (adding tokens makes it worse)
 
@@ -34423,7 +34427,7 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
                 "that is not the answer itself. Think as long as you need, and size code, "
                 "diffs and file contents to the task."
             )
-        elif fill_pct >= _VERBOSITY_NUDGE_MIN_FILL and score < 75:
+        elif fill_pct >= _VERBOSITY_NUDGE_MIN_FILL:
             nudge = (
                 f"[Token Optimizer] Context {fill_pct:.0f}%{window_note}, quality {score:.0f}/100. "
                 "Answer in a focused and spartan way, as if the user has ADHD. "

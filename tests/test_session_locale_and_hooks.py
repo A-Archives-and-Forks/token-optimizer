@@ -135,34 +135,42 @@ def _probe(fill, **kw):
 _TP = measure.__file__
 print('AT30:' + ('1' if _probe(30, transcript_path=_TP) else '0'))
 print('AT25:' + ('1' if _probe(25, transcript_path=_TP) else '0'))
-print('AT20:' + ('1' if _probe(20, transcript_path=_TP) else '0'))
+print('AT24:' + ('1' if _probe(24, transcript_path=_TP) else '0'))
 print('AT19:' + ('1' if _probe(19, transcript_path=_TP) else '0'))
-# Fill alone must never fire it: a healthy session stays quiet at any fill
-# below the strong tier, which is the guard that keeps the nudge from
-# becoming background noise.
+# Fill ALONE fires it. A pristine session at 30% fill still pays for verbose
+# output, and the old quality<75 second condition meant the gentle tier only
+# ever reached sessions that had already degraded -- i.e. very long ones --
+# so most users never saw it.
 measure._read_quality_cache = lambda cp: {
-    'fill_pct': 30, 'score': 90, 'nudge_count': 0, 'last_nudge_time': 0,
+    'fill_pct': 30, 'score': 100, 'nudge_count': 0, 'last_nudge_time': 0,
 }
 print('HEALTHY30:' + ('1' if measure.run_verbosity_steer(quiet=True, transcript_path=_TP) else '0'))
+# ...but a healthy session BELOW the floor still stays quiet, so "fill alone"
+# did not become "always".
+measure._read_quality_cache = lambda cp: {
+    'fill_pct': 15, 'score': 100, 'nudge_count': 0, 'last_nudge_time': 0,
+}
+print('HEALTHY15:' + ('1' if measure.run_verbosity_steer(quiet=True, transcript_path=_TP) else '0'))
 # Guard: no transcript_path and no session_id means the transcript was inferred
 # and cannot be verified. A brand-new session must not inherit these numbers.
 print('NOIDENT:' + ('1' if _probe(30) else '0'))
 """
 
 
-def test_lean_nudge_boundary_is_20pct():
-    """The gentle tier's floor is _VERBOSITY_NUDGE_MIN_FILL, lowered 25 -> 20.
-    The boundary is pinned on both sides so a future edit
-    cannot quietly widen or narrow it, and HEALTHY30 pins the second condition:
-    fill alone never fires the nudge, quality must also be degraded."""
+def test_lean_nudge_boundary_is_25pct():
+    """The gentle tier's floor is _VERBOSITY_NUDGE_MIN_FILL, back to 25, and
+    fill is now the ONLY condition. The boundary is pinned on both sides so a
+    future edit cannot quietly widen or narrow it; HEALTHY30 pins the removal
+    of the quality gate, and HEALTHY15 pins that the floor still holds."""
     r = _run(_LEAN_PROBE)
     assert r.returncode == 0, f"lean probe crashed: {r.stderr}"
     out = r.stdout
     assert "AT30:1" in out, f"gentle nudge should fire at 30% fill: {out!r}"
-    assert "AT25:1" in out, f"gentle nudge should fire at 25% fill: {out!r}"
-    assert "AT20:1" in out, f"gentle nudge should fire at exactly 20% fill: {out!r}"
+    assert "AT25:1" in out, f"gentle nudge should fire at exactly 25% fill: {out!r}"
+    assert "AT24:0" in out, f"gentle nudge should NOT fire at 24% fill: {out!r}"
     assert "AT19:0" in out, f"gentle nudge should NOT fire at 19% fill: {out!r}"
-    assert "HEALTHY30:0" in out, f"a healthy session must not nudge on fill alone: {out!r}"
+    assert "HEALTHY30:1" in out, f"fill alone must fire the nudge at 30%: {out!r}"
+    assert "HEALTHY15:0" in out, f"below the floor must stay quiet: {out!r}"
     # Session identity guard: an inferred transcript with no session_id to verify
     # it against must stay silent, even at a fill that would otherwise nudge.
     # This is the observed bug -- a nudge fired on the first prompt of an empty
@@ -180,7 +188,7 @@ def test_verbosity_min_fill_is_clamped():
         "import measure\n"
         "print('V:' + str(measure._VERBOSITY_NUDGE_MIN_FILL))\n"
     )
-    for raw, want in (("-5", 1), ("0", 1), ("20", 20), ("74", 74), ("999", 74), ("abc", 20)):
+    for raw, want in (("-5", 1), ("0", 1), ("20", 20), ("74", 74), ("999", 74), ("abc", 25)):
         env = dict(os.environ, TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL=raw)
         r = subprocess.run(
             [sys.executable, "-c", probe], cwd=str(MEASURE.parent),
