@@ -32,7 +32,7 @@ No data leaves the machine at any point in this flow.
 | trends.db (SQLite) | Per-session aggregates: token counts, model usage, cost estimates, session UUIDs | Configurable (`TOKEN_OPTIMIZER_TRENDS_RETENTION_DAYS`, default: unlimited) | `<plugin-data>/data/trends.db` |
 | Session stores (SQLite) | File read records, content hashes, cached file content (up to 50KB/file, credential-redacted), activity log | Auto-deleted after 48 hours | `<plugin-data>/data/session-store/<id>.db` |
 | Checkpoints (markdown) | Truncated conversation context (up to 300 chars of last user/assistant message), extracted decisions, error snippets | Configurable (`TOKEN_OPTIMIZER_CHECKPOINT_RETENTION_DAYS`, default: 7 days, max 50 files) | `~/.claude/token-optimizer/checkpoints/` |
-| Tool archives (JSON) | Credential-redacted tool output for retrieval | Configurable (`TOKEN_OPTIMIZER_ARCHIVE_RETENTION_HOURS`, default: 24 hours) | `<plugin-data>/data/tool-archive/` |
+| Tool archives (JSON) | Credential-redacted tool output for retrieval | Configurable (`TOKEN_OPTIMIZER_ARCHIVE_RETENTION_HOURS`, default: 24 hours); aggregate caps: 1,000 files / 100 MiB | `<plugin-data>/data/tool-archive/` |
 | Quality cache (JSON) | Per-session quality score snapshots | Configurable (`TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS`, default: 7 days) | `~/.claude/token-optimizer/quality-cache-*.json` |
 | Config (JSON) | Feature flags, consent status, pricing tier | Persistent until purge | `~/.claude/token-optimizer/config.json` |
 | Dashboard (HTML) | Generated visualization | Regenerated on demand | `<plugin-data>/data/dashboard.html` |

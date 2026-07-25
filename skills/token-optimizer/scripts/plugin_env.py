@@ -27,7 +27,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sys
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -85,6 +87,27 @@ def _safe_load_json(path: Path):
         return None
 
 
+def _registered_plugin_data_dirs() -> list[Path]:
+    """Return safe identities still referenced by installed_plugins.json."""
+    candidates: list[Path] = []
+    registry = _safe_load_json(_INSTALLED_PLUGINS)
+    if not isinstance(registry, dict):
+        return candidates
+    plugins = registry.get("plugins", {})
+    if not isinstance(plugins, dict):
+        return candidates
+    for key in plugins:
+        if not isinstance(key, str) or not key.startswith(_PLUGIN_NAME + "@"):
+            continue
+        marketplace = key.split("@", 1)[1]
+        if not _SAFE_MARKETPLACE_NAME.match(marketplace):
+            continue
+        candidate = _PLUGIN_DATA_BASE / f"{_PLUGIN_NAME}-{marketplace}"
+        if _is_safe_subdir(candidate, _PLUGIN_DATA_BASE):
+            candidates.append(candidate)
+    return sorted(set(candidates), key=lambda path: path.name)
+
+
 @lru_cache(maxsize=1)
 def resolve_plugin_data_dir() -> Path | None:
     """Return the active plugin-data directory.
@@ -92,7 +115,7 @@ def resolve_plugin_data_dir() -> Path | None:
     Priority:
       1. Runtime-appropriate plugin data env var
       2. installed_plugins.json lookup for the active marketplace install
-      3. Glob fallback to most-recently-modified token-optimizer-* data dir
+      3. Stable lexical glob fallback across token-optimizer-* data dirs
       4. None (caller falls back to the legacy _backups/ path)
 
     All discovered paths are confined under the active runtime's plugin-data
@@ -109,21 +132,7 @@ def resolve_plugin_data_dir() -> Path | None:
         except (OSError, ValueError):
             pass
 
-    candidates: list[Path] = []
-
-    registry = _safe_load_json(_INSTALLED_PLUGINS)
-    if isinstance(registry, dict):
-        plugins = registry.get("plugins", {})
-        if isinstance(plugins, dict):
-            for key in plugins:
-                if not isinstance(key, str) or not key.startswith(_PLUGIN_NAME + "@"):
-                    continue
-                marketplace = key.split("@", 1)[1]
-                if not _SAFE_MARKETPLACE_NAME.match(marketplace):
-                    continue
-                candidate = _PLUGIN_DATA_BASE / f"{_PLUGIN_NAME}-{marketplace}"
-                if _is_safe_subdir(candidate, _PLUGIN_DATA_BASE):
-                    candidates.append(candidate)
+    candidates = _registered_plugin_data_dirs()
 
     if not candidates:
         try:
@@ -137,11 +146,156 @@ def resolve_plugin_data_dir() -> Path | None:
     if not candidates:
         return None
 
+    candidates.sort(key=lambda p: p.name)
+    return candidates[0]
+
+
+def _all_plugin_data_dirs() -> list[Path]:
+    """Return every safe Token Optimizer identity in deterministic order."""
+    candidates: list[Path] = []
     try:
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        if _PLUGIN_DATA_BASE.is_dir():
+            for path in _PLUGIN_DATA_BASE.glob(f"{_PLUGIN_NAME}-*"):
+                if _is_safe_subdir(path, _PLUGIN_DATA_BASE):
+                    candidates.append(path)
     except OSError:
         pass
-    return candidates[0]
+    return sorted(set(candidates), key=lambda path: path.name)
+
+
+def find_sibling_plugin_data_dirs(active: Path | None = None) -> list[Path]:
+    """Return safe plugin-data identities other than the active identity."""
+    active = active if active is not None else resolve_plugin_data_dir()
+    try:
+        active_resolved = active.resolve(strict=False) if active is not None else None
+    except (OSError, ValueError):
+        active_resolved = None
+    siblings: list[Path] = []
+    for candidate in _all_plugin_data_dirs():
+        try:
+            if active_resolved is not None and candidate.resolve(strict=False) == active_resolved:
+                continue
+        except (OSError, ValueError):
+            continue
+        siblings.append(candidate)
+    return siblings
+
+
+def snapshot_dir_candidates() -> list[Path]:
+    """Return active then sibling snapshot roots for read-side recovery."""
+    override = os.environ.get("TOKEN_OPTIMIZER_SNAPSHOT_DIR", "").strip()
+    if override:
+        return [Path(override).expanduser()]
+    active = resolve_plugin_data_dir()
+    candidates: list[Path] = []
+    if active is not None:
+        candidates.append(active / "data")
+    candidates.extend(path / "data" for path in find_sibling_plugin_data_dirs(active))
+    if not candidates:
+        candidates.append(_LEGACY_BACKUP_DIR)
+    return candidates
+
+
+def _latest_tree_mtime(path: Path) -> float | None:
+    """Return newest mtime, treating symlinks/read errors as non-reclaimable."""
+    try:
+        latest = os.lstat(path).st_mtime
+        errors: list[OSError] = []
+        for root, dirnames, filenames in os.walk(
+            path,
+            followlinks=False,
+            onerror=errors.append,
+        ):
+            root_path = Path(root)
+            for name in [*dirnames, *filenames]:
+                item = root_path / name
+                if item.is_symlink():
+                    return None
+                latest = max(latest, os.lstat(item).st_mtime)
+        if errors:
+            return None
+        return latest
+    except OSError:
+        return None
+
+
+def _announce_orphan_reclamation(message: str, active: Path | None) -> None:
+    """Emit to stderr and persist destructive-action notices when possible."""
+    print(message, file=sys.stderr)
+    if active is None:
+        return
+    try:
+        log_dir = active / "data"
+        log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(log_dir, 0o700)
+        log_path = log_dir / "orphan-reclamation.log"
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{int(time.time())} {message}\n")
+        os.chmod(log_path, 0o600)
+    except OSError:
+        pass
+
+
+def reclaim_orphaned_plugin_data_dirs(min_age_days: int | None = None) -> list[Path]:
+    """Reclaim old sibling identities only with explicit user opt-in.
+
+    Detection is always safe and announced. Deletion requires
+    TOKEN_OPTIMIZER_RECLAIM_ORPHANED_DATA=1, a minimum seven-day age gate, a
+    symlink-free readable tree, and an identity distinct from the active one.
+    """
+    if min_age_days is None:
+        try:
+            min_age_days = int(os.environ.get(
+                "TOKEN_OPTIMIZER_ORPHAN_RETENTION_DAYS", "30"
+            ))
+        except (TypeError, ValueError):
+            min_age_days = 30
+    min_age_days = max(7, min_age_days)
+    cutoff = time.time() - (min_age_days * 86400)
+    active = resolve_plugin_data_dir()
+    registered = {
+        path.resolve(strict=False) for path in _registered_plugin_data_dirs()
+    }
+    if not registered:
+        return []
+    eligible = [
+        path for path in find_sibling_plugin_data_dirs(active)
+        if path.resolve(strict=False) not in registered
+        and (latest := _latest_tree_mtime(path)) is not None
+        and latest < cutoff
+    ]
+    if not eligible:
+        return []
+    opted_in = os.environ.get(
+        "TOKEN_OPTIMIZER_RECLAIM_ORPHANED_DATA", ""
+    ).strip().lower() in _TRUTHY_ENV
+    if not opted_in:
+        names = ", ".join(path.name for path in eligible)
+        print(
+            "[Token Optimizer] Old orphaned plugin data detected but not deleted: "
+            f"{names}. Set TOKEN_OPTIMIZER_RECLAIM_ORPHANED_DATA=1 to reclaim "
+            f"identities inactive for at least {min_age_days} days.",
+            file=sys.stderr,
+        )
+        return []
+    removed: list[Path] = []
+    for path in eligible:
+        try:
+            shutil.rmtree(path)
+            if not path.exists():
+                removed.append(path)
+                _announce_orphan_reclamation(
+                    "[Token Optimizer] Reclaimed orphaned plugin data identity: "
+                    f"{path.name}",
+                    active,
+                )
+        except OSError as exc:
+            _announce_orphan_reclamation(
+                "[Token Optimizer] Could not reclaim orphaned plugin data identity "
+                f"{path.name}: {exc.__class__.__name__}",
+                active,
+            )
+    return removed
 
 
 def resolve_snapshot_dir() -> Path:
