@@ -60,6 +60,9 @@ _ARCHIVE_THRESHOLD = 4096       # chars: only archive results >= this size
 _ARCHIVE_PREVIEW_SIZE = 1500    # chars: preview included in replacement output
 _ARCHIVE_MAX_SIZE = 5_242_880   # 5MB: truncate responses beyond this
 _STDIN_MAX_BYTES = _ARCHIVE_MAX_SIZE + 262_144  # 5MB response plus JSON overhead
+_ARCHIVE_RETENTION_HOURS_DEFAULT = 24
+_ARCHIVE_RETENTION_MAX_FILES_DEFAULT = 1000
+_ARCHIVE_RETENTION_MAX_BYTES_DEFAULT = 104_857_600  # 100 MiB
 
 # WS4: Agent/Task result progressive disclosure — shipped MEASURE-ONLY.
 #
@@ -154,28 +157,104 @@ def _redact_credentials(text: str) -> str:
     return text
 
 
-def cleanup_old_archives(max_age_hours: int = 48, skip_session_id: str | None = None) -> int:
-    """Delete tool-archive session directories older than max_age_hours.
+def _int_env(name: str, default: int) -> int:
+    """Read a non-negative integer without adding a heavy config import."""
+    try:
+        value = int(os.environ.get(name, str(default)))
+        return value if value >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _archive_tree_usage(session_dir: Path) -> tuple[int, int]:
+    """Return (regular-file count, bytes) without following symlinks."""
+    files = 0
+    total_bytes = 0
+    for root, dirnames, filenames in os.walk(session_dir, followlinks=False):
+        root_path = Path(root)
+        dirnames[:] = [
+            name for name in dirnames
+            if not (root_path / name).is_symlink()
+        ]
+        for name in filenames:
+            path = root_path / name
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                files += 1
+                total_bytes += os.lstat(path).st_size
+            except OSError:
+                continue
+    return files, total_bytes
+
+
+def cleanup_old_archives(
+    max_age_hours: int | None = None,
+    skip_session_id: str | None = None,
+) -> int:
+    """Delete expired archives and enforce aggregate file/byte caps.
 
     Best-effort: individual OSError is swallowed so a locked or missing
-    directory never aborts the hook. Returns the count of removed dirs.
+    directory never aborts the hook. The hot path reads its knobs locally to
+    avoid importing measure.py. Returns the count of removed session dirs.
     """
     archive_root = SNAPSHOT_DIR / "tool-archive"
     if not archive_root.exists() or archive_root.is_symlink():
         return 0
+    if max_age_hours is None:
+        max_age_hours = _int_env(
+            "TOKEN_OPTIMIZER_ARCHIVE_RETENTION_HOURS",
+            _ARCHIVE_RETENTION_HOURS_DEFAULT,
+        )
+    max_files = _int_env(
+        "TOKEN_OPTIMIZER_ARCHIVE_RETENTION_MAX_FILES",
+        _ARCHIVE_RETENTION_MAX_FILES_DEFAULT,
+    )
+    max_bytes = _int_env(
+        "TOKEN_OPTIMIZER_ARCHIVE_RETENTION_MAX_BYTES",
+        _ARCHIVE_RETENTION_MAX_BYTES_DEFAULT,
+    )
     cutoff = time.time() - (max_age_hours * 3600)
     removed = 0
     skip_sid = _sanitize_session_id(skip_session_id) if skip_session_id else None
-    for session_dir in archive_root.iterdir():
+    sessions: list[tuple[float, Path, int, int]] = []
+    try:
+        candidates = list(archive_root.iterdir())
+    except OSError:
+        return 0
+    for session_dir in candidates:
         if skip_sid and session_dir.name == skip_sid:
-            continue
+            removable = False
+        else:
+            removable = True
         if session_dir.is_symlink() or not session_dir.is_dir():
             continue
         try:
-            if os.lstat(session_dir).st_mtime < cutoff:
+            mtime = os.lstat(session_dir).st_mtime
+            if removable and mtime < cutoff:
                 shutil.rmtree(session_dir, ignore_errors=True)
                 if not session_dir.exists():
                     removed += 1
+                continue
+            file_count, byte_count = _archive_tree_usage(session_dir)
+            sessions.append((mtime, session_dir, file_count, byte_count))
+        except OSError:
+            pass
+    total_files = sum(item[2] for item in sessions)
+    total_bytes = sum(item[3] for item in sessions)
+    for _mtime, session_dir, file_count, byte_count in sorted(sessions):
+        over_files = max_files > 0 and total_files > max_files
+        over_bytes = max_bytes > 0 and total_bytes > max_bytes
+        if not (over_files or over_bytes):
+            break
+        if skip_sid and session_dir.name == skip_sid:
+            continue
+        try:
+            shutil.rmtree(session_dir, ignore_errors=True)
+            if not session_dir.exists():
+                removed += 1
+                total_files -= file_count
+                total_bytes -= byte_count
         except OSError:
             pass
     return removed
@@ -888,7 +967,7 @@ def archive_result(quiet: bool = False) -> None:
     # Best-effort TTL cleanup: runs only when we're about to write (after
     # early-exit checks), not on every PostToolUse invocation.
     try:
-        cleanup_old_archives(max_age_hours=48, skip_session_id=session_id)
+        cleanup_old_archives(skip_session_id=session_id)
     except Exception:
         pass
 
