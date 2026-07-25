@@ -175,20 +175,20 @@ Install, run `/token-optimizer` once, everything else runs automatically.
 
 Most token tools compress command output. That covers 15-25% of your context. The other 75% goes untouched.
 
-**Compression coverage.** Headroom and RTK compress bash and command output. Token Optimizer compresses eight surfaces of the output stack. Status: 🟢 supported, 🟡 partial, 🔴 not supported.
+**Compression coverage.** Headroom, RTK, and JFrog Boost compress bash and command output. Token Optimizer compresses eight surfaces of the output stack. Status: 🟢 supported, 🟡 partial, 🔴 not supported.
 
-| Compression surface | Token Optimizer | Headroom | RTK |
-|---|---|---|---|
-| **Bash / command output** (git, tests, lint, build, logs) | 🟢 60+ patterns, credential-safe; 564 → 115 tokens on a pytest run | 🟢 6 algorithms | 🟢 100+ filters |
-| **Search / grep output** | 🟢 Top hits plus a count; 500 lines → 20 | 🔴 | 🔴 |
-| **Tabular / JSON output** (jq, yq, csvtool, mlr) | 🟢 Value-preserving columnar | 🟢 SmartCrusher | 🔴 |
-| **File re-reads, delta mode** | 🟢 Diff only; 2,000-token re-read → ~50 | 🔴 | 🔴 |
-| **File re-reads, structure map** | 🟢 Skeleton of signatures and imports; 720KB → 250 tokens | 🔴 | 🔴 |
-| **Large tool results** (over 4K chars) | 🟢 Archived to disk, expandable on demand | 🔴 | 🔴 |
-| **Model output verbosity** | 🟢 Lean-output nudge, cache-safe (savings estimated, not metered) | 🔴 | 🔴 |
-| **Structural context** (configs, skills, MCP, memory) | 🟢 Per-component audit, each source scored | 🔴 | 🔴 |
+| Compression surface | Token Optimizer | Headroom | RTK | Boost |
+|---|---|---|---|---|
+| **Bash / command output** (git, tests, lint, build, logs) | 🟢 111 commands across 22 pattern families, credential-safe; 564 → 115 tokens on a pytest run | 🟢 SmartCrusher, CodeCompressor, Kompress-v2 | 🟢 100+ filters | 🟢 Command-aware filters |
+| **Search / grep output** | 🟢 Top hits plus a count; 500 lines → 20 | 🔴 | 🔴 | — |
+| **Tabular / JSON output** (jq, yq, csvtool, mlr) | 🟢 Value-preserving columnar | 🟢 SmartCrusher | 🔴 | — |
+| **File re-reads, delta mode** | 🟢 Diff only; 2,000-token re-read → ~50 | 🔴 | 🔴 | — |
+| **File re-reads, structure map** | 🟢 Skeleton of signatures and imports; 720KB → 250 tokens | 🔴 | 🔴 | — |
+| **Large tool results** (over 4K chars) | 🟢 Archived to disk, expandable on demand | 🔴 | 🔴 | — |
+| **Model output verbosity** | 🟢 Lean-output nudge, cache-safe (savings estimated, not metered) | 🔴 | 🔴 | 🔴 |
+| **Structural context** (configs, skills, MCP, memory) | 🟢 Per-component audit, each source scored | 🔴 | 🔴 | 🔴 |
 
-RTK reaches the first surface. Headroom reaches the first and the third. Token Optimizer covers all eight, then keeps going into what happens around compression:
+RTK and Boost reach the first surface. Headroom reaches the first and the third. Token Optimizer covers all eight, then keeps going into what happens around compression:
 
 - **Three kinds of waste, not one.** Structural (bloated configs, unused skills, stale memory), runtime (verbose output, re-reads), and behavioral (model misrouting, cache expiry, retry loops). [How each works →](https://alexgreensh.github.io/token-optimizer/features/active-compression/)
 - **Savings survive compaction.** Checkpoints before auto-compact, restores after. Without this, compression savings vanish the moment compaction fires.
@@ -199,26 +199,34 @@ RTK reaches the first surface. Headroom reaches the first and the third. Token O
   <img src="skills/token-optimizer/assets/automated-flow.svg" alt="How Token Optimizer works automatically every session" width="900">
 </p>
 
-|  | Token Optimizer | Headroom | RTK | context-mode | `/context` |
-|---|---|---|---|---|---|
-| **Compaction survival** | 🟢 Progressive checkpoints, restore, tool output digest | 🔴 | 🔴 | 🟡 Session guide only | 🔴 |
-| **Session continuity** | 🟢 Cross-session hints, cold-resume, checkpoint scoring | 🔴 | 🔴 | 🟡 Session guide | 🔴 |
-| **Model routing and behavioral coaching** | 🟢 12 detectors, subagent cost breakdown, anti-patterns | 🔴 | 🔴 | 🔴 | 🟡 Basic suggestions |
-| **Keep-Warm (cache TTL refresh)** | 🟢 Opt-in ping before cache expiry, tripwire auto-off | 🔴 | 🔴 | 🔴 | 🔴 |
-| **Historical trend analysis** | 🟢 30-day trends, quality/cost/cache/duration correlation, model-switch detection | 🔴 | 🔴 | 🔴 | 🔴 |
-| **Loop and spin detection** | 🟢 Catches behavioral loops before they burn | 🔴 | 🔴 | 🔴 | 🔴 |
-| **Context quality scoring** | 🟢 7-signal quality score with grades | 🔴 | 🔴 | 🔴 | 🟡 Capacity % only |
-| **Structural waste audit** | 🟢 Deep per-component (CLAUDE.md, skills, MCP, memory) | 🔴 | 🔴 | 🔴 | 🟡 Summary only |
-| **CLAUDE.md and MEMORY.md health** | 🟢 8 auditors + attention-curve scoring | 🔴 | 🔴 | 🔴 | 🔴 |
-| **Measures if compression helped** | 🟢 Local telemetry, before/after tokens, dollar savings | 🔴 | 🟡 `rtk gain` (token counts only) | 🔴 | 🔴 |
-| **Fleet-level cross-agent analysis** | 🟢 | 🔴 | 🔴 | 🔴 | 🔴 |
-| **Cache-safe** | 🟢 Never modifies existing context prefix | 🟡 Proxy mode rewrites in-flight | 🟢 Pre-shell only | 🟡 MCP overhead | 🟢 |
-| **Zero baseline context overhead** | 🟢 External process, no context injection | 🔴 Injects instructions | 🟢 Shell-level only | 🔴 MCP server overhead | 🟢 Native |
-| **Zero runtime dependencies** | 🟢 Pure stdlib (Python/TypeScript) | 🟡 Python + Rust + optional model | 🟢 Single Rust binary | 🟡 SQLite adapter required | 🟢 N/A |
-| **Zero telemetry** | 🟢 | 🟢 | 🟡 Opt-in | 🟡 Varies | 🟢 |
-| **Multi-platform** | 🟢 Claude Code, VS Code, Codex, OpenClaw, OpenCode, Hermes, Copilot | 🟢 Claude Code, Cursor, Codex, Aider, Copilot | 🟢 14 integrations | 🟢 15 integrations | 🔴 Claude Code only |
+|  | Token Optimizer | Headroom | RTK | Boost | context-mode | `/context` |
+|---|---|---|---|---|---|---|
+| **No command rewriting required** | 🟢 Hook-wired, fires automatically | 🟢 Transparent proxy | 🟢 Hook-based rewrite | 🟢 `boost init` wires supported agents; terminal use can be prefixed | 🟡 Automatic on hook-capable platforms | N/A Native command |
+| **Full original recoverable** | 🟢 Raw archived before compression, `expand` retrieves it; failures never compressed | 🟢 Reversible retrieval | 🟡 Full output saved on command failure | 🟢 Vendor documents command-output recovery | — | N/A Does not compress |
+| **Compaction survival** | 🟢 Progressive checkpoints, restore, tool output digest | 🔴 | 🔴 | — | 🟡 Session guide only | 🔴 |
+| **Session continuity** | 🟢 Cross-session hints, cold-resume, checkpoint scoring | 🔴 | 🔴 | — | 🟡 Session guide | 🔴 |
+| **Model routing and behavioral coaching** | 🟢 12 detectors, subagent cost breakdown, anti-patterns | 🔴 | 🔴 | — | 🔴 | 🟡 Basic suggestions |
+| **Per-task model and effort advice** | 🟢 `route` sizes the task before you spend | — | — | — | — | — |
+| **Keep-Warm (cache TTL refresh)** | 🟢 Opt-in ping before cache expiry, tripwire auto-off | 🔴 | 🔴 | — | 🔴 | 🔴 |
+| **Historical trend analysis** | 🟢 30-day trends, quality/cost/cache/duration correlation, model-switch detection | 🔴 | 🔴 | — | 🔴 | 🔴 |
+| **Loop and spin detection** | 🟢 Catches behavioral loops before they burn | 🔴 | 🔴 | — | 🔴 | 🔴 |
+| **Context quality scoring** | 🟢 7-signal quality score with grades | 🔴 | 🔴 | — | 🔴 | 🟡 Capacity % only |
+| **Structural waste audit** | 🟢 Deep per-component (CLAUDE.md, skills, MCP, memory) | 🔴 | 🔴 | 🔴 | 🔴 | 🟡 Summary only |
+| **CLAUDE.md and MEMORY.md health** | 🟢 8 auditors + attention-curve scoring | 🔴 | 🔴 | 🔴 | 🔴 | 🔴 |
+| **Measures if compression helped** | 🟢 Local telemetry, before/after tokens, dollar savings | 🔴 | 🟡 `rtk gain` (token counts only) | 🟡 `boost report`, vendor-side | 🔴 | 🔴 |
+| **End-to-end task-outcome benchmark** | 🔴 Output-token A/B only | — | — | 🟢 Vendor reports Terminal-Bench 2.0 with the same pass rate and ~12% lower cost | — | N/A |
+| **Register a custom command filter** | 🔴 Built-in command set; no user filter API | — | 🟢 Custom TOML filters | 🟢 TOML filters | — | N/A |
+| **User-tunable configuration** | 🟢 92 code-referenced `TOKEN_OPTIMIZER_*` names, explicitly split into user-facing and internal controls; additive allowlist; `.contextignore` | 🟢 Documented configuration | 🟢 `config.toml` and environment controls | 🟢 Filter TOML | 🟢 Documented configuration | N/A |
+| **Fleet-level cross-agent analysis** | 🟢 | 🔴 | 🔴 | — | 🔴 | 🔴 |
+| **Cache-safe** | 🟢 Never modifies existing context prefix | 🟡 Proxy mode rewrites in-flight | 🟢 Pre-shell only | 🟢 Pre-shell only | 🟡 MCP overhead | 🟢 |
+| **Zero baseline context overhead** | 🟢 External process, no context injection | 🔴 Injects instructions | 🟢 Shell-level only | 🟢 Shell-level only | 🔴 MCP server overhead | 🟢 Native |
+| **Zero runtime dependencies** | 🟢 Pure stdlib (Python/TypeScript) | 🟡 Python + Rust + optional model | 🟢 Single Rust binary | 🟢 Single binary | 🟡 SQLite adapter required | 🟢 N/A |
+| **Zero telemetry** | 🟢 Nothing leaves the machine | 🟡 `HEADROOM_TELEMETRY` opt-in, off by default | 🟡 Opt-in | 🔴 Collects commands invoked, command arguments, exit codes, duration, CI attributes, IP | 🟡 Varies | 🟢 |
+| **Signed and checksum-verified install** | 🟢 `CHECKSUMS.sha256` per release, verified at install, CI-enforced | — | — | 🔴 Installer verifies neither a checksum nor a signature | — | N/A |
+| **Source readable** | 🟢 PolyForm Noncommercial | 🟢 Public repository | 🟢 Apache-2.0 repository | 🔴 All Rights Reserved; reverse engineering prohibited | 🟢 ELv2 source-available repository | N/A |
+| **Multi-platform** | 🟢 Claude Code, VS Code, Codex, OpenClaw, OpenCode, Hermes, Copilot | 🟢 Claude Code, Cursor, Codex, Aider, Copilot | 🟢 15 integrations | 🟡 Cursor, Claude Code, Copilot, Codex CLI | 🟢 17 integrations | 🔴 Claude Code only |
 
-Every claim is tested against real sessions and a 57-fixture compression suite you can run yourself. **[Full benchmark methodology and results →](BENCHMARK.md)**
+An em dash means the capability was not verified from first-party material in the 2026-07-26 source audit; it is not a claim that the capability is absent. Boost's "pre-shell" and "shell-level" cells are sourced from its documented wrapper form (`boost <command>`); the mechanism `boost init` uses to wire an agent is not described in its first-party material. Token Optimizer's compression claims are tested against real sessions and an 87-fixture suite you can run yourself. **[Full benchmark methodology and results →](BENCHMARK.md)**
 
 ## The Dashboard
 

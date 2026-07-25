@@ -131,12 +131,25 @@ CLAIMS = [
         r"(\d+)\+?\s+detectors",
     ]),
     ("fixtures", "benchmark fixtures", count_fixtures, [
-        r"(\d+)\+?\s+fixtures",
+        # `[\s-]` not `\s`: the hyphenated attributive form ("a 57-fixture
+        # suite") is how the README phrased it, and a whitespace-only pattern
+        # read straight past it while reporting success. Same failure shape as
+        # the bare-"patterns" hole below -- the checker only sees the phrasings
+        # someone thought to enumerate, so prefer the loosest separator that
+        # cannot match an unrelated number.
+        r"(\d+)\+?[\s-]fixtures?\b",
         r"suite holds\s+(\d+)",
     ]),
     ("commands", "compressible commands", count_commands, [
         r"(\d+)\+?\s+command patterns",
         r"(\d+)\+?\s+commands\b",
+        # Bare "N+ patterns". Added 2026-07-26: README.md:182 carried "60+
+        # patterns" through the entire July docs-accuracy sweep because every
+        # pattern here required a qualifier ("command patterns", "pattern
+        # families"). The docstring above used "60+ patterns" as its worked
+        # example of an at-least claim while the checker could not see it.
+        # A guard whose own example slips past it is decoration.
+        r"(\d+)\+?\s+patterns\b",
     ]),
     ("families", "command pattern families", count_pattern_families, [
         r"(\d+)\+?\s+CLI families",
@@ -237,11 +250,21 @@ def docs() -> list[Path]:
     """Every surface that quotes numbers at a reader: the docs site and all
     six READMEs (root plus the five per-platform ones)."""
     out = list((REPO / "docs-site" / "src" / "content" / "docs").rglob("*.mdx"))
-    out += [p for p in REPO.rglob("README*.md")
-            if ".git" not in p.parts
-            and "node_modules" not in p.parts
-            and ".pytest_cache" not in p.parts]
+    out += [p for p in REPO.rglob("README*.md") if not _is_scratch(p)]
     return sorted(out)
+
+
+# Skip every dot-directory rather than denylisting them one at a time. Scratch
+# worktrees under dot-directories are not shipping documentation, and a general
+# structural rule avoids maintaining a list of every scratch-tool directory.
+_SCRATCH_DIRS = {"node_modules"}
+
+
+def _is_scratch(p: Path) -> bool:
+    return any(
+        part.startswith(".") or part in _SCRATCH_DIRS
+        for part in p.relative_to(REPO).parts[:-1]
+    )
 
 
 def check() -> tuple[list[str], dict[str, int]]:
