@@ -1,6 +1,6 @@
 ---
 title: Configuration
-description: "The single source of truth for every Token Optimizer environment variable and config.json key, with defaults and effects. Environment variables override config.json at runtime."
+description: "Reference for Python-core environment names, platform-scoped toggles, and config.json keys, with defaults and effects. Environment variables override config.json at runtime."
 ---
 
 Token Optimizer reads configuration from two places: environment variables and a `config.json` file. Environment variables take precedence. When both set the same setting, the environment variable wins for that run, and `config.json` holds the persistent default.
@@ -20,6 +20,7 @@ Each active compression feature has a `config.json` key and an environment overr
 | `TOKEN_OPTIMIZER_STRUCTURE_MAP` | soft-block only | Set to `beta` to enable structure-map compression event logging. This is a separate measurement toggle, not the mode selector above. |
 | `TOKEN_OPTIMIZER_QUALITY_NUDGES` | enabled | Set to `0` to disable the quality-drop alerter |
 | `TOKEN_OPTIMIZER_LOOP_DETECTION` | enabled | Set to `0` to disable the retry-loop detector |
+| `TOKEN_OPTIMIZER_FIRST_READ_SHADOW` | enabled | Set to `0` to disable both first-read skeleton measurement and active first-read skeleton serving |
 | `TOKEN_OPTIMIZER_FIRST_READ_ACTIVE` | enabled | Set to `0` to disable active first-read skeleton serving for promoted cohorts |
 | `TOKEN_OPTIMIZER_VERBOSITY_MIN_FILL` | `25` | Context fill % at which the lean-output nudge fires (fill alone; quality is not a condition) |
 
@@ -44,7 +45,11 @@ The read cache operates in one of four modes, selected with `TOKEN_OPTIMIZER_REA
 | `TOKEN_OPTIMIZER_QUALITY_WINDOW` | 20 | Rolling window size for ratio-based quality signals |
 | `TOKEN_OPTIMIZER_TOOL_CALL_WARN` | auto | Tool-call warning threshold; scales with the context window |
 | `TOKEN_OPTIMIZER_TOOL_CALL_CRITICAL` | auto | Tool-call critical threshold; scales with the context window |
-| `TOKEN_OPTIMIZER_RELEVANCE_THRESHOLD` | 0.3 | Minimum relevance score for a checkpoint to be restored |
+| `TOKEN_OPTIMIZER_RELEVANCE_THRESHOLD` | 0.3 | Minimum relevance score for collecting a checkpoint as a continuity candidate or teaser |
+| `TOKEN_OPTIMIZER_RELEVANCE_FULL_THRESHOLD` | 0.5 | Minimum relevance score for emitting the full recovered-data block instead of a one-line teaser |
+| `TOKEN_OPTIMIZER_DENSITY_MIN_MESSAGES` | 6 | Keep decision-density scoring neutral until the session has this many messages |
+| `TOKEN_OPTIMIZER_FRESH_NUDGE_QUALITY` | 70 | Quality-score threshold used by the fresh-session nudge |
+| `TOKEN_OPTIMIZER_FRESH_NUDGE_MIN_FILL` | 45 | Minimum context fill % used by the fresh-session nudge |
 
 ## Checkpoints and continuity
 
@@ -53,20 +58,29 @@ The read cache operates in one of four modes, selected with `TOKEN_OPTIMIZER_REA
 | `TOKEN_OPTIMIZER_CHECKPOINT_RETENTION_DAYS` | 7 | Days to keep checkpoints before cleanup |
 | `TOKEN_OPTIMIZER_CHECKPOINT_RETENTION_MAX` | 50 | Maximum checkpoints to scan for restore |
 | `TOKEN_OPTIMIZER_CHECKPOINT_TELEMETRY` | off | Set to `1` to enable the `checkpoint-stats` telemetry summary |
-| `TOKEN_OPTIMIZER_PROGRESSIVE_CHECKPOINTS` | platform-dependent | Controls progressive checkpoint capture at fill bands (where the platform supports it) |
-| `TOKEN_OPTIMIZER_SMART_COMPACTION` | true | Set to disable compaction context injection |
-| `TOKEN_OPTIMIZER_CONTINUITY` | true | Set to disable session continuity |
+| `TOKEN_OPTIMIZER_PROGRESSIVE_CHECKPOINTS` | enabled | Set to `0`, `false`, `no`, or `off` to disable progressive checkpoint capture at the 20/35/50/65/80% fill bands |
+| `TOKEN_OPTIMIZER_CHECKPOINT_FILES` | 10 | Maximum active/recent files retained in extracted checkpoint state |
+| `TOKEN_OPTIMIZER_CHECKPOINT_EVENT_MAX` | 1000 | Maximum checkpoint telemetry events retained after pruning |
+| `TOKEN_OPTIMIZER_CHECKPOINT_COOLDOWN_SECONDS` | 90 | Minimum time between checkpoint fires |
+| `TOKEN_OPTIMIZER_EDIT_BATCH_WRITE_THRESHOLD` | 4 | Write-count delta that triggers an edit-batch checkpoint |
+| `TOKEN_OPTIMIZER_EDIT_BATCH_FILE_THRESHOLD` | 3 | Changed-file delta that triggers an edit-batch checkpoint |
+| `TOKEN_OPTIMIZER_CONTINUITY_MAX_SESSIONS` | 5 | Maximum prior sessions represented in a continuity hint |
+| `TOKEN_OPTIMIZER_CONTINUITY_PER_SESSION_SCAN` | 3 | Maximum checkpoint candidates scanned per prior session |
+| `TOKEN_OPTIMIZER_RESUME_TOPIC_BAR` | 0.22 | Residual-topic score above which a resume request is treated as naming a topic rather than asking for the most recent same-project checkpoint |
 
-## Quality, nudges, and activity (cross-platform aliases)
+## OpenCode-only toggle names
 
-These shorter names are used by the TypeScript plugins (OpenCode, OpenClaw) and accepted as cross-platform aliases. They mirror the longer `TOKEN_OPTIMIZER_*` flags above.
+These seven names are read by `opencode/src/util/env.ts` and exist only there; the feature names also exist on other platforms, but these exact environment-variable names are not cross-platform aliases.
 
-| Variable | Default | Effect |
-|---|---|---|
-| `TOKEN_OPTIMIZER_NUDGES` | true | Enable quality nudges |
-| `TOKEN_OPTIMIZER_LOOP_DETECTION` | true | Enable retry-loop detection |
-| `TOKEN_OPTIMIZER_ACTIVITY` | true | Enable activity-mode tracking |
-| `TOKEN_OPTIMIZER_TRENDS` | true | Enable trends collection |
+| Variable | Default | Platform | Effect |
+|---|---|---|---|
+| `TOKEN_OPTIMIZER_SMART_COMPACTION` | true | OpenCode | Enable compaction context injection |
+| `TOKEN_OPTIMIZER_CONTINUITY` | true | OpenCode | Enable session continuity |
+| `TOKEN_OPTIMIZER_NUDGES` | true | OpenCode | Enable quality nudges |
+| `TOKEN_OPTIMIZER_ACTIVITY` | true | OpenCode | Enable activity-mode tracking |
+| `TOKEN_OPTIMIZER_TRENDS` | true | OpenCode | Enable trends collection |
+| `TOKEN_OPTIMIZER_DATA_DIR` | platform-global location | OpenCode | Base directory, used verbatim, under which the `token-optimizer/` data folder is created |
+| `TOKEN_OPTIMIZER_CHECKPOINT_MAX_CHARS` | 2000 | OpenCode | Maximum characters of checkpoint content injected on continuity restore |
 
 ## Dashboard and daemon
 
@@ -74,7 +88,8 @@ These shorter names are used by the TypeScript plugins (OpenCode, OpenClaw) and 
 |---|---|---|
 | `TOKEN_OPTIMIZER_HOST` | 127.0.0.1 | Bind host for the dashboard server |
 | `TOKEN_OPTIMIZER_DASHBOARD_HOST` | 127.0.0.1 | Dashboard-specific bind host; set to `0.0.0.0` for LAN access before `setup-daemon` |
-| `TOKEN_OPTIMIZER_DASHBOARD_TIMEOUT` | (engine default) | Timeout for the dashboard server request handling |
+| `TOKEN_OPTIMIZER_DASHBOARD_TIMEOUT` | 30 seconds | Total retry budget when opening the dashboard server |
+| `TOKEN_OPTIMIZER_TURN_PRELOAD_MAX` | 40 | Maximum recent sessions whose per-turn data is embedded in a static dashboard |
 
 Dashboard ports are fixed per runtime: 24842 (Claude Code), 24843 (Codex), 24844 (Hermes), 24845 (Copilot). They are not configured by environment variable; they are assigned by the engine so multiple runtimes can serve dashboards simultaneously without conflict. The `--port` flag on `dashboard` overrides the port for a one-off serve.
 
@@ -84,13 +99,15 @@ Dashboard ports are fixed per runtime: 24842 (Claude Code), 24843 (Codex), 24844
 |---|---|---|
 | `TOKEN_OPTIMIZER_TRENDS_RETENTION_DAYS` | unlimited | Days to keep rows in the history database |
 | `TOKEN_OPTIMIZER_ARCHIVE_RETENTION_HOURS` | 24 | Hours to keep archived tool results |
-| `TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS` | 7 | Days to keep quality-cache snapshots |
+| `TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS` | unlimited | Days to keep quality-cache snapshots; `0` means unlimited |
 
 Per-session file caches are auto-deleted after 48 hours and are not configurable. See [Your data and privacy](/reference/data-and-privacy/) for the full storage map.
 
 ## Keep-Warm
 
 Keep-Warm is opt-in and managed by the `keepwarm-*` commands; there are no plain feature-flag environment variables for it. Consent and billing mode are persisted in `config.json` and read by `keepwarm-consent-status`.
+
+The two Keep-Warm names found in the Python core are internal execution markers and are listed under [Internal and test-only names](#internal-and-test-only-names).
 
 ## Copilot cost rates
 
@@ -99,6 +116,8 @@ Keep-Warm is opt-in and managed by the `keepwarm-*` commands; there are no plain
 | `TOKEN_OPTIMIZER_COPILOT_USD_PER_CREDIT` | 0.01 | USD value of one Copilot AI credit, for cost display |
 | `TOKEN_OPTIMIZER_COPILOT_PREMIUM_RATE` | 0.04 | USD per premium request |
 | `TOKEN_OPTIMIZER_COPILOT_CAPS_JSON` | (unset) | JSON override of the Copilot capability map when upstream fixes outpace the shipped matrix, for example `'{"pretooluse_ctx": true}'` |
+| `TOKEN_OPTIMIZER_COPILOT_BIN` | `copilot` | Override the Copilot CLI executable used by doctor and hook-bridge checks |
+| `TOKEN_OPTIMIZER_COPILOT_HOME` | `~/.copilot` or auto-detected | Override the Copilot home used by Token Optimizer; validated before use |
 
 ## Pricing tier
 
@@ -116,10 +135,76 @@ The pricing tier drives every cost and savings calculation. Set it with `measure
 
 | Variable | Default | Effect |
 |---|---|---|
-| `TOKEN_OPTIMIZER_RUNTIME` | claude | Select the platform adapter: `claude`, `codex`, `copilot`, `hermes` |
+| `TOKEN_OPTIMIZER_RUNTIME` | claude | Select the platform adapter: `claude`, `codex`, `opencode`, `copilot`, or `hermes` |
 | `TOKEN_OPTIMIZER_SKIP_VERIFY` | off | Set to `1` to skip checksum verification during script install (not recommended) |
 | `TOKEN_OPTIMIZER_STAR_ASK` | enabled | Set to `0` to disable the one-time GitHub star offer entirely |
+| `TOKEN_OPTIMIZER_STAR_MIN_SESSIONS` | 3 | Minimum logged sessions before the one-time star offer's value-history gate is satisfied |
+| `TOKEN_OPTIMIZER_DEBUG` | off | Emit runtime-detection and refetch-guard diagnostics to stderr |
+| `TOKEN_OPTIMIZER_NO_PROC_SCAN` | off | Skip best-effort process-tree scans used as runtime-detection fallbacks |
+| `TOKEN_OPTIMIZER_ALLOW_UNSAFE_RUNTIME_HOME` | off | For container layouts, relax only the under-`$HOME` containment check; absolute, existing, non-symlink directory checks still apply |
 | `HERMES_HOME` | ~/.hermes | Override the Hermes home directory for the Hermes adapter |
+
+## Archive and savings attribution
+
+| Variable | Default | Effect |
+|---|---|---|
+| `TOKEN_OPTIMIZER_ARCHIVE_EXEMPT_TOOLS` | (unset) | Comma-separated `fnmatch` globs added to the built-in list of MCP tools whose full output stays inline |
+| `TOKEN_OPTIMIZER_ARCHIVE_EXEMPT_DEFAULTS` | enabled | Set to `off`, `false`, `0`, or `none` to remove the built-in archive exemptions |
+| `TOKEN_OPTIMIZER_COST_PER_MTOK` | model-derived | Positive numeric override for the input-token price estimate used by the hook-safe compression-savings path |
+
+## Advanced measurement and baseline tuning
+
+These controls change estimates, cohort gates, collection bounds, or cache behavior. They are user-settable, but primarily useful for validation and advanced deployments.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `TOKEN_OPTIMIZER_OVERHEAD_CACHE_TTL` | 3600 seconds | TTL for cached structural-overhead calculations |
+| `TOKEN_OPTIMIZER_COMPONENTS_CACHE_TTL` | 60 seconds | In-process TTL for repeated component scans |
+| `TOKEN_OPTIMIZER_LOOP_CONTINUATION_FACTOR` | 1.0 | Multiplier applied to measured looped volume for the separately labelled avoided-continuation estimate |
+| `TOKEN_OPTIMIZER_COHORT_MIN` | 3 | Minimum size for each compared cohort in contamination and retrieval estimates |
+| `TOKEN_OPTIMIZER_AVG_READ_TOKENS` | 2500 | Per-avoided-read token estimate used by retrieval savings |
+| `TOKEN_OPTIMIZER_AVOIDED_READS_CAP` | 8 | Per-session cap on avoided reads in the retrieval estimate |
+| `TOKEN_OPTIMIZER_ROUTABLE_OPUS_FRACTION` | 0.3 | Fraction of Opus work treated as routable in the model-routing opportunity calculation |
+| `TOKEN_OPTIMIZER_BASELINE_OPUS_SHARE` | 0.0 (unset) | Explicit pre-Token-Optimizer Opus share; values outside `(0, 1]` fall back to measured history |
+| `TOKEN_OPTIMIZER_AVOIDABLE_WRITE_FRACTION` | 0.3 | Share of full-file Writes treated as avoidable in the separately labelled output-waste opportunity |
+| `TOKEN_OPTIMIZER_AVOIDABLE_WRITE_TOKENS` | 1500 | Output-token delta assigned to each avoidable full-file Write opportunity |
+| `TOKEN_OPTIMIZER_CACHE_DROP_GAP_SECONDS` | 300 | Call gap treated as a likely 5-minute cache expiry in cache-drop estimates |
+| `TOKEN_OPTIMIZER_BASELINE_ONBOARDING_DAYS` | 1 | Initial install-period days excluded from baseline construction |
+| `TOKEN_OPTIMIZER_BASELINE_WINDOW_DAYS` | 30 | Early-history window used to construct the baseline |
+| `TOKEN_OPTIMIZER_BASELINE_WINSOR_PCT` | 0.99 | Percentile used to cap high-token sessions in baseline means |
+| `TOKEN_OPTIMIZER_BASELINE_MIN_SESSIONS` | 30 | Minimum sessions required for a stable early-history baseline |
+| `TOKEN_OPTIMIZER_AFTER_MIN_SESSIONS` | 10 | Minimum recent sessions required before trusting the after-window comparison |
+| `TOKEN_OPTIMIZER_MIN_INPUT_TOKENS` | 1000 | Minimum input tokens for a session to enter the interactive-work comparison pool |
+| `TOKEN_OPTIMIZER_MIN_DURATION_MINUTES` | 1.0 | Minimum duration for a session to enter the interactive-work comparison pool |
+| `TOKEN_OPTIMIZER_INITIAL_BACKFILL_DAYS` | 365 | Lookback used by the one-time deep session-history backfill |
+| `TOKEN_OPTIMIZER_COLLECT_COMMIT_BATCH` | 200 | Number of collected sessions committed per backfill batch |
+| `TOKEN_OPTIMIZER_COLLECT_MAX_PER_RUN` | 150 | Maximum newly parsed sessions per collection run; `0` is unbounded |
+| `TOKEN_OPTIMIZER_INITIAL_BACKFILL_MAX_ATTEMPTS` | 5 | Maximum deep-backfill attempts before returning to the rolling window |
+
+## Internal and test-only names
+
+These names are implementation plumbing, child-process sentinels, generated-script constants, or test seams. They are documented here so the reference covers every `TOKEN_OPTIMIZER_*` identifier in `skills/token-optimizer/scripts/*.py`, but they are not presented as user-facing tuning knobs.
+
+| Name | Code default | Internal purpose |
+|---|---|---|
+| `TOKEN_OPTIMIZER_SNAPSHOT_DIR` | resolved runtime data directory | Test/sandbox override for snapshot, cache, and decision-log storage |
+| `TOKEN_OPTIMIZER_SAFE_ROOT` | resolved Claude home | Test-only safe root for structure-replay glob expansion; candidates outside the normal root are rejected |
+| `TOKEN_OPTIMIZER_PRICING_AS_OF` | current UTC time | Pins the pricing date in tests; invalid values fall back to the current time |
+| `TOKEN_OPTIMIZER_PRETOOL_OPUS` | off | Explicit consent gate for applying the 0.95-Opus fallback when no measured baseline exists |
+| `TOKEN_OPTIMIZER_SESSION_MODEL` | `unknown` | Event-time model hint used by compression logging |
+| `TOKEN_OPTIMIZER_PLUGIN_DATA` | runtime-resolved | Plugin-data path passed between runtime adapters |
+| `TOKEN_OPTIMIZER_UTF8_REEXEC` | unset | Child-process sentinel that prevents a UTF-8-mode re-exec loop |
+| `TOKEN_OPTIMIZER_KEEPWARM_PING` | unset | Marks a keep-warm ping child so its Stop hook cannot recursively arm another ping |
+| `TOKEN_OPTIMIZER_KEEPWARM_ALLOW_LLM_PING` | off | Internal dogfood escape hatch for the token-spending keep-warm LLM ping; absent or false keeps the ping disabled |
+| `TOKEN_OPTIMIZER_DAEMON_ENSURE_THROTTLE` | 86400 seconds | Test seam for the daemon ensure-attempt throttle |
+| `TOKEN_OPTIMIZER_DAEMON_PULSE_PROBE` | 60 seconds | Test seam for the daemon pulse health-probe interval |
+| `TOKEN_OPTIMIZER_DAEMON_PULSE_REVIVE` | 300 seconds | Test seam for the daemon pulse revival interval |
+| `TOKEN_OPTIMIZER_DAEMON_VERIFY_TIMEOUT` | 2.0 seconds | Test seam for the daemon health-verification retry budget |
+| `TOKEN_OPTIMIZER_DAEMON_VERSION` | plugin version | Constant embedded in the generated daemon script; not read from the environment |
+| `TOKEN_OPTIMIZER_MARKER` | `token-optimizer/scripts` | Python constant used to recognize installed Codex hook entries; not read from the environment |
+| `TOKEN_OPTIMIZER_VERSION` | plugin manifest version | Python constant populated from plugin metadata; not read from the environment |
+| `TOKEN_OPTIMIZER_CHECKPOINT_TTL` | unused (former default 300 seconds) | Former environment name retained only in a source comment; restore eligibility now uses retention days |
+| `TOKEN_OPTIMIZER_PREVENTED_LOOP_ITERATIONS` | 3 | Parsed into an internal constant that is not referenced elsewhere in the current Python core |
 
 ## config.json keys
 
