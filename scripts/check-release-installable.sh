@@ -60,7 +60,12 @@ trap 'rm -rf "$tmp"' EXIT
 # Authenticated when a token is present (CI), anonymous otherwise. Anonymous
 # API calls are rate-limited per IP and shared runners burn that quota fast,
 # which is why CI passes github.token through.
-curl_args=(-fsSL "$api" -o "${tmp}/latest.json")
+#
+# Retries because this job runs on every push and PR. A single transient API blip
+# would turn a contributor's unrelated PR red with an error they cannot fix, and
+# an occasional unexplained red is how a check earns the "just hit re-run" reflex.
+# A guard people reflexively re-run is a guard nobody reads.
+curl_args=(-fsSL --retry 3 --retry-delay 2 --retry-connrefused "$api" -o "${tmp}/latest.json")
 if [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
     curl_args+=(-H "Authorization: Bearer ${GH_TOKEN:-$GITHUB_TOKEN}")
 fi
@@ -96,7 +101,8 @@ fi
 printf 'latest release : %s\n' "$RELEASE_TAG"
 printf 'manifest asset : present\n'
 
-curl -fsSL "$CHECKSUM_ASSET_URL" -o "${tmp}/CHECKSUMS.sha256" \
+curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused \
+    "$CHECKSUM_ASSET_URL" -o "${tmp}/CHECKSUMS.sha256" \
     || fail "Release ${RELEASE_TAG} advertises a CHECKSUMS.sha256 asset but it could not be downloaded."
 
 [ -s "${tmp}/CHECKSUMS.sha256" ] \
