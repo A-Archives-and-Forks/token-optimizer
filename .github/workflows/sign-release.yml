@@ -80,6 +80,16 @@ jobs:
               exit 1
             }
           gh release download "$TAG" -p CHECKSUMS.sha256 -O /tmp/released.sha256 --clobber
+          # `sha256sum -c` on an EMPTY file exits 0 -- zero lines checked means zero
+          # failures. Verified: `: > f; sha256sum -c f --quiet; echo $?` prints 0 on
+          # coreutils. So a truncated or empty download would sail through the very
+          # step whose job is to prove the upload landed, and the break would surface
+          # later inside a user's install as "your install may be compromised". A
+          # proof step with a vacuous-pass hole is not a proof step.
+          [ -s /tmp/released.sha256 ] || {
+            echo "::error::the downloaded CHECKSUMS.sha256 for $TAG is empty."
+            exit 1
+          }
           echo "Verifying the tagged tree against the released manifest..."
           sha256sum -c /tmp/released.sha256 --quiet
           echo "OK: $(wc -l < /tmp/released.sha256) entries verified."
