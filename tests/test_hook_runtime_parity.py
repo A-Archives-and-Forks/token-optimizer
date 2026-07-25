@@ -78,6 +78,27 @@ print("survived")
     assert result.returncode == 0 and result.stdout.strip() == "survived"
 
 
+def test_deadline_exit_is_not_blocked_by_full_stderr_pipe():
+    code = """
+import os, time
+read_fd, write_fd = os.pipe()
+os.dup2(write_fd, 2)
+os.close(write_fd)
+os.set_blocking(2, False)
+while True:
+    try:
+        os.write(2, b"x" * 65536)
+    except BlockingIOError:
+        break
+os.set_blocking(2, True)
+from hook_runtime import HookDeadline
+HookDeadline(0.15).start()
+time.sleep(2)
+"""
+    result, elapsed = _python(code)
+    assert result.returncode == 0 and 0.08 <= elapsed < 0.9
+
+
 def test_live_pid_does_not_prevent_expired_lease_recovery(tmp_path):
     path = tmp_path / "state.lease"
     now = time.time()
@@ -90,7 +111,10 @@ def test_live_pid_does_not_prevent_expired_lease_recovery(tmp_path):
     contender = LeaseLock(path, acquire_timeout=0, reclaim_grace=0)
     acquired = contender.acquire()
     contender.release()
-    assert acquired and not path.exists()
+    successor = LeaseLock(path, acquire_timeout=0, reclaim_grace=0)
+    succeeded_again = successor.acquire()
+    successor.release()
+    assert acquired and succeeded_again
 
 
 def test_dead_pid_does_not_make_an_unexpired_lease_reclaimable(tmp_path):
@@ -126,6 +150,45 @@ def test_unassessable_lease_metadata_fails_open_without_reclamation(tmp_path, re
     assert not acquired and path.exists() and path.read_text() == record
 
 
+def test_stable_malformed_lease_is_reclaimable_after_grace(tmp_path):
+    path = tmp_path / "state.lease"
+    path.write_text("{partial", encoding="utf-8")
+    old = time.time() - 2
+    os.utime(path, (old, old))
+    contender = LeaseLock(path, acquire_timeout=0, reclaim_grace=0.25)
+
+    acquired = contender.acquire()
+    contender.release()
+
+    successor = LeaseLock(path, acquire_timeout=0)
+    succeeded_again = successor.acquire()
+    successor.release()
+    assert acquired and succeeded_again
+
+
+def test_lease_metadata_is_complete_before_final_path_is_published(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "state.lease"
+    real_write = os.write
+
+    def checked_write(fd, data):
+        if data != b"1":
+            assert not path.exists()
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", checked_write)
+    lock = LeaseLock(path, acquire_timeout=0)
+    acquired = lock.acquire()
+    lock.release()
+
+    assert (
+        acquired
+        and path.exists()
+        and json.loads(path.read_text())["released"] == 1
+    )
+
+
 def test_release_never_unlinks_a_different_nonce(tmp_path):
     path = tmp_path / "state.lease"
     owner = LeaseLock(path, acquire_timeout=0)
@@ -143,6 +206,110 @@ def test_release_never_unlinks_a_different_nonce(tmp_path):
         and path.exists()
         and json.loads(path.read_text())["nonce"] == "replacement-owner"
     )
+
+
+def test_expired_owner_release_cannot_delete_a_successor_lease(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "state.lease"
+    owner = LeaseLock(
+        path, acquire_timeout=0, lease_seconds=0.1, reclaim_grace=0
+    )
+    assert owner.acquire()
+    time.sleep(0.12)
+    reclaimer = LeaseLock(path, acquire_timeout=0, reclaim_grace=0)
+    successor = LeaseLock(path, acquire_timeout=0, reclaim_grace=0)
+    anchor = getattr(owner, "_owner_path", path)
+    real_read_text = Path.read_text
+    real_read_bytes = Path.read_bytes
+    raced = False
+
+    def trigger_race(raw):
+        nonlocal raced
+        if not raced:
+            raced = True
+            assert reclaimer._reclaim_if_expired()
+            assert successor.acquire()
+        return raw
+
+    def raced_read_text(self, *args, **kwargs):
+        raw = real_read_text(self, *args, **kwargs)
+        return trigger_race(raw) if self in (anchor, path) else raw
+
+    def raced_read_bytes(self):
+        raw = real_read_bytes(self)
+        return trigger_race(raw) if self in (anchor, path) else raw
+
+    monkeypatch.setattr(Path, "read_text", raced_read_text)
+    monkeypatch.setattr(Path, "read_bytes", raced_read_bytes)
+    owner.release()
+
+    assert raced
+    assert json.loads(path.read_text())["nonce"] == successor.nonce
+    assert not reclaimer.acquire()
+    successor.release()
+
+
+def test_stale_reclaimer_cannot_move_a_successor_lease(tmp_path, monkeypatch):
+    path = tmp_path / "state.lease"
+    owner = LeaseLock(
+        path, acquire_timeout=0, lease_seconds=0.1, reclaim_grace=0
+    )
+    assert owner.acquire()
+    time.sleep(0.12)
+
+    first = LeaseLock(path, acquire_timeout=0, reclaim_grace=0)
+    stale = LeaseLock(path, acquire_timeout=0, reclaim_grace=0)
+    stale_observation = stale._read_owner()
+    assert stale_observation is not None
+    assert first._reclaim_if_expired()
+
+    successor = LeaseLock(path, acquire_timeout=0)
+    assert successor.acquire()
+    late = LeaseLock(path, acquire_timeout=0)
+    real_read_text = Path.read_text
+    late_acquired = None
+
+    def raced_read_text(self, *args, **kwargs):
+        nonlocal late_acquired
+        raw = real_read_text(self, *args, **kwargs)
+        if ".reclaim-" in self.name and late_acquired is None:
+            late_acquired = late.acquire()
+        return raw
+
+    monkeypatch.setattr(stale, "_read_owner", lambda: stale_observation)
+    monkeypatch.setattr(Path, "read_text", raced_read_text)
+
+    assert not stale._reclaim_if_expired()
+    assert late_acquired is False
+    assert json.loads(path.read_text())["nonce"] == successor.nonce
+
+    late.release()
+    successor.release()
+    owner.release()
+
+
+def test_acquire_never_retries_after_timeout(tmp_path, monkeypatch):
+    lock = LeaseLock(tmp_path / "state.lease", acquire_timeout=0.075)
+    now = 0.0
+    attempts = 0
+
+    def try_create():
+        nonlocal attempts
+        attempts += 1
+        return attempts > 1
+
+    def advance_past_timeout(_seconds):
+        nonlocal now
+        now = 0.08
+
+    monkeypatch.setattr(lock, "_try_create", try_create)
+    monkeypatch.setattr(lock, "_reclaim_if_expired", lambda: False)
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    monkeypatch.setattr(time, "sleep", advance_past_timeout)
+
+    assert not lock.acquire()
+    assert attempts == 1
 
 
 def test_many_contenders_have_one_winner_and_bounded_losers(tmp_path):
@@ -258,6 +425,29 @@ def test_throttle_only_cache_miss_never_parses_transcript(
         quiet=True,
     )
     assert result is None and not cache_dir.exists()
+
+
+def test_quality_cache_throttle_markers_are_session_specific(
+    measure_module, monkeypatch, tmp_path
+):
+    module = measure_module
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(module, "QUALITY_CACHE_DIR", cache_dir)
+    cache_dir.mkdir()
+    session_a = tmp_path / "session-a.jsonl"
+    session_b = tmp_path / "session-b.jsonl"
+    for session in (session_a, session_b):
+        session.write_text("{}\n", encoding="utf-8")
+        cache_path = module._quality_cache_path_for(session)
+        assert module._write_quality_cache(cache_path, {"score": 100})
+    old = time.time() - 300
+    os.utime(
+        module._quality_cache_throttle_marker(filepath=session_b),
+        (old, old),
+    )
+
+    assert not module._quality_cache_tick_due(120, session_a)
+    assert module._quality_cache_tick_due(120, session_b)
 
 
 def test_throttle_only_cli_exits_before_reading_open_stdin(tmp_path):

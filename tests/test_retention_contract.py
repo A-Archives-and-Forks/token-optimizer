@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import time
@@ -67,9 +68,122 @@ def test_archive_cleanup_enforces_total_byte_cap(monkeypatch, tmp_path):
 
     module.cleanup_old_archives()
 
-    remaining_bytes = sum(p.stat().st_size for p in root.glob("*/*") if p.is_file())
+    remaining_bytes = sum(
+        p.stat().st_size for p in root.glob("session-*/*") if p.is_file()
+    )
     assert remaining_bytes <= 15
     assert not (root / "session-0").exists()
+
+
+def test_archive_cleanup_enforces_caps_across_plugin_identities(monkeypatch, tmp_path):
+    active = tmp_path / "token-optimizer-active" / "data"
+    sibling = tmp_path / "token-optimizer-old" / "data"
+    module = _load_archive_result(monkeypatch, active)
+    monkeypatch.setattr(module, "snapshot_dir_candidates", lambda: [active, sibling])
+    now = time.time()
+    for index, snapshot in enumerate((sibling, active, active)):
+        session = snapshot / "tool-archive" / f"session-{index}"
+        session.mkdir(parents=True)
+        (session / "result.json").write_bytes(b"x" * 10)
+        os.utime(session, (now - (30 - index), now - (30 - index)))
+
+    removed = module.cleanup_old_archives()
+
+    assert removed == 1
+    assert not (sibling / "tool-archive" / "session-0").exists()
+    assert len(list(tmp_path.glob("*/data/tool-archive/*/*.json"))) == 2
+
+
+def test_archive_cleanup_never_removes_an_active_session(monkeypatch, tmp_path):
+    module = _load_archive_result(monkeypatch, tmp_path)
+    monkeypatch.setenv("TOKEN_OPTIMIZER_ARCHIVE_RETENTION_MAX_FILES", "1")
+    root = tmp_path / "tool-archive"
+    active = root / "active-session"
+    caller = root / "caller-session"
+    for session in (active, caller):
+        session.mkdir(parents=True)
+        (session / "result.json").write_bytes(b"x" * 10)
+    (active / ".active").write_text(str(os.getpid()), encoding="utf-8")
+    now = time.time()
+    os.utime(active, (now - 30, now - 30))
+    os.utime(caller, (now - 10, now - 10))
+
+    removed = module.cleanup_old_archives(skip_session_id="caller-session")
+
+    assert removed == 0
+    assert active.exists()
+    assert caller.exists()
+
+
+def test_active_session_entries_obey_age_and_aggregate_caps(monkeypatch, tmp_path):
+    module = _load_archive_result(monkeypatch, tmp_path)
+    monkeypatch.setenv("TOKEN_OPTIMIZER_ARCHIVE_RETENTION_MAX_FILES", "3")
+    root = tmp_path / "tool-archive"
+    active = root / "active-session"
+    active.mkdir(parents=True)
+    (active / ".active").touch()
+    now = time.time()
+    manifest_lines = []
+    for index in range(4):
+        entry = active / f"tool-{index}.json"
+        entry.write_bytes(b"x" * 10)
+        manifest_lines.append(f'{{"tool_use_id":"tool-{index}"}}')
+        entry_time = now - 90_000 if index == 0 else now - (30 - index)
+        os.utime(entry, (entry_time, entry_time))
+    (active / "manifest.jsonl").write_text(
+        "\n".join(manifest_lines) + "\n", encoding="utf-8"
+    )
+
+    removed = module.cleanup_old_archives(skip_session_id="active-session")
+
+    remaining_files, _remaining_bytes = module._archive_tree_usage(active)
+    assert removed == 0
+    assert active.exists()
+    assert not (active / "tool-0.json").exists()
+    assert remaining_files <= 3
+    retained_ids = {
+        json.loads(line)["tool_use_id"]
+        for line in (active / "manifest.jsonl").read_text().splitlines()
+    }
+    assert retained_ids == {path.stem for path in active.glob("*.json")}
+
+
+def test_archive_hot_path_does_not_scan_tree_before_each_write(monkeypatch, tmp_path):
+    module = _load_archive_result(monkeypatch, tmp_path)
+    payloads = iter([
+        {
+            "session_id": "session-1",
+            "tool_use_id": "tool-1",
+            "tool_name": "mcp__example",
+            "tool_response": "x" * 5000,
+        },
+        {
+            "session_id": "session-1",
+            "tool_use_id": "tool-2",
+            "tool_name": "mcp__example",
+            "tool_response": "y" * 5000,
+        },
+    ])
+    monkeypatch.setattr(module, "read_stdin_hook_input", lambda _cap: next(payloads))
+    monkeypatch.setattr(
+        module,
+        "_archive_tree_usage",
+        lambda _path: pytest.fail("synchronous archive write scanned the archive tree"),
+    )
+    cleanup_calls = 0
+
+    def cleanup(**_kwargs):
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        return 0
+
+    monkeypatch.setattr(module, "cleanup_old_archives", cleanup)
+    module.archive_result(quiet=True)
+    module.archive_result(quiet=True)
+
+    assert cleanup_calls == 1
+    assert (tmp_path / "tool-archive" / "session-1" / "tool-1.json").exists()
+    assert (tmp_path / "tool-archive" / "session-1" / "tool-2.json").exists()
 
 
 def test_hot_path_and_session_end_both_run_configured_cleanup():
@@ -81,6 +195,6 @@ def test_hot_path_and_session_end_both_run_configured_cleanup():
         measure.index("def _defer_session_end_flush(")
     ]
 
-    assert "cleanup_old_archives(skip_session_id=session_id)" in hot_path
+    assert "_cleanup_archives_if_due(session_id)" in hot_path
     assert "max_age_hours=48" not in hot_path
     assert "cleanup_old_archives()" in worker

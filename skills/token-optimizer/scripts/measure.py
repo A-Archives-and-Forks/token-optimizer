@@ -27754,14 +27754,33 @@ def _quality_cache_path_for(filepath=None):
     return QUALITY_CACHE_PATH
 
 
-def _quality_cache_tick_due(throttle_seconds):
+def _quality_cache_throttle_marker(
+    filepath=None, session_id=None, cache_path=None
+):
+    """Return the throttle marker for one session (legacy global if unknown)."""
+    identity = None
+    if cache_path is not None:
+        identity = Path(cache_path).stem.removeprefix("quality-cache-")
+    elif filepath:
+        identity = Path(filepath).stem
+    elif session_id:
+        identity = sanitize_session_id(session_id)
+    if identity:
+        identity = re.sub(r"[^a-zA-Z0-9_-]", "_", str(identity))[:128]
+        return QUALITY_CACHE_DIR / f".quality-cache-throttle-{identity}"
+    return QUALITY_CACHE_DIR / ".quality-cache-throttle"
+
+
+def _quality_cache_tick_due(
+    throttle_seconds, filepath=None, session_id=None
+):
     """One-stat gate for the PostToolUse throttle-only hot path.
 
     A missing marker is a cache miss, not permission to parse a transcript.
     UserPromptSubmit creates the first cache and marker.
     """
     try:
-        marker = QUALITY_CACHE_DIR / ".quality-cache-throttle"
+        marker = _quality_cache_throttle_marker(filepath, session_id)
         age = time.time() - marker.stat().st_mtime
         return age >= max(0, throttle_seconds)
     except OSError:
@@ -27862,7 +27881,7 @@ def _write_quality_cache(cache_path, result):
         os.replace(tmp_path, str(cache_path))
         tmp_path = None
         try:
-            (QUALITY_CACHE_DIR / ".quality-cache-throttle").touch()
+            _quality_cache_throttle_marker(cache_path=cache_path).touch()
         except OSError:
             pass
         ok = True
@@ -35901,9 +35920,16 @@ if __name__ == "__main__":
                 except ValueError:
                     pass
         _tok_hook_deadline = _install_hook_budget(8)
-        if throttle_only and not force and not _quality_cache_tick_due(throttle):
-            _clear_hook_budget(_tok_hook_deadline)
-            sys.exit(0)
+        payload = {}
+        if throttle_only:
+            payload = _read_stdin_hook_input(max_bytes=1_000_000)
+            if not force and not _quality_cache_tick_due(
+                throttle,
+                payload.get("transcript_path"),
+                payload.get("session_id"),
+            ):
+                _clear_hook_budget(_tok_hook_deadline)
+                sys.exit(0)
         # Mid-session dashboard-daemon liveness pulse. quality-cache is the
         # per-turn UserPromptSubmit handler, so piggybacking here adds NO new hook
         # process (zero extra per-turn interpreter spawn). Cheap + throttled +
@@ -35939,7 +35965,10 @@ if __name__ == "__main__":
             # Read hook payload from stdin if available (provides exact transcript_path)
             session_jsonl = None
             session_id_from_hook = None
-            if not sys.stdin.isatty():
+            if payload:
+                session_jsonl = payload.get("transcript_path")
+                session_id_from_hook = payload.get("session_id")
+            elif not throttle_only and not sys.stdin.isatty():
                 try:
                     payload = json.loads(sys.stdin.read(1_000_000))
                     session_jsonl = payload.get("transcript_path")

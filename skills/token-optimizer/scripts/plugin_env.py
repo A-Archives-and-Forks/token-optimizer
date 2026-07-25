@@ -280,6 +280,32 @@ def reclaim_orphaned_plugin_data_dirs(min_age_days: int | None = None) -> list[P
         return []
     removed: list[Path] = []
     for path in eligible:
+        # Eligibility is only a candidate snapshot. A reinstall can update the
+        # registry, active identity, or directory contents while the initial
+        # tree scan is running, so repeat every destructive precondition at
+        # the point of deletion.
+        resolve_plugin_data_dir.cache_clear()
+        active_now = resolve_plugin_data_dir()
+        try:
+            target = path.resolve(strict=False)
+            active_resolved = (
+                active_now.resolve(strict=False)
+                if active_now is not None else None
+            )
+            registered_now = {
+                item.resolve(strict=False)
+                for item in _registered_plugin_data_dirs()
+            }
+            latest_now = _latest_tree_mtime(path)
+        except OSError:
+            continue
+        if (
+            active_resolved == target
+            or target in registered_now
+            or latest_now is None
+            or latest_now >= cutoff
+        ):
+            continue
         try:
             shutil.rmtree(path)
             if not path.exists():
