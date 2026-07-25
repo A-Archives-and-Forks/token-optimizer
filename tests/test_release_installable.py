@@ -73,6 +73,7 @@ def test_gate_fails_when_release_has_no_assets(tmp_path):
     r = run_gate(api)
     assert r.returncode == 1
     assert "NOT INSTALLABLE" in r.stderr
+    assert "RESULT: INSTALLABLE" not in r.stdout
     # The message must name the fix, not just the symptom.
     assert "sign-release.sh" in r.stderr
     assert "install.sh:962" in r.stderr
@@ -88,6 +89,7 @@ def test_gate_fails_when_release_has_other_assets_but_not_the_manifest(tmp_path)
     r = run_gate(api)
     assert r.returncode == 1
     assert "no CHECKSUMS.sha256 asset" in r.stderr
+    assert "RESULT: INSTALLABLE" not in r.stdout
     # It should report what WAS attached, so the failure is diagnosable.
     assert "notes.txt" in r.stderr
 
@@ -97,7 +99,8 @@ def test_gate_fails_when_manifest_url_is_unreachable(tmp_path):
     api = write_release(tmp_path, "badurl.json", asset(tmp_path / "missing.sha256"))
     r = run_gate(api)
     assert r.returncode == 1
-    assert "NOT INSTALLABLE" in r.stderr
+    assert "could not be downloaded" in r.stderr
+    assert "RESULT: INSTALLABLE" not in r.stdout
 
 
 def test_gate_fails_when_manifest_is_empty(tmp_path):
@@ -107,6 +110,7 @@ def test_gate_fails_when_manifest_is_empty(tmp_path):
     r = run_gate(api)
     assert r.returncode == 1
     assert "empty" in r.stderr
+    assert "RESULT: INSTALLABLE" not in r.stdout
 
 
 def test_gate_fails_when_manifest_is_malformed(tmp_path):
@@ -119,6 +123,7 @@ def test_gate_fails_when_manifest_is_malformed(tmp_path):
     r = run_gate(api)
     assert r.returncode == 1
     assert "malformed" in r.stderr
+    assert "RESULT: INSTALLABLE" not in r.stdout
 
 
 def test_gate_fails_when_api_returns_no_tag(tmp_path):
@@ -127,6 +132,7 @@ def test_gate_fails_when_api_returns_no_tag(tmp_path):
     r = run_gate(p)
     assert r.returncode == 1
     assert "no tag_name" in r.stderr
+    assert "RESULT: INSTALLABLE" not in r.stdout
 
 
 def test_gate_passes_on_a_well_formed_release(tmp_path):
