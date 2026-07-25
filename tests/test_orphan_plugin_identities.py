@@ -121,6 +121,48 @@ def test_reclamation_never_deletes_a_registered_sibling(monkeypatch, tmp_path):
     assert registered.exists()
 
 
+def test_reclamation_revalidates_identity_immediately_before_delete(
+    monkeypatch, tmp_path
+):
+    data_base = tmp_path / "data"
+    active = data_base / "token-optimizer-active"
+    orphan = data_base / "token-optimizer-orphan"
+    active.mkdir(parents=True)
+    orphan.mkdir()
+    old = time.time() - (90 * 86400)
+    os.utime(orphan, (old, old))
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(active))
+    monkeypatch.setenv("TOKEN_OPTIMIZER_RECLAIM_ORPHANED_DATA", "1")
+    module = _load_plugin_env(monkeypatch, data_base)
+    module._INSTALLED_PLUGINS.write_text(
+        json.dumps({"plugins": {"token-optimizer@active": []}}),
+        encoding="utf-8",
+    )
+    original_latest = module._latest_tree_mtime
+    calls = 0
+
+    def register_during_scan(path):
+        nonlocal calls
+        calls += 1
+        result = original_latest(path)
+        if calls == 1:
+            module._INSTALLED_PLUGINS.write_text(
+                json.dumps({
+                    "plugins": {
+                        "token-optimizer@active": [],
+                        "token-optimizer@orphan": [],
+                    }
+                }),
+                encoding="utf-8",
+            )
+        return result
+
+    monkeypatch.setattr(module, "_latest_tree_mtime", register_during_scan)
+
+    assert module.reclaim_orphaned_plugin_data_dirs(min_age_days=30) == []
+    assert orphan.exists()
+
+
 def test_expand_checks_sibling_archives_before_reporting_miss(
     monkeypatch, tmp_path, capsys
 ):
