@@ -147,6 +147,73 @@ def test_gate_passes_on_a_well_formed_release(tmp_path):
     assert "manifest lines : 2" in r.stdout
 
 
+def test_gate_accepts_a_manifest_whose_last_line_lacks_a_newline(tmp_path):
+    """`wc -l` counts newlines, not lines, so a manifest with no trailing newline
+    undercounts -- and a single-entry one reports 0, which must not be mistaken
+    for empty. sign-release.sh writes trailing newlines, but the gate reads a
+    file off the network and must not reject a valid manifest on a byte that
+    carries no meaning."""
+    manifest = tmp_path / "CHECKSUMS.sha256"
+    manifest.write_text(
+        "0000000000000000000000000000000000000000000000000000000000000000  a.txt"
+    )  # no trailing \n
+    api = write_release(tmp_path, "nonl.json", asset(manifest))
+    r = run_gate(api)
+    assert r.returncode == 0, r.stderr
+    assert "RESULT: INSTALLABLE" in r.stdout
+
+
+def test_gate_rejects_a_manifest_with_crlf_line_endings(tmp_path):
+    """CRLF makes every path end in \\r, so sha256sum -c would look for
+    'a.txt\\r' and fail inside a user's install as 'may be compromised'. Better
+    to reject it here, loudly, than to ship it."""
+    manifest = tmp_path / "CHECKSUMS.sha256"
+    manifest.write_bytes(
+        b"0000000000000000000000000000000000000000000000000000000000000000  a.txt\r\n"
+    )
+    api = write_release(tmp_path, "crlf.json", asset(manifest))
+    r = run_gate(api)
+    assert r.returncode == 1
+    # A CRLF-specific message, not a generic "malformed": the fix is on the
+    # signing machine's core.autocrlf, and the message should say so.
+    assert "CRLF" in r.stderr
+    assert "RESULT: INSTALLABLE" not in r.stdout
+
+
+def test_gate_rejects_a_manifest_with_a_trailing_blank_line(tmp_path):
+    """A blank line is not '<sha256>  <path>'. sha256sum tolerates it, but the
+    gate is checking whether the asset is a well-formed manifest, and silently
+    accepting junk lines is how a truncated download passes for real."""
+    manifest = tmp_path / "CHECKSUMS.sha256"
+    manifest.write_text(
+        "0000000000000000000000000000000000000000000000000000000000000000  a.txt\n\n"
+    )
+    api = write_release(tmp_path, "blank.json", asset(manifest))
+    r = run_gate(api)
+    assert r.returncode == 1
+    assert "malformed" in r.stderr
+
+
+def test_gate_does_not_let_api_strings_inject_into_its_own_messages(tmp_path):
+    """RELEASE_TAG and the asset names come off the network and land in printf
+    and fail() strings. A crafted name containing a format specifier must not be
+    interpreted as one."""
+    api_path = tmp_path / "inject.json"
+    api_path.write_text(
+        json.dumps(
+            {
+                "tag_name": "v9.9.9-%s-%d",
+                "assets": [{"name": "%s%s%n.txt", "browser_download_url": "file:///dev/null"}],
+            }
+        )
+    )
+    r = run_gate(api_path)
+    assert r.returncode == 1
+    # The literal text survives; no format expansion, no crash.
+    assert "%s%s%n.txt" in r.stderr
+    assert "RESULT: INSTALLABLE" not in r.stdout
+
+
 def test_gate_script_is_executable_and_syntactically_valid():
     assert GATE.exists(), f"{GATE} is missing"
     r = subprocess.run(["bash", "-n", str(GATE)], capture_output=True, text=True)

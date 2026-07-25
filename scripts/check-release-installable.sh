@@ -108,10 +108,22 @@ curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused \
 [ -s "${tmp}/CHECKSUMS.sha256" ] \
     || fail "The CHECKSUMS.sha256 asset on ${RELEASE_TAG} is empty."
 
-# Well-formedness: every line must be a sha256 followed by a path. A truncated
-# or HTML-error-page asset would otherwise pass presence and fail later, during
-# a user's install, with "your install may be compromised".
-if grep -qvE '^[0-9a-f]{64}  ' "${tmp}/CHECKSUMS.sha256"; then
+# CRLF check comes FIRST, because the well-formedness regex below anchors only
+# the start of the line and a trailing \r sails straight through it. A CRLF
+# manifest then makes every recorded path end in \r, so a user's
+# `sha256sum -c` looks for "skills/foo.py\r", does not find it, and the install
+# dies at install.sh:1127 claiming the install may be compromised -- from a
+# manifest this gate called well-formed. Caught by
+# tests/test_release_installable.py::test_gate_rejects_a_manifest_with_crlf_line_endings.
+if LC_ALL=C grep -q "$(printf '\r')" "${tmp}/CHECKSUMS.sha256"; then
+    fail "The CHECKSUMS.sha256 asset on ${RELEASE_TAG} has CRLF line endings. Every path in it would end in a carriage return, so verification fails for every file during install. Fix: regenerate on a LF checkout (check core.autocrlf on the machine that signed it)."
+fi
+
+# Well-formedness: every line must be a sha256 followed by two spaces and a
+# non-empty path. A truncated or HTML-error-page asset would otherwise pass
+# presence and fail later, during a user's install, with "your install may be
+# compromised".
+if grep -qvE '^[0-9a-f]{64}  [^[:space:]]' "${tmp}/CHECKSUMS.sha256"; then
     fail "The CHECKSUMS.sha256 asset on ${RELEASE_TAG} is malformed (a line is not '<sha256>  <path>')."
 fi
 
