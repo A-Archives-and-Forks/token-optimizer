@@ -76,3 +76,35 @@ jobs:
       - name: Build docs site
         working-directory: docs-site
         run: npm run build
+
+  # Can a stranger install this right now?
+  #
+  # Between v5.11.57 and v5.11.64 the answer was no, for eight consecutive
+  # releases, and nothing in this repo noticed. install.sh verifies every install
+  # against the CHECKSUMS.sha256 asset on the latest release and verification is
+  # the default path; with no asset attached, resolve_latest_release() fails and
+  # the install hard-aborts. Meanwhile everything visible from the inside was
+  # green: tests passing, docs building, the maintainer's own machine on the
+  # current version because /plugin installs from the marketplace clone and never
+  # crosses that gate. The break existed only from where a new user stands, so
+  # nothing that looks inward could ever have caught it.
+  #
+  # This job looks from the outside instead, at the live releases API, and turns
+  # a dead installer into a red check in front of the PRs it should be blocking.
+  # It is deliberately allowed to fail a push that did not cause it: if the
+  # published install path is broken, that IS more urgent than the change in
+  # flight, and burying it in a workflow nobody watches is how it survived
+  # eleven releases.
+  installable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # github.token only to lift the anonymous API rate limit -- shared runner
+      # IPs burn the 60/hour allowance fast, and a rate-limited probe that
+      # reports "not installable" would be a false alarm training people to
+      # ignore this check.
+      - name: Check the published release is installable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/check-release-installable.sh
