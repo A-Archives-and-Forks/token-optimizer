@@ -1,0 +1,85 @@
+name: Sign release
+
+# Attaches CHECKSUMS.sha256 to a release, automatically.
+#
+# install.sh verifies every install against the CHECKSUMS.sha256 asset on the
+# latest GitHub Release, and verification is the DEFAULT path (install.sh:787).
+# resolve_latest_release() returns failure when that asset is missing
+# (install.sh:815), and the caller turns that into a hard abort
+# (install.sh:962). So a release with no manifest asset is not a cosmetic gap:
+# it is a broken installer for every new user.
+#
+# That is exactly what happened. scripts/sign-release.sh was manual-only, with
+# nothing in CI invoking it, so it stopped being run. The committed manifest
+# froze at v5.11.53 and no release from v5.11.57 through v5.11.64 carried the
+# asset at all. Every verified install aborted, and the only documented way past
+# it was TOKEN_OPTIMIZER_SKIP_VERIFY=1 — teaching new users to switch off
+# integrity checking in order to install a tool. Eleven releases shipped that
+# way because the step lived in a human's memory. A release step that depends on
+# someone remembering is not a step, it is a wish.
+#
+# Triggered on `release: published` rather than on tag push. The signer calls
+# `gh release view "$TAG"` and exits non-zero when the release does not exist
+# yet (scripts/sign-release.sh:27-32); a tag is normally pushed BEFORE the
+# release is created, so a tag-push trigger would race the release into
+# existence and fail on ordering roughly every time. `published` fires when the
+# release provably exists, which is also the exact moment the asset has to be
+# there.
+on:
+  release:
+    types: [published]
+  # Manual backfill for a release that predates this workflow.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to sign (e.g. v5.11.64)
+        required: true
+        type: string
+
+# Needs write to upload a release asset. Nothing else.
+permissions:
+  contents: write
+
+# Never let two signings race for the same tag's asset.
+concurrency:
+  group: sign-release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history and the tag itself: the signer resolves the repo root and
+      # enumerates files with `git ls-files`, so a shallow or sparse checkout
+      # would silently produce a short manifest.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          fetch-depth: 0
+
+      - name: Sign release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: bash scripts/sign-release.sh "$TAG"
+
+      # Verify the upload actually landed, from the outside, the same way
+      # install.sh sees it. A signing step that reports success without checking
+      # is how this failure mode stayed invisible for eleven releases: the guard
+      # has to prove its own result, not assume it.
+      - name: Verify the asset resolves and the manifest matches the tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          echo "Checking that $TAG carries a CHECKSUMS.sha256 asset..."
+          gh release view "$TAG" --json assets \
+            --jq '.assets[].name' | grep -qx 'CHECKSUMS.sha256' || {
+              echo "::error::$TAG has no CHECKSUMS.sha256 asset after signing."
+              exit 1
+            }
+          gh release download "$TAG" -p CHECKSUMS.sha256 -O /tmp/released.sha256 --clobber
+          echo "Verifying the tagged tree against the released manifest..."
+          sha256sum -c /tmp/released.sha256 --quiet
+          echo "OK: $(wc -l < /tmp/released.sha256) entries verified."
