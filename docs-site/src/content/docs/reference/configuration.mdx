@@ -99,7 +99,10 @@ Dashboard ports are fixed per runtime: 24842 (Claude Code), 24843 (Codex), 24844
 |---|---|---|
 | `TOKEN_OPTIMIZER_TRENDS_RETENTION_DAYS` | unlimited | Days to keep rows in the history database |
 | `TOKEN_OPTIMIZER_ARCHIVE_RETENTION_HOURS` | 24 | Hours to keep archived tool results |
-| `TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS` | unlimited | Days to keep quality-cache snapshots; `0` means unlimited |
+| `TOKEN_OPTIMIZER_ARCHIVE_RETENTION_MAX_FILES` | 1000 | Maximum files across tool archives; oldest sessions are removed first |
+| `TOKEN_OPTIMIZER_ARCHIVE_RETENTION_MAX_BYTES` | 104857600 | Maximum aggregate tool-archive bytes (100 MiB); oldest sessions are removed first |
+| `TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS` | 7 | Days to keep quality-cache snapshots; `0` means unlimited |
+| `TOKEN_OPTIMIZER_ORPHAN_RETENTION_DAYS` | 30 | Minimum inactivity age for orphan plugin-data reclamation (hard floor: 7 days) |
 
 Per-session file caches are auto-deleted after 48 hours and are not configurable. See [Your data and privacy](/reference/data-and-privacy/) for the full storage map.
 

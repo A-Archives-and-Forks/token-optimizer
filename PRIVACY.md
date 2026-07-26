@@ -54,7 +54,7 @@ Markdown files containing truncated conversation context for session continuity.
 JSON files containing the full output of large tool calls (over 4KB), used for retrieval during the same session. **Content is credential-redacted before storage.**
 
 - **Path:** `<plugin-data>/data/tool-archive/<session-id>/`
-- **Retention:** Configurable via `TOKEN_OPTIMIZER_ARCHIVE_RETENTION_HOURS` (default: 24 hours)
+- **Retention:** Configurable via `TOKEN_OPTIMIZER_ARCHIVE_RETENTION_HOURS` (default: 24 hours), with aggregate caps of 1,000 files and 100 MiB
 - **Sensitive content:** Tool output (credential-redacted) which may include file contents, command output, or API responses
 
 ### Quality Cache

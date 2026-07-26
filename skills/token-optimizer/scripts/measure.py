@@ -91,7 +91,13 @@ except ImportError:  # pragma: no cover - Python < 3.11 fallback
     tomllib = None
 
 from hook_io import read_stdin_hook_input as _read_stdin_hook_input_shared
-from plugin_env import resolve_plugin_data_dir, interpret_flag_value
+from hook_runtime import HookDeadline, LeaseLock, current_deadline, lease_lock
+from plugin_env import (
+    interpret_flag_value,
+    reclaim_orphaned_plugin_data_dirs,
+    resolve_plugin_data_dir,
+    snapshot_dir_candidates,
+)
 from utf8_io import enforce_utf8_io, reexec_in_utf8_mode
 from runtime_env import claude_home, detect_runtime, runtime_home, runtime_name_for_humans
 
@@ -100,12 +106,6 @@ import codex_session
 import codex_state
 import copilot_session
 import hermes_session
-
-try:
-    import fcntl
-    _HAS_FCNTL = True
-except ImportError:
-    _HAS_FCNTL = False  # Windows: no advisory locking
 
 CHARS_PER_TOKEN = 4.0
 _SKILL_DESC_TRUNCATION_LIMIT = 1536
@@ -4896,59 +4896,45 @@ _CODEX_CONFIG_LOCK_PATH = runtime_home() / ".codex-config.lock"
 
 @contextmanager
 def _codex_config_lock():
-    """Advisory file lock for config.toml writes.
+    """Bounded portable lease for config.toml writes.
 
-    Mirrors _config_lock: blocking flock with kernel auto-release on process
-    death; no-op fallback on Windows. Serializes concurrent read-modify-write
-    cycles on config.toml (skill enable/disable, MCP toggles).
+    Serializes concurrent read-modify-write cycles on config.toml (skill
+    enable/disable, MCP toggles). Contenders skip the mutation after 75ms
+    rather than blocking a hook.
     """
-    if not _HAS_FCNTL:
-        yield
-        return
-    lock_path = _CODEX_CONFIG_LOCK_PATH
-    try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    lease_path = _CODEX_CONFIG_LOCK_PATH.with_suffix(".lease")
+    with lease_lock(
+        lease_path,
+        deadline=current_deadline(),
+        acquire_timeout=0.075,
+    ) as acquired:
+        yield acquired
 
 
 @contextmanager
 def _skill_mgmt_lock():
-    """Advisory file lock serializing skill archive/restore mutations.
+    """Bounded portable lease serializing skill archive/restore mutations.
 
-    Mirrors _config_lock: blocking flock with kernel auto-release on process
-    death; no-op fallback on Windows. The dashboard daemon and a CLI
-    `measure.py skill archive|restore` run in separate processes with no
-    in-process serialization, so this cross-process lock closes the
-    archive/restore TOCTOU windows (issue #48 hardening).
+    The dashboard daemon and a CLI `measure.py skill archive|restore` run in
+    separate processes with no in-process serialization, so this cross-process
+    lease closes the archive/restore TOCTOU windows (issue #48 hardening).
+    Contenders skip the mutation after 75ms rather than blocking a hook.
     """
-    if not _HAS_FCNTL:
-        yield
-        return
     lock_path = CLAUDE_DIR / "_backups" / ".skill-mgmt.lock"
-    try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    lease_path = lock_path.with_suffix(".lease")
+    with lease_lock(
+        lease_path,
+        deadline=current_deadline(),
+        acquire_timeout=0.075,
+    ) as acquired:
+        yield acquired
 
 
 def _write_codex_config(text: str) -> None:
     path = _safe_codex_config_path()
-    with _codex_config_lock():
+    with _codex_config_lock() as acquired:
+        if not acquired:
+            return
         codex_io.atomic_write(path, text)
 
 
@@ -5425,7 +5411,9 @@ def _manage_skill(action, name):
     Held under a cross-process lock so a dashboard-daemon call and a CLI call
     can't interleave their archive/restore mutations.
     """
-    with _skill_mgmt_lock():
+    with _skill_mgmt_lock() as acquired:
+        if not acquired:
+            return False
         return _manage_skill_locked(action, name)
 
 
@@ -6023,6 +6011,15 @@ def _run_session_end_flush_worker(args):
             # Data-retention enforcement (enterprise compliance)
             try:
                 _cleanup_quality_cache()
+            except Exception:
+                pass
+            try:
+                from archive_result import cleanup_old_archives
+                cleanup_old_archives()
+            except Exception:
+                pass
+            try:
+                reclaim_orphaned_plugin_data_dirs()
             except Exception:
                 pass
             try:
@@ -9851,29 +9848,14 @@ def _write_tripwire_sidecar(demoted, rates, promoted_at=None):
 
 @contextmanager
 def _tripwire_lock():
-    """Advisory file lock serializing tripwire recompute+write (T4).
-
-    Mirrors _config_lock: a blocking flock with kernel auto-release on process
-    death and a no-op fallback on Windows. The Edit hook fires the evaluation
-    from many concurrent processes; without this, two interleaved
-    read-modify-write cycles could clobber each other's demotions or promoted_at
-    fence. The read-only fast path in evaluate_cohort_tripwire stays lock-free.
-    """
-    if not _HAS_FCNTL:
-        yield
-        return
-    lock_path = SNAPSHOT_DIR / _TRIPWIRE_LOCK_NAME
-    try:
-        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    """Bounded portable lease serializing tripwire recompute+write (T4)."""
+    lock_path = SNAPSHOT_DIR / f"{_TRIPWIRE_LOCK_NAME}.lease"
+    with lease_lock(
+        lock_path,
+        deadline=current_deadline(),
+        acquire_timeout=0.075,
+    ) as acquired:
+        yield acquired
 
 
 def evaluate_cohort_tripwire(force=False):
@@ -9901,10 +9883,11 @@ def evaluate_cohort_tripwire(force=False):
         except (TypeError, ValueError):
             pass
 
-    # T4: serialize the recompute+write branch under a lightweight flock (mirrors
-    # _config_lock) so two concurrent Edit-hook evaluations can't interleave a
-    # read-modify-write on the sidecar. The fast path above stays lock-free.
-    with _tripwire_lock():
+    # T4: serialize the recompute+write branch under a portable bounded lease.
+    # Contenders fail open by skipping this mutation, never by running unlocked.
+    with _tripwire_lock() as acquired:
+        if not acquired:
+            return sidecar or {}
         # Re-read INSIDE the lock: another process may have just recomputed.
         sidecar = _read_tripwire_sidecar(return_corrupt=True)
         if sidecar == "__corrupt__":
@@ -10535,29 +10518,20 @@ def _keepwarm_sidecar_path():
 
 @contextmanager
 def _keepwarm_lock():
-    """Advisory file lock serializing keep-warm sidecar read-modify-writes.
+    """Bounded portable lease serializing keep-warm sidecar read-modify-writes.
 
-    Mirrors _tripwire_lock / _config_lock: a blocking flock with kernel
-    auto-release on process death and a no-op fallback on Windows. Two Stop hooks
-    from different sessions can append concurrently, and the tick loop rewrites the
-    whole file during compaction; without this an interleaved append + rewrite
-    could lose a record or leave a torn line.
+    Two Stop hooks from different sessions can append concurrently, and the tick
+    loop rewrites the whole file during compaction; without this an interleaved
+    append + rewrite could lose a record or leave a torn line. Contenders skip
+    the mutation after 75ms rather than blocking a hook.
     """
-    if not _HAS_FCNTL:
-        yield
-        return
-    lock_path = SNAPSHOT_DIR / _KEEPWARM_LOCK_NAME
-    try:
-        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    lock_path = SNAPSHOT_DIR / f"{_KEEPWARM_LOCK_NAME}.lease"
+    with lease_lock(
+        lock_path,
+        deadline=current_deadline(),
+        acquire_timeout=0.075,
+    ) as acquired:
+        yield acquired
 
 
 def _keepwarm_append_line(path, line):
@@ -10571,7 +10545,9 @@ def _keepwarm_append_line(path, line):
     append can never tear against a concurrent compaction rewrite.
     """
     try:
-        with _keepwarm_lock():
+        with _keepwarm_lock() as acquired:
+            if not acquired:
+                return False
             try:
                 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
             except OSError:
@@ -10923,7 +10899,9 @@ def compact_keepwarm_sidecar(path=None, now=None):
         now = time.time()
     kept = []
     dropped = 0
-    with _keepwarm_lock():
+    with _keepwarm_lock() as acquired:
+        if not acquired:
+            return (0, 0)
         records = load_keepwarm_records(path)
         # Account for corrupt/invalid lines as dropped for the caller's visibility.
         try:
@@ -13348,7 +13326,9 @@ def _keepwarm_rewrite_records(records, now=None):
         now = time.time()
     path = _keepwarm_sidecar_path()
     try:
-        with _keepwarm_lock():
+        with _keepwarm_lock() as acquired:
+            if not acquired:
+                return
             try:
                 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
                 fd, tmp_name = tempfile.mkstemp(
@@ -14148,7 +14128,9 @@ def _keepwarm_compact_ledger(now=None, retain_days=_KEEPWARM_LEDGER_RETAIN_DAYS)
     if not has_old and size <= _KEEPWARM_LEDGER_MAX_BYTES:
         return (False, len(kept), 0)
     try:
-        with _keepwarm_lock():
+        with _keepwarm_lock() as acquired:
+            if not acquired:
+                return (False, 0, 0)
             try:
                 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
                 fd, tmp_name = tempfile.mkstemp(
@@ -14918,22 +14900,17 @@ def keepwarm_tripwire_mode():
 
 @contextmanager
 def _keepwarm_tripwire_lock():
-    """Advisory flock serializing tripwire recompute+write (clone of _tripwire_lock)."""
-    if not _HAS_FCNTL:
-        yield
-        return
-    lock_path = SNAPSHOT_DIR / _KEEPWARM_TRIPWIRE_LOCK_NAME
-    try:
-        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    """Bounded portable lease serializing tripwire recompute+write.
+
+    Contenders skip the mutation after 75ms rather than blocking a hook.
+    """
+    lock_path = SNAPSHOT_DIR / f"{_KEEPWARM_TRIPWIRE_LOCK_NAME}.lease"
+    with lease_lock(
+        lock_path,
+        deadline=current_deadline(),
+        acquire_timeout=0.075,
+    ) as acquired:
+        yield acquired
 
 
 def _write_keepwarm_tripwire_sidecar(mode, strikes, ratio, health, now=None,
@@ -15043,7 +15020,9 @@ def evaluate_keepwarm_tripwire(now=None, rows=None, force=False):
         _KEEPWARM_TRIPWIRE_RATIO_GATE + realized + 1.0)
     health = _keepwarm_tripwire_health(rows, now=now)
 
-    with _keepwarm_tripwire_lock():
+    with _keepwarm_tripwire_lock() as acquired:
+        if not acquired:
+            return {}
         cur_mode = keepwarm_tripwire_mode()
         try:
             prev = json.loads(_keepwarm_tripwire_path().read_text(encoding="utf-8"))
@@ -15101,7 +15080,9 @@ def keepwarm_tripwire_repromote(now=None):
                                      now=now, rows=rows)
     spend = summary["spend_usd"]
     ratio = (summary["realized_usd"] / spend) if spend > 0 else (summary["realized_usd"] + 1.0)
-    with _keepwarm_tripwire_lock():
+    with _keepwarm_tripwire_lock() as acquired:
+        if not acquired:
+            return None
         return _write_keepwarm_tripwire_sidecar(
             "sustain", 0, ratio, health, now=now, last_strike_ts=None)
 
@@ -18449,26 +18430,18 @@ _SETTINGS_LOCK_PATH = SETTINGS_PATH.parent / ".settings.lock"
 
 @contextmanager
 def _settings_lock():
-    """Advisory file lock for settings.json writes.
+    """Bounded portable lease for settings.json writes.
 
     Prevents concurrent writes from silently overwriting each other.
-    Uses blocking flock — the kernel handles waiting and auto-releases
-    on process death. Falls back to no-op on Windows or if the lock
-    file can't be opened.
+    Contenders skip the mutation after 75ms rather than blocking a hook.
     """
-    if not _HAS_FCNTL:
-        yield
-        return
-    try:
-        fd = os.open(str(_SETTINGS_LOCK_PATH), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    lease_path = _SETTINGS_LOCK_PATH.with_suffix(".lease")
+    with lease_lock(
+        lease_path,
+        deadline=current_deadline(),
+        acquire_timeout=0.075,
+    ) as acquired:
+        yield acquired
 
 
 def _write_settings_atomic(settings_data):
@@ -18484,7 +18457,9 @@ def _write_settings_atomic(settings_data):
     unlinking the already-renamed destination. Any exception encountered
     during the write propagates naturally after cleanup.
     """
-    with _settings_lock():
+    with _settings_lock() as acquired:
+        if not acquired:
+            return
         tmp_fd, tmp_path = tempfile.mkstemp(
             dir=str(SETTINGS_PATH.parent),
             prefix=".settings-",
@@ -21804,7 +21779,7 @@ def _external_memory_present() -> bool:
 
 
 # Data-retention controls (enterprise compliance)
-_QUALITY_CACHE_RETENTION_DAYS = _int_env("TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS", 0)  # 0 = unlimited (default); enterprise sets to e.g. 30
+_QUALITY_CACHE_RETENTION_DAYS = _int_env("TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS", 7)
 _CHECKPOINT_EVENT_MAX = _int_env("TOKEN_OPTIMIZER_CHECKPOINT_EVENT_MAX", 1000)
 _TRENDS_RETENTION_DAYS = _int_env("TOKEN_OPTIMIZER_TRENDS_RETENTION_DAYS", 0)  # 0 = unlimited
 _ARCHIVE_RETENTION_HOURS = _int_env("TOKEN_OPTIMIZER_ARCHIVE_RETENTION_HOURS", 24)
@@ -24639,14 +24614,21 @@ def expand_archived(tool_use_id=None, session_id=None, list_all=False):
     If list_all is True, prints a summary of all archived results.
     Otherwise, searches for tool_use_id and prints the full response.
     """
-    archive_root = SNAPSHOT_DIR / "tool-archive"
+    archive_roots = []
+    for snapshot_dir in snapshot_dir_candidates():
+        archive_root = snapshot_dir / "tool-archive"
+        if archive_root not in archive_roots:
+            archive_roots.append(archive_root)
 
     if list_all:
-        if not archive_root.is_dir():
+        if not any(root.is_dir() for root in archive_roots):
             print("[Tool Archive] No archived results found.")
             return
         total = 0
-        session_dirs = sorted(archive_root.iterdir()) if archive_root.is_dir() else []
+        session_dirs = []
+        for archive_root in archive_roots:
+            if archive_root.is_dir() and not archive_root.is_symlink():
+                session_dirs.extend(sorted(archive_root.iterdir()))
         if session_id:
             sid = sanitize_session_id(session_id)
             session_dirs = [d for d in session_dirs if d.name == sid]
@@ -24692,16 +24674,25 @@ def expand_archived(tool_use_id=None, session_id=None, list_all=False):
         print("[Error] Invalid tool_use_id format.", file=sys.stderr)
         sys.exit(1)
 
-    if not archive_root.is_dir():
+    if not any(root.is_dir() for root in archive_roots):
         print("[Error] No archive directory found. No results have been archived yet.", file=sys.stderr)
         sys.exit(1)
 
     # Determine search scope
     if session_id:
-        sd = _archive_dir_for_session(session_id)
-        search_dirs = [sd] if sd else []
+        sid = sanitize_session_id(session_id)
+        search_dirs = [
+            archive_root / sid for archive_root in archive_roots
+            if sid != "unknown"
+        ]
     else:
-        search_dirs = [d for d in archive_root.iterdir() if d.is_dir()]
+        search_dirs = []
+        for archive_root in archive_roots:
+            if archive_root.is_dir() and not archive_root.is_symlink():
+                search_dirs.extend(
+                    d for d in archive_root.iterdir()
+                    if d.is_dir() and not d.is_symlink()
+                )
 
     for sd in search_dirs:
         entry_path = sd / f"{tool_use_id}.json"
@@ -27387,7 +27378,7 @@ def _cleanup_checkpoints():
 
 def _cleanup_quality_cache():
     """Remove quality-cache-*.json files older than the configured retention window.
-    No-op when _QUALITY_CACHE_RETENTION_DAYS is 0 (unlimited, the default)."""
+    No-op when _QUALITY_CACHE_RETENTION_DAYS is explicitly set to 0."""
     if _QUALITY_CACHE_RETENTION_DAYS <= 0:
         return
     try:
@@ -27737,6 +27728,39 @@ def _quality_cache_path_for(filepath=None):
     return QUALITY_CACHE_PATH
 
 
+def _quality_cache_throttle_marker(
+    filepath=None, session_id=None, cache_path=None
+):
+    """Return the throttle marker for one session (legacy global if unknown)."""
+    identity = None
+    if cache_path is not None:
+        identity = Path(cache_path).stem.removeprefix("quality-cache-")
+    elif filepath:
+        identity = Path(filepath).stem
+    elif session_id:
+        identity = sanitize_session_id(session_id)
+    if identity:
+        identity = re.sub(r"[^a-zA-Z0-9_-]", "_", str(identity))[:128]
+        return QUALITY_CACHE_DIR / f".quality-cache-throttle-{identity}"
+    return QUALITY_CACHE_DIR / ".quality-cache-throttle"
+
+
+def _quality_cache_tick_due(
+    throttle_seconds, filepath=None, session_id=None
+):
+    """One-stat gate for the PostToolUse throttle-only hot path.
+
+    A missing marker is a cache miss, not permission to parse a transcript.
+    UserPromptSubmit creates the first cache and marker.
+    """
+    try:
+        marker = _quality_cache_throttle_marker(filepath, session_id)
+        age = time.time() - marker.stat().st_mtime
+        return age >= max(0, throttle_seconds)
+    except OSError:
+        return False
+
+
 def _write_checkpoint_atomic(checkpoint_path, content):
     """Atomically write a checkpoint markdown file. Returns True on success.
 
@@ -27783,13 +27807,10 @@ def _write_checkpoint_atomic(checkpoint_path, content):
 
 
 # --- Hook wall-clock guard ----------------------------------------------------
-# Hook handlers invoked from hooks/hooks.json exit gracefully if they exceed a
-# wall-clock budget. Prevents a slow filesystem, lock contention, or a runaway
-# code path from blocking SessionStart or UserPromptSubmit for minutes. POSIX
-# only: feature-detects SIGALRM and no-ops on platforms without it. The prior
-# SIGALRM handler is saved on install and restored on clear so test runners
-# (pytest-timeout, etc.) that rely on their own SIGALRM handler are not
-# clobbered when a hook path runs under test.
+# Hook handlers invoked from hooks/hooks.json are hard-stopped if they exceed a
+# wall-clock budget. HookDeadline uses one daemon-watchdog implementation on
+# Linux, macOS, Windows/MSYS2, and Codex; it can interrupt blocking I/O where a
+# signal flag or cooperative timer cannot.
 #
 # _HookTimeout inherits from BaseException (not Exception) so inner `except
 # Exception: pass` blocks inside guarded handlers do NOT swallow it. Same
@@ -27797,36 +27818,19 @@ def _write_checkpoint_atomic(checkpoint_path, content):
 # dispatch's `except _HookTimeout` still catches it by exact type.
 
 class _HookTimeout(BaseException):
+    """Compatibility sentinel for tests that inject the former timeout."""
     pass
 
 
-def _hook_timeout_handler(_signum, _frame):
-    # Parameters are required by signal.signal() API; underscore-prefixed
-    # to silence dead-code checkers.
-    raise _HookTimeout()
-
-
 def _install_hook_budget(seconds=8):
-    """Install a SIGALRM wall-clock guard. Returns the prior handler, or None
-    on platforms without SIGALRM.
-    """
-    if not hasattr(signal, "SIGALRM"):
-        return None
-    old = signal.signal(signal.SIGALRM, _hook_timeout_handler)
-    signal.alarm(seconds)
-    return old
+    """Start the cross-platform hard wall-clock guard."""
+    return HookDeadline(seconds).start()
 
 
-def _clear_hook_budget(old_handler):
-    """Clear the wall-clock guard and restore the prior SIGALRM handler."""
-    if not hasattr(signal, "SIGALRM"):
-        return
-    signal.alarm(0)
-    if old_handler is not None:
-        try:
-            signal.signal(signal.SIGALRM, old_handler)
-        except (ValueError, TypeError):
-            pass
+def _clear_hook_budget(deadline):
+    """Cancel a normally completed hook's watchdog."""
+    if deadline is not None:
+        deadline.cancel()
 
 
 def _write_quality_cache(cache_path, result):
@@ -27850,6 +27854,10 @@ def _write_quality_cache(cache_path, result):
             json.dump(result, f)
         os.replace(tmp_path, str(cache_path))
         tmp_path = None
+        try:
+            _quality_cache_throttle_marker(cache_path=cache_path).touch()
+        except OSError:
+            pass
         ok = True
     except OSError:
         ok = False
@@ -28606,11 +28614,10 @@ def _maybe_loop_warning(result, cache_path, quality_data, quiet=False):
 
 
 def _acquire_quality_lock(cache_path):
-    """Non-blocking per-session lock serializing quality_cache recompute+write.
+    """Bounded portable lock serializing quality_cache recompute+write.
 
-    Returns an fd on success, None when locking is unavailable (caller proceeds
-    unlocked, e.g. Windows), or False when another process already holds it
-    (caller should skip the recompute and return the current cached score).
+    Returns a LeaseLock on success or False when unavailable/contended. The
+    caller must skip the mutation on False; it never proceeds unlocked.
 
     Why: the PostToolUse refresh fires on every tool call, so with parallel
     subagents many quality_cache() processes can recompute concurrently. The
@@ -28620,31 +28627,20 @@ def _acquire_quality_lock(cache_path):
     thundering-herd recomputes. Hook processes are one-shot, so the advisory
     lock is also released on process exit as a safety net.
     """
-    if not _HAS_FCNTL:
-        return None
-    try:
-        fd = os.open(str(cache_path.with_suffix(".qlock")), os.O_WRONLY | os.O_CREAT, 0o600)
-    except OSError:
-        return None
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError):
-        os.close(fd)
+    lock = LeaseLock(
+        cache_path.with_suffix(".qlease"),
+        deadline=current_deadline(),
+        acquire_timeout=0.075,
+    )
+    if not lock.acquire():
         return False
-    return fd
+    return lock
 
 
-def _release_quality_lock(fd):
-    if not fd:  # None or False
+def _release_quality_lock(lock):
+    if not lock:
         return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    except OSError:
-        pass
-    try:
-        os.close(fd)
-    except OSError:
-        pass
+    lock.release()
 
 
 def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_jsonl=None, force=False, pure_time_throttle=False, session_id=None):
@@ -28678,6 +28674,11 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
 
     # Per-session cache: each session has its own file to avoid cross-session pollution
     cache_path = _quality_cache_path_for(filepath)
+
+    # A throttle-only PostToolUse tick is never allowed to bootstrap a missing
+    # cache. UserPromptSubmit owns the initial computation; this hot path skips.
+    if pure_time_throttle and not force and not cache_path.exists():
+        return None
 
     # Throttle: skip only if cache is recent AND the session transcript has not changed.
     # This keeps latency low without missing threshold crossings on active sessions.
@@ -29333,29 +29334,21 @@ _CONFIG_LOCK_PATH = CONFIG_DIR / ".config.lock"
 
 @contextmanager
 def _config_lock():
-    """Advisory file lock for config.json writes (adv-004 fix, 2026-04-16).
+    """Bounded portable lease for config.json writes.
 
     The v5 toggle endpoint can trigger 5+ concurrent read-modify-write
     cycles on CONFIG_PATH when a user rage-clicks dashboard checkboxes,
     and SessionStart ensure-health also writes last_hook_heal_check.
-    Without serialization, interleaved writers silently clobber each
-    other's keys. Mirrors _settings_lock: blocking flock with kernel
-    auto-release on process death; no-op fallback on Windows.
+    Without serialization, interleaved writers silently clobber each other's
+    keys. Contenders skip the mutation after 75ms rather than blocking a hook.
     """
-    if not _HAS_FCNTL:
-        yield
-        return
-    try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(_CONFIG_LOCK_PATH), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    lease_path = _CONFIG_LOCK_PATH.with_suffix(".lease")
+    with lease_lock(
+        lease_path,
+        deadline=current_deadline(),
+        acquire_timeout=0.075,
+    ) as acquired:
+        yield acquired
 
 
 def _write_config_flag(key, value):
@@ -29372,7 +29365,9 @@ def _write_config_flag(key, value):
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
         return
-    with _config_lock():
+    with _config_lock() as acquired:
+        if not acquired:
+            return
         cfg = {}
         if CONFIG_PATH.exists():
             try:
@@ -35826,6 +35821,7 @@ if __name__ == "__main__":
     elif args[0] == "verbosity-steer":
         # Claude Code UserPromptSubmit: delegate to run_verbosity_steer.
         # Reads stdin for transcript_path, then calls the shared function.
+        _tok_hook_deadline = _install_hook_budget(8)
         try:
             hook_input = _read_stdin_hook_input()
             transcript_path = hook_input.get("transcript_path")
@@ -35840,6 +35836,8 @@ if __name__ == "__main__":
                 print(payload)
         except Exception:
             pass
+        finally:
+            _clear_hook_budget(_tok_hook_deadline)
     elif args[0] == "compact-instructions":
         output_json = "--json" in args
         install = "--install" in args
@@ -35875,10 +35873,37 @@ if __name__ == "__main__":
         except Exception:
             pass
     elif args[0] == "quality-cache":
-        # Hook wall-clock guard: the handler exits gracefully after 8s to
-        # keep SessionStart / UserPromptSubmit responsive even under lock
-        # contention or a pathologically slow filesystem.
-        _tok_hook_old_sig = _install_hook_budget(8)
+        # Parse argument-only policy before touching the filesystem, daemon,
+        # settings, config, or stdin. The throttle-only path pays one marker
+        # stat and exits immediately unless a refresh is actually due.
+        quiet = "--quiet" in args or "-q" in args
+        warn = "--warn" in args
+        force = "--force" in args
+        throttle_only = "--throttle-only" in args
+        throttle = 120
+        warn_threshold = 70
+        for i, a in enumerate(args):
+            if a == "--throttle" and i + 1 < len(args):
+                try:
+                    throttle = int(args[i + 1])
+                except ValueError:
+                    pass
+            if a == "--warn-threshold" and i + 1 < len(args):
+                try:
+                    warn_threshold = int(args[i + 1])
+                except ValueError:
+                    pass
+        _tok_hook_deadline = _install_hook_budget(8)
+        payload = {}
+        if throttle_only:
+            payload = _read_stdin_hook_input(max_bytes=1_000_000)
+            if not force and not _quality_cache_tick_due(
+                throttle,
+                payload.get("transcript_path"),
+                payload.get("session_id"),
+            ):
+                _clear_hook_budget(_tok_hook_deadline)
+                sys.exit(0)
         # Mid-session dashboard-daemon liveness pulse. quality-cache is the
         # per-turn UserPromptSubmit handler, so piggybacking here adds NO new hook
         # process (zero extra per-turn interpreter spawn). Cheap + throttled +
@@ -35889,23 +35914,6 @@ if __name__ == "__main__":
         except Exception:
             pass
         try:
-            quiet = "--quiet" in args or "-q" in args
-            warn = "--warn" in args
-            force = "--force" in args
-            throttle_only = "--throttle-only" in args
-            throttle = 120
-            warn_threshold = 70
-            for i, a in enumerate(args):
-                if a == "--throttle" and i + 1 < len(args):
-                    try:
-                        throttle = int(args[i + 1])
-                    except ValueError:
-                        pass
-                if a == "--warn-threshold" and i + 1 < len(args):
-                    try:
-                        warn_threshold = int(args[i + 1])
-                    except ValueError:
-                        pass
             # Self-healing: if quality-cache hook is missing from settings.json, reinstall it.
             # Respects "quality_bar_disabled" in config.json for permanent opt-out.
             #
@@ -35931,7 +35939,10 @@ if __name__ == "__main__":
             # Read hook payload from stdin if available (provides exact transcript_path)
             session_jsonl = None
             session_id_from_hook = None
-            if not sys.stdin.isatty():
+            if payload:
+                session_jsonl = payload.get("transcript_path")
+                session_id_from_hook = payload.get("session_id")
+            elif not throttle_only and not sys.stdin.isatty():
                 try:
                     payload = json.loads(sys.stdin.read(1_000_000))
                     session_jsonl = payload.get("transcript_path")
@@ -35970,7 +35981,7 @@ if __name__ == "__main__":
             )
             sys.exit(0)
         finally:
-            _clear_hook_budget(_tok_hook_old_sig)
+            _clear_hook_budget(_tok_hook_deadline)
     elif args[0] == "v5":
         # v5 feature management: measure.py v5 [status|enable|disable|welcome] [feature]
         output_json = "--json" in args

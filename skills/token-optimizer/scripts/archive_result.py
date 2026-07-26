@@ -40,7 +40,8 @@ except ImportError:
     _redact_creds_shared = None
 from bash_compress import _TOKEN_PATTERNS
 from hook_io import read_stdin_hook_input
-from plugin_env import resolve_snapshot_dir
+from hook_runtime import LeaseLock
+from plugin_env import resolve_snapshot_dir, snapshot_dir_candidates
 from refetch_fingerprint import ARGS_HASH_KEY, expand_command, tool_fingerprint
 from runtime_env import claude_home
 from session_store import SessionStore, _sanitize_session_id as sanitize_sid
@@ -60,6 +61,11 @@ _ARCHIVE_THRESHOLD = 4096       # chars: only archive results >= this size
 _ARCHIVE_PREVIEW_SIZE = 1500    # chars: preview included in replacement output
 _ARCHIVE_MAX_SIZE = 5_242_880   # 5MB: truncate responses beyond this
 _STDIN_MAX_BYTES = _ARCHIVE_MAX_SIZE + 262_144  # 5MB response plus JSON overhead
+_ARCHIVE_RETENTION_HOURS_DEFAULT = 24
+_ARCHIVE_RETENTION_MAX_FILES_DEFAULT = 1000
+_ARCHIVE_RETENTION_MAX_BYTES_DEFAULT = 104_857_600  # 100 MiB
+_ARCHIVE_ACTIVE_GRACE_SECONDS_DEFAULT = 86_400
+_ARCHIVE_CLEANUP_INTERVAL_SECONDS_DEFAULT = 60
 
 # WS4: Agent/Task result progressive disclosure — shipped MEASURE-ONLY.
 #
@@ -154,31 +160,321 @@ def _redact_credentials(text: str) -> str:
     return text
 
 
-def cleanup_old_archives(max_age_hours: int = 48, skip_session_id: str | None = None) -> int:
-    """Delete tool-archive session directories older than max_age_hours.
+def _int_env(name: str, default: int) -> int:
+    """Read a non-negative integer without adding a heavy config import."""
+    try:
+        value = int(os.environ.get(name, str(default)))
+        return value if value >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _archive_tree_usage(session_dir: Path) -> tuple[int, int]:
+    """Return (regular-file count, bytes) without following symlinks."""
+    files = 0
+    total_bytes = 0
+    for root, dirnames, filenames in os.walk(session_dir, followlinks=False):
+        root_path = Path(root)
+        dirnames[:] = [
+            name for name in dirnames
+            if not (root_path / name).is_symlink()
+        ]
+        for name in filenames:
+            path = root_path / name
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                files += 1
+                total_bytes += os.lstat(path).st_size
+            except OSError:
+                continue
+    return files, total_bytes
+
+
+def _archive_roots() -> list[Path]:
+    """Return every safe archive root, active identity first."""
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for snapshot_dir in snapshot_dir_candidates():
+        archive_root = snapshot_dir / "tool-archive"
+        try:
+            key = os.path.normcase(str(archive_root.resolve(strict=False)))
+        except (OSError, ValueError):
+            continue
+        if key not in seen:
+            roots.append(archive_root)
+            seen.add(key)
+    return roots
+
+
+def _session_lock_path(archive_root: Path, session_id: str) -> Path:
+    return archive_root / ".locks" / f"{_sanitize_session_id(session_id)}.lease"
+
+
+def _mark_session_active(session_dir: Path) -> None:
+    """Refresh the bounded activity heartbeat used by aggregate cleanup."""
+    marker = session_dir / ".active"
+    try:
+        marker.touch(mode=0o600, exist_ok=True)
+        os.chmod(marker, 0o600)
+    except OSError:
+        pass
+
+
+def _session_is_active(session_dir: Path) -> bool:
+    grace = _int_env(
+        "TOKEN_OPTIMIZER_ARCHIVE_ACTIVE_GRACE_SECONDS",
+        _ARCHIVE_ACTIVE_GRACE_SECONDS_DEFAULT,
+    )
+    try:
+        marker = session_dir / ".active"
+        return (
+            not marker.is_symlink()
+            and marker.is_file()
+            and time.time() - os.lstat(marker).st_mtime <= grace
+        )
+    except OSError:
+        return True
+
+
+def _prune_session_entries(
+    session_dir: Path,
+    *,
+    cutoff: float | None = None,
+    files_needed: int = 0,
+    bytes_needed: int = 0,
+) -> None:
+    """Prune oldest result entries without removing an active session dir."""
+    entries: list[tuple[float, Path, int]] = []
+    try:
+        candidates = list(session_dir.glob("*.json"))
+    except OSError:
+        return
+    for path in candidates:
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            stat = os.lstat(path)
+            entries.append((stat.st_mtime, path, stat.st_size))
+        except OSError:
+            continue
+    entries.sort(key=lambda item: item[0])
+    removed_files = 0
+    removed_bytes = 0
+    removed_any = False
+    for mtime, path, size in entries:
+        expired = cutoff is not None and mtime < cutoff
+        needed = (
+            removed_files < max(0, files_needed)
+            or removed_bytes < max(0, bytes_needed)
+        )
+        if not expired and not needed:
+            continue
+        try:
+            path.unlink()
+            removed_files += 1
+            removed_bytes += size
+            removed_any = True
+        except OSError:
+            continue
+    if not removed_any:
+        return
+
+    # Keep the manifest bounded with the result set. The caller holds the
+    # session lease, so replacement cannot race another archive writer.
+    manifest = session_dir / "manifest.jsonl"
+    try:
+        if manifest.is_symlink() or not manifest.is_file():
+            return
+        retained = {path.stem for path in session_dir.glob("*.json")}
+        lines: list[str] = []
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+                if record.get("tool_use_id") in retained:
+                    lines.append(line)
+            except (TypeError, json.JSONDecodeError):
+                continue
+        if not lines:
+            manifest.unlink()
+            return
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".manifest.", suffix=".tmp", dir=str(session_dir), text=True
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, manifest)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except (OSError, ValueError):
+        pass
+
+
+def cleanup_old_archives(
+    max_age_hours: int | None = None,
+    skip_session_id: str | None = None,
+) -> int:
+    """Delete expired archives and enforce aggregate file/byte caps.
 
     Best-effort: individual OSError is swallowed so a locked or missing
-    directory never aborts the hook. Returns the count of removed dirs.
+    directory never aborts the hook. The hot path reads its knobs locally to
+    avoid importing measure.py. Returns the count of removed session dirs.
     """
-    archive_root = SNAPSHOT_DIR / "tool-archive"
-    if not archive_root.exists() or archive_root.is_symlink():
-        return 0
+    if max_age_hours is None:
+        max_age_hours = _int_env(
+            "TOKEN_OPTIMIZER_ARCHIVE_RETENTION_HOURS",
+            _ARCHIVE_RETENTION_HOURS_DEFAULT,
+        )
+    max_files = _int_env(
+        "TOKEN_OPTIMIZER_ARCHIVE_RETENTION_MAX_FILES",
+        _ARCHIVE_RETENTION_MAX_FILES_DEFAULT,
+    )
+    max_bytes = _int_env(
+        "TOKEN_OPTIMIZER_ARCHIVE_RETENTION_MAX_BYTES",
+        _ARCHIVE_RETENTION_MAX_BYTES_DEFAULT,
+    )
     cutoff = time.time() - (max_age_hours * 3600)
     removed = 0
     skip_sid = _sanitize_session_id(skip_session_id) if skip_session_id else None
-    for session_dir in archive_root.iterdir():
-        if skip_sid and session_dir.name == skip_sid:
-            continue
-        if session_dir.is_symlink() or not session_dir.is_dir():
+    sessions: list[tuple[float, Path, Path, int, int, bool]] = []
+    for archive_root in _archive_roots():
+        if not archive_root.exists() or archive_root.is_symlink():
             continue
         try:
-            if os.lstat(session_dir).st_mtime < cutoff:
-                shutil.rmtree(session_dir, ignore_errors=True)
-                if not session_dir.exists():
-                    removed += 1
+            candidates = list(archive_root.iterdir())
+        except OSError:
+            continue
+        for session_dir in candidates:
+            if session_dir.name.startswith("."):
+                continue
+            if session_dir.is_symlink() or not session_dir.is_dir():
+                continue
+            protected = (
+                (skip_sid is not None and session_dir.name == skip_sid)
+                or _session_is_active(session_dir)
+            )
+            try:
+                mtime = os.lstat(session_dir).st_mtime
+                if protected:
+                    lock = LeaseLock(
+                        _session_lock_path(archive_root, session_dir.name),
+                        acquire_timeout=0,
+                    )
+                    if lock.acquire():
+                        try:
+                            _prune_session_entries(session_dir, cutoff=cutoff)
+                        finally:
+                            lock.release()
+                elif mtime < cutoff:
+                    lock = LeaseLock(
+                        _session_lock_path(archive_root, session_dir.name),
+                        acquire_timeout=0,
+                    )
+                    if lock.acquire():
+                        try:
+                            if not _session_is_active(session_dir):
+                                shutil.rmtree(session_dir, ignore_errors=True)
+                                if not session_dir.exists():
+                                    removed += 1
+                                    continue
+                        finally:
+                            lock.release()
+                file_count, byte_count = _archive_tree_usage(session_dir)
+                sessions.append((
+                    mtime,
+                    archive_root,
+                    session_dir,
+                    file_count,
+                    byte_count,
+                    protected,
+                ))
+            except OSError:
+                pass
+    total_files = sum(item[3] for item in sessions)
+    total_bytes = sum(item[4] for item in sessions)
+    for _mtime, archive_root, session_dir, file_count, byte_count, protected in sorted(
+        sessions, key=lambda item: item[0]
+    ):
+        over_files = max_files > 0 and total_files > max_files
+        over_bytes = max_bytes > 0 and total_bytes > max_bytes
+        if not (over_files or over_bytes):
+            break
+        if protected:
+            lock = LeaseLock(
+                _session_lock_path(archive_root, session_dir.name),
+                acquire_timeout=0,
+            )
+            if not lock.acquire():
+                continue
+            try:
+                before_files, before_bytes = _archive_tree_usage(session_dir)
+                _prune_session_entries(
+                    session_dir,
+                    files_needed=max(0, total_files - max_files)
+                    if max_files > 0 else 0,
+                    bytes_needed=max(0, total_bytes - max_bytes)
+                    if max_bytes > 0 else 0,
+                )
+                after_files, after_bytes = _archive_tree_usage(session_dir)
+                total_files -= max(0, before_files - after_files)
+                total_bytes -= max(0, before_bytes - after_bytes)
+            finally:
+                lock.release()
+            continue
+        lock = LeaseLock(
+            _session_lock_path(archive_root, session_dir.name),
+            acquire_timeout=0,
+        )
+        if not lock.acquire():
+            continue
+        try:
+            if _session_is_active(session_dir):
+                continue
+            shutil.rmtree(session_dir, ignore_errors=True)
+            if not session_dir.exists():
+                removed += 1
+                total_files -= file_count
+                total_bytes -= byte_count
         except OSError:
             pass
+        finally:
+            lock.release()
     return removed
+
+
+def _cleanup_archives_if_due(session_id: str) -> None:
+    """Rate-limit the recursive retention scan on synchronous hook paths."""
+    interval = _int_env(
+        "TOKEN_OPTIMIZER_ARCHIVE_CLEANUP_INTERVAL_SECONDS",
+        _ARCHIVE_CLEANUP_INTERVAL_SECONDS_DEFAULT,
+    )
+    marker = SNAPSHOT_DIR / ".archive-cleanup.last"
+    lock = LeaseLock(
+        SNAPSHOT_DIR / ".archive-cleanup.lease",
+        acquire_timeout=0,
+    )
+    if not lock.acquire():
+        return
+    try:
+        try:
+            if interval > 0 and time.time() - marker.stat().st_mtime < interval:
+                return
+        except OSError:
+            pass
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            marker.touch(mode=0o600, exist_ok=True)
+        except OSError:
+            return
+        cleanup_old_archives(skip_session_id=session_id)
+    finally:
+        lock.release()
 
 
 # ---------------------------------------------------------------------------
@@ -583,27 +879,37 @@ def archive_original(content: str, session_id: str | None, key: str,
         archive_dir = _archive_dir_for_session(session_id or "unknown")
         if not _ensure_private_archive_dir(archive_dir):
             return None
-        safe_response = _redact_credentials(content)
-        # Redact the path too — a path can embed a token/secret (e.g. a URL-ish
-        # segment). Stored uniformly: null when the caller didn't supply one.
-        safe_path = _redact_credentials(file_path) if file_path else None
-        meta = {
-            "tool_name": tool_name,
-            "tool_use_id": key,
-            ARGS_HASH_KEY: None,  # non-MCP progressive-disclosure path; guard skips these.
-            "file_path": safe_path,
-            "language": language,
-            "chars": len(safe_response),
-            "original_chars": len(content),
-            "tokens_est": int(len(safe_response) / CODE_CHARS_PER_TOKEN),
-            "truncated": False,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "archived_from": "compress_with_preservation",
-        }
-        entry_path = archive_dir / f"{key}.json"
-        _atomic_write_json(entry_path, {**meta, "response": safe_response})
-        _append_manifest_line(archive_dir / "manifest.jsonl", meta)
-        return key
+        session_lock = LeaseLock(
+            _session_lock_path(archive_dir.parent, session_id or "unknown"),
+            acquire_timeout=0.075,
+        )
+        if not session_lock.acquire():
+            return None
+        try:
+            safe_response = _redact_credentials(content)
+            # Redact the path too — a path can embed a token/secret (e.g. a URL-ish
+            # segment). Stored uniformly: null when the caller didn't supply one.
+            safe_path = _redact_credentials(file_path) if file_path else None
+            meta = {
+                "tool_name": tool_name,
+                "tool_use_id": key,
+                ARGS_HASH_KEY: None,  # non-MCP progressive-disclosure path; guard skips these.
+                "file_path": safe_path,
+                "language": language,
+                "chars": len(safe_response),
+                "original_chars": len(content),
+                "tokens_est": int(len(safe_response) / CODE_CHARS_PER_TOKEN),
+                "truncated": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "archived_from": "compress_with_preservation",
+            }
+            _mark_session_active(archive_dir)
+            entry_path = archive_dir / f"{key}.json"
+            _atomic_write_json(entry_path, {**meta, "response": safe_response})
+            _append_manifest_line(archive_dir / "manifest.jsonl", meta)
+            return key
+        finally:
+            session_lock.release()
     except Exception:
         if not quiet:
             print(f"[Tool Archive] archive_original failed for {tool_name}; serving raw.", file=sys.stderr)
@@ -885,13 +1191,6 @@ def archive_result(quiet: bool = False) -> None:
     char_count = _ARCHIVE_MAX_SIZE if truncated else original_char_count
     token_est = int(char_count / CODE_CHARS_PER_TOKEN)
 
-    # Best-effort TTL cleanup: runs only when we're about to write (after
-    # early-exit checks), not on every PostToolUse invocation.
-    try:
-        cleanup_old_archives(max_age_hours=48, skip_session_id=session_id)
-    except Exception:
-        pass
-
     archive_dir = _archive_dir_for_session(session_id)
     if not _ensure_private_archive_dir(archive_dir):
         if not quiet:
@@ -925,16 +1224,34 @@ def archive_result(quiet: bool = False) -> None:
     # ever reach the archive file, even transiently.
     safe_response = _redact_credentials(tool_response)
 
+    session_lock = LeaseLock(
+        _session_lock_path(archive_dir.parent, session_id),
+        acquire_timeout=0.075,
+    )
+    if not session_lock.acquire():
+        if not quiet:
+            print(f"[Tool Archive] Archive busy for {tool_name}; leaving output unchanged.", file=sys.stderr)
+        return
     try:
+        _mark_session_active(archive_dir)
         entry_path = archive_dir / f"{tool_use_id}.json"
         _atomic_write_json(entry_path, {**meta, "response": safe_response})
-
         manifest_path = archive_dir / "manifest.jsonl"
         _append_manifest_line(manifest_path, meta)
     except OSError:
         if not quiet:
             print(f"[Tool Archive] Failed to archive {tool_name} result; leaving output unchanged.", file=sys.stderr)
         return
+    finally:
+        session_lock.release()
+
+    # The recursive cross-identity retention pass is throttled and separately
+    # leased, so ordinary synchronous PostToolUse calls do only O(1) metadata
+    # work instead of restatting the full archive tree.
+    try:
+        _cleanup_archives_if_due(session_id)
+    except Exception:
+        pass
 
     if not quiet:
         print(f"[Tool Archive] Archived {tool_name} result ({char_count:,} chars, ~{token_est:,} tokens): {tool_use_id}", file=sys.stderr)
