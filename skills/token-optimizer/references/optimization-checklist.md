@@ -28,7 +28,7 @@ Comprehensive checklist of ALL optimization techniques.
 ---
 
 ### 3. CLAUDE.md Consolidation
-**Target**: Under ~300 lines (~4,500 tokens). Anthropic recommends CLAUDE.md under ~500 lines (code.claude.com/docs/en/costs). The aggressive optimization target is ~300 lines (~4,500 tokens at ~15 tokens/line for prose).
+**Target**: Under 200 lines per CLAUDE.md file — Anthropic's documented guidance (code.claude.com/docs/en/memory). The ~300 lines / ~4,500 tokens figure is an internal aggressive heuristic (derived at ~15 tokens/line for prose), not an Anthropic recommendation.
 
 **Actions**:
 - [ ] Remove content that belongs in skills/commands (workflows, detailed configs)
@@ -38,7 +38,7 @@ Comprehensive checklist of ALL optimization techniques.
 - [ ] Apply tiered architecture (see below)
 
 **Tiered Architecture Pattern**:
-- **Tier 1 (always loaded, ~300 lines / ~4,500 tokens)**: Identity, critical rules, key paths, personality ONE-LINER
+- **Tier 1 (always loaded, ~300 lines / ~4,500 tokens — internal heuristic, not Anthropic's under-200-lines guidance)**: Identity, critical rules, key paths, personality ONE-LINER
 - **Tier 2 (skill/command, loaded on-demand)**: Workflows, domain docs, tool configs
 - **Tier 3 (file reference, explicit only)**: Full guides, templates, detailed standards
 
@@ -548,7 +548,7 @@ Also track with `/cost` at end of each session and `measure.py trends` for histo
 ├─ MCP server instructions:    ~50-100 tokens per server
 ├─ Skills frontmatter:          ~100 tokens x skill count
 ├─ Commands frontmatter:        ~50 tokens x command count
-├─ CLAUDE.md (global):          Variable (target: ~4,500 tokens / ~300 lines)
+├─ CLAUDE.md (global):          Variable (Anthropic guidance: under 200 lines; internal heuristic ~4,500 tokens / ~300 lines)
 ├─ Project CLAUDE.md:           Variable (target: <300 tokens)
 ├─ MEMORY.md:                   Variable (200-line auto-load cap, ~3,000 tokens)
 ├─ System reminders:            ~2,000 tokens (auto-injected, variable)

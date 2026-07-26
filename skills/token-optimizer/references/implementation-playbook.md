@@ -14,7 +14,7 @@ cp ~/.claude/CLAUDE.md ~/.claude/_backups/CLAUDE.md.pre-optimization-$(date +%Y%
 **Steps**:
 1. Read current CLAUDE.md
 2. Apply tiered architecture pattern:
-   - **Tier 1 (always loaded, ~300 lines / ~4,500 tokens)**: Identity, critical rules, key paths
+   - **Tier 1 (always loaded, ~300 lines / ~4,500 tokens — internal heuristic, not Anthropic's under-200-lines guidance)**: Identity, critical rules, key paths
    - **Tier 2 (skill/command, loaded on-demand)**: Workflows, domain docs, tool configs
    - **Tier 3 (file reference, explicit only)**: Full guides, templates, detailed standards
 3. Move Tier 2/3 content to skills or reference files

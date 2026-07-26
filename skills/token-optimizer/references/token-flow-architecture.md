@@ -64,7 +64,7 @@ MESSAGE SEND
 |----------------------------------------------------|
 | ALWAYS LOADED (every message):                      |
 | - ~/.claude/CLAUDE.md          ~2,000-5,000 tokens  |
-|   (target: ~4,500 / ~300 lines)                     |
+|   (Anthropic: under 200 lines; ~300/~4,500 internal)|
 | - ~/.claude/projects/.../      ~1,500-3,000 tokens  |
 |   MEMORY.md (200-line auto-load cap)                |
 | - [repo]/CLAUDE.md             ~10-1,500 tokens     |
@@ -108,7 +108,7 @@ MCP (ToolSearch +      1,000 tokens  (500 base + ~30 tools x 15)
   deferred names):
 Skills (20):           2,000 tokens
 Commands (10):           500 tokens
-CLAUDE.md:             2,500 tokens  (~170 lines, well under 300-line target)
+CLAUDE.md:             2,500 tokens  (~170 lines, well under 200-line Anthropic guidance)
 MEMORY.md:             1,500 tokens  (~100 lines, well under 200-line cap)
 System reminders:      1,000 tokens
 ---------------------------------
@@ -142,7 +142,7 @@ CONSUMED:            ~43,000 tokens (4.3% of 1M)
 
 | Component | Control Level | Optimization Method |
 |-----------|---------------|---------------------|
-| **CLAUDE.md** | Full | Slim to ~4,500 tokens (~300 lines). Move content to skills. Apply tiered architecture. |
+| **CLAUDE.md** | Full | Slim to under 200 lines (Anthropic guidance; code.claude.com/docs/en/memory). Internal heuristic: ~300 lines / ~4,500 tokens. Move content to skills. Apply tiered architecture. |
 | **MEMORY.md** | Full | Stay under 200-line auto-load cap (~3,000 tokens). Remove duplication with CLAUDE.md. |
 | **Project CLAUDE.md** | Full | Keep project-specific only. No duplication with global. |
 
@@ -452,7 +452,7 @@ Core system + tools: 15,000 tokens (fixed)
 MCP tools:            6,000 tokens (pruned unused servers)
 Skills (~30):         3,000 tokens (archived 30)
 Commands (~25):       1,200 tokens (archived 35)
-CLAUDE.md:            2,500 tokens (~170 lines, under 300-line target)
+CLAUDE.md:            2,500 tokens (~170 lines, under 200-line Anthropic guidance)
 MEMORY.md:            2,000 tokens (~130 lines, under 200-line cap)
 System reminders:     1,000 tokens (permissions.deny)
 ---------------------------------
