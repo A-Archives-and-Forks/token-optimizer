@@ -53,19 +53,48 @@ _is_safe_prefix() {
 # exactly as it did before caching was added.
 _PY_CACHE_FILE=""
 
+_is_msys_platform() {
+    local platform
+    platform=$(uname -s 2>/dev/null) || return 1
+    case "$platform" in
+        MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    esac
+    return 1
+}
+
+_cache_dir_is_per_user() {
+    local cache_dir="$1" cache_real root root_real
+    cache_real=$(CDPATH='' cd -- "$cache_dir" 2>/dev/null && pwd -P) || return 1
+    for root in "${XDG_CACHE_HOME:-}" "${HOME:-}"; do
+        [ -n "$root" ] && [ -d "$root" ] || continue
+        root_real=$(CDPATH='' cd -- "$root" 2>/dev/null && pwd -P) || continue
+        case "$cache_real" in
+            "$root_real"/*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 _cache_dir_ready() {
     local cache_dir="$1"
     if [ ! -d "$cache_dir" ]; then
         (umask 077; mkdir -p "$cache_dir") >/dev/null 2>&1 || return 1
     fi
-    # Require the dir to be owned by us (-O), not merely writable: a dir another
-    # user pre-created (and left world-writable) would otherwise be accepted and
-    # its planted cache record trusted. Owned + created umask 077 keeps it 0700.
-    [ -d "$cache_dir" ] && [ -w "$cache_dir" ] && [ -O "$cache_dir" ]
+    [ -d "$cache_dir" ] && [ -w "$cache_dir" ] || return 1
+    if _is_msys_platform; then
+        # Git Bash/MSYS2/Cygwin emulate POSIX ownership, so `test -O` can reject
+        # the current user's own directory. Canonical confinement under HOME or
+        # XDG_CACHE_HOME supplies the equivalent Windows ACL trust boundary.
+        _cache_dir_is_per_user "$cache_dir"
+    else
+        # On native POSIX, require ownership rather than mere writability so a
+        # planted cache record in another user's directory is never trusted.
+        [ -O "$cache_dir" ]
+    fi
 }
 
 _setup_interpreter_cache() {
-    local launcher_dir plugin_dir hash_output plugin_hash cache_dir
+    local launcher_dir plugin_dir hash_output plugin_hash path_hash_output path_hash cache_dir
 
     launcher_dir=${0%/*}
     [ "$launcher_dir" != "$0" ] || launcher_dir=.
@@ -80,6 +109,13 @@ _setup_interpreter_cache() {
     fi
     plugin_hash=${hash_output%% *}
     case "$plugin_hash" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    if ! path_hash_output=$(printf '%s' "${PATH:-}" | cksum 2>/dev/null); then
+        return 0
+    fi
+    path_hash=${path_hash_output%% *}
+    case "$path_hash" in
         ''|*[!0-9]*) return 0 ;;
     esac
 
@@ -103,7 +139,7 @@ _setup_interpreter_cache() {
         { [ -n "$cache_dir" ] && _cache_dir_ready "$cache_dir"; } || return 0
     fi
 
-    _PY_CACHE_FILE="${cache_dir%/}/interpreter-${plugin_hash}.cache"
+    _PY_CACHE_FILE="${cache_dir%/}/interpreter-${plugin_hash}-${path_hash}.cache"
 }
 
 _exec_cached_interpreter() {

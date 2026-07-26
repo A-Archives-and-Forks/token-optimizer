@@ -204,7 +204,7 @@ THRESHOLD_ONLY = {
 # (key, human label, (source file, extraction regex), doc regexes stating it)
 THRESHOLDS = [
     ("archive_auto_purge_h", "automatic archive purge window (hours)",
-     (_ARCHIVER, r"cleanup_old_archives\(max_age_hours=(\d+)"), [
+     (_ARCHIVER, r"_ARCHIVE_RETENTION_HOURS_DEFAULT = (\d+)"), [
         r"purges archives older than (\d+) hours",
         r"[Aa]utomatic purge after (\d+) hours",
         r"After (\d+) hours, applied when the hook",
@@ -217,6 +217,13 @@ THRESHOLDS = [
         r"older than (\d+) hours by default",
         r"\(default (\d+); the automatic",
         r"trims on a (\d+)-hour default",
+    ]),
+    ("quality_cache_default_d", "quality-cache retention default (days)",
+     (_MEASURE, r'_int_env\("TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS", (\d+)\)'), [
+        r"TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS` \(default: (\d+) days\)",
+        r"TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS`, default: (\d+) days",
+        r"TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS` \| (\d+) \|",
+        r"TOKEN_OPTIMIZER_QUALITY_CACHE_RETENTION_DAYS` \(default (\d+)\)",
     ]),
     ("loop_firing_floor", "loop-warning firing floor",
      (_MEASURE, r'best\["confidence"\] < ([0-9]+(?:\.[0-9]+)?)'), [
@@ -251,6 +258,7 @@ def docs() -> list[Path]:
     six READMEs (root plus the five per-platform ones)."""
     out = list((REPO / "docs-site" / "src" / "content" / "docs").rglob("*.mdx"))
     out += [p for p in REPO.rglob("README*.md") if not _is_scratch(p)]
+    out += [REPO / "PRIVACY.md", REPO / "SECURITY.md"]
     return sorted(out)
 
 
