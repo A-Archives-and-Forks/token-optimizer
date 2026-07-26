@@ -2726,14 +2726,22 @@ def quick_scan(as_json=False):
                 "detail": f"save ~{savings:,} tokens/session",
                 "extend": f"Improves stable prompt-cache prefix and extends peak quality by ~{savings:,} tokens",
             }
-    if not quick_win and claude_md_tokens > 5000:
-        savings = claude_md_tokens - 4500
-        quick_win = {
-            "action": f"Slim CLAUDE.md from {claude_md_lines} lines to ~300",
-            "savings": savings,
-            "detail": f"save ~{savings:,} tokens/session",
-            "extend": f"Extends peak quality zone by ~{savings:,} tokens",
-        }
+    if not quick_win and claude_md_tokens > 5000 and claude_md_lines > 200:
+        # Savings target = Anthropic's documented 200-line guidance. Compute
+        # tokens-per-line from the measured file so the savings figure matches
+        # the "to under 200" target in the action text, not the old ~4,500-token
+        # internal heuristic. Guard on claude_md_lines > 200 so we don't emit a
+        # no-op "save ~0 tokens" recommendation when a long-but-short file
+        # trips the token threshold but is already under the line guidance.
+        tokens_per_line = claude_md_tokens / max(claude_md_lines, 1)
+        savings = max(0, claude_md_tokens - int(200 * tokens_per_line))
+        if savings > 0:
+            quick_win = {
+                "action": f"Slim CLAUDE.md from {claude_md_lines} lines to under 200 (per Anthropic guidance)",
+                "savings": savings,
+                "detail": f"save ~{savings:,} tokens/session",
+                "extend": f"Extends peak quality zone by ~{savings:,} tokens",
+            }
 
     # Coaching insight
     coaching = None
@@ -6265,23 +6273,35 @@ def generate_auto_recommendations(components, trends=None, days=30):
         if key.startswith("claude_md") and components[key].get("exists"):
             claude_tokens += components[key].get("tokens", 0)
             claude_lines += components[key].get("lines", 0)
-    if claude_tokens > 6000:
-        quick.append(
-            f"**Slim CLAUDE.md ({claude_tokens:,} tokens, target ~4,500 / ~300 lines)**: "
-            f"Everything in CLAUDE.md loads every single message you send. "
-            f"Anthropic recommends under ~500 lines. The aggressive optimization target is ~300 lines (~4,500 tokens).\n"
-            f"  Move to skills (loaded on-demand, ~100 tokens in menu): workflow guides, coding standards, "
-            f"deployment procedures, detailed templates. "
-            f"Move to reference files (zero cost until read): API docs, config examples, architecture notes. "
-            f"Keep in CLAUDE.md: identity/personality, critical behavioral rules, key file paths, "
-            f"and short pointers to skills and references. "
-            f"Don't delete content, reorganize it. A 2-line pointer to a skill costs 100x less than "
-            f"the same content inline. ~{claude_tokens - 4500:,} tokens recoverable."
-        )
-    elif claude_tokens > 5000:
+    if claude_tokens > 6000 and claude_lines > 200:
+        # Savings target = Anthropic's documented 200-line guidance. Compute
+        # tokens-per-line from this file's own measurements so "tokens
+        # recoverable" actually corresponds to slimming to 200 lines, not to
+        # the old ~4,500-token internal heuristic. Guard on claude_lines > 200
+        # so a token-dense but short file doesn't get a "slim to 200 lines"
+        # recommendation with ~0 tokens recoverable (self-contradicting).
+        tokens_per_line = claude_tokens / max(claude_lines, 1)
+        target_tokens = int(200 * tokens_per_line)
+        recoverable = max(0, claude_tokens - target_tokens)
+        if recoverable > 0:
+            quick.append(
+                f"**Slim CLAUDE.md ({claude_tokens:,} tokens, target under 200 lines)**: "
+                f"Everything in CLAUDE.md loads every single message you send. "
+                f"Anthropic recommends under 200 lines per CLAUDE.md file (https://code.claude.com/docs/en/memory). "
+                f"The ~300 lines / ~4,500 tokens figure is an internal heuristic, not an Anthropic recommendation — "
+                f"Anthropic documents only the 200-line target, no token threshold.\n"
+                f"  Move to skills (loaded on-demand, ~100 tokens in menu): workflow guides, coding standards, "
+                f"deployment procedures, detailed templates. "
+                f"Move to reference files (zero cost until read): API docs, config examples, architecture notes. "
+                f"Keep in CLAUDE.md: identity/personality, critical behavioral rules, key file paths, "
+                f"and short pointers to skills and references. "
+                f"Don't delete content, reorganize it. A 2-line pointer to a skill costs 100x less than "
+                f"the same content inline. ~{recoverable:,} tokens recoverable (slimming to 200 lines at ~{tokens_per_line:.1f} tokens/line)."
+            )
+    elif claude_lines > 200 and claude_tokens > 5000:
         medium.append(
-            f"**Consider slimming CLAUDE.md ({claude_tokens:,} tokens)**: "
-            f"Your CLAUDE.md is above the ~4,500 token (~300 line) optimized target but not critically large. "
+            f"**Consider slimming CLAUDE.md ({claude_lines} lines, {claude_tokens:,} tokens)**: "
+            f"Your CLAUDE.md is over Anthropic's documented 200-line guidance (https://code.claude.com/docs/en/memory) but not critically large. "
             f"Review for any sections that could become skills or reference files. "
             f"Focus on content that's only relevant for specific workflows."
         )
