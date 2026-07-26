@@ -19368,6 +19368,40 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             self._json_response(200 if payload.get("ok") else 500, payload)
             return
+        if clean == "api/regenerate":
+            # Synchronous, unlike the background freshness regen: the caller is a
+            # human who pressed a button and needs a real success/failure answer,
+            # not a fire-and-forget that looks identical whether it worked or not.
+            # That ambiguity is exactly what let the daemon serve a two-day-old
+            # dashboard while every health check reported green.
+            import subprocess
+            target = _resolve_measure_py()
+            if not os.path.isfile(target):
+                _log_regen("MANUAL regen failed: measure.py not found at " + target)
+                self._json_response(500, {{"ok": False, "msg": "measure.py not found; reinstall or run setup-daemon"}})
+                return
+            try:
+                for step in ("collect", "dashboard"):
+                    r = subprocess.run(
+                        [sys.executable, target, step, "--quiet"],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    if r.returncode != 0:
+                        msg = (r.stderr or r.stdout or "").strip()[:300] or ("%s exited %d" % (step, r.returncode))
+                        _log_regen("MANUAL regen failed at %s: %s" % (step, msg))
+                        self._json_response(500, {{"ok": False, "step": step, "msg": msg}})
+                        return
+            except (subprocess.TimeoutExpired, OSError) as e:
+                _log_regen("MANUAL regen error: %s" % e)
+                self._json_response(500, {{"ok": False, "msg": "regeneration failed: " + str(e)}})
+                return
+            try:
+                generated = os.path.getmtime(DASHBOARD)
+            except OSError:
+                generated = 0
+            _log_regen("MANUAL regen OK via %s" % target)
+            self._json_response(200, {{"ok": True, "generated_at": generated, "measure_py": target}})
+            return
         self.send_error(403, "Forbidden")
 
     def do_GET(self):
