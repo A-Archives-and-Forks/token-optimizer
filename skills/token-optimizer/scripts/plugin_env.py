@@ -306,9 +306,50 @@ def reclaim_orphaned_plugin_data_dirs(min_age_days: int | None = None) -> list[P
             or latest_now >= cutoff
         ):
             continue
+        # Even with every precondition rechecked above, check-then-rmtree is not
+        # atomic: rmtree resolves the PATHNAME, so an installer that re-registers
+        # and recreates this identity inside the gap gets its live data deleted.
+        # Claim the tree with an atomic rename first. After it succeeds the
+        # original pathname is free -- a concurrent reinstall lands on a fresh
+        # directory and is unaffected by what we do next -- and we are deleting a
+        # name only this process knows.
+        quarantine = path.with_name(
+            f".{path.name}.reclaiming-{os.getpid()}-{int(time.time() * 1000)}"
+        )
         try:
-            shutil.rmtree(path)
-            if not path.exists():
+            os.rename(path, quarantine)
+        except OSError:
+            continue
+        # Revalidate against the claimed tree. If it turns out someone touched it
+        # or registered it in the gap, put it back exactly where it was.
+        try:
+            latest_claimed = _latest_tree_mtime(quarantine)
+            resolve_plugin_data_dir.cache_clear()
+            active_after = resolve_plugin_data_dir()
+            active_after_resolved = (
+                active_after.resolve(strict=False)
+                if active_after is not None else None
+            )
+            registered_after = {
+                item.resolve(strict=False)
+                for item in _registered_plugin_data_dirs()
+            }
+        except OSError:
+            latest_claimed, active_after_resolved, registered_after = None, None, set()
+        if (
+            latest_claimed is None
+            or latest_claimed >= cutoff
+            or active_after_resolved == target
+            or target in registered_after
+        ):
+            try:
+                os.rename(quarantine, path)
+            except OSError:
+                pass
+            continue
+        try:
+            shutil.rmtree(quarantine)
+            if not quarantine.exists():
                 removed.append(path)
                 _announce_orphan_reclamation(
                     "[Token Optimizer] Reclaimed orphaned plugin data identity: "
