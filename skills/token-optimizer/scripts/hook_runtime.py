@@ -46,14 +46,6 @@ class HookDeadline:
             self._previous = getattr(_DEADLINE_LOCAL, "current", None)
             _DEADLINE_LOCAL.current = self
             self._thread.start()
-            # Emit the best-effort diagnostic only after the exit-only
-            # watchdog is armed. If stderr is a full, undrained pipe this
-            # caller may block, but the watchdog remains able to terminate the
-            # process because its deadline path performs no I/O.
-            try:
-                os.write(2, self.message)
-            except OSError:
-                pass
         return self
 
     def remaining(self) -> float:
@@ -62,8 +54,27 @@ class HookDeadline:
     def expires_wall(self) -> float:
         return time.time() + self.remaining()
 
+    def _emit_diagnostic(self):
+        try:
+            os.write(2, self.message)
+        except OSError:
+            pass
+
     def _watch(self):
         if not self._cancelled.wait(self.remaining()):
+            # The diagnostic belongs on the timeout path only - emitting it at
+            # arm time made every NORMAL completion print "budget exceeded".
+            # It runs in a bounded side thread so a full/undrained stderr pipe
+            # can never delay termination: if the write blocks, the daemon
+            # thread is abandoned and os._exit still fires. Losing the message
+            # is acceptable; failing to exit is not.
+            emitter = threading.Thread(
+                target=self._emit_diagnostic,
+                name="token-optimizer-hook-deadline-msg",
+                daemon=True,
+            )
+            emitter.start()
+            emitter.join(0.05)
             os._exit(0)
 
     def cancel(self):

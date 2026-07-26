@@ -76,6 +76,12 @@ print("survived")
 """
     result, _elapsed = _python(code)
     assert result.returncode == 0 and result.stdout.strip() == "survived"
+    # A hook that finishes inside its budget must say NOTHING. Emitting the
+    # timeout diagnostic at arm time made every normal completion print
+    # "budget exceeded; skipping" on stderr - four gauntlet reviewers caught it
+    # in the field before any test did.
+    assert "budget exceeded" not in result.stderr
+    assert "skipping" not in result.stderr
 
 
 def test_deadline_exit_is_not_blocked_by_full_stderr_pipe():
