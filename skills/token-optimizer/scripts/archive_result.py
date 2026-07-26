@@ -67,6 +67,16 @@ _ARCHIVE_RETENTION_MAX_BYTES_DEFAULT = 104_857_600  # 100 MiB
 _ARCHIVE_ACTIVE_GRACE_SECONDS_DEFAULT = 86_400
 _ARCHIVE_CLEANUP_INTERVAL_SECONDS_DEFAULT = 60
 
+# Best-effort sweep staleness threshold for orphan lease artifacts in
+# ``archive_root/.locks/``. ``HookDeadline._watch`` calls ``os._exit(0)``, which
+# bypasses ``LeaseLock.release()`` (the only unlinker of the candidate hard
+# link), so ``.{sid}.lease.candidate-{nonce}`` files leak. Archive lock sites
+# use ``LeaseLock(..., acquire_timeout=0)`` with NO deadline, so the max lease a
+# candidate can represent is the default ``lease_seconds + reclaim_grace``
+# (10.0 + 0.25 = 10.25s). The sweep reaps candidates older than this; a younger
+# candidate is a live acquisition in flight and is never touched.
+LOCK_SWEEP_STALE_SECONDS = 10.25
+
 # WS4: Agent/Task result progressive disclosure — shipped MEASURE-ONLY.
 #
 # A head+tail+pointer treatment WOULD save ~74% of the agent-result pool, but the
@@ -211,6 +221,51 @@ def _session_lock_path(archive_root: Path, session_id: str) -> Path:
     return archive_root / ".locks" / f"{_sanitize_session_id(session_id)}.lease"
 
 
+def _sweep_stale_lock_candidates(archive_root: Path) -> None:
+    """Best-effort: unlink orphan ``.{sid}.lease.candidate-{nonce}`` and
+    ``.{sid}.lease.reclaim-{digest}`` artifacts left in
+    ``archive_root/.locks/`` when ``os._exit`` bypasses ``LeaseLock.release``
+    or the ``finally`` that unlinks a reclaim claim.
+
+    ``cleanup_old_archives`` skips dot-dirs as *session* candidates (the
+    ``.locks`` directory is never pruned as a session); this is a separate,
+    bounded scan of its contents. Only artifacts whose ``st_mtime`` is older
+    than ``LOCK_SWEEP_STALE_SECONDS`` (the max lease duration for archive locks)
+    are reaped, so a live acquisition or in-flight reclaimer is never broken.
+
+    The reclaim claim name is **deterministic per generation**
+    (``sha256("owner:{nonce}")[:32]``); a reclaimer killed between ``os.link``
+    and the ``finally`` unlink orphans a claim that, because the name is
+    deterministic, permanently deadlocks every future same-generation
+    reclaimer (``FileExistsError`` -> fail open forever). Reaping the stale
+    claim here bounds that deadlock from *permanent* to *until the next
+    cleanup pass* WITHOUT touching the deterministic claim name in
+    ``hook_runtime._reclaim_path`` (the determinism is load-bearing
+    serialization: it is what makes concurrent same-generation reclaimers
+    exactly-one-winner). ``OSError`` is swallowed per entry so a locked or
+    vanishing file never aborts the hook.
+    """
+    locks_dir = archive_root / ".locks"
+    try:
+        entries = list(locks_dir.iterdir())
+    except (OSError, ValueError):
+        return
+    cutoff = time.time() - LOCK_SWEEP_STALE_SECONDS
+    for entry in entries:
+        if (
+            ".lease.candidate-" not in entry.name
+            and ".lease.reclaim-" not in entry.name
+        ):
+            continue
+        try:
+            if entry.is_dir():
+                continue
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError:
+            pass
+
+
 def _mark_session_active(session_dir: Path) -> None:
     """Refresh the bounded activity heartbeat used by aggregate cleanup."""
     marker = session_dir / ".active"
@@ -346,6 +401,10 @@ def cleanup_old_archives(
     for archive_root in _archive_roots():
         if not archive_root.exists() or archive_root.is_symlink():
             continue
+        # Sweep orphan ``.lease.candidate-*`` artifacts from ``.locks/`` (a
+        # dot-dir the session scan below intentionally skips). Best-effort;
+        # OSError-swallowed internally.
+        _sweep_stale_lock_candidates(archive_root)
         try:
             candidates = list(archive_root.iterdir())
         except OSError:

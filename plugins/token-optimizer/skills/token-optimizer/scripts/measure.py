@@ -34652,8 +34652,24 @@ if __name__ == "__main__":
         # Ingest recent Copilot sessions (CLI + VS Code planes) into trends.db.
         # Fired by the stop hook via copilot_hook_bridge.handle_stop(); extra
         # flags are silently consumed (INSERT OR IGNORE keeps this idempotent).
+        # Wall-clock backstop: this dispatch is spawned fire-and-forget by the
+        # Stop hook bridge (start_new_session=True, DEVNULL, no PID tracking),
+        # so the parent hook's 20s ceiling never reaches the detached
+        # grandchild. A stuck SQLite / pathological session dir would otherwise
+        # leave a permanent orphan per Stop event, silently contending for
+        # trends.db. Cap it at 60s and fail open: a skipped rollup on a single
+        # Stop is invisible (the next Stop re-collects idempotently), a frozen
+        # orphan is not. Mirrors the keepwarm-arm / checkpoint budgets above.
         quiet = "--quiet" in args or "-q" in args
-        _collect_copilot_sessions(days=90, quiet=quiet)
+        _tok_hook_deadline = _install_hook_budget(60)
+        try:
+            _collect_copilot_sessions(days=90, quiet=quiet)
+        except _HookTimeout:
+            pass
+        except Exception:
+            pass
+        finally:
+            _clear_hook_budget(_tok_hook_deadline)
         sys.exit(0)
     elif args[0] == "copilot-summary":
         _copilot_summary()
@@ -34670,8 +34686,21 @@ if __name__ == "__main__":
         # --session <id> and --platform / --reason are accepted and silently
         # consumed so the bridge's exact call signature never causes an error;
         # a full recent collect is always run (INSERT OR IGNORE is idempotent).
+        # Wall-clock backstop: same rationale as copilot-rollup above -- the
+        # Hermes bridge spawns this fire-and-forget with start_new_session=True
+        # and no PID tracking, so the parent hook deadline never propagates.
+        # Cap at 60s and fail open; a skipped rollup is invisible (the next
+        # session re-collects idempotently), a frozen orphan is not.
         quiet = "--quiet" in args or "-q" in args
-        _collect_hermes_sessions(days=90, quiet=quiet)
+        _tok_hook_deadline = _install_hook_budget(60)
+        try:
+            _collect_hermes_sessions(days=90, quiet=quiet)
+        except _HookTimeout:
+            pass
+        except Exception:
+            pass
+        finally:
+            _clear_hook_budget(_tok_hook_deadline)
         sys.exit(0)
     elif args[0] == "hermes-summary":
         # Print a brief usage summary for the most recent Hermes sessions.
