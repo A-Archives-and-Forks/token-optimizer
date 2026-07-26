@@ -2,7 +2,7 @@
 #
 # This example shows how to structure CLAUDE.md for prompt caching.
 # Static content FIRST (cacheable), volatile content LAST.
-# Anthropic guidance: under ~500 lines. Aggressive target: ~300 lines (~4,500 tokens).
+# Anthropic guidance: under 200 lines per CLAUDE.md file (code.claude.com/docs/en/memory). Internal aggressive heuristic: ~300 lines (~4,500 tokens at ~15 tokens/line) — not an Anthropic recommendation.
 
 # ============================================================
 # STATIC (rarely changes, cached by prompt caching)

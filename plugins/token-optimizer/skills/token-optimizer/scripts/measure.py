@@ -6778,20 +6778,31 @@ def generate_coach_data(focus=None, components=None, trends=None):
 
     # Check instruction-file size — thresholds relative to context window.
     claude_tokens = 0
+    claude_lines = 0
     for key in components:
         if (
             (not is_codex and key.startswith("claude_md"))
             or (is_codex and key.startswith("agents_md"))
         ) and components[key].get("exists"):
             claude_tokens += components[key].get("tokens", 0)
+            claude_lines += components[key].get("lines", 0)
     claude_pct = claude_tokens / context_window * 100 if context_window else 0
+    # Savings target = Anthropic's documented 200-line guidance (same math as
+    # quick_scan): derive recoverable tokens from 200 × measured tokens-per-line
+    # so the figure tracks line slimming, not the dropped ~4,500-token heuristic.
+    # Guard on claude_lines > 200 so a token-dense but already-lean file reports
+    # "Preventive" instead of a self-contradicting ~0 token saving.
+    tokens_per_line = claude_tokens / max(claude_lines, 1)
+    target_tokens = int(200 * tokens_per_line)
+    recoverable = max(0, claude_tokens - target_tokens)
+    savings_value = f"~{recoverable:,} tokens per message" if claude_lines > 200 else "Preventive"
     if claude_pct > 3:
         patterns_bad.append({
             "name": f"{instruction_label} Could Be Leaner",
             "severity": "medium",
             "detail": f"{instruction_label} chain totals {claude_tokens:,} tokens ({claude_pct:.1f}% of context)",
             "fix": "Split long always-loaded guidance into narrower project files and keep the root instruction file as a lean index.",
-            "savings": f"~{claude_tokens - 4500:,} tokens per message",
+            "savings": savings_value,
         })
         score -= 5
     elif claude_pct > 2:
@@ -6800,7 +6811,7 @@ def generate_coach_data(focus=None, components=None, trends=None):
             "severity": "low",
             "detail": f"{instruction_label} at {claude_tokens:,} tokens ({claude_pct:.1f}% of context)",
             "fix": "Move verbose guidance into narrower project files or on-demand skills.",
-            "savings": f"~{claude_tokens - 4500:,} tokens per message",
+            "savings": savings_value,
         })
         score -= 5
     elif claude_tokens > 0:
