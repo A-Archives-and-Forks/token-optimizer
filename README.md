@@ -210,15 +210,12 @@ RTK and Boost reach the first surface. Headroom reaches the first and the third.
 | Model routing and behavioral coaching | 🟢 12 detectors, subagent cost breakdown, anti-patterns | 🔴 | 🔴 | — | 🔴 | 🟡 Basic suggestions |
 | Historical trend analysis | 🟢 30-day trends, quality/cost/cache/duration correlation, model-switch detection | 🔴 | 🔴 | — | 🔴 | 🔴 |
 | Context quality scoring | 🟢 7-signal quality score with grades | 🔴 | 🔴 | — | 🔴 | 🟡 Capacity % only |
+| Loop and spin detection | 🟢 Catches behavioral loops before they burn | 🔴 | 🔴 | — | 🔴 | 🔴 |
 | Measures if compression helped | 🟢 Local telemetry, before/after tokens, dollar savings | 🔴 | 🟡 `rtk gain` (token counts only) | 🟡 `boost report`, vendor-side | 🔴 | 🔴 |
-| **Cost, safety, and reach** | | | | | | |
-| Cache-safe | 🟢 Never modifies existing context prefix | 🟡 Proxy mode rewrites in-flight | 🟢 Pre-shell only | 🟢 Pre-shell only | 🟡 MCP overhead | 🟢 |
-| Zero baseline context overhead | 🟢 External process, no context injection | 🔴 Injects instructions | 🟢 Shell-level only | 🟢 Shell-level only | 🔴 MCP server overhead | 🟢 Native |
-| Zero telemetry | 🟢 Nothing leaves the machine | 🟡 `HEADROOM_TELEMETRY` opt-in, off by default | 🟡 Opt-in | 🔴 Collects commands invoked, command arguments, exit codes, duration, CI attributes, IP | 🟡 Varies | 🟢 |
-| Multi-platform | 🟢 Claude Code, VS Code, Codex, OpenClaw, OpenCode, Hermes, Copilot | 🟢 Claude Code, Cursor, Codex, Aider, Copilot | 🟢 15 integrations | 🟡 Cursor, Claude Code, Copilot, Codex CLI | 🟢 17 integrations | 🔴 Claude Code only |
+| Fleet-level cross-agent analysis | 🟢 | 🔴 | 🔴 | — | 🔴 | 🔴 |
 
 <details>
-<summary><b>Show the remaining 11 rows</b> (compression mechanics, deeper analysis, proof and install)</summary>
+<summary><b>Show the remaining 13 rows</b> (compression mechanics; cost, safety and reach; tuning, proof and install)</summary>
 
 |  | Token Optimizer | Headroom | RTK | Boost | context-mode | `/context` |
 |---|---|---|---|---|---|---|
@@ -227,18 +224,19 @@ RTK and Boost reach the first surface. Headroom reaches the first and the third.
 | Full original recoverable | 🟢 Raw archived before compression, `expand` retrieves it; failures never compressed | 🟢 Reversible retrieval | 🟡 Full output saved on command failure | 🟢 Vendor documents command-output recovery | — | N/A Does not compress |
 | Register a custom command filter | 🔴 Built-in command set; no user filter API | — | 🟢 Custom TOML filters | 🟢 TOML filters | — | N/A |
 | User-tunable configuration | 🟢 92 code-referenced `TOKEN_OPTIMIZER_*` names, explicitly split into user-facing and internal controls; additive allowlist; `.contextignore` | 🟢 Documented configuration | 🟢 `config.toml` and environment controls | 🟢 Filter TOML | 🟢 Documented configuration | N/A |
-| **Deeper analysis** | | | | | | |
+| **Cost, safety, and reach** | | | | | | |
+| Cache-safe | 🟢 Never modifies existing context prefix | 🟡 Proxy mode rewrites in-flight | 🟢 Pre-shell only | 🟢 Pre-shell only | 🟡 MCP overhead | 🟢 |
+| Zero baseline context overhead | 🟢 External process, no context injection | 🔴 Injects instructions | 🟢 Shell-level only | 🟢 Shell-level only | 🔴 MCP server overhead | 🟢 Native |
+| Zero runtime dependencies | 🟢 Pure stdlib (Python/TypeScript) | 🟡 Python + Rust + optional model | 🟢 Single Rust binary | 🟢 Single binary | 🟡 SQLite adapter required | 🟢 N/A |
+| Zero telemetry | 🟢 Nothing leaves the machine | 🟡 `HEADROOM_TELEMETRY` opt-in, off by default | 🟡 Opt-in | 🔴 Collects commands invoked, command arguments, exit codes, duration, CI attributes, IP | 🟡 Varies | 🟢 |
+| Multi-platform | 🟢 Claude Code, VS Code, Codex, OpenClaw, OpenCode, Hermes, Copilot | 🟢 Claude Code, Cursor, Codex, Aider, Copilot | 🟢 15 integrations | 🟡 Cursor, Claude Code, Copilot, Codex CLI | 🟢 17 integrations | 🔴 Claude Code only |
+| **Tuning, proof, and install** | | | | | | |
 | Per-task model and effort advice | 🟢 `route` sizes the task before you spend | — | — | — | — | — |
 | Keep-Warm (cache TTL refresh) | 🟢 Opt-in ping before cache expiry, tripwire auto-off | 🔴 | 🔴 | — | 🔴 | 🔴 |
-| Loop and spin detection | 🟢 Catches behavioral loops before they burn | 🔴 | 🔴 | — | 🔴 | 🔴 |
-| Fleet-level cross-agent analysis | 🟢 | 🔴 | 🔴 | — | 🔴 | 🔴 |
-| **Proof and install** | | | | | | |
 | End-to-end task-outcome benchmark | 🔴 Output-token A/B only | — | — | 🟢 Vendor reports Terminal-Bench 2.0 with the same pass rate and ~12% lower cost | — | N/A |
-| Zero runtime dependencies | 🟢 Pure stdlib (Python/TypeScript) | 🟡 Python + Rust + optional model | 🟢 Single Rust binary | 🟢 Single binary | 🟡 SQLite adapter required | 🟢 N/A |
 | Signed and checksum-verified install | 🟢 `CHECKSUMS.sha256` per release, verified at install, CI-enforced | — | — | 🔴 Installer verifies neither a checksum nor a signature | — | N/A |
 
 </details>
-
 
 An em dash means the capability was not verified from first-party material in the 2026-07-26 source audit; it is not a claim that the capability is absent. Boost's "pre-shell" and "shell-level" cells are sourced from its documented wrapper form (`boost <command>`); the mechanism `boost init` uses to wire an agent is not described in its first-party material. Token Optimizer's compression claims are tested against real sessions and an 87-fixture suite you can run yourself. **[Full benchmark methodology and results →](BENCHMARK.md)**
 
