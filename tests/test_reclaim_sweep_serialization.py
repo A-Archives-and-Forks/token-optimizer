@@ -129,8 +129,19 @@ def _write_expired_owner_lease(lease_path: Path, owner_nonce: str) -> None:
 
 
 def _age_old(path: Path) -> None:
-    """Age ``path`` past the sweep staleness threshold (max lease duration)."""
-    old = time.time() - (MAX_LEASE_SECONDS + 5)
+    """Age ``path`` past its sweep threshold.
+
+    Candidates and reclaim claims are on deliberately different fuses: reaping a
+    live candidate is harmless (the acquirer just fails open), but reaping a live
+    reclaim claim frees a deterministic name and can produce two winners, so the
+    claim fuse is much longer. Age against whichever applies to this file.
+    """
+    import archive_result
+    if ".lease.reclaim-" in path.name:
+        threshold = archive_result.RECLAIM_SWEEP_STALE_SECONDS
+    else:
+        threshold = archive_result.LOCK_SWEEP_STALE_SECONDS
+    old = time.time() - (threshold + 5)
     os.utime(path, (old, old))
 
 

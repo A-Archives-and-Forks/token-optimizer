@@ -76,6 +76,16 @@ _ARCHIVE_CLEANUP_INTERVAL_SECONDS_DEFAULT = 60
 # (10.0 + 0.25 = 10.25s). The sweep reaps candidates older than this; a younger
 # candidate is a live acquisition in flight and is never touched.
 LOCK_SWEEP_STALE_SECONDS = 10.25
+# A reclaim claim is swept on a far longer fuse than a lease candidate, and the
+# asymmetry is deliberate. Reaping a live CANDIDATE is harmless: the acquirer
+# simply fails to acquire and fails open. Reaping a live RECLAIM claim is not --
+# the claim name is deterministic per generation precisely so that concurrent
+# same-generation reclaimers collide and exactly one wins. Free that name while
+# a reclaimer is still mid-sequence and a second reclaimer can take it, so two
+# processes can end up believing they hold the lock. A reclaimer paused past ten
+# seconds is plausible (suspended process, slow NFS, debugger); paused past five
+# minutes is not, and the orphaned-claim deadlock this cures is bounded and rare.
+RECLAIM_SWEEP_STALE_SECONDS = 300.0
 
 # WS4: Agent/Task result progressive disclosure — shipped MEASURE-ONLY.
 #
@@ -250,12 +260,15 @@ def _sweep_stale_lock_candidates(archive_root: Path) -> None:
         entries = list(locks_dir.iterdir())
     except (OSError, ValueError):
         return
-    cutoff = time.time() - LOCK_SWEEP_STALE_SECONDS
+    now = time.time()
+    candidate_cutoff = now - LOCK_SWEEP_STALE_SECONDS
+    reclaim_cutoff = now - RECLAIM_SWEEP_STALE_SECONDS
     for entry in entries:
-        if (
-            ".lease.candidate-" not in entry.name
-            and ".lease.reclaim-" not in entry.name
-        ):
+        if ".lease.candidate-" in entry.name:
+            cutoff = candidate_cutoff
+        elif ".lease.reclaim-" in entry.name:
+            cutoff = reclaim_cutoff
+        else:
             continue
         try:
             if entry.is_dir():
