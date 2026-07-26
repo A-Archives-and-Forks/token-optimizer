@@ -243,7 +243,7 @@ RTK and Boost reach the first surface. Headroom reaches the first and the third.
 An em dash means the capability was not verified from first-party material in the 2026-07-26 source audit; it is not a claim that the capability is absent. Boost's "pre-shell" and "shell-level" cells are sourced from its documented wrapper form (`boost <command>`); the mechanism `boost init` uses to wire an agent is not described in its first-party material. Token Optimizer's compression claims are tested against real sessions and an 87-fixture suite you can run yourself. **[Full benchmark methodology and results →](BENCHMARK.md)**
 
 <p align="center">
-  <a href="https://alexgreensh.github.io/token-optimizer/"><img src="https://img.shields.io/badge/Read%20the%20full%20documentation-token--optimizer%20docs-0b7285?style=for-the-badge" alt="Read the full documentation"></a>
+  <a href="https://alexgreensh.github.io/token-optimizer/reference/comparison/"><img src="https://img.shields.io/badge/Read%20the%20official%20full%20comparison-in%20our%20docs-0b7285?style=for-the-badge" alt="Read the official full comparison page in our documentation"></a>
 </p>
 
 ## The Dashboard
