@@ -199,12 +199,12 @@ RTK and Boost reach the first surface. Headroom reaches the first and the third.
   <img src="skills/token-optimizer/assets/automated-flow.svg" alt="How Token Optimizer works automatically every session" width="900">
 </p>
 
+These ten rows are the ones where Token Optimizer is the only 🟢 in the row: what survives beyond compression, and the waste no compressor looks for. Compression mechanics, cost and safety, and the two rows where we lose are behind the fold.
+
 |  | Token Optimizer | Headroom | RTK | Boost | context-mode | `/context` |
 |---|---|---|---|---|---|---|
-| **Survives what compression alone cannot** | | | | | | |
 | Compaction survival | 🟢 Progressive checkpoints, restore, tool output digest | 🔴 | 🔴 | — | 🟡 Session guide only | 🔴 |
 | Session continuity | 🟢 Cross-session hints, cold-resume, checkpoint scoring | 🔴 | 🔴 | — | 🟡 Session guide | 🔴 |
-| **Finds waste no compressor looks for** | | | | | | |
 | Structural waste audit | 🟢 Deep per-component (CLAUDE.md, skills, MCP, memory) | 🔴 | 🔴 | 🔴 | 🔴 | 🟡 Summary only |
 | CLAUDE.md and MEMORY.md health | 🟢 8 auditors + attention-curve scoring | 🔴 | 🔴 | 🔴 | 🔴 | 🔴 |
 | Model routing and behavioral coaching | 🟢 12 detectors, subagent cost breakdown, anti-patterns | 🔴 | 🔴 | — | 🔴 | 🟡 Basic suggestions |
@@ -219,25 +219,21 @@ RTK and Boost reach the first surface. Headroom reaches the first and the third.
 
 |  | Token Optimizer | Headroom | RTK | Boost | context-mode | `/context` |
 |---|---|---|---|---|---|---|
-| **Compression mechanics** | | | | | | |
 | No command rewriting required | 🟢 Hook-wired, fires automatically | 🟢 Transparent proxy | 🟢 Hook-based rewrite | 🟢 `boost init` wires supported agents; terminal use can be prefixed | 🟡 Automatic on hook-capable platforms | N/A Native command |
 | Full original recoverable | 🟢 Raw archived before compression, `expand` retrieves it; failures never compressed | 🟢 Reversible retrieval | 🟡 Full output saved on command failure | 🟢 Vendor documents command-output recovery | — | N/A Does not compress |
 | Register a custom command filter | 🔴 Built-in command set; no user filter API | — | 🟢 Custom TOML filters | 🟢 TOML filters | — | N/A |
 | User-tunable configuration | 🟢 92 code-referenced `TOKEN_OPTIMIZER_*` names, explicitly split into user-facing and internal controls; additive allowlist; `.contextignore` | 🟢 Documented configuration | 🟢 `config.toml` and environment controls | 🟢 Filter TOML | 🟢 Documented configuration | N/A |
-| **Cost, safety, and reach** | | | | | | |
 | Cache-safe | 🟢 Never modifies existing context prefix | 🟡 Proxy mode rewrites in-flight | 🟢 Pre-shell only | 🟢 Pre-shell only | 🟡 MCP overhead | 🟢 |
 | Zero baseline context overhead | 🟢 External process, no context injection | 🔴 Injects instructions | 🟢 Shell-level only | 🟢 Shell-level only | 🔴 MCP server overhead | 🟢 Native |
 | Zero runtime dependencies | 🟢 Pure stdlib (Python/TypeScript) | 🟡 Python + Rust + optional model | 🟢 Single Rust binary | 🟢 Single binary | 🟡 SQLite adapter required | 🟢 N/A |
 | Zero telemetry | 🟢 Nothing leaves the machine | 🟡 `HEADROOM_TELEMETRY` opt-in, off by default | 🟡 Opt-in | 🔴 Collects commands invoked, command arguments, exit codes, duration, CI attributes, IP | 🟡 Varies | 🟢 |
 | Multi-platform | 🟢 Claude Code, VS Code, Codex, OpenClaw, OpenCode, Hermes, Copilot | 🟢 Claude Code, Cursor, Codex, Aider, Copilot | 🟢 15 integrations | 🟡 Cursor, Claude Code, Copilot, Codex CLI | 🟢 17 integrations | 🔴 Claude Code only |
-| **Tuning, proof, and install** | | | | | | |
 | Per-task model and effort advice | 🟢 `route` sizes the task before you spend | — | — | — | — | — |
 | Keep-Warm (cache TTL refresh) | 🟢 Opt-in ping before cache expiry, tripwire auto-off | 🔴 | 🔴 | — | 🔴 | 🔴 |
 | End-to-end task-outcome benchmark | 🔴 Output-token A/B only | — | — | 🟢 Vendor reports Terminal-Bench 2.0 with the same pass rate and ~12% lower cost | — | N/A |
 | Signed and checksum-verified install | 🟢 `CHECKSUMS.sha256` per release, verified at install, CI-enforced | — | — | 🔴 Installer verifies neither a checksum nor a signature | — | N/A |
 
 </details>
-
 An em dash means the capability was not verified from first-party material in the 2026-07-26 source audit; it is not a claim that the capability is absent. Boost's "pre-shell" and "shell-level" cells are sourced from its documented wrapper form (`boost <command>`); the mechanism `boost init` uses to wire an agent is not described in its first-party material. Token Optimizer's compression claims are tested against real sessions and an 87-fixture suite you can run yourself. **[Full benchmark methodology and results →](BENCHMARK.md)**
 
 <p align="center">
