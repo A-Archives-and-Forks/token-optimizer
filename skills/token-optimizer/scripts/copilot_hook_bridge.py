@@ -602,11 +602,34 @@ def handle_stop(payload):
     to_dir = _to_dir()
     sid = fields["session_id"]
     if to_dir is not None and sid:
-        for name in (f"inflight-{sid}.json", f"inflight-{sid}.lock"):
+        try:
+            (to_dir / f"inflight-{sid}.json").unlink()
+        except OSError:
+            pass
+        # The .lock pathname IS the published LeaseLock name for this session
+        # (see _session_lock). Unlinking it unconditionally removes the
+        # rendezvous point out from under a PostToolUse handler that is still
+        # inside its critical section: a third process can then publish a fresh
+        # candidate onto the now-free name and run concurrently, while the
+        # original holder -- which operates on its own candidate inode -- never
+        # notices it was displaced. Nothing in the Copilot hook contract
+        # guarantees Stop is serialised after PostToolUse returns.
+        #
+        # So only remove the lock when it is provably unheld: take it
+        # non-blocking, and if that fails, leave it for the sessionStart sweep.
+        lock_path = to_dir / f"inflight-{sid}.lock"
+        if lease_lock is None:
             try:
-                (to_dir / name).unlink()
+                lock_path.unlink()
             except OSError:
                 pass
+        else:
+            with lease_lock(lock_path, acquire_timeout=0) as acquired:
+                if acquired:
+                    try:
+                        lock_path.unlink()
+                    except OSError:
+                        pass
 
 
 _HANDLERS = {
