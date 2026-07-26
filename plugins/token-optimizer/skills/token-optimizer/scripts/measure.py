@@ -19017,6 +19017,77 @@ THRASH_LIMIT = 3
 DASHBOARD_FRESH_SECONDS = 120
 _last_regen = 0.0
 
+# The path this daemon was GENERATED against. Used only as a last-resort fallback:
+# it points into a versioned plugin-cache directory that any later upgrade may prune,
+# which silently broke every regeneration for upgrading users (the daemon kept
+# listening, so health checks stayed green while refresh was dead).
+MEASURE_PY_FALLBACK = {measure_py_literal}
+_MEASURE_PY_CACHE = ("", 0.0)
+MEASURE_PY_RESOLVE_TTL = 300
+REGEN_LOG = os.path.join(os.path.dirname(DASHBOARD), "daemon-regen.log")
+
+
+def _log_regen(msg):
+    """Append a regeneration event. Never raises; the daemon must survive a dead log."""
+    try:
+        with open(REGEN_LOG, "a", encoding="utf-8") as f:
+            f.write("%s %s\\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), msg))
+    except OSError:
+        pass
+
+
+def _resolve_measure_py():
+    """Find the NEWEST installed measure.py at call time, not at generation time.
+
+    Mirrors the discovery the token-dashboard skill already does: walk the known
+    install roots, read each copy's .claude-plugin/plugin.json version, keep the
+    highest. Resolving at call time is the whole point -- a baked absolute path
+    dies the moment an upgrade prunes the version that generated this file.
+    Cached for MEASURE_PY_RESOLVE_TTL so a busy daemon does not re-walk per request.
+    """
+    global _MEASURE_PY_CACHE
+    cached, when = _MEASURE_PY_CACHE
+    now = time.time()
+    if cached and now - when < MEASURE_PY_RESOLVE_TTL and os.path.isfile(cached):
+        return cached
+    roots = [
+        os.path.expanduser("~/.claude/skills"),
+        os.path.expanduser("~/.claude/plugins/cache"),
+        os.path.expanduser("~/.claude/token-optimizer"),
+        os.path.expanduser("~/.codex/skills"),
+        os.path.expanduser("~/.codex/plugins/cache"),
+        os.path.expanduser("~/.config/opencode/plugins/cache"),
+        os.path.expanduser("~/.config/opencode/plugins"),
+    ]
+    best_path, best_ver = "", None
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
+            if "measure.py" not in filenames:
+                continue
+            if "token-optimizer" not in dirpath or not dirpath.endswith("scripts"):
+                continue
+            cand = os.path.join(dirpath, "measure.py")
+            manifest = os.path.join(
+                os.path.realpath(os.path.join(dirpath, "..", "..", "..")),
+                ".claude-plugin", "plugin.json",
+            )
+            ver = (0,)
+            try:
+                with open(manifest, "r", encoding="utf-8") as f:
+                    raw = json.load(f).get("version", "0")
+                ver = tuple(int(p) for p in str(raw).split(".") if p.isdigit())
+            except (OSError, ValueError, TypeError):
+                ver = (0,)
+            if best_ver is None or ver > best_ver:
+                best_ver, best_path = ver, cand
+    if best_path:
+        _MEASURE_PY_CACHE = (best_path, now)
+        return best_path
+    _log_regen("resolve failed, falling back to generated path %s" % MEASURE_PY_FALLBACK)
+    return MEASURE_PY_FALLBACK
+
 
 def _read_token():
     """Read per-install CSRF token from disk. Empty string if missing/unreadable."""
@@ -19173,13 +19244,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         _last_regen = now
         try:
             import subprocess
+            target = _resolve_measure_py()
+            if not os.path.isfile(target):
+                _log_regen("SKIP regen: measure.py not found at %s" % target)
+                return
+            # stderr is captured to a log rather than discarded. Swallowing it is what
+            # let a dead regeneration look identical to a healthy one for two days.
+            errf = open(REGEN_LOG, "a", encoding="utf-8")
             subprocess.Popen(
-                [sys.executable, {measure_py_literal}, "dashboard", "--quiet"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                [sys.executable, target, "dashboard", "--quiet"],
+                stdout=subprocess.DEVNULL, stderr=errf,
                 stdin=subprocess.DEVNULL, close_fds=True,
             )
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            _log_regen("regen launch failed: %s" % exc)
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -19232,7 +19310,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             action = "enable" if enabled else "disable"
             try:
                 result = subprocess.run(
-                    [sys.executable, {measure_py_literal}, "v5", action, name, "--json"],
+                    [sys.executable, _resolve_measure_py(), "v5", action, name, "--json"],
                     capture_output=True, text=True, timeout=10
                 )
             except (subprocess.TimeoutExpired, OSError) as e:
@@ -19277,7 +19355,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             endpoint = clean[len("api/"):]  # e.g. "skill/archive"
             try:
                 result = subprocess.run(
-                    [sys.executable, {measure_py_literal}, "api-manage", endpoint, name],
+                    [sys.executable, _resolve_measure_py(), "api-manage", endpoint, name],
                     capture_output=True, text=True, timeout=15
                 )
             except (subprocess.TimeoutExpired, OSError) as e:
