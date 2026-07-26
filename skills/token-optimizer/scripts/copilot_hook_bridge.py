@@ -40,6 +40,7 @@ import shlex
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,11 @@ try:
     from codex_io import atomic_write_json as _atomic_write_json_impl
 except ImportError:  # pragma: no cover - broken install
     _atomic_write_json_impl = None  # type: ignore[assignment]
+
+try:
+    from hook_runtime import lease_lock
+except ImportError:  # pragma: no cover - broken install
+    lease_lock = None  # type: ignore[assignment]
 
 _MAX_STDIN_BYTES = 4 * 1024 * 1024  # refuse absurd payloads (amplification)
 # Snapshot at import: the installed payload is static for the process lifetime,
@@ -376,6 +382,18 @@ def handle_session_start(payload):
                         p.unlink()
                 except OSError:
                     continue
+            # Orphaned lease artifacts from the portable lock (hook_runtime.
+            # LeaseLock): published lock files and crash-left candidate files
+            # persist across sessions, so sweep them on the same stale threshold
+            # as the in-flight tallies. Error-tolerant like the tally sweep — a
+            # sweep failure must never break sessionStart.
+            for pattern in ("inflight-*.lock", ".inflight-*.lock.candidate-*"):
+                for p in to_dir.glob(pattern):
+                    try:
+                        if now - p.stat().st_mtime > _INFLIGHT_STALE_SECS:
+                            p.unlink()
+                    except OSError:
+                        continue
         except OSError:
             pass
 
@@ -459,38 +477,21 @@ def handle_pre_tool_use(payload):
     _emit({"hookSpecificOutput": hook_out})
 
 
-class _session_lock:
-    """Advisory exclusive lock over a session's tally, so concurrent tool
-    calls don't lose updates in the read-modify-write. No-op on Windows or
-    when fcntl is unavailable (best-effort; the tally is a soft counter)."""
+@contextmanager
+def _session_lock(to_dir, sid):
+    """Bounded portable lease over a session's tally read-modify-write.
 
-    def __init__(self, to_dir, sid):
-        self._path = to_dir / f"inflight-{sid}.lock"
-        self._fh = None
-
-    def __enter__(self):
-        try:
-            import fcntl  # noqa: PLC0415
-
-            self._fh = open(self._path, "w", encoding="utf-8")
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
-        except (ImportError, OSError):
-            self._fh = None
-        return self
-
-    def __exit__(self, *exc):
-        if self._fh is not None:
-            try:
-                import fcntl  # noqa: PLC0415
-
-                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-            except (ImportError, OSError):
-                pass
-            try:
-                self._fh.close()
-            except OSError:
-                pass
-        return False
+    Fail-open on contention: contenders skip the mutation after 75ms rather
+    than blocking the hot path. The tally is a soft counter, so a skipped
+    update is tolerable. Broken-install fallback (hook_runtime unavailable)
+    proceeds without a lock, matching the prior best-effort behavior.
+    """
+    lock_path = to_dir / f"inflight-{sid}.lock"
+    if lease_lock is None:
+        yield True
+        return
+    with lease_lock(lock_path, acquire_timeout=0.075) as acquired:
+        yield acquired
 
 
 def handle_post_tool_use(payload):
@@ -502,7 +503,9 @@ def handle_post_tool_use(payload):
     tool_calls = 1
 
     if to_dir is not None:
-      with _session_lock(to_dir, sid):
+      with _session_lock(to_dir, sid) as acquired:
+        if not acquired:
+            return
         tally_path = to_dir / f"inflight-{sid}.json"
         tally = {}
         try:
@@ -593,13 +596,17 @@ def handle_stop(payload):
     except (OSError, subprocess.SubprocessError):
         pass
     # Remove this session's in-flight tally: shutdown event is now authoritative.
+    # Also drop the published lease lock file so a fast sessionStart doesn't
+    # see a stale inflight-{sid}.lock from this session (candidate files age
+    # out via the sessionStart sweep).
     to_dir = _to_dir()
     sid = fields["session_id"]
     if to_dir is not None and sid:
-        try:
-            (to_dir / f"inflight-{sid}.json").unlink()
-        except OSError:
-            pass
+        for name in (f"inflight-{sid}.json", f"inflight-{sid}.lock"):
+            try:
+                (to_dir / name).unlink()
+            except OSError:
+                pass
 
 
 _HANDLERS = {
