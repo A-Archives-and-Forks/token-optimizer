@@ -19088,7 +19088,21 @@ def _resolve_measure_py():
         cand_dir = os.path.join(container, name)
         if os.path.islink(cand_dir) or not os.path.isdir(cand_dir):
             continue
-        parts = [int(x) for x in name.split(".") if x.isdigit()]
+        # Take the leading numeric run and stop at the first non-numeric
+        # component. A plain isdigit() filter silently DROPPED such parts, so
+        # "5.11.66-rc1" became (5, 11) and sorted BELOW (5, 11, 60) -- the
+        # daemon would pick an older stable over the newer build actually
+        # installed. Stopping instead of skipping keeps the tuple positional.
+        parts = []
+        for chunk in name.split("."):
+            digits = ""
+            for ch in chunk:
+                if not ch.isdigit():
+                    break
+                digits += ch
+            if not digits:
+                break
+            parts.append(int(digits))
         if not parts:
             continue
         cand = os.path.join(cand_dir, suffix)

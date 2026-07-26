@@ -161,3 +161,32 @@ def test_falls_back_to_the_generated_path_when_nothing_resolves(tmp_path):
     lonely.write_text("# measure.py\n", encoding="utf-8")
     resolve = _load_resolver(str(lonely), tmp_path / "log.txt")
     assert Path(resolve()).resolve() == lonely.resolve()
+
+
+def test_prerelease_version_does_not_rank_below_an_older_stable(tmp_path):
+    """A pre-release dir must not be out-ranked by an older stable one.
+
+    The first implementation filtered non-numeric components out, so
+    "5.11.66-rc1" collapsed to (5, 11) and lost to (5, 11, 60). The daemon would
+    then run an older build than the one installed.
+    """
+    cache = tmp_path / "cache"
+    older = _make_install(cache, "alexgreensh-token-optimizer", "5.11.60")
+    rc = _make_install(cache, "alexgreensh-token-optimizer", "5.11.66-rc1")
+
+    resolve = _load_resolver(str(older), tmp_path / "log.txt")
+    got = Path(resolve()).resolve()
+    assert got == rc.resolve(), (
+        f"resolver picked {got.parents[3].name} over the newer 5.11.66-rc1"
+    )
+
+
+def test_non_numeric_version_directories_are_skipped(tmp_path):
+    """Names like 'latest' or 'dev' must not crash or win."""
+    cache = tmp_path / "cache"
+    real = _make_install(cache, "alexgreensh-token-optimizer", "5.11.65")
+    _make_install(cache, "alexgreensh-token-optimizer", "latest")
+    _make_install(cache, "alexgreensh-token-optimizer", "dev")
+
+    resolve = _load_resolver(str(real), tmp_path / "log.txt")
+    assert Path(resolve()).resolve() == real.resolve()
