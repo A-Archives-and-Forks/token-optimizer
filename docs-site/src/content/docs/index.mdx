@@ -3,13 +3,22 @@ title: Introduction
 description: A fully local context optimizer for Claude Code and five other agents. It cuts the three kinds of token waste, keeps your work alive across compaction, and shows every token, dollar, and turn on a live dashboard.
 ---
 
-import { Card, CardGrid, Aside } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
 
 Token Optimizer cuts the tokens you waste and keeps the work you would otherwise lose. It audits your setup for waste, compresses new content as it enters your context, checkpoints your session before compaction destroys it, and tracks every token and dollar on a dashboard that updates after each session. It runs fully local, with zero baseline context overhead and zero runtime dependencies.
 
 It works today on Claude Code (CLI and VS Code), OpenCode, OpenClaw, Codex, Hermes, and GitHub Copilot (CLI and VS Code, beta). Each platform has its own native plugin. Windsurf and Cursor are on the roadmap.
 
 ![Token Optimizer Quick Scan: context window, startup overhead, degradation risk, and the top token offenders](/images/hero-terminal.svg)
+
+{/* href uses BASE_URL, not a hardcoded base: rehype-base-links only rewrites
+    anchors in MDX prose, never a component's own href, so this has to survive the
+    documented BASE = "" custom-domain switch in astro.config.mjs on its own. */}
+<LinkCard
+  title="How does it compare to other solutions?"
+  href={`${import.meta.env.BASE_URL.replace(/\/$/, '')}/reference/comparison/`}
+  description="Token Optimizer against every other context tool, feature by feature, across all 26 rows."
+/>
 
 ## Most tools fix one kind of waste
 
