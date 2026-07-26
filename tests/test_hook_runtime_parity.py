@@ -373,18 +373,107 @@ def measure_module(monkeypatch, tmp_path):
 
 
 def test_windows_simulation_uses_portable_config_and_tripwire_leases(
-    measure_module, monkeypatch, tmp_path
+    monkeypatch, tmp_path
 ):
-    module = measure_module
-    monkeypatch.setattr(module, "_HAS_FCNTL", False)
-    monkeypatch.setattr(module, "CONFIG_DIR", tmp_path / "config")
-    monkeypatch.setattr(module, "_CONFIG_LOCK_PATH", tmp_path / "config" / ".config.lock")
-    monkeypatch.setattr(module, "SNAPSHOT_DIR", tmp_path / "snapshots")
-    with module._config_lock() as config_acquired:
-        pass
-    with module._tripwire_lock() as tripwire_acquired:
-        pass
-    assert config_acquired is True and tripwire_acquired is True
+    """Every lock site acquires under Windows simulation (fcntl/SIGALRM removed).
+
+    Proves cross-platform parity on this macOS host: no lock silently no-ops
+    when fcntl is unavailable. Each ``is True`` assertion fails if its site
+    reverts to the old _HAS_FCNTL no-op guard (which yielded None, not True).
+    """
+    # Simulate Windows: fcntl unavailable, SIGALRM absent.
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.delattr(signal, "SIGALRM", raising=False)
+
+    # Redirect snapshot dir via env before import.
+    monkeypatch.setenv("TOKEN_OPTIMIZER_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
+
+    # Fresh import with fcntl removed — pop cached modules so they re-import
+    # under the Windows simulation. Pop hook_runtime too so the bridge
+    # re-imports it without fcntl.
+    for mod_name in ("measure", "copilot_hook_bridge", "hook_runtime"):
+        sys.modules.pop(mod_name, None)
+
+    measure = importlib.import_module("measure")
+    copilot_bridge = importlib.import_module("copilot_hook_bridge")
+
+    # Redirect module-level path constants to isolated tmp_path locations.
+    config_dir = tmp_path / "config"
+    monkeypatch.setattr(measure, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(measure, "_CONFIG_LOCK_PATH", config_dir / ".config.lock")
+    monkeypatch.setattr(measure, "SNAPSHOT_DIR", tmp_path / "snapshots")
+    monkeypatch.setattr(measure, "_CODEX_CONFIG_LOCK_PATH", tmp_path / ".codex-config.lock")
+    monkeypatch.setattr(measure, "CLAUDE_DIR", tmp_path / "claude")
+    monkeypatch.setattr(measure, "_SETTINGS_LOCK_PATH", tmp_path / ".settings.lock")
+
+    try:
+        # 1. _config_lock (already portable)
+        with measure._config_lock() as acquired:
+            pass
+        assert acquired is True
+
+        # 2. _tripwire_lock (already portable)
+        with measure._tripwire_lock() as acquired:
+            pass
+        assert acquired is True
+
+        # 3. _acquire_quality_lock (already portable)
+        quality_lock = measure._acquire_quality_lock(tmp_path / "test.qcache")
+        assert quality_lock is not False
+        assert quality_lock.acquired is True
+        quality_lock.release()
+
+        # 4. _codex_config_lock (migrated from fcntl)
+        with measure._codex_config_lock() as acquired:
+            pass
+        assert acquired is True
+
+        # 5. _skill_mgmt_lock (migrated from fcntl)
+        with measure._skill_mgmt_lock() as acquired:
+            pass
+        assert acquired is True
+
+        # 6. _keepwarm_lock (migrated from fcntl)
+        with measure._keepwarm_lock() as acquired:
+            pass
+        assert acquired is True
+
+        # 7. _keepwarm_tripwire_lock (migrated from fcntl)
+        with measure._keepwarm_tripwire_lock() as acquired:
+            pass
+        assert acquired is True
+
+        # 8. _settings_lock (migrated from fcntl)
+        with measure._settings_lock() as acquired:
+            pass
+        assert acquired is True
+
+        # 9. copilot_hook_bridge _session_lock (migrated from fcntl)
+        copilot_dir = tmp_path / "copilot"
+        with copilot_bridge._session_lock(copilot_dir, "test-sid") as acquired:
+            pass
+        assert acquired is True
+
+        # Verify lease artifacts exist (guards against yield-True-without-lock
+        # mutants). The `is True` assertions above are the primary proof; these
+        # artifact checks add a second layer for a few representative sites.
+        assert (config_dir / ".config.lease").exists() or any(
+            p.name.startswith(".config.lease.candidate-") for p in config_dir.iterdir()
+        )
+        assert (tmp_path / ".codex-config.lease").exists() or any(
+            p.name.startswith(".codex-config.lease.candidate-")
+            for p in tmp_path.iterdir()
+        )
+        # copilot _session_lock publishes "inflight-<sid>.lock" (not .lease)
+        # because the lock path is built directly from to_dir, not via
+        # .with_suffix(".lease").
+        assert (tmp_path / "copilot" / "inflight-test-sid.lock").exists() or any(
+            p.name.startswith(".inflight-test-sid.lock.candidate-")
+            for p in (tmp_path / "copilot").iterdir()
+        )
+    finally:
+        for mod_name in ("measure", "copilot_hook_bridge", "hook_runtime"):
+            sys.modules.pop(mod_name, None)
 
 
 def test_config_contention_is_bounded_and_skips_mutation(

@@ -107,12 +107,6 @@ import codex_state
 import copilot_session
 import hermes_session
 
-try:
-    import fcntl
-    _HAS_FCNTL = True
-except ImportError:
-    _HAS_FCNTL = False  # Windows: no advisory locking
-
 CHARS_PER_TOKEN = 4.0
 _SKILL_DESC_TRUNCATION_LIMIT = 1536
 
@@ -4902,59 +4896,45 @@ _CODEX_CONFIG_LOCK_PATH = runtime_home() / ".codex-config.lock"
 
 @contextmanager
 def _codex_config_lock():
-    """Advisory file lock for config.toml writes.
+    """Bounded portable lease for config.toml writes.
 
-    Mirrors _config_lock: blocking flock with kernel auto-release on process
-    death; no-op fallback on Windows. Serializes concurrent read-modify-write
-    cycles on config.toml (skill enable/disable, MCP toggles).
+    Serializes concurrent read-modify-write cycles on config.toml (skill
+    enable/disable, MCP toggles). Contenders skip the mutation after 75ms
+    rather than blocking a hook.
     """
-    if not _HAS_FCNTL:
-        yield
-        return
-    lock_path = _CODEX_CONFIG_LOCK_PATH
-    try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    lease_path = _CODEX_CONFIG_LOCK_PATH.with_suffix(".lease")
+    with lease_lock(
+        lease_path,
+        deadline=current_deadline(),
+        acquire_timeout=0.075,
+    ) as acquired:
+        yield acquired
 
 
 @contextmanager
 def _skill_mgmt_lock():
-    """Advisory file lock serializing skill archive/restore mutations.
+    """Bounded portable lease serializing skill archive/restore mutations.
 
-    Mirrors _config_lock: blocking flock with kernel auto-release on process
-    death; no-op fallback on Windows. The dashboard daemon and a CLI
-    `measure.py skill archive|restore` run in separate processes with no
-    in-process serialization, so this cross-process lock closes the
-    archive/restore TOCTOU windows (issue #48 hardening).
+    The dashboard daemon and a CLI `measure.py skill archive|restore` run in
+    separate processes with no in-process serialization, so this cross-process
+    lease closes the archive/restore TOCTOU windows (issue #48 hardening).
+    Contenders skip the mutation after 75ms rather than blocking a hook.
     """
-    if not _HAS_FCNTL:
-        yield
-        return
     lock_path = CLAUDE_DIR / "_backups" / ".skill-mgmt.lock"
-    try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    lease_path = lock_path.with_suffix(".lease")
+    with lease_lock(
+        lease_path,
+        deadline=current_deadline(),
+        acquire_timeout=0.075,
+    ) as acquired:
+        yield acquired
 
 
 def _write_codex_config(text: str) -> None:
     path = _safe_codex_config_path()
-    with _codex_config_lock():
+    with _codex_config_lock() as acquired:
+        if not acquired:
+            return
         codex_io.atomic_write(path, text)
 
 
@@ -5431,7 +5411,9 @@ def _manage_skill(action, name):
     Held under a cross-process lock so a dashboard-daemon call and a CLI call
     can't interleave their archive/restore mutations.
     """
-    with _skill_mgmt_lock():
+    with _skill_mgmt_lock() as acquired:
+        if not acquired:
+            return False
         return _manage_skill_locked(action, name)
 
 
@@ -10536,29 +10518,20 @@ def _keepwarm_sidecar_path():
 
 @contextmanager
 def _keepwarm_lock():
-    """Advisory file lock serializing keep-warm sidecar read-modify-writes.
+    """Bounded portable lease serializing keep-warm sidecar read-modify-writes.
 
-    Mirrors _tripwire_lock / _config_lock: a blocking flock with kernel
-    auto-release on process death and a no-op fallback on Windows. Two Stop hooks
-    from different sessions can append concurrently, and the tick loop rewrites the
-    whole file during compaction; without this an interleaved append + rewrite
-    could lose a record or leave a torn line.
+    Two Stop hooks from different sessions can append concurrently, and the tick
+    loop rewrites the whole file during compaction; without this an interleaved
+    append + rewrite could lose a record or leave a torn line. Contenders skip
+    the mutation after 75ms rather than blocking a hook.
     """
-    if not _HAS_FCNTL:
-        yield
-        return
-    lock_path = SNAPSHOT_DIR / _KEEPWARM_LOCK_NAME
-    try:
-        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    lock_path = SNAPSHOT_DIR / f"{_KEEPWARM_LOCK_NAME}.lease"
+    with lease_lock(
+        lock_path,
+        deadline=current_deadline(),
+        acquire_timeout=0.075,
+    ) as acquired:
+        yield acquired
 
 
 def _keepwarm_append_line(path, line):
@@ -10572,7 +10545,9 @@ def _keepwarm_append_line(path, line):
     append can never tear against a concurrent compaction rewrite.
     """
     try:
-        with _keepwarm_lock():
+        with _keepwarm_lock() as acquired:
+            if not acquired:
+                return False
             try:
                 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
             except OSError:
@@ -10924,7 +10899,9 @@ def compact_keepwarm_sidecar(path=None, now=None):
         now = time.time()
     kept = []
     dropped = 0
-    with _keepwarm_lock():
+    with _keepwarm_lock() as acquired:
+        if not acquired:
+            return (0, 0)
         records = load_keepwarm_records(path)
         # Account for corrupt/invalid lines as dropped for the caller's visibility.
         try:
@@ -13349,7 +13326,9 @@ def _keepwarm_rewrite_records(records, now=None):
         now = time.time()
     path = _keepwarm_sidecar_path()
     try:
-        with _keepwarm_lock():
+        with _keepwarm_lock() as acquired:
+            if not acquired:
+                return
             try:
                 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
                 fd, tmp_name = tempfile.mkstemp(
@@ -14149,7 +14128,9 @@ def _keepwarm_compact_ledger(now=None, retain_days=_KEEPWARM_LEDGER_RETAIN_DAYS)
     if not has_old and size <= _KEEPWARM_LEDGER_MAX_BYTES:
         return (False, len(kept), 0)
     try:
-        with _keepwarm_lock():
+        with _keepwarm_lock() as acquired:
+            if not acquired:
+                return (False, 0, 0)
             try:
                 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
                 fd, tmp_name = tempfile.mkstemp(
@@ -14919,22 +14900,17 @@ def keepwarm_tripwire_mode():
 
 @contextmanager
 def _keepwarm_tripwire_lock():
-    """Advisory flock serializing tripwire recompute+write (clone of _tripwire_lock)."""
-    if not _HAS_FCNTL:
-        yield
-        return
-    lock_path = SNAPSHOT_DIR / _KEEPWARM_TRIPWIRE_LOCK_NAME
-    try:
-        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    """Bounded portable lease serializing tripwire recompute+write.
+
+    Contenders skip the mutation after 75ms rather than blocking a hook.
+    """
+    lock_path = SNAPSHOT_DIR / f"{_KEEPWARM_TRIPWIRE_LOCK_NAME}.lease"
+    with lease_lock(
+        lock_path,
+        deadline=current_deadline(),
+        acquire_timeout=0.075,
+    ) as acquired:
+        yield acquired
 
 
 def _write_keepwarm_tripwire_sidecar(mode, strikes, ratio, health, now=None,
@@ -15044,7 +15020,9 @@ def evaluate_keepwarm_tripwire(now=None, rows=None, force=False):
         _KEEPWARM_TRIPWIRE_RATIO_GATE + realized + 1.0)
     health = _keepwarm_tripwire_health(rows, now=now)
 
-    with _keepwarm_tripwire_lock():
+    with _keepwarm_tripwire_lock() as acquired:
+        if not acquired:
+            return {}
         cur_mode = keepwarm_tripwire_mode()
         try:
             prev = json.loads(_keepwarm_tripwire_path().read_text(encoding="utf-8"))
@@ -15102,7 +15080,9 @@ def keepwarm_tripwire_repromote(now=None):
                                      now=now, rows=rows)
     spend = summary["spend_usd"]
     ratio = (summary["realized_usd"] / spend) if spend > 0 else (summary["realized_usd"] + 1.0)
-    with _keepwarm_tripwire_lock():
+    with _keepwarm_tripwire_lock() as acquired:
+        if not acquired:
+            return None
         return _write_keepwarm_tripwire_sidecar(
             "sustain", 0, ratio, health, now=now, last_strike_ts=None)
 
@@ -18450,26 +18430,18 @@ _SETTINGS_LOCK_PATH = SETTINGS_PATH.parent / ".settings.lock"
 
 @contextmanager
 def _settings_lock():
-    """Advisory file lock for settings.json writes.
+    """Bounded portable lease for settings.json writes.
 
     Prevents concurrent writes from silently overwriting each other.
-    Uses blocking flock — the kernel handles waiting and auto-releases
-    on process death. Falls back to no-op on Windows or if the lock
-    file can't be opened.
+    Contenders skip the mutation after 75ms rather than blocking a hook.
     """
-    if not _HAS_FCNTL:
-        yield
-        return
-    try:
-        fd = os.open(str(_SETTINGS_LOCK_PATH), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
+    lease_path = _SETTINGS_LOCK_PATH.with_suffix(".lease")
+    with lease_lock(
+        lease_path,
+        deadline=current_deadline(),
+        acquire_timeout=0.075,
+    ) as acquired:
+        yield acquired
 
 
 def _write_settings_atomic(settings_data):
@@ -18485,7 +18457,9 @@ def _write_settings_atomic(settings_data):
     unlinking the already-renamed destination. Any exception encountered
     during the write propagates naturally after cleanup.
     """
-    with _settings_lock():
+    with _settings_lock() as acquired:
+        if not acquired:
+            return
         tmp_fd, tmp_path = tempfile.mkstemp(
             dir=str(SETTINGS_PATH.parent),
             prefix=".settings-",

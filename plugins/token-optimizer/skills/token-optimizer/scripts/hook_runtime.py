@@ -37,11 +37,6 @@ class HookDeadline:
             name="token-optimizer-hook-deadline",
             daemon=True,
         )
-        self._notify_thread = threading.Thread(
-            target=self._notify,
-            name="token-optimizer-hook-deadline-notify",
-            daemon=True,
-        )
         self._started = False
         self._previous = None
 
@@ -50,8 +45,15 @@ class HookDeadline:
             self._started = True
             self._previous = getattr(_DEADLINE_LOCAL, "current", None)
             _DEADLINE_LOCAL.current = self
-            self._notify_thread.start()
             self._thread.start()
+            # Emit the best-effort diagnostic only after the exit-only
+            # watchdog is armed. If stderr is a full, undrained pipe this
+            # caller may block, but the watchdog remains able to terminate the
+            # process because its deadline path performs no I/O.
+            try:
+                os.write(2, self.message)
+            except OSError:
+                pass
         return self
 
     def remaining(self) -> float:
@@ -59,16 +61,6 @@ class HookDeadline:
 
     def expires_wall(self) -> float:
         return time.time() + self.remaining()
-
-    def _notify(self):
-        # Give a best-effort write a tiny scheduling head start. The independent
-        # watchdog still exits at the exact deadline and never waits for I/O.
-        notify_in = max(0.0, self.remaining() - 0.01)
-        if not self._cancelled.wait(notify_in):
-            try:
-                os.write(2, self.message)
-            except OSError:
-                pass
 
     def _watch(self):
         if not self._cancelled.wait(self.remaining()):
@@ -79,7 +71,6 @@ class HookDeadline:
             return
         self._cancelled.set()
         self._thread.join(timeout=0.1)
-        self._notify_thread.join(timeout=0.1)
         if getattr(_DEADLINE_LOCAL, "current", None) is self:
             _DEADLINE_LOCAL.current = self._previous
 
