@@ -150,9 +150,12 @@ def test_unassessable_lease_metadata_fails_open_without_reclamation(tmp_path, re
     assert not acquired and path.exists() and path.read_text() == record
 
 
-def test_stable_malformed_lease_is_reclaimable_after_grace(tmp_path):
+@pytest.mark.parametrize("malformed", [b"", b"{partial", b'{"nonce":'])
+def test_stable_malformed_lease_is_reclaimable_after_grace(
+    tmp_path, malformed
+):
     path = tmp_path / "state.lease"
-    path.write_text("{partial", encoding="utf-8")
+    path.write_bytes(malformed)
     old = time.time() - 2
     os.utime(path, (old, old))
     contender = LeaseLock(path, acquire_timeout=0, reclaim_grace=0.25)
@@ -164,6 +167,41 @@ def test_stable_malformed_lease_is_reclaimable_after_grace(tmp_path):
     succeeded_again = successor.acquire()
     successor.release()
     assert acquired and succeeded_again
+
+
+def test_many_contenders_reclaim_one_malformed_generation_once(tmp_path):
+    lock_path = tmp_path / "malformed.lease"
+    wins_path = tmp_path / "wins.txt"
+    lock_path.write_bytes(b"")
+    old = time.time() - 2
+    os.utime(lock_path, (old, old))
+    code = """
+import sys, time
+from hook_runtime import LeaseLock
+lock = LeaseLock(
+    sys.argv[1],
+    acquire_timeout=0.075,
+    reclaim_grace=0.25,
+)
+if lock.acquire():
+    with open(sys.argv[2], "a", encoding="utf-8") as out:
+        out.write("won\\n")
+    time.sleep(0.2)
+    lock.release()
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(SCRIPTS)
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", code, str(lock_path), str(wins_path)],
+            env=env,
+        )
+        for _ in range(12)
+    ]
+    codes = [process.wait(timeout=2) for process in processes]
+
+    assert codes == [0] * len(processes)
+    assert wins_path.read_text().splitlines() == ["won"]
 
 
 def test_lease_metadata_is_complete_before_final_path_is_published(
