@@ -65,7 +65,6 @@ The table covers the six tools most often compared to Token Optimizer. Status: �
 | Zero runtime dependencies | 🟢 Pure stdlib (Python/TypeScript) | 🟡 Python + Rust + optional model | 🟢 Single Rust binary | 🟢 Single binary | 🟡 SQLite adapter required | 🟢 N/A |
 | Zero telemetry | 🟢 Nothing leaves the machine | 🟡 Anonymous aggregate telemetry, opt-in via `HEADROOM_TELEMETRY`, off by default | 🟡 Opt-in | 🔴 Beta Agreement §6 covers commands invoked, command arguments, exit codes, duration, CI attributes, IP | 🟡 Varies | 🟢 |
 | Signed and checksum-verified install | 🟢 `CHECKSUMS.sha256` on every release, verified at install; CI fails a release that cannot be installed | — | — | 🔴 `install.sh` verifies neither a checksum nor a signature on either download path | — | N/A |
-| Source readable | 🟢 PolyForm Noncommercial, full source | 🟢 Public repository | 🟢 Apache-2.0 repository | 🔴 All Rights Reserved; reverse engineering prohibited by the Beta Agreement | 🟢 ELv2 source-available repository | N/A |
 | Multi-platform | 🟢 Claude Code, VS Code, Codex, OpenClaw, OpenCode, Hermes, Copilot | 🟢 Claude Code, Cursor, Codex, Aider, Copilot | 🟢 15 integrations | 🟡 Cursor, Claude Code, Copilot, Codex CLI | 🟢 17 integrations | 🔴 Claude Code only |
 
 <Aside type="note">
