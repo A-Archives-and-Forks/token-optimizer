@@ -112,6 +112,7 @@ class LeaseLock:
         acquire_timeout: float = 0.075,
         lease_seconds: float = 10.0,
         reclaim_grace: float = 0.25,
+        cohort_throttle: bool = True,
     ):
         # Preserve an already-materialized concrete path. This also lets tests
         # simulate Windows by changing os.name after pathlib created PosixPath
@@ -121,6 +122,7 @@ class LeaseLock:
         self.acquire_timeout = max(0.0, float(acquire_timeout))
         self.lease_seconds = max(0.1, float(lease_seconds))
         self.reclaim_grace = max(0.0, float(reclaim_grace))
+        self.cohort_throttle = bool(cohort_throttle)
         self.nonce = secrets.token_hex(16)
         self._owner_path = self.path.with_name(
             f".{self.path.name}.candidate-{self.nonce}"
@@ -141,8 +143,12 @@ class LeaseLock:
             # Waiting acquisitions represent a thundering-herd cohort. Keep
             # that generation reserved through its lease so a delayed cohort
             # member cannot run the same mutation after an early release.
-            # Nonblocking locks retain immediate sequential reuse.
-            "reuse_wall": expires if self.acquire_timeout > 0 else now,
+            # Nonblocking locks retain immediate sequential reuse. Writers that
+            # persist DISTINCT mutations (e.g. archive writers keyed by
+            # tool_use_id) opt out via cohort_throttle=False so a trailing
+            # distinct-PID writer can immediately reclaim a released lease
+            # instead of being suppressed for the full lease window.
+            "reuse_wall": expires if (self.acquire_timeout > 0 and self.cohort_throttle) else now,
             "created_wall": now,
             "expires_wall": expires,
         }

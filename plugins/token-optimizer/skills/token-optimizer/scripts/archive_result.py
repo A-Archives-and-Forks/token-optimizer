@@ -882,6 +882,7 @@ def archive_original(content: str, session_id: str | None, key: str,
         session_lock = LeaseLock(
             _session_lock_path(archive_dir.parent, session_id or "unknown"),
             acquire_timeout=0.075,
+            cohort_throttle=False,
         )
         if not session_lock.acquire():
             return None
@@ -1227,6 +1228,7 @@ def archive_result(quiet: bool = False) -> None:
     session_lock = LeaseLock(
         _session_lock_path(archive_dir.parent, session_id),
         acquire_timeout=0.075,
+        cohort_throttle=False,
     )
     if not session_lock.acquire():
         if not quiet:
