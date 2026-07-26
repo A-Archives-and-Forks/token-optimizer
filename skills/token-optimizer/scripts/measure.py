@@ -19029,6 +19029,8 @@ _last_regen = 0.0
 # listening, so health checks stayed green while refresh was dead).
 MEASURE_PY_FALLBACK = {measure_py_literal}
 _MEASURE_PY_CACHE = ("", 0.0)
+_regen_inflight = False
+REGEN_STEP_TIMEOUT = 45
 MEASURE_PY_RESOLVE_TTL = 300
 REGEN_LOG = os.path.join(os.path.dirname(DASHBOARD), "daemon-regen.log")
 
@@ -19056,43 +19058,57 @@ def _resolve_measure_py():
     now = time.time()
     if cached and now - when < MEASURE_PY_RESOLVE_TTL and os.path.isfile(cached):
         return cached
-    roots = [
-        os.path.expanduser("~/.claude/skills"),
-        os.path.expanduser("~/.claude/plugins/cache"),
-        os.path.expanduser("~/.claude/token-optimizer"),
-        os.path.expanduser("~/.codex/skills"),
-        os.path.expanduser("~/.codex/plugins/cache"),
-        os.path.expanduser("~/.config/opencode/plugins/cache"),
-        os.path.expanduser("~/.config/opencode/plugins"),
-    ]
+    # SECURITY: resolution stays inside the SAME plugin identity this daemon was
+    # generated from. An earlier version walked seven install roots with
+    # followlinks=True and picked whichever copy self-reported the highest version
+    # in its .claude-plugin/plugin.json, then executed it. That let any unrelated
+    # plugin shipping a nested token-optimizer/scripts/measure.py and a manifest
+    # claiming a huge version win the contest, and let a symlink under any walked
+    # root escape the roots entirely -- a code-execution path where there had
+    # previously been a static self-reference. Narrowed deliberately:
+    #   - no directory walk and no symlink following
+    #   - candidates must be siblings under the generating identity's version
+    #     container, so nothing new is trusted
+    #   - the version comes from the DIRECTORY NAME, not from file contents any
+    #     other writer controls
+    #   - the resolved path is containment-checked before it is ever executed
+    fallback = MEASURE_PY_FALLBACK
+    # .../<identity>/token-optimizer/<version>/skills/token-optimizer/scripts/measure.py
+    version_dir = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(fallback)))))
+    container = os.path.dirname(version_dir)
+    suffix = os.path.relpath(os.path.abspath(fallback), version_dir)
     best_path, best_ver = "", None
-    for root in roots:
-        if not os.path.isdir(root):
+    try:
+        entries = os.listdir(container)
+    except OSError:
+        entries = []
+    container_real = os.path.realpath(container)
+    for name in entries:
+        cand_dir = os.path.join(container, name)
+        if os.path.islink(cand_dir) or not os.path.isdir(cand_dir):
             continue
-        for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
-            if "measure.py" not in filenames:
-                continue
-            if "token-optimizer" not in dirpath or not dirpath.endswith("scripts"):
-                continue
-            cand = os.path.join(dirpath, "measure.py")
-            manifest = os.path.join(
-                os.path.realpath(os.path.join(dirpath, "..", "..", "..")),
-                ".claude-plugin", "plugin.json",
-            )
-            ver = (0,)
-            try:
-                with open(manifest, "r", encoding="utf-8") as f:
-                    raw = json.load(f).get("version", "0")
-                ver = tuple(int(p) for p in str(raw).split(".") if p.isdigit())
-            except (OSError, ValueError, TypeError):
-                ver = (0,)
-            if best_ver is None or ver > best_ver:
-                best_ver, best_path = ver, cand
+        parts = [int(x) for x in name.split(".") if x.isdigit()]
+        if not parts:
+            continue
+        cand = os.path.join(cand_dir, suffix)
+        if not os.path.isfile(cand) or os.path.islink(cand):
+            continue
+        # Containment: the real path must still sit under the real container.
+        cand_real = os.path.realpath(cand)
+        if not (cand_real == container_real or
+                cand_real.startswith(container_real + os.sep)):
+            continue
+        ver = tuple(parts)
+        if best_ver is None or ver > best_ver:
+            best_ver, best_path = ver, cand
     if best_path:
         _MEASURE_PY_CACHE = (best_path, now)
         return best_path
-    _log_regen("resolve failed, falling back to generated path %s" % MEASURE_PY_FALLBACK)
-    return MEASURE_PY_FALLBACK
+    if os.path.isfile(fallback):
+        return fallback
+    _log_regen("resolve failed: no installed measure.py under %s" % container)
+    return fallback
 
 
 def _read_token():
@@ -19386,11 +19402,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 _log_regen("MANUAL regen failed: measure.py not found at " + target)
                 self._json_response(500, {{"ok": False, "msg": "measure.py not found; reinstall or run setup-daemon"}})
                 return
+            # This server is single-threaded, so a synchronous regen blocks EVERY
+            # other request -- dashboard loads, health checks, v5 toggles. Two
+            # 120s steps meant one click could wedge the daemon for four minutes.
+            # Bounded to REGEN_STEP_TIMEOUT per step, and a second concurrent
+            # click is refused rather than queued behind the first.
+            global _regen_inflight
+            if _regen_inflight:
+                self._json_response(409, {{"ok": False, "msg": "a regeneration is already running"}})
+                return
+            _regen_inflight = True
             try:
                 for step in ("collect", "dashboard"):
                     r = subprocess.run(
                         [sys.executable, target, step, "--quiet"],
-                        capture_output=True, text=True, timeout=120,
+                        capture_output=True, text=True, timeout=REGEN_STEP_TIMEOUT,
                     )
                     if r.returncode != 0:
                         msg = (r.stderr or r.stdout or "").strip()[:300] or ("%s exited %d" % (step, r.returncode))
@@ -19401,6 +19427,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 _log_regen("MANUAL regen error: %s" % e)
                 self._json_response(500, {{"ok": False, "msg": "regeneration failed: " + str(e)}})
                 return
+            finally:
+                # Must clear on EVERY exit path, including the mid-loop failure
+                # returns above; a stuck flag would refuse regeneration forever.
+                _regen_inflight = False
             try:
                 generated = os.path.getmtime(DASHBOARD)
             except OSError:
