@@ -115,6 +115,44 @@ def test_archive_cleanup_never_removes_an_active_session(monkeypatch, tmp_path):
     assert caller.exists()
 
 
+def test_archive_cleanup_never_removes_a_session_with_a_live_writer_lease(
+    monkeypatch, tmp_path
+):
+    module = _load_archive_result(monkeypatch, tmp_path)
+    monkeypatch.setenv("TOKEN_OPTIMIZER_ARCHIVE_RETENTION_MAX_FILES", "1")
+    root = tmp_path / "tool-archive"
+    live = root / "live-session"
+    other = root / "other-session"
+    for session in (live, other):
+        session.mkdir(parents=True)
+        (session / "result.json").write_bytes(b"x" * 10)
+    old = time.time() - 90_000
+    os.utime(live, (old, old))
+
+    writer = module.LeaseLock(
+        module._session_lock_path(root, "live-session"),
+        acquire_timeout=0,
+    )
+    assert writer.acquire()
+    try:
+        removed_while_live = module.cleanup_old_archives(
+            skip_session_id="other-session"
+        )
+    finally:
+        writer.release()
+
+    assert removed_while_live == 0
+    assert live.exists()
+    assert other.exists()
+
+    removed_after_release = module.cleanup_old_archives(
+        skip_session_id="other-session"
+    )
+    assert removed_after_release == 1
+    assert not live.exists()
+    assert other.exists()
+
+
 def test_active_session_entries_obey_age_and_aggregate_caps(monkeypatch, tmp_path):
     module = _load_archive_result(monkeypatch, tmp_path)
     monkeypatch.setenv("TOKEN_OPTIMIZER_ARCHIVE_RETENTION_MAX_FILES", "3")
