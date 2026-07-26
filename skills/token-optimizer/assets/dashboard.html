@@ -3870,9 +3870,17 @@ var DB = (function() {
           // "3d ago". 30 min matches the generator's own stale threshold.
           var stale = ageMin > 30 || !!rw.meter_stale;
           var col = stale ? 'var(--c-waste)' : 'var(--c-text-dim)';
+          // The old copy said "run Claude Code to refresh", which was wrong: the
+          // meter file is written by the statusline and is usually already fresh.
+          // What is stale is this generated HTML. Regenerating is the actual fix,
+          // so offer the button that does it instead of sending the reader away.
           return '<div style="margin-top:var(--s-3);font-size:13px;color:' + col + ';">' +
             (stale ? '⚠ ' : '') + 'Window reading as of ' + esc(whenStr) + ' (' + ageStr + ')' +
-            (stale ? ' · run Claude Code to refresh' : '') + '</div>';
+            ' <button id="to-regen-btn" onclick="window.__TOKEN_REGENERATE&&window.__TOKEN_REGENERATE()" ' +
+            'style="margin-left:8px;padding:2px 10px;font:inherit;font-size:12px;cursor:pointer;' +
+            'background:transparent;color:inherit;border:1px solid currentColor;border-radius:4px;">' +
+            'Regenerate savings</button>' +
+            '<span id="to-regen-msg" style="margin-left:8px;"></span></div>';
         })() +
         '<div style="margin-top:var(--s-4);padding-top:var(--s-3);border-top:1px solid var(--c-border);font-size:14px;color:var(--c-text-dim);line-height:1.7;text-wrap:pretty;">' +
           'Your usage is measured. The comparison is estimated: ' + esc(rw.proxy) + ' ' +
@@ -6542,6 +6550,31 @@ document.addEventListener('DOMContentLoaded', function() {
       }
       return r;
     });
+  };
+
+  // Manual regeneration. The background freshness regen is stale-while-revalidate:
+  // it serves the current file and refreshes for NEXT time, so a reader who wants
+  // current numbers now would have to reload twice and never knows that. This is
+  // synchronous on the daemon side and reloads on success, so one click is enough.
+  window.__TOKEN_REGENERATE = function() {
+    var btn = document.getElementById('to-regen-btn');
+    var msg = document.getElementById('to-regen-msg');
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    var was = btn.textContent;
+    btn.textContent = 'Regenerating…';
+    if (msg) msg.textContent = '';
+    window.__TOKEN_API_POST('/api/regenerate', {})
+      .then(function(r) { return r.json().catch(function() { return { ok: false, msg: 'bad response' }; }); })
+      .then(function(d) {
+        if (d && d.ok) { location.reload(); return; }
+        btn.disabled = false; btn.textContent = was;
+        if (msg) msg.textContent = 'Failed: ' + ((d && d.msg) || 'unknown error');
+      })
+      .catch(function(e) {
+        btn.disabled = false; btn.textContent = was;
+        if (msg) msg.textContent = e && e.authError ? 'Auth expired — reload the page.' : ('Failed: ' + (e && e.message || e));
+      });
   };
   // Fetch the per-install token after we've confirmed the daemon is up.
   // Server only returns it to localhost Origin+Host so foreign pages can't
