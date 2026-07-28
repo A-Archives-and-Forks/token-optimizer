@@ -376,7 +376,7 @@ function cmdDashboard(days) {
     console.log(`Dashboard written to: ${filepath}`);
     // Open in default browser
     const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-    (0, child_process_1.execFile)(opener, [filepath], () => { });
+    (0, child_process_1.execFile)(opener, [filepath], { windowsHide: true }, () => { });
 }
 function cmdContext(json) {
     const dir = (0, session_parser_1.findOpenClawDir)();
@@ -434,7 +434,7 @@ function cmdQuality(days, json) {
 function cmdGitContext(json) {
     function runGit(...args) {
         try {
-            return (0, child_process_1.execFileSync)("git", args, { encoding: "utf-8", timeout: 10000 }).trim();
+            return (0, child_process_1.execFileSync)("git", args, { encoding: "utf-8", timeout: 10000, windowsHide: true }).trim();
         }
         catch {
             return "";
