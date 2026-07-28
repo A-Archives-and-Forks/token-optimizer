@@ -13,7 +13,9 @@ for fire-and-forget background spawns where the child must survive the parent
 (session-end flush, daemon regen, rollup, etc.). ``spawn_detached`` retries
 without ``CREATE_BREAKAWAY_FROM_JOB`` if ``CreateProcess`` fails with
 ``ACCESS_DENIED`` inside a restrictive Windows Job Object, then returns the
-``Popen`` or ``None`` (never raises).
+``Popen`` or ``None`` (never raises). After each call, the module-level
+``last_spawn_used_fallback`` flag records whether the retry path was taken,
+so a test (or caller) can assert the non-fallback path succeeded.
 
 For spawns that must INHERIT the parent's stdio (hooks/run.py), do NOT use this
 helper -- those need CREATE_NO_WINDOW, not DETACHED_PROCESS.
@@ -25,6 +27,12 @@ import os
 import subprocess
 
 logger = logging.getLogger(__name__)
+
+# Set by spawn_detached to True when the CREATE_BREAKAWAY_FROM_JOB retry path
+# was taken (i.e. the first attempt failed and the fallback succeeded). Tests
+# and callers can read this to assert the non-fallback path was used. Reset to
+# False at the start of every spawn_detached call.
+last_spawn_used_fallback: bool = False
 
 
 def detach_spawn_kwargs():
@@ -63,8 +71,15 @@ def spawn_detached(argv, **popen_kwargs):
     already swallows ``OSError``, so without this retry the background worker
     would silently never spawn.
 
+    After each call, ``last_spawn_used_fallback`` records whether the retry
+    path was taken (True = fallback used, False = primary path succeeded or
+    failed without retry). A test can assert this is False to prove the
+    non-fallback path worked on a real Windows runner.
+
     Never raises: returns ``None`` on failure.
     """
+    global last_spawn_used_fallback
+    last_spawn_used_fallback = False
     kwargs = dict(popen_kwargs)
     kwargs.update(detach_spawn_kwargs())
     try:
@@ -82,7 +97,12 @@ def spawn_detached(argv, **popen_kwargs):
         logger.warning(
             "[spawn_utils] retrying without CREATE_BREAKAWAY_FROM_JOB: %r", argv)
         try:
-            return subprocess.Popen(argv, **kwargs)
+            result = subprocess.Popen(argv, **kwargs)
+            last_spawn_used_fallback = True
+            logger.warning(
+                "[spawn_utils] retry without CREATE_BREAKAWAY_FROM_JOB "
+                "succeeded: %r", argv)
+            return result
         except OSError:
             logger.warning(
                 "[spawn_utils] Popen retry without CREATE_BREAKAWAY_FROM_JOB "

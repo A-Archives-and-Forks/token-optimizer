@@ -81,12 +81,20 @@ def _reap(proc, posix_sig):
             try:
                 proc.kill()
             except OSError:
-                pass
+                try:
+                    sys.stderr.write("run.py: posix reap kill failed\n")
+                    sys.stderr.flush()
+                except (OSError, ValueError):
+                    pass
     else:
         try:
             proc.kill()
         except OSError:
-            pass
+            try:
+                sys.stderr.write("run.py: fallback reap kill failed\n")
+                sys.stderr.flush()
+            except (OSError, ValueError):
+                pass
 
 
 def _forward_and_exit(signum, frame):
@@ -270,7 +278,11 @@ def main() -> int:
             # SQLite lock, starving the next hook invocation. _reap handles
             # the nt/posix split (see _reap docstring).
             try:
-                _reap(proc, signal.SIGKILL)
+                # signal.SIGKILL does not exist on Windows (AttributeError
+                # at the call site, before _reap even runs). Use getattr so
+                # the nt branch of _reap (which ignores posix_sig) is never
+                # blocked by a missing attribute. POSIX has SIGKILL.
+                _reap(proc, getattr(signal, "SIGKILL", signal.SIGTERM))
                 proc.wait(timeout=5)
             except (subprocess.SubprocessError, OSError):
                 pass

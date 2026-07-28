@@ -206,6 +206,7 @@ def test_spawn_detached_nt_passes_creationflags(monkeypatch):
     spawn_utils.spawn_detached(["x"], stdout=subprocess.DEVNULL)
     assert cap["creationflags"] == _DETACH_FLAGS
     assert "start_new_session" not in cap
+    assert spawn_utils.last_spawn_used_fallback is False
 
 
 def test_spawn_detached_posix_passes_start_new_session(monkeypatch):
@@ -243,6 +244,7 @@ def test_spawn_detached_nt_retries_without_breakaway_on_oserror(monkeypatch):
     assert attempts[0] == _DETACH_FLAGS
     assert attempts[1] == (_DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP)
     assert not (attempts[1] & _CREATE_BREAKAWAY_FROM_JOB)
+    assert spawn_utils.last_spawn_used_fallback is True
 
 
 def test_spawn_detached_nt_returns_none_on_double_failure(monkeypatch):
@@ -286,20 +288,15 @@ def test_session_end_flush_posix_uses_start_new_session(m, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# measure.py: daemon-revive spawn (line ~21660) -- uses detach_spawn_kwargs()
-# directly (single source of truth), not spawn_detached.
+# measure.py: daemon-revive spawn (line ~21685) -- now routed through
+# spawn_detached (single source of truth, includes breakaway retry).
 # ---------------------------------------------------------------------------
 def test_daemon_revive_nt_uses_creationflags(m, monkeypatch):
-    """The daemon-revive spawn must route through detach_spawn_kwargs() on nt."""
+    """The daemon-revive spawn must route through spawn_detached on nt."""
     monkeypatch.setattr(m, "_verify_daemon_port", lambda **k: False)  # dead
     monkeypatch.setattr(m, "_normalized_platform", lambda: "Windows")
     _set_nt_spawn_utils(monkeypatch)
-    cap = {}
-    def fake_popen(argv, *a, **k):
-        cap.update(k)
-        class _P: pass
-        return _P()
-    monkeypatch.setattr(m.subprocess, "Popen", fake_popen)
+    cap = _capture_spawn_detached_popen(monkeypatch)
     assert m._daemon_midsession_pulse() == "revive-spawned"
     assert "creationflags" in cap
     assert cap["creationflags"] == _DETACH_FLAGS
@@ -309,12 +306,7 @@ def test_daemon_revive_nt_uses_creationflags(m, monkeypatch):
 def test_daemon_revive_posix_uses_start_new_session(m, monkeypatch):
     monkeypatch.setattr(m, "_verify_daemon_port", lambda **k: False)
     _set_posix_spawn_utils(monkeypatch)
-    cap = {}
-    def fake_popen(argv, *a, **k):
-        cap.update(k)
-        class _P: pass
-        return _P()
-    monkeypatch.setattr(m.subprocess, "Popen", fake_popen)
+    cap = _capture_spawn_detached_popen(monkeypatch)
     assert m._daemon_midsession_pulse() == "revive-spawned"
     assert cap.get("start_new_session") is True
     assert "creationflags" not in cap
@@ -703,6 +695,13 @@ def test_run_py_timeout_reap_nt_uses_proc_kill(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(root / "_data"))
     monkeypatch.setattr(mod, "_check_consent", lambda: True)
+    # P2-4: guard against pass-on-revert. Patch os.killpg to raise if called
+    # on nt (it must never be), and drop signal.SIGKILL so a reverted run.py
+    # that references signal.SIGKILL directly (P1-A) blows up here too.
+    def _killpg_must_not_be_called(pgid, sig):
+        raise AssertionError("os.killpg must NOT be called on nt")
+    monkeypatch.setattr(mod.os, "killpg", _killpg_must_not_be_called, raising=False)
+    monkeypatch.delattr(mod.signal, "SIGKILL", raising=False)
     kill_calls = []
     class _FakeProc:
         pid = 54321
@@ -772,6 +771,13 @@ def test_run_py_forward_and_exit_nt_uses_proc_kill(monkeypatch):
     Wraps the os._exit(0)."""
     mod = _load_run_py()
     _set_nt(monkeypatch, mod)
+    # P2-4: guard against pass-on-revert. Patch os.killpg to raise if called
+    # on nt (it must never be), and drop signal.SIGKILL so a reverted run.py
+    # that references signal.SIGKILL directly (P1-A) blows up here too.
+    def _killpg_must_not_be_called(pgid, sig):
+        raise AssertionError("os.killpg must NOT be called on nt")
+    monkeypatch.setattr(mod.os, "killpg", _killpg_must_not_be_called, raising=False)
+    monkeypatch.delattr(mod.signal, "SIGKILL", raising=False)
     kill_calls = []
     run_calls = []
     def fake_run(cmd, **k):
@@ -829,25 +835,151 @@ def test_run_py_forward_and_exit_posix_uses_killpg(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Real-spawn smoke test (runs only on actual Windows; CI windows-latest leg).
-# Exercises spawn_utils.spawn_detached against a real child process and
-# asserts the Popen is returned (not None) and the child exits 0.
+# utf8_io.py: reexec_in_utf8_mode CREATE_NO_WINDOW on nt
 # ---------------------------------------------------------------------------
+def test_utf8_io_reexec_nt_uses_create_no_window(monkeypatch):
+    """reexec_in_utf8_mode on nt must pass CREATE_NO_WINDOW to Popen so the
+    re-exec child does not flash a console when the parent is console-less."""
+    if "utf8_io" in sys.modules:
+        del sys.modules["utf8_io"]
+    import utf8_io
+    # Force the re-exec path: non-UTF-8 encoding, no sentinel, no utf8_mode flag.
+    monkeypatch.setattr(utf8_io, "os", _make_fake_os("nt"))
+    fake_sub = types.ModuleType("subprocess")
+    for _name, _val in _NT_FLAGS.items():
+        setattr(fake_sub, _name, _val)
+    fake_sub.DEVNULL = subprocess.DEVNULL
+    fake_sub.SubprocessError = subprocess.SubprocessError
+    cap = {}
+    class _FakeProc:
+        returncode = 0
+        def wait(self):
+            return 0
+    def fake_popen(argv, **k):
+        cap.update(k)
+        return _FakeProc()
+    fake_sub.Popen = fake_popen
+    # Inject fake subprocess into sys.modules so the local import gets it.
+    monkeypatch.setitem(sys.modules, "subprocess", fake_sub)
+
+    # Make platform check pass for win.
+    monkeypatch.setattr(utf8_io.sys, "platform", "win32")
+    monkeypatch.setattr(utf8_io.sys, "flags", types.SimpleNamespace(utf8_mode=0))
+    monkeypatch.setattr(utf8_io.sys, "argv", ["script.py"])
+    monkeypatch.setattr(utf8_io.sys, "executable", sys.executable)
+    monkeypatch.delenv(utf8_io._REEXEC_FLAG, raising=False)
+
+    # Force a non-UTF-8 encoding so the re-exec path fires.
+    import locale as _locale_mod
+    monkeypatch.setattr(_locale_mod, "getpreferredencoding", lambda *a: "cp1252")
+
+    # Prevent os._exit from killing the test process.
+    exited = {}
+    def fake_exit(code=0):
+        exited["code"] = code
+    monkeypatch.setattr(utf8_io.os, "_exit", fake_exit)
+
+    utf8_io.reexec_in_utf8_mode()
+
+    assert "creationflags" in cap, "nt re-exec must pass CREATE_NO_WINDOW"
+    assert cap["creationflags"] == _CREATE_NO_WINDOW
+    assert "start_new_session" not in cap
+    assert "code" in exited, "re-exec must call os._exit"
+
+
+def test_utf8_io_reexec_posix_no_creationflags(monkeypatch):
+    """reexec_in_utf8_mode on posix must NOT pass creationflags (uses execv)."""
+    if "utf8_io" in sys.modules:
+        del sys.modules["utf8_io"]
+    import utf8_io
+    monkeypatch.setattr(utf8_io, "os", _make_fake_os("posix"))
+    monkeypatch.setattr(utf8_io.sys, "platform", "linux")
+    monkeypatch.setattr(utf8_io.sys, "flags", types.SimpleNamespace(utf8_mode=0))
+    monkeypatch.setattr(utf8_io.sys, "argv", ["script.py"])
+    monkeypatch.setattr(utf8_io.sys, "executable", sys.executable)
+    monkeypatch.delenv(utf8_io._REEXEC_FLAG, raising=False)
+
+    import locale as _locale_mod
+    monkeypatch.setattr(_locale_mod, "getpreferredencoding", lambda *a: "cp1252")
+
+    # On posix, reexec uses os.execv, not Popen. Patch execv to prove it's taken.
+    execv_called = {}
+    def fake_execv(path, args):
+        execv_called["path"] = path
+        execv_called["args"] = args
+    monkeypatch.setattr(utf8_io.os, "execv", fake_execv)
+
+    utf8_io.reexec_in_utf8_mode()
+
+    assert "path" in execv_called, "posix re-exec must call os.execv"
+    assert execv_called["path"] == sys.executable
+
+
+# ---------------------------------------------------------------------------
+# measure.py _log_spawn_failure: durable breadcrumb on spawn_detached None
+# ---------------------------------------------------------------------------
+def test_log_spawn_failure_writes_durable_line(m, monkeypatch, tmp_path):
+    """_log_spawn_failure must append a timestamped line to spawn-failures.log."""
+    import spawn_utils
+    # Point DAEMON_LOG_DIR to a temp dir inside the snapshot dir.
+    log_dir = tmp_path / "logs"
+    monkeypatch.setattr(m, "DAEMON_LOG_DIR", log_dir)
+    # Make spawn_detached return None by patching its Popen to raise OSError.
+    _set_posix_spawn_utils(monkeypatch)
+    def fake_popen(argv, **k):
+        raise OSError("nope")
+    monkeypatch.setattr(spawn_utils.subprocess, "Popen", fake_popen)
+
+    m._defer_session_end_flush(["measure.py", "session-end", "--session", "t"])
+
+    log_file = log_dir / "spawn-failures.log"
+    assert log_file.exists(), "spawn-failures.log must be created"
+    content = log_file.read_text(encoding="utf-8")
+    assert "session-end flush spawn failed" in content
+    assert content.strip().endswith("session-end flush spawn failed")
+
+
+# ---------------------------------------------------------------------------
+# Real-spawn smoke test (runs only on actual Windows; CI windows-latest leg).
+# Exercises spawn_utils.spawn_detached against a real child process that
+# reports its own console state via ctypes. Asserts:
+#   1. Popen is returned (not None)
+#   2. Child exits 0
+#   3. Child has NO console (GetConsoleWindow()==0, proving DETACHED_PROCESS took effect)
+#   4. last_spawn_used_fallback is False (CREATE_BREAKAWAY_FROM_JOB succeeded
+#      without falling back to the retry path)
+# ---------------------------------------------------------------------------
+_CHILD_SCRIPT = (
+    "import ctypes, sys;\n"
+    "hwnd = ctypes.windll.kernel32.GetConsoleWindow();\n"
+    "sys.exit(0 if hwnd == 0 else 1)\n"
+)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="real-spawn smoke test is Windows-only")
 def test_spawn_detached_real_child():
-    """On real Windows, spawn_detached must actually spawn a child that exits 0.
+    """On real Windows, spawn_detached must spawn a detached, console-less child.
 
-    This is the only test that exercises the real CreateProcess path with
-    CREATE_BREAKAWAY_FROM_JOB. The mock-based tests above verify the kwargs
-    are correct; this one verifies the OS accepts them.
+    The child script calls GetConsoleWindow() and exits 0 only if the returned
+    window handle is 0 (no console attached). This proves DETACHED_PROCESS
+    actually took effect at the OS level, not just that the kwargs were passed.
+    Also asserts last_spawn_used_fallback is False so the CREATE_BREAKAWAY_FROM_JOB
+    primary path is confirmed working on the CI runner.
     """
     import spawn_utils
     proc = spawn_utils.spawn_detached(
-        [sys.executable, "-c", "import sys; sys.exit(0)"],
+        [sys.executable, "-c", _CHILD_SCRIPT],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
     )
     assert proc is not None, "spawn_detached returned None on real Windows"
     rc = proc.wait(timeout=10)
-    assert rc == 0, f"real child exited {rc}, expected 0"
+    assert rc == 0, (
+        f"real child exited {rc}, expected 0 (GetConsoleWindow() != 0 means "
+        "DETACHED_PROCESS did not take effect)"
+    )
+    assert not spawn_utils.last_spawn_used_fallback, (
+        "CREATE_BREAKAWAY_FROM_JOB primary path should succeed on the CI runner; "
+        "fallback was used instead"
+    )

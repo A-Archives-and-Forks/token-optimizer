@@ -215,6 +215,28 @@ def test_measure_py_dual_tree_parity():
         "measure.py drift between skills/ and plugins/ — run scripts/sync-codex-marketplace-plugin.sh"
 
 
+def test_hooks_dual_tree_parity():
+    """Every file in hooks/ must be byte-identical between the canonical tree
+    and the plugins/ mirror, except hooks.json which is intentionally async-
+    stripped in the mirror (see test_mirror_has_async_stripped_but_is_otherwise_identical).
+    Catches drift in run.py, module_runner.py, python-launcher.sh, etc."""
+    canonical_hooks = REPO / "hooks"
+    mirror_hooks = REPO / "plugins" / "token-optimizer" / "hooks"
+    assert canonical_hooks.is_dir(), f"canonical hooks/ missing: {canonical_hooks}"
+    assert mirror_hooks.is_dir(), f"plugins mirror hooks/ missing: {mirror_hooks}"
+    # hooks.json is the declared async exception; everything else must match.
+    # Skip __pycache__ (bytecode cache, not source).
+    for cf in canonical_hooks.iterdir():
+        if cf.name == "hooks.json" or cf.name == "__pycache__":
+            continue
+        mf = mirror_hooks / cf.name
+        assert mf.exists(), f"mirror hooks/{cf.name} missing"
+        assert cf.read_bytes() == mf.read_bytes(), (
+            f"hooks/{cf.name} drift between canonical and plugins/ — "
+            f"run scripts/sync-codex-marketplace-plugin.sh"
+        )
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

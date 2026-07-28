@@ -100,7 +100,7 @@ from plugin_env import (
 )
 from utf8_io import enforce_utf8_io, reexec_in_utf8_mode
 from runtime_env import claude_home, detect_runtime, runtime_home, runtime_name_for_humans
-from spawn_utils import detach_spawn_kwargs, spawn_detached
+from spawn_utils import spawn_detached
 
 import codex_io
 import codex_session
@@ -21679,17 +21679,14 @@ def _daemon_midsession_pulse():
         # (DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP + CREATE_BREAKAWAY_FROM_JOB)
         # or the child dies with the hook's job object (CXP-1). The child runs
         # `daemon-revive`, which calls _ensure_dashboard_daemon(force=True).
-        # Routed through detach_spawn_kwargs() (single source of truth); the
-        # daemon-revive child must survive the hook, so spawn_detached is not
-        # needed here (the caller already swallows Exception).
-        try:
-            _popen_kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 stdin=subprocess.DEVNULL)
-            _popen_kwargs.update(detach_spawn_kwargs())
-            subprocess.Popen(
-                [sys.executable, str(MEASURE_PY_PATH), "daemon-revive"],
-                **_popen_kwargs)
-        except Exception:
+        # Routed through spawn_detached (single source of truth) so the
+        # CREATE_BREAKAWAY_FROM_JOB retry path is included at the exact CXP-1
+        # site it was built for.
+        _proc = spawn_detached(
+            [sys.executable, str(MEASURE_PY_PATH), "daemon-revive"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL)
+        if _proc is None:
             _log_spawn_failure("daemon-revive spawn failed")
             return "revive-spawn-failed"
         return "revive-spawned"
@@ -34392,7 +34389,7 @@ def run_ensure_health():
                 update_log = install_dir / ".last-update.log"
                 log_fd = os.open(str(update_log), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 try:
-                    spawn_detached(
+                    _proc = spawn_detached(
                         ["bash", str(installer)],
                         cwd=str(install_dir),
                         stdout=log_fd, stderr=subprocess.STDOUT,
@@ -34402,6 +34399,8 @@ def run_ensure_health():
                     # the parent must close its own copy so the fd doesn't leak
                     # across daily checks (EMFILE after ~1024 stale opens).
                     os.close(log_fd)
+                if _proc is None:
+                    _log_spawn_failure("update installer spawn failed")
                 update_marker.touch()
     except Exception:
         pass

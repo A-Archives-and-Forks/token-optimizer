@@ -12,10 +12,13 @@ name: Tests
 # spread is a real portability signal for this project, not ceremony.
 #
 # A windows-latest leg runs the same suite plus a real-spawn smoke test
-# (test_spawn_detached_real_child) that exercises spawn_utils.spawn_detached
-# against an actual child process on Windows, catching console-flash
-# regressions and CREATE_BREAKAWAY_FROM_JOB failures that macOS/Linux
-# cannot see.
+# (test_spawn_detached_real_child) that spawns a child via spawn_detached
+# on real Windows and asserts: (1) Popen is returned (not None), (2) the
+# child exits 0, (3) GetConsoleWindow()==0 in the child (proving
+# DETACHED_PROCESS took effect at the OS level), and (4)
+# last_spawn_used_fallback is False (CREATE_BREAKAWAY_FROM_JOB succeeded
+# without the retry path). This catches console-flash regressions and
+# breakaway failures that macOS/Linux cannot see.
 on:
   push:
   pull_request:

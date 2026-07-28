@@ -60,22 +60,12 @@ try:
 except ImportError:  # pragma: no cover - broken install
     logger.warning("[copilot] spawn_utils import failed; using degraded fallback")
     def spawn_detached(argv, **popen_kwargs):  # type: ignore[no-redef]
-        # Minimal fallback: try with detach kwargs, swallow OSError.
-        # intentionally omits the breakaway retry; canonical
-        # spawn_utils.spawn_detached has it.
+        # degraded broken-install path: may flash console / not detach.
+        # Does NOT replicate the OS-flag logic or the breakaway retry;
+        # canonical spawn_utils.spawn_detached has both.
         import subprocess as _sp
-        _kw = dict(popen_kwargs)
-        if os.name == "nt":
-            flags = 0
-            for _name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP",
-                          "CREATE_BREAKAWAY_FROM_JOB"):
-                flags |= getattr(_sp, _name, 0)
-            if flags:
-                _kw["creationflags"] = flags
-        else:
-            _kw["start_new_session"] = True
         try:
-            return _sp.Popen(argv, **_kw)
+            return _sp.Popen(argv, **popen_kwargs)
         except OSError:
             return None
 
@@ -610,7 +600,7 @@ def handle_stop(payload):
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     try:
-        spawn_detached(
+        _proc = spawn_detached(
             [sys.executable, str(measure), "copilot-rollup", "--quiet"],
             env=env,
             stdout=subprocess.DEVNULL,
@@ -618,6 +608,9 @@ def handle_stop(payload):
         )
     except (OSError, subprocess.SubprocessError):
         pass
+    else:
+        if _proc is None:
+            logger.warning("[copilot_hook_bridge] handle_stop spawn_detached returned None")
     # Remove this session's in-flight tally: shutdown event is now authoritative.
     # Also drop the published lease lock file so a fast sessionStart doesn't
     # see a stale inflight-{sid}.lock from this session (candidate files age

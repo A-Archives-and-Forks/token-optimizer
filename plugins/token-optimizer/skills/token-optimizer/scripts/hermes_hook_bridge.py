@@ -183,7 +183,7 @@ def run_rollup(session_id: str = "", platform: str = "hermes", reason: str = "")
     if reason:
         cmd += ["--reason", reason]
     try:
-        spawn_detached(
+        _proc = spawn_detached(
             cmd,
             env={**os.environ, "TOKEN_OPTIMIZER_RUNTIME": "hermes",
                  "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
@@ -192,6 +192,9 @@ def run_rollup(session_id: str = "", platform: str = "hermes", reason: str = "")
         )
     except Exception as exc:
         logger.debug("[hermes_hook_bridge] run_rollup Popen error: %s", exc)
+        return
+    if _proc is None:
+        logger.warning("[hermes_hook_bridge] run_rollup spawn_detached returned None")
 
 
 def run_summary(session_id: str = "") -> str:
@@ -223,7 +226,7 @@ def run_dashboard(session_id: str = "", port: int = DASHBOARD_PORT) -> None:
     if session_id:
         args += ["--session", session_id]
     try:
-        spawn_detached(
+        _proc = spawn_detached(
             args,
             env={**os.environ, "TOKEN_OPTIMIZER_RUNTIME": "hermes",
                  "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
@@ -233,6 +236,10 @@ def run_dashboard(session_id: str = "", port: int = DASHBOARD_PORT) -> None:
     except Exception as exc:
         logger.debug("[hermes_hook_bridge] dashboard launch error: %s", exc)
         print(f"[Token Optimizer] Could not open dashboard: {exc}")
+        return
+    if _proc is None:
+        logger.warning("[hermes_hook_bridge] run_dashboard spawn_detached returned None")
+        print("[Token Optimizer] Could not open dashboard: spawn failed")
 
 
 if __name__ == "__main__":
