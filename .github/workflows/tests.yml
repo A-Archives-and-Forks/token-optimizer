@@ -10,6 +10,12 @@ name: Tests
 # 3.11 and 3.14 locally, so the interpreters in between are covered by the same
 # range. Hooks run under whatever python3 a user happens to have, so version
 # spread is a real portability signal for this project, not ceremony.
+#
+# A windows-latest leg runs the same suite plus a real-spawn smoke test
+# (test_spawn_detached_real_child) that exercises spawn_utils.spawn_detached
+# against an actual child process on Windows, catching console-flash
+# regressions and CREATE_BREAKAWAY_FROM_JOB failures that macOS/Linux
+# cannot see.
 on:
   push:
   pull_request:
@@ -31,7 +37,7 @@ jobs:
       # One red interpreter should not hide the result on the others.
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v7
@@ -47,6 +53,30 @@ jobs:
 
       # Run from the repo root: the tests resolve the scripts under
       # skills/token-optimizer/scripts/ relative to it.
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+  # Windows leg: runs the same suite plus a real-spawn smoke test that
+  # exercises spawn_utils.spawn_detached against an actual child process.
+  # Catches console-flash regressions and CREATE_BREAKAWAY_FROM_JOB failures
+  # that macOS/Linux cannot see.
+  pytest-windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+
       - name: Run tests
         run: python -m pytest tests/ -q
 

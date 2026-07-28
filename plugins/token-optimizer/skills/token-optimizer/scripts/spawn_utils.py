@@ -58,8 +58,10 @@ def spawn_detached(argv, **popen_kwargs):
     inside a restrictive parent Job Object), retries ONCE with
     ``creationflags`` minus ``CREATE_BREAKAWAY_FROM_JOB`` (i.e.
     ``DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`` only) and logs the
-    fallback at debug level. Every caller already swallows ``OSError``, so
-    without this retry the background worker would silently never spawn.
+    fallback at warning level (no logging is configured in the runtime, so
+    logger.debug would be dropped by lastResort at WARNING). Every caller
+    already swallows ``OSError``, so without this retry the background worker
+    would silently never spawn.
 
     Never raises: returns ``None`` on failure.
     """
@@ -69,18 +71,20 @@ def spawn_detached(argv, **popen_kwargs):
         return subprocess.Popen(argv, **kwargs)
     except OSError:
         if os.name != "nt":
-            logger.debug("[spawn_utils] Popen failed (non-nt): %r", argv)
+            logger.warning("[spawn_utils] Popen failed (non-nt): %r", argv)
             return None
         flags = kwargs.get("creationflags", 0)
         breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
         if not (flags & breakaway):
-            logger.debug("[spawn_utils] Popen failed, no breakaway to drop: %r", argv)
+            logger.warning("[spawn_utils] Popen failed, no breakaway to drop: %r", argv)
             return None
         kwargs["creationflags"] = flags & ~breakaway
+        logger.warning(
+            "[spawn_utils] retrying without CREATE_BREAKAWAY_FROM_JOB: %r", argv)
         try:
             return subprocess.Popen(argv, **kwargs)
         except OSError:
-            logger.debug(
+            logger.warning(
                 "[spawn_utils] Popen retry without CREATE_BREAKAWAY_FROM_JOB "
                 "also failed: %r", argv)
             return None

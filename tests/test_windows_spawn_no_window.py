@@ -826,3 +826,28 @@ def test_run_py_forward_and_exit_posix_uses_killpg(monkeypatch):
     assert any(isinstance(c, tuple) and c[0] == "killpg" for c in killpg_calls), (
         "posix signal handler must reap via os.killpg"
     )
+
+
+# ---------------------------------------------------------------------------
+# Real-spawn smoke test (runs only on actual Windows; CI windows-latest leg).
+# Exercises spawn_utils.spawn_detached against a real child process and
+# asserts the Popen is returned (not None) and the child exits 0.
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(os.name != "nt", reason="real-spawn smoke test is Windows-only")
+def test_spawn_detached_real_child():
+    """On real Windows, spawn_detached must actually spawn a child that exits 0.
+
+    This is the only test that exercises the real CreateProcess path with
+    CREATE_BREAKAWAY_FROM_JOB. The mock-based tests above verify the kwargs
+    are correct; this one verifies the OS accepts them.
+    """
+    import spawn_utils
+    proc = spawn_utils.spawn_detached(
+        [sys.executable, "-c", "import sys; sys.exit(0)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+    assert proc is not None, "spawn_detached returned None on real Windows"
+    rc = proc.wait(timeout=10)
+    assert rc == 0, f"real child exited {rc}, expected 0"

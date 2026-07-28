@@ -75,7 +75,17 @@ def reexec_in_utf8_mode() -> None:
             # "can't open file '...\Files\Python312\python.exe'". Use
             # subprocess.Popen (which quotes correctly) and exit immediately
             # so the child takes over the role of this process.
-            child = _sp.Popen([sys.executable, "-X", "utf8", *sys.argv])
+            # CREATE_NO_WINDOW prevents a console flash when the parent is a
+            # console-less detached process (e.g. a hook spawned by the host).
+            # The child inherits stdio (no DEVNULL) so output ordering is
+            # preserved. Do NOT add DETACHED_PROCESS -- the child must
+            # inherit the parent's stdio.
+            _popen_kwargs = {}
+            _flags = getattr(_sp, "CREATE_NO_WINDOW", 0)
+            if _flags:
+                _popen_kwargs["creationflags"] = _flags
+            child = _sp.Popen([sys.executable, "-X", "utf8", *sys.argv],
+                              **_popen_kwargs)
             # Wait for the child to finish so output ordering is preserved and
             # the parent's exit code reflects the child's result.
             try:
