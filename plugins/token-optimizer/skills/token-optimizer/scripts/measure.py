@@ -6057,7 +6057,7 @@ def _defer_session_end_flush(args):
         ]
         env = os.environ.copy()
         env["TOKEN_OPTIMIZER_RUNTIME"] = detect_runtime()
-        spawn_detached(
+        _proc = spawn_detached(
             cmd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -6066,6 +6066,8 @@ def _defer_session_end_flush(args):
             env=env,
             close_fds=True,
         )
+        if _proc is None:
+            _log_spawn_failure("session-end flush spawn failed")
     except Exception:
         pass
 
@@ -9226,6 +9228,21 @@ def _extract_session_uuid(session_id):
     if len(session_id) <= 20 and "-" not in session_id:
         return None, True
     return None, False
+
+
+def _log_spawn_failure(msg):
+    """Append a durable breadcrumb when a detached spawn returns None.
+
+    spawn_detached swallows OSError and returns None; every caller ignores it,
+    so a silent spawn failure leaves no trace. This writes one line to the
+    daemon log dir so the failure is discoverable post-hoc. Never raises.
+    """
+    try:
+        DAEMON_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(DAEMON_LOG_DIR / "spawn-failures.log", "a", encoding="utf-8") as f:
+            f.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), msg))
+    except OSError:
+        pass
 
 
 def _log_savings_event(event_type, tokens_saved, session_id=None, detail=None, model=None):
@@ -21673,6 +21690,7 @@ def _daemon_midsession_pulse():
                 [sys.executable, str(MEASURE_PY_PATH), "daemon-revive"],
                 **_popen_kwargs)
         except Exception:
+            _log_spawn_failure("daemon-revive spawn failed")
             return "revive-spawn-failed"
         return "revive-spawned"
     except Exception:

@@ -58,8 +58,11 @@ except ImportError:  # pragma: no cover - broken install
 try:
     from spawn_utils import spawn_detached
 except ImportError:  # pragma: no cover - broken install
+    logger.warning("[copilot] spawn_utils import failed; using degraded fallback")
     def spawn_detached(argv, **popen_kwargs):  # type: ignore[no-redef]
         # Minimal fallback: try with detach kwargs, swallow OSError.
+        # intentionally omits the breakaway retry; canonical
+        # spawn_utils.spawn_detached has it.
         import subprocess as _sp
         _kw = dict(popen_kwargs)
         if os.name == "nt":

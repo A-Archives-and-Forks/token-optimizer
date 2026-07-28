@@ -49,12 +49,8 @@ if sys.version_info < (3, 9):
 _child_proc: subprocess.Popen | None = None
 
 
-def _forward_and_exit(signum, frame):
-    """Forward SIGTERM/SIGINT to the child, then exit.
-
-    On POSIX, the child is started with ``start_new_session=True`` so it leads
-    its own process group; killing the group reaps any grandchildren (the
-    launcher chain uses ``exec``, so run.py's PID is the one the host tracks).
+def _reap(proc, posix_sig):
+    """Reap the child process. Never raises.
 
     On Windows, the child proc IS measure.py (module_runner.py runs it
     in-process via runpy.run_module), so a plain ``proc.kill()``
@@ -62,30 +58,47 @@ def _forward_and_exit(signum, frame):
     walking the PPID tree and killing the detached session-end-flush worker
     (the one CREATE_BREAKAWAY_FROM_JOB exists to keep alive).
 
-    Note: on Windows this handler only fires for console Ctrl+C or an
-    in-process os.kill; an external TerminateProcess from the host bypasses
-    Python handlers entirely.
+    On POSIX, the child is started with ``start_new_session=True`` so it leads
+    its own process group; killing the group reaps any grandchildren (the
+    launcher chain uses ``exec``, so run.py's PID is the one the host tracks).
+    Falls back to ``proc.kill()`` when the group is already gone.
+    """
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            proc.kill()
+        except OSError:
+            try:
+                sys.stderr.write("run.py: nt reap kill failed\n")
+                sys.stderr.flush()
+            except (OSError, ValueError):
+                pass
+    elif hasattr(os, "killpg"):
+        try:
+            os.killpg(os.getpgid(proc.pid), posix_sig)
+        except (ProcessLookupError, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    else:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _forward_and_exit(signum, frame):
+    """Forward SIGTERM/SIGINT to the child, then exit.
+
+    On Windows this handler only fires for console Ctrl+C or an in-process
+    os.kill; an external TerminateProcess from the host bypasses Python
+    handlers entirely.
     """
     global _child_proc
-    if _child_proc is not None and _child_proc.poll() is None:
-        if os.name == "nt":
-            try:
-                _child_proc.kill()
-            except OSError:
-                pass
-        elif hasattr(os, "killpg"):
-            try:
-                os.killpg(os.getpgid(_child_proc.pid), signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                try:
-                    _child_proc.kill()
-                except OSError:
-                    pass
-        else:
-            try:
-                _child_proc.kill()
-            except OSError:
-                pass
+    if _child_proc is not None:
+        _reap(_child_proc, signal.SIGTERM)
     os._exit(0)
 
 
@@ -254,23 +267,10 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             # Important: Popen.wait doesn't auto-kill on timeout. Leaving
             # the child alive would leak a process holding the trends.db
-            # SQLite lock, starving the next hook invocation. On POSIX, kill
-            # the whole process group so any grandchildren die with the child.
-            # On Windows, the child proc IS measure.py (module_runner.py runs
-            # it in-process), so proc.kill() (TerminateProcess of proc.pid
-            # only) releases the lock without walking the PPID tree and
-            # killing the detached session-end-flush worker.
+            # SQLite lock, starving the next hook invocation. _reap handles
+            # the nt/posix split (see _reap docstring).
             try:
-                if proc.poll() is None:
-                    if os.name == "nt":
-                        proc.kill()
-                    elif hasattr(os, "killpg"):
-                        try:
-                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                        except (ProcessLookupError, OSError):
-                            proc.kill()
-                    else:
-                        proc.kill()
+                _reap(proc, signal.SIGKILL)
                 proc.wait(timeout=5)
             except (subprocess.SubprocessError, OSError):
                 pass
