@@ -29,12 +29,13 @@ export function createDashboardTool(
 
         const { execFileSync } = await import("node:child_process");
         const platform = process.platform;
+        const hide = { windowsHide: true } as const;
         if (platform === "darwin") {
-          execFileSync("open", [outputPath]);
+          execFileSync("open", [outputPath], hide);
         } else if (platform === "linux") {
-          try { execFileSync("xdg-open", [outputPath]); } catch { execFileSync("sensible-browser", [outputPath]); }
+          try { execFileSync("xdg-open", [outputPath], hide); } catch { execFileSync("sensible-browser", [outputPath], hide); }
         } else if (platform === "win32") {
-          execFileSync("cmd", ["/c", "start", "", outputPath]);
+          execFileSync("cmd", ["/c", "start", "", outputPath], hide);
         }
 
         return {

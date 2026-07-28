@@ -404,7 +404,7 @@ function cmdDashboard(days: number): void {
   console.log(`Dashboard written to: ${filepath}`);
   // Open in default browser
   const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-  execFile(opener, [filepath], () => { /* ignore errors */ });
+  execFile(opener, [filepath], { windowsHide: true }, () => { /* ignore errors */ });
 }
 
 function cmdContext(json: boolean): void {
@@ -475,7 +475,7 @@ function cmdQuality(days: number, json: boolean): void {
 function cmdGitContext(json: boolean): void {
   function runGit(...args: string[]): string {
     try {
-      return execFileSync("git", args, { encoding: "utf-8", timeout: 10000 }).trim();
+      return execFileSync("git", args, { encoding: "utf-8", timeout: 10000, windowsHide: true }).trim();
     } catch {
       return "";
     }
