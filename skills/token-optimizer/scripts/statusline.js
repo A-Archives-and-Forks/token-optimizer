@@ -43,6 +43,7 @@ process.stdin.on('end', () => {
         cwd: dir,
         encoding: 'utf8',
         timeout: 200,
+        windowsHide: true,
         stdio: ['ignore', 'pipe', 'ignore'],
       }).trim();
       if (b) branch = `${SEP}${DIM}(${b})${RESET}`;
