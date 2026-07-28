@@ -100,7 +100,7 @@ from plugin_env import (
 )
 from utf8_io import enforce_utf8_io, reexec_in_utf8_mode
 from runtime_env import claude_home, detect_runtime, runtime_home, runtime_name_for_humans
-from spawn_utils import detach_spawn_kwargs
+from spawn_utils import detach_spawn_kwargs, spawn_detached
 
 import codex_io
 import codex_session
@@ -6057,7 +6057,7 @@ def _defer_session_end_flush(args):
         ]
         env = os.environ.copy()
         env["TOKEN_OPTIMIZER_RUNTIME"] = detect_runtime()
-        subprocess.Popen(
+        spawn_detached(
             cmd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -6065,7 +6065,6 @@ def _defer_session_end_flush(args):
             cwd=str(Path.cwd()),
             env=env,
             close_fds=True,
-            **detach_spawn_kwargs(),
         )
     except Exception:
         pass
@@ -19288,24 +19287,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # stderr is captured to a log rather than discarded. Swallowing it is what
             # let a dead regeneration look identical to a healthy one for two days.
             errf = open(REGEN_LOG, "a", encoding="utf-8")
-            # The regen child is a transient worker (writes the new HTML and
-            # exits); it does NOT need to survive the daemon, so DETACHED_PROCESS
-            # would be wrong. On Windows it only needs CREATE_NO_WINDOW to avoid
-            # a console flash; POSIX detaches via start_new_session. Inlined
-            # (not a shared helper) because this template generates a STANDALONE
-            # daemon script with no sibling helper module on its sys.path.
-            _regen_kwargs = dict(stdout=subprocess.DEVNULL, stderr=errf,
-                                 stdin=subprocess.DEVNULL, close_fds=True)
-            if os.name == "nt":
-                _flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                if _flags:
-                    _regen_kwargs["creationflags"] = _flags
-            else:
-                _regen_kwargs["start_new_session"] = True
-            subprocess.Popen(
-                [sys.executable, target, "dashboard", "--quiet"],
-                **_regen_kwargs,
-            )
+            try:
+                # The regen child is a transient worker (writes the new HTML and
+                # exits); it does NOT need to survive the daemon, so DETACHED_PROCESS
+                # would be wrong. On Windows it only needs CREATE_NO_WINDOW to avoid
+                # a console flash; POSIX detaches via start_new_session. Inlined
+                # (not a shared helper) because this template generates a STANDALONE
+                # daemon script with no sibling helper module on its sys.path.
+                _regen_kwargs = dict(stdout=subprocess.DEVNULL, stderr=errf,
+                                     stdin=subprocess.DEVNULL, close_fds=True)
+                if os.name == "nt":
+                    _flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    if _flags:
+                        _regen_kwargs["creationflags"] = _flags
+                else:
+                    _regen_kwargs["start_new_session"] = True
+                subprocess.Popen(
+                    [sys.executable, target, "dashboard", "--quiet"],
+                    **_regen_kwargs,
+                )
+            finally:
+                # Popen duplicates the fd via start_new_session/creationflags;
+                # the parent must close its own copy so the file handle doesn't
+                # leak per stale-open (EMFILE after ~1024 regens).
+                errf.close()
         except (OSError, ValueError) as exc:
             _log_regen("regen launch failed: %s" % exc)
 
@@ -21657,18 +21662,13 @@ def _daemon_midsession_pulse():
         # (DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP + CREATE_BREAKAWAY_FROM_JOB)
         # or the child dies with the hook's job object (CXP-1). The child runs
         # `daemon-revive`, which calls _ensure_dashboard_daemon(force=True).
+        # Routed through detach_spawn_kwargs() (single source of truth); the
+        # daemon-revive child must survive the hook, so spawn_detached is not
+        # needed here (the caller already swallows Exception).
         try:
             _popen_kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  stdin=subprocess.DEVNULL)
-            if os.name == "nt":
-                _flags = 0
-                for _f in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP",
-                           "CREATE_BREAKAWAY_FROM_JOB"):
-                    _flags |= getattr(subprocess, _f, 0)
-                if _flags:
-                    _popen_kwargs["creationflags"] = _flags
-            else:
-                _popen_kwargs["start_new_session"] = True
+            _popen_kwargs.update(detach_spawn_kwargs())
             subprocess.Popen(
                 [sys.executable, str(MEASURE_PY_PATH), "daemon-revive"],
                 **_popen_kwargs)
@@ -34371,16 +34371,19 @@ def run_ensure_health():
                 age = time.time() - update_marker.stat().st_mtime
                 should_check = age > 86400  # Once per day
             if should_check:
-                import subprocess
                 update_log = install_dir / ".last-update.log"
                 log_fd = os.open(str(update_log), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                subprocess.Popen(
-                    ["bash", str(installer)],
-                    cwd=str(install_dir),
-                    stdout=log_fd, stderr=subprocess.STDOUT,
-                    **detach_spawn_kwargs(),
-                )
-                os.close(log_fd)
+                try:
+                    spawn_detached(
+                        ["bash", str(installer)],
+                        cwd=str(install_dir),
+                        stdout=log_fd, stderr=subprocess.STDOUT,
+                    )
+                finally:
+                    # Popen duplicates the fd via start_new_session/creationflags;
+                    # the parent must close its own copy so the fd doesn't leak
+                    # across daily checks (EMFILE after ~1024 stale opens).
+                    os.close(log_fd)
                 update_marker.touch()
     except Exception:
         pass

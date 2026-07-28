@@ -15,6 +15,15 @@ checks it exists, and runs it with the same interpreter (sys.executable).
 On timeout we kill the child (Popen.kill) to avoid leaking a process
 holding the trends.db SQLite lock. Always exits 0 so hook failures never
 block the user's tool call.
+
+Windows reap note: module_runner.py runs measure.py IN-PROCESS via
+runpy.run_module, so the child proc IS measure.py (the trends.db lock
+holder), not a grandchild. On Windows we reap with plain proc.kill()
+(TerminateProcess of proc.pid only), NOT taskkill /F /T which would walk
+the PPID tree and wrongly kill the detached session-end-flush worker
+(the one CREATE_BREAKAWAY_FROM_JOB exists to keep alive). The SIGINT/
+SIGTERM handler only fires for console Ctrl+C or in-process os.kill; an
+external TerminateProcess from the host bypasses Python handlers entirely.
 """
 from __future__ import annotations
 
@@ -40,42 +49,30 @@ if sys.version_info < (3, 9):
 _child_proc: subprocess.Popen | None = None
 
 
-def _reap_windows_tree(proc):
-    """Reap a process tree on Windows using ``taskkill /F /T /PID``.
-
-    ``/T`` kills the entire descendant tree (the launcher chain uses ``exec``,
-    so run.py's PID is the one the host tracks, but grandchildren may still
-    exist). The call is run with ``CREATE_NO_WINDOW`` so the taskkill itself
-    does not flash a console window. Falls back to ``proc.kill()`` on any
-    error. Never raises.
-    """
-    try:
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except (OSError, subprocess.SubprocessError):
-        try:
-            proc.kill()
-        except OSError:
-            pass
-
-
 def _forward_and_exit(signum, frame):
-    """Forward SIGTERM/SIGINT to the child's process group, then exit.
+    """Forward SIGTERM/SIGINT to the child, then exit.
 
-    The child is started with ``start_new_session=True`` so it leads its own
-    process group; killing the group reaps any grandchildren (the launcher
-    chain uses ``exec``, so run.py's PID is the one the host tracks). Falls
-    back to a single ``proc.kill()`` on platforms without ``os.killpg`` or
-    when the group is already gone.
+    On POSIX, the child is started with ``start_new_session=True`` so it leads
+    its own process group; killing the group reaps any grandchildren (the
+    launcher chain uses ``exec``, so run.py's PID is the one the host tracks).
+
+    On Windows, the child proc IS measure.py (module_runner.py runs it
+    in-process via runpy.run_module), so a plain ``proc.kill()``
+    (TerminateProcess of proc.pid only) releases the trends.db lock without
+    walking the PPID tree and killing the detached session-end-flush worker
+    (the one CREATE_BREAKAWAY_FROM_JOB exists to keep alive).
+
+    Note: on Windows this handler only fires for console Ctrl+C or an
+    in-process os.kill; an external TerminateProcess from the host bypasses
+    Python handlers entirely.
     """
     global _child_proc
     if _child_proc is not None and _child_proc.poll() is None:
         if os.name == "nt":
-            _reap_windows_tree(_child_proc)
+            try:
+                _child_proc.kill()
+            except OSError:
+                pass
         elif hasattr(os, "killpg"):
             try:
                 os.killpg(os.getpgid(_child_proc.pid), signal.SIGTERM)
@@ -227,7 +224,9 @@ def main() -> int:
     global _child_proc
     # Install SIGTERM/SIGINT handlers BEFORE spawning the child so an external
     # kill from Claude Code reaps the whole child process group instead of
-    # orphaning the grandchild.
+    # orphaning the grandchild. On Windows these handlers only fire for
+    # console Ctrl+C or in-process os.kill; an external TerminateProcess from
+    # the host bypasses Python handlers entirely.
     signal.signal(signal.SIGTERM, _forward_and_exit)
     signal.signal(signal.SIGINT, _forward_and_exit)
     try:
@@ -236,13 +235,14 @@ def main() -> int:
         # via os.killpg. Do NOT add stdout=/stderr=/stdin= here: several hooks
         # inject via stdout and MUST inherit run.py's stdio.
         # On Windows, start_new_session is a no-op; use CREATE_NO_WINDOW to hide
-        # the console flash and CREATE_NEW_PROCESS_GROUP so a Ctrl-Break can
-        # reach the child tree. Do NOT use DETACHED_PROCESS here -- the child
-        # MUST inherit run.py's stdio for hook injection via stdout.
+        # the console flash. Do NOT add CREATE_NEW_PROCESS_GROUP (inert for
+        # reaping here since run.py never sends GenerateConsoleCtrlEvent, and
+        # it disables the child's Ctrl+C self-terminate). Do NOT use
+        # DETACHED_PROCESS -- the child MUST inherit run.py's stdio for hook
+        # injection via stdout.
         _popen_kwargs = dict(env=child_env)
         if os.name == "nt":
-            _flags = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                      | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+            _flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             if _flags:
                 _popen_kwargs["creationflags"] = _flags
         else:
@@ -254,12 +254,16 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             # Important: Popen.wait doesn't auto-kill on timeout. Leaving
             # the child alive would leak a process holding the trends.db
-            # SQLite lock, starving the next hook invocation. Kill the whole
-            # process group so any grandchildren die with the child.
+            # SQLite lock, starving the next hook invocation. On POSIX, kill
+            # the whole process group so any grandchildren die with the child.
+            # On Windows, the child proc IS measure.py (module_runner.py runs
+            # it in-process), so proc.kill() (TerminateProcess of proc.pid
+            # only) releases the lock without walking the PPID tree and
+            # killing the detached session-end-flush worker.
             try:
                 if proc.poll() is None:
                     if os.name == "nt":
-                        _reap_windows_tree(proc)
+                        proc.kill()
                     elif hasattr(os, "killpg"):
                         try:
                             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)

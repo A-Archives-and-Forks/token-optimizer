@@ -56,16 +56,25 @@ except ImportError:  # pragma: no cover - broken install
     copilot_home = None  # type: ignore[assignment]
 
 try:
-    from spawn_utils import detach_spawn_kwargs
+    from spawn_utils import spawn_detached
 except ImportError:  # pragma: no cover - broken install
-    def detach_spawn_kwargs():  # type: ignore[no-redef]
+    def spawn_detached(argv, **popen_kwargs):  # type: ignore[no-redef]
+        # Minimal fallback: try with detach kwargs, swallow OSError.
+        import subprocess as _sp
+        _kw = dict(popen_kwargs)
         if os.name == "nt":
             flags = 0
             for _name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP",
                           "CREATE_BREAKAWAY_FROM_JOB"):
-                flags |= getattr(subprocess, _name, 0)
-            return {"creationflags": flags} if flags else {}
-        return {"start_new_session": True}
+                flags |= getattr(_sp, _name, 0)
+            if flags:
+                _kw["creationflags"] = flags
+        else:
+            _kw["start_new_session"] = True
+        try:
+            return _sp.Popen(argv, **_kw)
+        except OSError:
+            return None
 
 try:
     import bash_hook as _bash_hook
@@ -598,12 +607,11 @@ def handle_stop(payload):
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     try:
-        subprocess.Popen(
+        spawn_detached(
             [sys.executable, str(measure), "copilot-rollup", "--quiet"],
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            **detach_spawn_kwargs(),
         )
     except (OSError, subprocess.SubprocessError):
         pass
