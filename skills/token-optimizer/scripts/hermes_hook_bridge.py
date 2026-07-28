@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 
 from runtime_env import runtime_home
+from spawn_utils import detach_spawn_kwargs
 
 # Dashboard port constant — single source of truth.
 try:
@@ -188,7 +189,7 @@ def run_rollup(session_id: str = "", platform: str = "hermes", reason: str = "")
                  "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **detach_spawn_kwargs(),
         )
     except Exception as exc:
         logger.debug("[hermes_hook_bridge] run_rollup Popen error: %s", exc)
@@ -229,7 +230,7 @@ def run_dashboard(session_id: str = "", port: int = DASHBOARD_PORT) -> None:
                  "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **detach_spawn_kwargs(),
         )
     except Exception as exc:
         logger.debug("[hermes_hook_bridge] dashboard launch error: %s", exc)

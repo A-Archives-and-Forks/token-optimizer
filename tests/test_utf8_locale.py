@@ -176,8 +176,13 @@ def test_run_py_injects_utf8_env():
     assert '"PYTHONUTF8": "1"' in src, "run.py must force PYTHONUTF8=1 in child env"
     assert '"PYTHONIOENCODING": "utf-8"' in src, "run.py must force PYTHONIOENCODING in child env"
     # env=child_env must be passed to Popen; tolerate extra kwargs such as
-    # start_new_session=True (added by the stop-hook orphan-process fix).
-    assert re.search(r"subprocess\.Popen\(cmd, env=child_env\b", src), "run.py must pass child_env to Popen"
+    # start_new_session=True (added by the stop-hook orphan-process fix) or
+    # **_popen_kwargs (added by the Windows console-flash fix, which builds
+    # _popen_kwargs = dict(env=child_env) + platform-specific flags).
+    assert (
+        re.search(r"subprocess\.Popen\(cmd, env=child_env\b", src)
+        or re.search(r"_popen_kwargs\s*=\s*dict\(env=child_env\)", src)
+    ), "run.py must pass child_env to Popen"
 
 
 def main():

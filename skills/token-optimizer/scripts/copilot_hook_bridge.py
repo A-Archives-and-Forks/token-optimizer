@@ -56,6 +56,18 @@ except ImportError:  # pragma: no cover - broken install
     copilot_home = None  # type: ignore[assignment]
 
 try:
+    from spawn_utils import detach_spawn_kwargs
+except ImportError:  # pragma: no cover - broken install
+    def detach_spawn_kwargs():  # type: ignore[no-redef]
+        if os.name == "nt":
+            flags = 0
+            for _name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP",
+                          "CREATE_BREAKAWAY_FROM_JOB"):
+                flags |= getattr(subprocess, _name, 0)
+            return {"creationflags": flags} if flags else {}
+        return {"start_new_session": True}
+
+try:
     import bash_hook as _bash_hook
 except ImportError:  # pragma: no cover
     _bash_hook = None  # type: ignore[assignment]
@@ -591,7 +603,7 @@ def handle_stop(payload):
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **detach_spawn_kwargs(),
         )
     except (OSError, subprocess.SubprocessError):
         pass
