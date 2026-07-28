@@ -40,6 +40,29 @@ if sys.version_info < (3, 9):
 _child_proc: subprocess.Popen | None = None
 
 
+def _reap_windows_tree(proc):
+    """Reap a process tree on Windows using ``taskkill /F /T /PID``.
+
+    ``/T`` kills the entire descendant tree (the launcher chain uses ``exec``,
+    so run.py's PID is the one the host tracks, but grandchildren may still
+    exist). The call is run with ``CREATE_NO_WINDOW`` so the taskkill itself
+    does not flash a console window. Falls back to ``proc.kill()`` on any
+    error. Never raises.
+    """
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def _forward_and_exit(signum, frame):
     """Forward SIGTERM/SIGINT to the child's process group, then exit.
 
@@ -51,7 +74,9 @@ def _forward_and_exit(signum, frame):
     """
     global _child_proc
     if _child_proc is not None and _child_proc.poll() is None:
-        if hasattr(os, "killpg"):
+        if os.name == "nt":
+            _reap_windows_tree(_child_proc)
+        elif hasattr(os, "killpg"):
             try:
                 os.killpg(os.getpgid(_child_proc.pid), signal.SIGTERM)
             except (ProcessLookupError, OSError):
@@ -210,7 +235,19 @@ def main() -> int:
         # timeout/external kill can reap the whole group (grandchildren included)
         # via os.killpg. Do NOT add stdout=/stderr=/stdin= here: several hooks
         # inject via stdout and MUST inherit run.py's stdio.
-        proc = subprocess.Popen(cmd, env=child_env, start_new_session=True)
+        # On Windows, start_new_session is a no-op; use CREATE_NO_WINDOW to hide
+        # the console flash and CREATE_NEW_PROCESS_GROUP so a Ctrl-Break can
+        # reach the child tree. Do NOT use DETACHED_PROCESS here -- the child
+        # MUST inherit run.py's stdio for hook injection via stdout.
+        _popen_kwargs = dict(env=child_env)
+        if os.name == "nt":
+            _flags = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                      | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+            if _flags:
+                _popen_kwargs["creationflags"] = _flags
+        else:
+            _popen_kwargs["start_new_session"] = True
+        proc = subprocess.Popen(cmd, **_popen_kwargs)
         _child_proc = proc
         try:
             proc.wait(timeout=120)
@@ -221,7 +258,9 @@ def main() -> int:
             # process group so any grandchildren die with the child.
             try:
                 if proc.poll() is None:
-                    if hasattr(os, "killpg"):
+                    if os.name == "nt":
+                        _reap_windows_tree(proc)
+                    elif hasattr(os, "killpg"):
                         try:
                             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                         except (ProcessLookupError, OSError):

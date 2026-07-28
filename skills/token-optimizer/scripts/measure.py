@@ -100,6 +100,7 @@ from plugin_env import (
 )
 from utf8_io import enforce_utf8_io, reexec_in_utf8_mode
 from runtime_env import claude_home, detect_runtime, runtime_home, runtime_name_for_humans
+from spawn_utils import detach_spawn_kwargs
 
 import codex_io
 import codex_session
@@ -6063,8 +6064,8 @@ def _defer_session_end_flush(args):
             stderr=subprocess.DEVNULL,
             cwd=str(Path.cwd()),
             env=env,
-            start_new_session=True,
             close_fds=True,
+            **detach_spawn_kwargs(),
         )
     except Exception:
         pass
@@ -19287,10 +19288,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # stderr is captured to a log rather than discarded. Swallowing it is what
             # let a dead regeneration look identical to a healthy one for two days.
             errf = open(REGEN_LOG, "a", encoding="utf-8")
+            # The regen child is a transient worker (writes the new HTML and
+            # exits); it does NOT need to survive the daemon, so DETACHED_PROCESS
+            # would be wrong. On Windows it only needs CREATE_NO_WINDOW to avoid
+            # a console flash; POSIX detaches via start_new_session. Inlined
+            # (not a shared helper) because this template generates a STANDALONE
+            # daemon script with no sibling helper module on its sys.path.
+            _regen_kwargs = dict(stdout=subprocess.DEVNULL, stderr=errf,
+                                 stdin=subprocess.DEVNULL, close_fds=True)
+            if os.name == "nt":
+                _flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if _flags:
+                    _regen_kwargs["creationflags"] = _flags
+            else:
+                _regen_kwargs["start_new_session"] = True
             subprocess.Popen(
                 [sys.executable, target, "dashboard", "--quiet"],
-                stdout=subprocess.DEVNULL, stderr=errf,
-                stdin=subprocess.DEVNULL, close_fds=True,
+                **_regen_kwargs,
             )
         except (OSError, ValueError) as exc:
             _log_regen("regen launch failed: %s" % exc)
@@ -34364,7 +34378,7 @@ def run_ensure_health():
                     ["bash", str(installer)],
                     cwd=str(install_dir),
                     stdout=log_fd, stderr=subprocess.STDOUT,
-                    start_new_session=True
+                    **detach_spawn_kwargs(),
                 )
                 os.close(log_fd)
                 update_marker.touch()
