@@ -53,6 +53,12 @@ EXPECTED_ASYNC = {
     ("SessionStart", None, "ensure-health"): True,
     ("SessionStart", None, "quality-cache --force"): False,
     ("SessionStart", "compact", "compact-restore --compact"): False,
+    # #101: SessionStart(compact) clears the live session's file_reads after a
+    # compaction succeeds. Sync (not async): same read_cache.py --clear family
+    # as PreCompact/CwdChanged, and must run deterministically before the next
+    # PreToolUse/Read judges redundancy -- an async fire-and-forget could lose
+    # the clear against a racing reader.
+    ("SessionStart", "compact", "read_cache.py --clear-compacted"): False,
     ("SessionStart", None, "compact-restore --new-session-only"): False,
     ("Stop", None, "compact-capture --trigger stop --quiet"): False,
     ("Stop", None, "session-end-flush --trigger stop"): False,

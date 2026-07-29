@@ -1644,6 +1644,42 @@ def handle_read(hook_input: dict[str, Any], mode: str, quiet: bool) -> None:
         return
 
 
+def handle_clear_compacted(hook_input: dict[str, Any], quiet: bool) -> None:
+    """Clear ONLY the current session's file_reads after a compaction (#101).
+
+    Wired to SessionStart (matcher ``compact``) via the ``--clear-compacted``
+    flag, which reads ``session_id`` from the stdin hook input. Post-compaction
+    the live session's read cache is stale: an unchanged file whose ``file_reads``
+    row survives can be judged redundant on a re-Read even though compaction
+    dropped it from context.
+
+    Calls ``store.clear_file_entries()`` ONLY -- never ``handle_clear``'s
+    session-scoped branch, which also unlinks the decisions telemetry log
+    (``_decisions_log_path``) and the legacy cache json. Routed through
+    compaction, that branch would delete per-session decision/shadow telemetry
+    on every compaction. ``cached_content`` is intentionally kept: the delta-read
+    path is gated on the file entry existing, so clearing only ``file_reads`` is
+    safe and preserves the delta baseline for an edited file.
+    """
+    session_id = str(
+        hook_input.get("agent_id") or hook_input.get("session_id") or "unknown"
+    )
+    if not session_id or session_id == "unknown":
+        return
+    store = _make_store(session_id)
+    if store is None:
+        return
+    try:
+        store.clear_file_entries()
+    finally:
+        store.close()
+    if not quiet:
+        print(
+            f"[Read Cache] Cleared compacted session file_reads for {session_id}",
+            file=sys.stderr,
+        )
+
+
 def handle_clear(session_id: str, quiet: bool) -> None:
     """Clear read cache for a session."""
 
@@ -1807,6 +1843,18 @@ def _is_read_cache_disabled() -> bool:
 def main() -> None:
     args = sys.argv[1:]
     quiet = "--quiet" in args or "-q" in args
+
+    if "--clear-compacted" in args:
+        # #101: SessionStart(compact) clears ONLY the current session's
+        # file_reads (via stdin session_id) so a post-compaction re-Read of an
+        # unchanged file is not judged redundant. Never touches the decisions
+        # telemetry log or legacy cache json (unlike handle_clear's session
+        # branch). Bare --clear semantics are left untouched.
+        hook_input = read_stdin_hook_input(1_000_000)
+        if not hook_input:
+            return
+        handle_clear_compacted(hook_input, quiet)
+        return
 
     if "--clear" in args:
         session_id = "all"
