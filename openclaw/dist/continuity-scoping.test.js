@@ -1,4 +1,7 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 /**
  * GitHub #103 — per-project scoping for OpenClaw continuity injection.
@@ -10,32 +13,21 @@ Object.defineProperty(exports, "__esModule", { value: true });
  * the existing slices, with one disclosure line emitted only when something
  * is dropped.
  *
- * The parity fixture (``PARITY_FIXTURE``) is duplicated verbatim in the Python
- * and OpenCode scoping tests so all three runtimes' keep/drop decisions are
- * asserted against the SAME token inputs.
+ * The parity fixture (``PARITY_FIXTURE``) is loaded from a single shared JSON
+ * file (``tests/fixtures/keep_recovered_parity.json``) that is also consumed
+ * by the Python and OpenCode TS scoping tests, so all three runtimes' keep/drop
+ * decisions are asserted against the SAME token inputs with no copy drift.
  */
 const bun_test_1 = require("bun:test");
 const continuity_js_1 = require("./continuity.js");
+const keep_recovered_parity_json_1 = __importDefault(require("../../tests/fixtures/keep_recovered_parity.json"));
 // ---------------------------------------------------------------------------
-// Shared parity fixture — MUST stay byte-identical to the Python + OpenCode
-// scoping tests. (item_text, keep_tokens, expected_keep)
+// Shared parity fixture — single source of truth.
+// Loaded from tests/fixtures/keep_recovered_parity.json, consumed by all 3
+// suites (Python, OpenClaw TS, OpenCode TS). (item_text, keep_tokens, expected_keep)
 // ---------------------------------------------------------------------------
-const PARITY_FIXTURE = [
-    // < 3 distinctive tokens -> inconclusive -> keep (even with zero overlap)
-    ["gamma delta", new Set(["alpha", "beta"]), true],
-    // >= 3 distinctive tokens, zero overlap -> DROP
-    ["refactor gamma delta epsilon module", new Set(["alpha", "beta"]), false],
-    // >= 3 distinctive tokens, nonempty overlap -> keep
-    ["refactor gamma delta alpha module", new Set(["alpha", "beta"]), true],
-    // Full paths are SINGLE tokens with regex [a-zA-Z0-9_./:-]+ (slashes are
-    // in the class), so they have < 3 distinctive tokens -> always kept.
-    // This is by design: the same-project gate handles checkpoint-level path
-    // filtering; the per-item filter targets session-wide TEXT fields.
-    ["/home/u/alpha/src/main.py", new Set(["alpha", "main"]), true],
-    ["/home/u/gamma/src/other.py", new Set(["alpha", "main"]), true],
-    // empty item -> keep
-    ["", new Set(["alpha"]), true],
-];
+const PARITY_FIXTURE = keep_recovered_parity_json_1.default
+    .map((row) => [row.item_text, new Set(row.keep_tokens), row.expected_keep]);
 // ---------------------------------------------------------------------------
 // Parity: the decision function on a shared token fixture
 // ---------------------------------------------------------------------------
@@ -93,12 +85,13 @@ function mixedAbCheckpointMd() {
     (0, bun_test_1.expect)(block).toContain("beta_router");
     // A-only DECISION dropped:
     (0, bun_test_1.expect)(block).not.toContain("gamma delta epsilon");
-    // Exactly one disclosure line. File paths are single-token -> kept, so
-    // F=0 is elided. Only the 1 dropped decision is reported:
-    const disclosureCount = (block.match(/- Omitted \(same session, different project\):/g) || []).length;
+    // A-only FILE path dropped (cross-project absolute path not under cwd):
+    (0, bun_test_1.expect)(block).not.toContain("gamma_engine");
+    // Exactly one disclosure line. Both the A-only decision AND the A-only
+    // file path are dropped, so the disclosure reports both categories:
+    const disclosureCount = (block.match(/- Omitted \(scoped to current project\):/g) || []).length;
     (0, bun_test_1.expect)(disclosureCount).toBe(1);
-    (0, bun_test_1.expect)(block).toContain("- Omitted (same session, different project): 1 decision(s)");
-    (0, bun_test_1.expect)(block).not.toContain("file(s)");
+    (0, bun_test_1.expect)(block).toContain("- Omitted (scoped to current project): 1 decision(s), 1 file(s)");
 });
 (0, bun_test_1.test)("buildResumeLeanBlock single-project checkpoint emits NO disclosure", () => {
     const entry = makeEntry();
@@ -108,6 +101,9 @@ function mixedAbCheckpointMd() {
         "## Key Decisions",
         "- Ship the beta feature behind a feature flag",
         "- Wire beta_router into the request pipeline",
+        // Names NO project token: would be dropped by the token-overlap rule
+        // alone, but the mixture gate keeps it (single-project checkpoint).
+        "- Switched from REST polling to websocket push",
         "",
         "## File Changes",
         `- ${PROJ_B}/src/beta_router.py`,
@@ -121,6 +117,8 @@ function mixedAbCheckpointMd() {
     const block = (0, continuity_js_1.buildResumeLeanBlock)(entry, content, 3500, "continue the beta work", PROJ_B);
     (0, bun_test_1.expect)(block).toContain("beta feature");
     (0, bun_test_1.expect)(block).toContain("beta_router");
+    // The non-basename decision is kept (single-project -> no filtering):
+    (0, bun_test_1.expect)(block).toContain("Switched from REST polling to websocket push");
     (0, bun_test_1.expect)(block).not.toContain("- Omitted");
 });
 (0, bun_test_1.test)("buildResumeLeanBlock no filter when cwd absent (backward compat)", () => {
@@ -129,6 +127,15 @@ function mixedAbCheckpointMd() {
     // Legacy call: no promptText/cwd -> unfiltered, A-only items survive, no
     // disclosure line.
     const block = (0, continuity_js_1.buildResumeLeanBlock)(entry, content);
+    (0, bun_test_1.expect)(block).toContain("gamma delta epsilon");
+    (0, bun_test_1.expect)(block).not.toContain("- Omitted");
+});
+(0, bun_test_1.test)("buildResumeLeanBlock no filter when promptText present but cwd absent (AND gate)", () => {
+    const entry = makeEntry();
+    const content = mixedAbCheckpointMd();
+    // AND gate: promptText alone (no cwd) -> no filtering, no fabricated
+    // disclosure. The OR gate would have filtered on prompt tokens alone.
+    const block = (0, continuity_js_1.buildResumeLeanBlock)(entry, content, 3500, "beta feature");
     (0, bun_test_1.expect)(block).toContain("gamma delta epsilon");
     (0, bun_test_1.expect)(block).not.toContain("- Omitted");
 });
@@ -148,10 +155,13 @@ function mixedAbCheckpointMd() {
     (0, bun_test_1.expect)(hint).toContain("beta feature behind a feature flag");
     // A-only DECISION dropped:
     (0, bun_test_1.expect)(hint).not.toContain("gamma delta epsilon");
-    // Exactly one disclosure line:
-    const disclosureCount = (hint.match(/- Omitted \(same session, different project\):/g) || []).length;
+    // A-only FILE path dropped (cross-project absolute path not under cwd):
+    (0, bun_test_1.expect)(hint).not.toContain("gamma_engine");
+    // Exactly one disclosure line. Both the A-only decision AND the A-only
+    // file path are dropped, so the disclosure reports both categories:
+    const disclosureCount = (hint.match(/- Omitted \(scoped to current project\):/g) || []).length;
     (0, bun_test_1.expect)(disclosureCount).toBe(1);
-    (0, bun_test_1.expect)(hint).toContain("- Omitted (same session, different project): 1 decision(s)");
+    (0, bun_test_1.expect)(hint).toContain("- Omitted (scoped to current project): 1 decision(s), 1 file(s)");
 });
 (0, bun_test_1.test)("buildContinuityHint single-project checkpoint emits NO disclosure", () => {
     const entry = makeEntry();
@@ -160,6 +170,9 @@ function mixedAbCheckpointMd() {
         "",
         "## Key Decisions",
         "- Ship the beta feature behind a feature flag",
+        // Names NO project token: would be dropped by the token-overlap rule
+        // alone, but the mixture gate keeps it (single-project checkpoint).
+        "- Switched from REST polling to websocket push",
         "",
         "## File Changes",
         `- ${PROJ_B}/src/beta_router.py`,
@@ -174,8 +187,25 @@ function mixedAbCheckpointMd() {
         score: 0.9,
         content,
     };
-    const hint = (0, continuity_js_1.buildContinuityHint)(candidate, "continue the beta work", PROJ_B);
+    // Non-resume prompt so the lightweight hint path runs (not the lean block).
+    const hint = (0, continuity_js_1.buildContinuityHint)(candidate, "beta feature", PROJ_B);
     (0, bun_test_1.expect)(hint).toContain("beta feature");
+    // The non-basename decision is kept (single-project -> no filtering):
+    (0, bun_test_1.expect)(hint).toContain("Switched from REST polling to websocket push");
+    (0, bun_test_1.expect)(hint).not.toContain("- Omitted");
+});
+(0, bun_test_1.test)("buildContinuityHint no filter when promptText present but cwd absent (AND gate)", () => {
+    const entry = makeEntry();
+    const content = mixedAbCheckpointMd();
+    const candidate = {
+        entry,
+        score: 0.9,
+        content,
+    };
+    // AND gate: promptText alone (no cwd) -> no filtering, no fabricated
+    // disclosure. The OR gate would have filtered on prompt tokens alone.
+    const hint = (0, continuity_js_1.buildContinuityHint)(candidate, "beta feature");
+    (0, bun_test_1.expect)(hint).toContain("gamma delta epsilon");
     (0, bun_test_1.expect)(hint).not.toContain("- Omitted");
 });
 //# sourceMappingURL=continuity-scoping.test.js.map
