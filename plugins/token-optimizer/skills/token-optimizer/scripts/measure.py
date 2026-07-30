@@ -20653,6 +20653,39 @@ def _reclaim_posix_daemon_port(port=DAEMON_PORT, script_name="dashboard-server.p
             time.sleep(0.5)
 
 
+def _daemon_ports_to_reclaim(this_install_only: bool):
+    """Which daemon ports a POSIX uninstall must SIGTERM-reclaim.
+
+    #106 F2 (P1) added a running-process kill on uninstall because
+    ``launchctl bootout`` / ``systemctl disable`` unregister the job without
+    stopping the child, leaving a daemon serving its port with the 0600 CSRF
+    token live in memory. But a sweep-all uninstall tears down EVERY runtime's
+    scheduler unit and EVERY identity's files, while the reclaim helper defaults
+    to ``DAEMON_PORT`` -- the RESOLVED runtime's port only. So a sibling
+    runtime's daemon (e.g. Codex on 24843 when cleanup runs from Claude) kept
+    running its token-authed mutating API after a reported uninstall.
+
+    Scoped (``this_install_only``): just the resolved runtime's port. Sweep-all:
+    every runtime's port (claude 24842 + codex/hermes/copilot). ``script_name``
+    in the reclaim helper is runtime-generic, so this only ever kills our own
+    ``dashboard-server.py`` bound to one of these ports.
+    """
+    if this_install_only:
+        return (DAEMON_PORT,)
+    ports = {24842}
+    ports.update(_DAEMON_PORT_BY_RUNTIME.values())
+    return tuple(sorted(ports))
+
+
+def _reclaim_daemon_ports(this_install_only: bool):
+    """Reclaim every port in scope; never crash the uninstall on cleanup."""
+    for port in _daemon_ports_to_reclaim(this_install_only):
+        try:
+            _reclaim_posix_daemon_port(port=port)
+        except Exception:  # noqa: BLE001 -- uninstall must never crash on cleanup
+            pass
+
+
 def _daemon_access_lines(effective_host):
     """v5.11.1 (#59): return the access-scope lines for install/dry-run output.
 
@@ -20899,14 +20932,14 @@ def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
     # #106 F2 (P1): unregistering the job does NOT stop the process --
     # `launchctl bootout` / `systemctl disable` drop the registration without
     # SIGTERMing the running child, so the daemon kept serving its port with
-    # the 0600 CSRF token live in memory until logout. Reclaim the port now
+    # the 0600 CSRF token live in memory until logout. Reclaim the port(s) now
     # that the tombstone is down (so nothing races a respawn) and the job is
-    # unregistered. Never kills a foreign process on the port -- the helper
-    # verifies the command line is our own dashboard-server.py.
-    try:
-        _reclaim_posix_daemon_port()
-    except Exception:  # noqa: BLE001 -- uninstall must never crash on cleanup
-        pass
+    # unregistered. On a sweep-all uninstall this covers EVERY runtime's port
+    # (Gauntlet3 B-F1: a sibling runtime's daemon + live CSRF token otherwise
+    # survived), scoped back to the resolved runtime under --this-install-only.
+    # Never kills a foreign process on a port -- the helper verifies the command
+    # line is our own dashboard-server.py.
+    _reclaim_daemon_ports(this_install_only)
     # Sweep per-identity daemon files across every token-optimizer-* identity.
     per_identity_removed: list[tuple[Path, list[str]]] = []
     sweep_failed: list[str] = []
@@ -21758,14 +21791,14 @@ def _uninstall_systemd_user_daemon(this_install_only=False, dry_run=False):
     # #106 F2 (P1): unregistering the job does NOT stop the process --
     # `launchctl bootout` / `systemctl disable` drop the registration without
     # SIGTERMing the running child, so the daemon kept serving its port with
-    # the 0600 CSRF token live in memory until logout. Reclaim the port now
+    # the 0600 CSRF token live in memory until logout. Reclaim the port(s) now
     # that the tombstone is down (so nothing races a respawn) and the job is
-    # unregistered. Never kills a foreign process on the port -- the helper
-    # verifies the command line is our own dashboard-server.py.
-    try:
-        _reclaim_posix_daemon_port()
-    except Exception:  # noqa: BLE001 -- uninstall must never crash on cleanup
-        pass
+    # unregistered. On a sweep-all uninstall this covers EVERY runtime's port
+    # (Gauntlet3 B-F1: a sibling runtime's daemon + live CSRF token otherwise
+    # survived), scoped back to the resolved runtime under --this-install-only.
+    # Never kills a foreign process on a port -- the helper verifies the command
+    # line is our own dashboard-server.py.
+    _reclaim_daemon_ports(this_install_only)
     # Sweep per-identity daemon files across every token-optimizer-* identity.
     per_identity_removed: list[tuple[Path, list[str]]] = []
     sweep_failed: list[str] = []
