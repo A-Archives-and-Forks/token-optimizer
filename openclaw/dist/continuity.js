@@ -240,6 +240,42 @@ function pathUnderRoots(p, roots) {
     }
     return false;
 }
+/** True when ``p`` is an attributable absolute path (unix ``/`` or a Windows
+ *  drive root). Backslashes normalized so Windows paths are recognized on any
+ *  host. Relative/basenames are NOT attributable to a specific project, so
+ *  they fall through to the token-overlap rule instead of being path-dropped. */
+function isAbsolutePath(p) {
+    const s = String(p ?? "").replace(/\\/g, "/").trim();
+    if (!s)
+        return false;
+    return s.startsWith("/") || /^[A-Za-z]:\//.test(s);
+}
+/** True when file path ``p`` is an attributable absolute path that does NOT
+ *  live under ``cwd`` — a cross-project file (GitHub #103). The set-overlap
+ *  tokenizer treats a full path as a SINGLE token (the regex includes slashes)
+ *  so it has < 3 distinctive tokens and would always be kept by
+ *  ``keepRecoveredItem``; this rule drops such paths at the file-filter sites
+ *  regardless of token overlap, using the EXISTING ``pathUnderRoots`` prefix
+ *  check. Relative/basenames fall through to the token rule. cwd absent ->
+ *  never drop (legacy callers stay unfiltered). */
+function crossProjectFileDrop(p, cwd) {
+    if (!cwd || !p)
+        return false;
+    return isAbsolutePath(p) && !pathUnderRoots(p, cwdRoots(cwd));
+}
+/** True when the checkpoint carries at least one attributable absolute file
+ *  path NOT under ``cwd`` — the checkpoint genuinely spans multiple projects
+ *  (GitHub #103). DECISION filtering is gated on this: a single-project
+ *  checkpoint (every attributable path in-project, or none) has nothing to
+ *  scope, so its decisions are kept verbatim even when they name no project
+ *  token (e.g. "Switched from REST polling to websocket push"). Without this
+ *  gate the token-overlap rule over-prunes generic technical decisions and
+ *  mislabels them "different project". cwd absent -> never multi-project. */
+function checkpointHasCrossProjectPath(paths, cwd) {
+    if (!cwd)
+        return false;
+    return paths.some((p) => crossProjectFileDrop(p, cwd));
+}
 /** The KEPT in-project file paths from a checkpoint (## File Changes entries
  *  that live under cwd). Seed the keep-token set so a decision/file naming the
  *  current project survives the filter. */
@@ -281,7 +317,7 @@ function formatDisclosure(droppedDecisions, droppedFiles) {
         parts.push(`${droppedDecisions} decision(s)`);
     if (droppedFiles > 0)
         parts.push(`${droppedFiles} file(s)`);
-    return `- Omitted (same session, different project): ${parts.join(", ")}`;
+    return `- Omitted (scoped to current project): ${parts.join(", ")}`;
 }
 // ---------------------------------------------------------------------------
 // Core scoring: keyword_relevance_score port
@@ -561,24 +597,30 @@ function buildContinuityHint(candidate, promptText = "", cwd = "") {
     // otherwise leak the OTHER project's Key Decisions / File Changes into this
     // hint. Filter FIRST (set-overlap rule, no float threshold), then apply the
     // existing [:4]/[:6] slices. Disclosure counts = filter drops ONLY. Kept
-    // items pass through byte-for-byte (no cascading drops). When promptText/cwd
-    // are absent (legacy callers), keep_tokens is empty -> everything has zero
-    // overlap, but items with < 3 distinctive tokens are still kept; structured
-    // sections with >= 3 tokens would all drop, so fall back to the raw excerpt
-    // to preserve the pre-filter behavior for callers that don't opt in.
+    // items pass through byte-for-byte (no cascading drops). Enable-gate is AND:
+    // filtering activates only when BOTH promptText AND cwd are present (full
+    // topic + project context). Either alone -> keepTokens is null -> no
+    // filtering, fall back to the raw excerpt (legacy callers).
     const sections = parseCheckpointSections(content);
-    const keepTokens = (promptText || cwd)
+    const keepTokens = (promptText && cwd)
         ? continuityKeepTokens(promptText, cwd, inProjectFilePaths(content, cwd))
         : null;
     let droppedDecisions = 0;
     let droppedFiles = 0;
     let fencedBody = null;
     if (keepTokens) {
-        const keptDecisionsRaw = sections.keyDecisions.filter((d) => keepRecoveredItem(d, keepTokens));
+        // Decision filtering is gated on checkpoint mixture (GitHub #103): a
+        // single-project checkpoint has nothing to scope, so its decisions are
+        // kept verbatim even when they name no project token. Only a checkpoint
+        // that genuinely spans projects gets its decisions token-filtered.
+        const multiProject = checkpointHasCrossProjectPath(sections.fileChanges, cwd);
+        const keptDecisionsRaw = multiProject
+            ? sections.keyDecisions.filter((d) => keepRecoveredItem(d, keepTokens))
+            : sections.keyDecisions;
         droppedDecisions = sections.keyDecisions.length - keptDecisionsRaw.length;
         const decisions = keptDecisionsRaw.slice(0, 4)
             .map((d) => safeRecoveredScalar(d, 120)).filter(Boolean);
-        const keptFilesRaw = sections.fileChanges.filter((f) => keepRecoveredItem(f, keepTokens));
+        const keptFilesRaw = sections.fileChanges.filter((f) => !crossProjectFileDrop(f, cwd) && keepRecoveredItem(f, keepTokens));
         droppedFiles = sections.fileChanges.length - keptFilesRaw.length;
         const files = keptFilesRaw.slice(0, 6)
             .map((f) => safeRecoveredScalar(f, 140)).filter(Boolean);
@@ -1066,9 +1108,10 @@ function buildResumeLeanBlock(entry, content, maxChars = 3500, promptText = "", 
     const { keyDecisions, fileChanges, userInstructions, activeTaskGuess, headerMeta } = parseCheckpointSections(content);
     // GitHub #103: per-item relevance filter. Filter FIRST, then slice. Disclosure
     // counts = filter drops ONLY, never slice truncation. Kept items pass through
-    // byte-for-byte (no cascading drops). When promptText/cwd are absent, no
-    // filtering (legacy callers preserve byte-identical output).
-    const keepTokens = (promptText || cwd)
+    // byte-for-byte (no cascading drops). Enable-gate is AND: filtering activates
+    // only when BOTH promptText AND cwd are present (full topic + project context).
+    // Either alone -> no filtering (legacy callers preserve byte-identical output).
+    const keepTokens = (promptText && cwd)
         ? continuityKeepTokens(promptText, cwd, inProjectFilePaths(content, cwd))
         : null;
     const header = [
@@ -1089,7 +1132,13 @@ function buildResumeLeanBlock(entry, content, maxChars = 3500, promptText = "", 
     }
     let droppedDecisions = 0;
     let droppedFiles = 0;
-    const decisionsRaw = keepTokens
+    // Decision filtering is gated on checkpoint mixture (GitHub #103): a
+    // single-project checkpoint has nothing to scope, so its decisions are kept
+    // verbatim even when they name no project token.
+    const multiProject = keepTokens
+        ? checkpointHasCrossProjectPath(fileChanges, cwd)
+        : false;
+    const decisionsRaw = (keepTokens && multiProject)
         ? keyDecisions.filter((d) => keepRecoveredItem(d, keepTokens))
         : keyDecisions;
     droppedDecisions = keyDecisions.length - decisionsRaw.length;
@@ -1100,7 +1149,7 @@ function buildResumeLeanBlock(entry, content, maxChars = 3500, promptText = "", 
         }
     }
     const filesRaw = keepTokens
-        ? fileChanges.filter((f) => keepRecoveredItem(f, keepTokens))
+        ? fileChanges.filter((f) => !crossProjectFileDrop(f, cwd) && keepRecoveredItem(f, keepTokens))
         : fileChanges;
     droppedFiles = fileChanges.length - filesRaw.length;
     if (filesRaw.length > 0) {
