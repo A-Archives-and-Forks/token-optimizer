@@ -567,16 +567,60 @@ _KNOWN_MARKETPLACES_NAME = "known_marketplaces.json"
 _TOKEN_MARKER = "token-optimizer"
 
 
-def _is_our_marketplace(name: str, entry: object) -> bool:
+def _is_our_marketplace(name: str, entry: object, our_marketplaces=None) -> bool:
+    """True only when we can EVIDENCE that ``name`` is our own marketplace.
+
+    #106 F3 (P2-5): the old rule was a bare substring test -- any marketplace
+    whose name merely contained "token-optimizer" was claimed as ours and
+    deleted. A user's own marketplace (a fork, a "my-token-optimizer-tweaks"
+    registry, a colleague's mirror) is not ours to remove, and
+    known_marketplaces.json is Claude Code's file, not ours.
+
+    Ownership now requires one of:
+      * ``our_marketplaces`` -- the marketplace suffixes taken from OUR OWN
+        installed_plugins keys (``token-optimizer@<marketplace>``), i.e. the
+        registry itself says we installed a plugin from it; or
+      * an ``installLocation`` whose final path component is a plugin-cache
+        dir for our plugin name (``.../<something>token-optimizer<something>``
+        is NOT enough -- the directory must actually be a marketplace dir we
+        installed into, matched on an exact path segment).
+
+    Anything else is reported (so the user can see it) but never removed.
+    """
     if not isinstance(name, str):
         return False
-    if _TOKEN_MARKER in name.lower():
+    if our_marketplaces and name in our_marketplaces:
         return True
     if isinstance(entry, dict):
         loc = entry.get("installLocation", "")
-        if isinstance(loc, str) and _TOKEN_MARKER in loc.lower():
-            return True
+        if isinstance(loc, str) and loc:
+            try:
+                segments = {seg.lower() for seg in Path(loc).parts}
+            except (OSError, ValueError):
+                segments = set()
+            # Exact path-segment match, not a substring of the whole path:
+            # ".../marketplaces/alexgreensh-token-optimizer" counts only when
+            # that segment is one WE are installed from (checked above), while
+            # a bare ".../token-optimizer" cache dir is ours by construction.
+            if _PLUGIN_NAME in segments:
+                return True
     return False
+
+
+def _our_marketplace_names(registry: dict) -> set:
+    """Marketplace suffixes from our own installed_plugins keys.
+
+    ``token-optimizer@alexgreensh-token-optimizer`` -> the marketplace name
+    after the ``@``. This is the registry's own statement that we installed a
+    plugin from that marketplace, which is the only self-evident proof of
+    ownership available (#106 F3 / P2-5).
+    """
+    names = set()
+    for key in _our_plugin_keys(registry):
+        _, _, suffix = key.partition("@")
+        if suffix:
+            names.add(suffix)
+    return names
 
 
 def _load_known_marketplaces(claude_home_dir: Path) -> dict:
@@ -712,8 +756,12 @@ def reconcile_uninstall(
         })
 
     marketplaces = _load_known_marketplaces(home)
+    # #106 F3 (P2-5): ownership must be evidenced by our own installed_plugins
+    # keys (or an exact plugin-name path segment), never a bare name substring.
+    our_marketplace_names = _our_marketplace_names(registry)
     our_mkt_keys = sorted(
-        k for k, v in marketplaces.items() if _is_our_marketplace(k, v)
+        k for k, v in marketplaces.items()
+        if _is_our_marketplace(k, v, our_marketplace_names)
     )
     for key in our_mkt_keys:
         entry = marketplaces.get(key, {})

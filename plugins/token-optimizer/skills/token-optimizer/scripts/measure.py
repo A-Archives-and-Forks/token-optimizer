@@ -21877,6 +21877,45 @@ def _backup_settings_file(dest_dir: Path) -> Path | None:
         return None
 
 
+def _is_our_hook_entry(entry) -> bool:
+    """True when a settings.json hook entry is one WE installed (#106 F3).
+
+    Ownership markers, all anchored on our own script names rather than a bare
+    "token-optimizer" substring (a user hook may legitimately mention us in a
+    path or a comment without being ours to delete):
+      * the command invokes one of our scripts (measure.py / read_cache.py /
+        statusline.js / archive_result.py / context_intel.py) AND references
+        token-optimizer, or
+      * it carries one of our distinctive subcommands (quality-cache,
+        compact-capture, compact-restore, ensure-health, clear-compacted,
+        session-end-flush, dynamic-compact-instructions).
+
+    Conservative by construction: unrecognized shapes are NOT ours, so a hook
+    we cannot positively identify is left in place. The cost of a false
+    negative is a dangling entry the user can delete; the cost of a false
+    positive is silently deleting their automation.
+    """
+    if not isinstance(entry, dict):
+        return False
+    cmd = entry.get("command")
+    if not isinstance(cmd, str) or not cmd:
+        return False
+    low = cmd.lower()
+    our_subcommands = (
+        "quality-cache", "compact-capture", "compact-restore", "ensure-health",
+        "clear-compacted", "session-end-flush", "dynamic-compact-instructions",
+    )
+    if any(sub in low for sub in our_subcommands):
+        return True
+    our_scripts = (
+        "measure.py", "read_cache.py", "statusline.js", "archive_result.py",
+        "context_intel.py", "activity_tracker.py",
+    )
+    if "token-optimizer" in low and any(s in low for s in our_scripts):
+        return True
+    return False
+
+
 def _remove_our_settings_entries(settings: dict) -> list[str]:
     """Strip Token Optimizer's OWN entries from ``settings`` in place.
 
@@ -21902,29 +21941,54 @@ def _remove_our_settings_entries(settings: dict) -> list[str]:
         if isinstance(cmd, str) and "statusline.js" in cmd and "token-optimizer" in cmd:
             del settings["statusLine"]
             removed.append("statusLine (token-optimizer)")
-    # UserPromptSubmit quality-cache hooks
+    # Hook entries we own, across every event.
+    #
+    # #106 F3 (P2-6): the old loop dropped ANY group whose filtered hook list
+    # came out empty -- including a user-authored group that never held a hook
+    # of ours (an empty `hooks: []`, or a group of foreign hooks in an event we
+    # also use) -- and miscounted each one as "UserPromptSubmit quality-cache
+    # hook". A group is now removed ONLY when it actually contained one of our
+    # hooks and filtering emptied it; user groups pass through untouched.
+    #
+    # #106 F3 (P2-9): the sweep covered UserPromptSubmit + SessionEnd only,
+    # leaving our smart-compact family (PreCompact / SessionStart / Stop /
+    # SessionEnd) dangling in settings.json after cleanup -- commands pointing
+    # into a plugin tree that is about to be deleted. Every event is now
+    # filtered with the same ownership predicate.
     hooks = settings.get("hooks")
     if isinstance(hooks, dict):
-        ups = hooks.get("UserPromptSubmit")
-        if isinstance(ups, list):
+        for event in list(hooks.keys()):
+            groups = hooks.get(event)
+            if not isinstance(groups, list):
+                continue
             new_groups = []
-            for group in ups:
+            n_removed = 0
+            for group in groups:
                 if not isinstance(group, dict):
                     new_groups.append(group)
                     continue
-                kept = [
-                    h for h in group.get("hooks", [])
-                    if not (isinstance(h, dict) and "quality-cache" in (h.get("command") or ""))
-                ]
+                entries = group.get("hooks")
+                if not isinstance(entries, list):
+                    new_groups.append(group)
+                    continue
+                kept = [h for h in entries if not _is_our_hook_entry(h)]
+                n_ours = len(entries) - len(kept)
+                if n_ours == 0:
+                    # Nothing of ours here -- leave the group exactly as-is,
+                    # even when it is empty (it is the user's to keep).
+                    new_groups.append(group)
+                    continue
+                n_removed += n_ours
                 if kept:
                     group["hooks"] = kept
                     new_groups.append(group)
-                else:
-                    removed.append("UserPromptSubmit quality-cache hook")
+                # else: the group held only our hooks -> drop the whole group.
+            if n_removed:
+                removed.append(f"{n_removed} {event} hook(s)")
             if new_groups:
-                hooks["UserPromptSubmit"] = new_groups
+                hooks[event] = new_groups
             else:
-                del hooks["UserPromptSubmit"]
+                del hooks[event]
     # SessionEnd hooks (reuses the proven filter)
     n_session_end = _remove_token_optimizer_session_end_hooks(settings)
     if n_session_end:
