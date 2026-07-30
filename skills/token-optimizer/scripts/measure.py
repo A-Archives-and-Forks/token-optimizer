@@ -18898,6 +18898,16 @@ DAEMON_HOST_PATH = SNAPSHOT_DIR / "dashboard-host"
 # HEADERS, not bind addresses.
 _DAEMON_HOST_ALLOWLIST = ("127.0.0.1", "localhost", "0.0.0.0")
 DAEMON_THRASH_BREADCRUMB = SNAPSHOT_DIR / ".daemon-thrash"  # adv-005 tombstone
+# #106 F2 / Gauntlet3 B-F2: the .daemon-thrash breadcrumb is written by TWO
+# distinct paths with opposite lifetimes. The 3-strikes thrash path writes an
+# EMPTY file (a transient "dashboard missing" tombstone that legitimately
+# self-heals after 60s once the dashboard reappears -- e.g. an update window).
+# The UNINSTALL path must write a tombstone that OUTLIVES the uninstall and is
+# cleared ONLY by a reinstall (setup_daemon unlinks it). A size-0 file could not
+# tell the two apart, so a surviving daemon script self-cleared the uninstall
+# tombstone after 60s and minted a fresh CSRF token post-uninstall. Give the
+# uninstall tombstone distinctive content so the daemon can honor it forever.
+_UNINSTALL_TOMBSTONE_MARKER = "uninstalled"
 DAEMON_IDENTITY_MAGIC = (
     f"token-optimizer-{_DAEMON_RUNTIME_SUFFIX}-dashboard-v1"
     if _DAEMON_RUNTIME_SUFFIX != "claude"
@@ -19306,6 +19316,7 @@ def _generate_daemon_script():
     token_path_literal = repr(str(DAEMON_TOKEN_PATH))
     host_path_literal = repr(str(DAEMON_HOST_PATH))
     thrash_path_literal = repr(str(DAEMON_THRASH_BREADCRUMB))
+    tombstone_marker_literal = repr(_UNINSTALL_TOMBSTONE_MARKER)
     magic_literal = repr(DAEMON_IDENTITY_MAGIC)
     return f'''#!/usr/bin/env python3
 """Token Optimizer dashboard server daemon.
@@ -19325,6 +19336,7 @@ DASHBOARD = {dashboard_literal}
 TOKEN_PATH = {token_path_literal}
 HOST_PATH = {host_path_literal}
 THRASH_PATH = {thrash_path_literal}
+UNINSTALL_MARKER = {tombstone_marker_literal}
 IDENTITY_MAGIC = {magic_literal}
 PORT = {DAEMON_PORT}
 
@@ -19799,31 +19811,40 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def _thrash_check_and_update():
     """Return True to continue, False to tombstone-and-exit cleanly."""
-    # adv-006: if an uninstall tombstone is present, exit cleanly.
-    # (Install writes empty file; any presence = "stop respawning me".)
+    # adv-006 / Gauntlet3 B-F2: two breadcrumb kinds live at THRASH_PATH.
+    #   - UNINSTALL tombstone: content == UNINSTALL_MARKER. Written by
+    #     `measure.py` uninstall; it must OUTLIVE the uninstall and is cleared
+    #     ONLY by a reinstall (setup_daemon unlinks it). Honor it FOREVER -- a
+    #     surviving daemon script must never resurrect and mint a fresh CSRF
+    #     token after a reported uninstall.
+    #   - THRASH tombstone: EMPTY file, written by the 3-strikes path below when
+    #     the dashboard has been missing. That is transient (e.g. an update
+    #     window), so it self-heals after 60s once the dashboard is back.
     if os.path.exists(THRASH_PATH):
         try:
-            size = os.path.getsize(THRASH_PATH)
+            with open(THRASH_PATH, "r", encoding="utf-8") as f:
+                content = f.read().strip()
         except OSError:
-            size = 0
-        # Size 0 = uninstall tombstone. >0 = thrash counter; process it below.
-        if size == 0:
-            # Honor it only if FRESH (an uninstall genuinely in progress). A real
-            # uninstall removes the plist + this very script within milliseconds,
-            # so a stale 0-byte tombstone sitting next to a healthy dashboard with
-            # this daemon still running is a stuck state, not an uninstall — clear
-            # it and serve. This self-heals daemons wrongly tombstoned by an
-            # update-window thrash, instead of staying dead until setup-daemon.
+            content = ""
+        if content == UNINSTALL_MARKER:
+            # Real uninstall: stay dead. Never self-clear, never serve.
+            return False
+        if content == "":
+            # Empty = 3-strikes thrash tombstone. Self-heal only when STALE: a
+            # stuck tombstone next to a healthy dashboard with this daemon still
+            # running is a thrash false-positive, not an uninstall.
             try:
                 age = time.time() - os.path.getmtime(THRASH_PATH)
             except OSError:
-                age = 0  # unreadable mtime: treat as fresh, preserve uninstall safety
+                age = 0  # unreadable mtime: treat as fresh, preserve safety
             if age < 60:
                 return False
             try:
                 os.unlink(THRASH_PATH)
             except OSError:
                 pass
+        # else: non-empty, non-marker -> a numeric thrash counter; fall through
+        # to the dashboard check / counter processing below.
 
     if os.path.exists(DASHBOARD):
         # Healthy start: clear any thrash counter.
@@ -20831,9 +20852,16 @@ def _install_launchd_daemon(dry_run=False, soft_fail=False, effective_host=None)
 
 
 def _write_uninstall_tombstone(snapshot_dir=None):
-    """v5.4.19 (adv-006): write an empty breadcrumb file so that if the daemon
+    """v5.4.19 (adv-006): write a marker breadcrumb file so that if the daemon
     process somehow respawns (e.g., an orphaned LaunchAgent the user didn't clean
     up), it exits cleanly on next start instead of resurrecting.
+
+    Gauntlet3 B-F2: the breadcrumb content is the ``_UNINSTALL_TOMBSTONE_MARKER``
+    (not an empty file). The daemon's 3-strikes thrash path writes an EMPTY
+    breadcrumb that self-heals after 60s; an empty uninstall tombstone was
+    indistinguishable from it, so a surviving daemon self-cleared it after 60s
+    and minted a fresh CSRF token after a reported uninstall. The marker makes
+    the uninstall tombstone permanent (cleared only by a reinstall).
 
     Torture-room H-4 (2026-04-16): surface failures to stderr so a silently
     broken tombstone (e.g. SNAPSHOT_DIR unwritable) is visible to the user
@@ -20853,8 +20881,12 @@ def _write_uninstall_tombstone(snapshot_dir=None):
     breadcrumb = snap / ".daemon-thrash"
     try:
         snap.mkdir(parents=True, exist_ok=True)
+        # Gauntlet3 B-F2: write a distinctive marker (NOT an empty file) so a
+        # surviving daemon script can tell an uninstall tombstone (permanent
+        # until reinstall) from a transient 3-strikes thrash tombstone (which
+        # self-heals after 60s). See _UNINSTALL_TOMBSTONE_MARKER.
         with open(breadcrumb, "w", encoding="utf-8") as f:
-            f.write("")
+            f.write(_UNINSTALL_TOMBSTONE_MARKER)
     except OSError as e:
         sys.stderr.write(
             f"[Token Optimizer] Warning: could not write uninstall tombstone "
