@@ -21,8 +21,10 @@ Run: python3 -m pytest tests/test_read_cache_clear_compacted.py -v
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -306,4 +308,141 @@ def test_clear_compacted_then_read_not_denied_end_to_end(tmp_path):
         f"post-clear re-Read of an unchanged file must NOT be denied after the "
         f"compaction clear; got permissionDecision={decision!r}; "
         f"stdout={post.stdout!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #101 follow-up: contention safety. The compacted-clear must NEVER be a
+# silent exit-0 no-op. Under a sibling write lock on the same per-session
+# sqlite db it must either LAND the DELETE (after waiting out the lock within
+# the hook budget) or SCREAM on stderr. These tests are bounded and cannot
+# deadlock: every held lock is released in a finally / by a timer.
+# ---------------------------------------------------------------------------
+
+def _session_db_path(snapshot_dir: Path, session_id: str) -> Path:
+    """Resolve the per-session sqlite db path the way SessionStore does."""
+    import re
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", session_id) or "unknown"
+    return snapshot_dir / "session-store" / f"{safe_id}.db"
+
+
+def _seed_and_db(tmp_path: Path, session_id: str = SESSION_S):
+    """Seed one file_reads row and return (file_path, db_path)."""
+    file_f = str(tmp_path / "held.txt")
+    Path(file_f).write_text("held\n", encoding="utf-8")
+    st = os.stat(file_f)
+    _seed_file_entry(tmp_path, session_id, file_f, st.st_mtime_ns, st.st_size)
+    assert _file_entries(tmp_path, session_id), "seed should have created a row"
+    return file_f, _session_db_path(tmp_path, session_id)
+
+
+def test_clear_compacted_lands_delete_under_brief_lock(tmp_path):
+    """A sibling write lock held briefly is waited out (within the 5s budget)
+    and the DELETE lands. Bounded: the lock is released by a timer thread."""
+    _seed_and_db(tmp_path)
+
+    acquired = threading.Event()
+    release = threading.Event()
+    db_path = _session_db_path(tmp_path, SESSION_S)
+
+    def _hold_lock():
+        # Open a 2nd connection, acquire the write lock (BEGIN IMMEDIATE),
+        # signal that we hold it, then hold until released (max 1s safety so
+        # the test stays well under the 5s ceiling even if release never
+        # fires -- the holder times out and rolls back, freeing the lock).
+        conn = sqlite3.connect(str(db_path), timeout=1.0)
+        try:
+            conn.execute("PRAGMA busy_timeout=1000")
+            conn.execute("BEGIN IMMEDIATE")
+            acquired.set()
+            release.wait(timeout=1.0)
+            conn.rollback()
+        finally:
+            conn.close()
+
+    holder = threading.Thread(target=_hold_lock, daemon=True)
+    holder.start()
+    assert acquired.wait(timeout=3.0), "lock holder failed to acquire"
+
+    # Default 5000ms busy_timeout: the clear waits out the brief lock.
+    out = _run_read_cache(
+        tmp_path, ["--clear-compacted", "--quiet"], {"session_id": SESSION_S}
+    )
+    release.set()  # release the lock so the holder thread can exit
+    holder.join(timeout=5.0)
+
+    assert out.returncode == 0, out.stderr
+    assert "--clear-compacted FAILED" not in out.stderr, (
+        f"clear should have waited out the brief lock and landed the DELETE, "
+        f"not screamed; stderr={out.stderr!r}"
+    )
+    assert _file_entries(tmp_path, SESSION_S) == {}, (
+        "the clear must have landed the DELETE after waiting out the lock; "
+        f"got {_file_entries(tmp_path, SESSION_S)}"
+    )
+
+
+def test_clear_compacted_screams_on_stderr_under_held_lock(tmp_path):
+    """When the write lock is held past a SHORT per-call busy_timeout, the
+    clear must SCREAM on stderr (never a silent exit-0 no-op) and leave
+    file_reads intact so #101 is not silently resurrected. Bounded: the held
+    lock is released in a finally; the subprocess busy_timeout is tiny."""
+    _seed_and_db(tmp_path)
+    db_path = _session_db_path(tmp_path, SESSION_S)
+
+    # Hold the write lock for the whole window the subprocess will try in.
+    holder_conn = sqlite3.connect(str(db_path), timeout=1.0)
+    holder_conn.execute("PRAGMA busy_timeout=1000")
+    holder_conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Force a tiny per-call busy_timeout so the clear screams fast instead
+        # of waiting the full 5s (keeps the test well under the 5s ceiling).
+        out = _run_read_cache(
+            tmp_path, ["--clear-compacted", "--quiet"],
+            {"session_id": SESSION_S},
+            extra_env={"TOKEN_OPTIMIZER_CLEAR_COMPACTED_BUSY_TIMEOUT": "200"},
+        )
+    finally:
+        holder_conn.rollback()
+        holder_conn.close()
+
+    assert out.returncode == 0, (
+        f"the clear must exit 0 even when it screams (hook must not crash); "
+        f"stderr={out.stderr!r}"
+    )
+    assert "[read_cache] --clear-compacted FAILED" in out.stderr, (
+        f"clear under an unreleased write lock must SCREAM on stderr, not "
+        f"silently exit 0; stderr={out.stderr!r}"
+    )
+    assert "database is locked" in out.stderr, (
+        f"the loud failure must name the OperationalError; stderr={out.stderr!r}"
+    )
+    entries = _file_entries(tmp_path, SESSION_S)
+    assert entries, (
+        "file_reads must be LEFT INTACT when the clear screamed -- a silent "
+        f"resurrection of #101 would leave an empty table; got {entries}"
+    )
+
+
+def test_clear_compacted_screams_on_no_stdin(tmp_path):
+    """Abort branch: no stdin hook input must emit a stderr note, not silent
+    exit 0 (a silent no-op here would leave #101 uncleared with no signal)."""
+    out = _run_read_cache(tmp_path, ["--clear-compacted"], None)
+    assert out.returncode == 0, out.stderr
+    assert "[read_cache] --clear-compacted FAILED" in out.stderr, (
+        f"no-stdin abort must emit a stderr note, not silent exit 0; "
+        f"stderr={out.stderr!r}"
+    )
+
+
+def test_clear_compacted_screams_on_missing_session(tmp_path):
+    """Abort branch: hook input with no session_id must emit a stderr note,
+    not silent exit 0."""
+    out = _run_read_cache(
+        tmp_path, ["--clear-compacted"], {"tool_name": "Read"}
+    )
+    assert out.returncode == 0, out.stderr
+    assert "[read_cache] --clear-compacted FAILED" in out.stderr, (
+        f"missing-session abort must emit a stderr note, not silent exit 0; "
+        f"stderr={out.stderr!r}"
     )
