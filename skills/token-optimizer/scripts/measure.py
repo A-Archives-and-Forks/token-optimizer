@@ -26821,8 +26821,15 @@ def _continuity_prompt_hint(prompt_text="", session_id=None, cwd=None, max_age_m
     # slice truncation. Kept items pass through byte-for-byte (no redacting of a
     # dropped path named inside a kept decision -- cascading drops is the
     # over-prune failure mode, forbidden).
-    keep_tokens = _continuity_keep_tokens(
-        text, cwd, _in_project_paths(sidecar, cwd))
+    # Gated on the prompt+cwd sentinel (matches build_lean_resume_context): a
+    # legacy caller with cwd absent gets the UNFILTERED hint with NO fabricated
+    # disclosure (GitHub #103 #6). The hint surface previously computed
+    # keep_tokens unconditionally, so cwd=None callers were token-filtered on
+    # prompt text alone and got a misleading "scoped to current project" line.
+    keep_tokens = (
+        _continuity_keep_tokens(text, cwd, _in_project_paths(sidecar, cwd))
+        if (text and cwd) else None
+    )
     # Decision filtering is gated on checkpoint mixture (GitHub #103): a
     # single-project checkpoint has nothing to scope, so its decisions are
     # kept verbatim even when they name no project token. Only a checkpoint
@@ -26850,7 +26857,7 @@ def _continuity_prompt_hint(prompt_text="", session_id=None, cwd=None, max_age_m
             if p and _cross_project_file_drop(p, cwd):
                 dropped_files += 1
                 continue
-            if p and not _keep_recovered_item(p, keep_tokens):
+            if keep_tokens is not None and p and not _keep_recovered_item(p, keep_tokens):
                 dropped_files += 1
                 continue
             kept_paths.append(p)
