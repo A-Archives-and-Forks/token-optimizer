@@ -3880,7 +3880,8 @@ var DB = (function() {
             'style="margin-left:8px;padding:2px 10px;font:inherit;font-size:12px;cursor:pointer;' +
             'background:transparent;color:inherit;border:1px solid currentColor;border-radius:4px;">' +
             'Regenerate savings</button>' +
-            '<span id="to-regen-msg" style="margin-left:8px;"></span></div>';
+            '<span id="to-regen-msg" style="margin-left:8px;"></span>' +
+            '<span id="to-live-stamp" hidden style="margin-left:8px;font-size:12px;color:var(--c-savings-alt, #10b981);"></span></div>';
         })() +
         '<div style="margin-top:var(--s-4);padding-top:var(--s-3);border-top:1px solid var(--c-border);font-size:14px;color:var(--c-text-dim);line-height:1.7;text-wrap:pretty;">' +
           'Your usage is measured. The comparison is estimated: ' + esc(rw.proxy) + ' ' +
@@ -6149,7 +6150,31 @@ var DB = (function() {
     return String(Math.round(n));
   }
 
-  return { init: init };
+  // Live-patch the Savings + Overview tiles from a fresh /api/savings payload
+  // without a full page regen. Called on load (when served by the daemon) and on
+  // tab refocus, so a browser refresh always shows current numbers. Defensive:
+  // a malformed payload leaves the existing render untouched rather than blanking
+  // the tab. Returns true when a patch was applied.
+  function refreshSavings(payload) {
+    if (!data || !payload || typeof payload !== 'object') return false;
+    if (payload.savings && typeof payload.savings === 'object') {
+      data.savings = payload.savings;
+    }
+    if (payload.cache_health && typeof payload.cache_health === 'object') {
+      data.cache_health = payload.cache_health;
+    }
+    safeRender('Savings', 'savings', renderSavings);
+    safeRender('Overview', 'overview', renderOverview);
+    var stamp = document.getElementById('to-live-stamp');
+    if (stamp) {
+      var t = new Date();
+      stamp.textContent = 'live · ' + t.toTimeString().slice(0, 8);
+      stamp.hidden = false;
+    }
+    return true;
+  }
+
+  return { init: init, refreshSavings: refreshSavings };
 })();
 
 /* ========== SAMPLE DATA (28 items: 7+8+7+6) ========== */
@@ -6513,7 +6538,28 @@ document.addEventListener('DOMContentLoaded', function() {
   var brandRuntime = document.getElementById('brand-runtime');
   if (brandRuntime) brandRuntime.textContent = data.runtime === 'codex' ? 'Codex' : '';
 
-  function startApp() { DB.init(data); }
+  function startApp() { DB.init(data); refreshSavingsLive(); }
+
+  // Pull fresh savings from the daemon and live-patch the Savings/Overview tiles.
+  // No-op unless the custom API is live (served over http, health probe passed) —
+  // so a file:// open stays in static mode with no CORS noise. Fail-silent: on any
+  // error the numbers already rendered stay put.
+  function refreshSavingsLive() {
+    if (!window.__TOKEN_API_LIVE) return;
+    var base = window.__TOKEN_API_BASE || '';
+    fetch(base + '/api/savings', { method: 'GET', credentials: 'include' })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(d) { if (d && d.ok) DB.refreshSavings(d); })
+      .catch(function() {});
+  }
+
+  // Refresh when the tab is brought back to the foreground, so returning to an
+  // already-open dashboard shows current savings without a manual reload.
+  if (typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', function() {
+      if (document.visibilityState === 'visible') refreshSavingsLive();
+    });
+  }
 
   // Probe for our custom API server before init.
   // When served from the daemon (http://localhost:*), a relative /api/health works.
