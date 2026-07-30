@@ -199,6 +199,21 @@ _maybe_swap_to_pythonw() {
     case "$pythonw" in
         */WindowsApps/*|*/windowsapps/*) return 0 ;;
     esac
+    # Liveness-probe the twin before committing to it. A corrupt/garbage
+    # pythonw.exe (e.g. a half-overwritten install twin, or a 0xC000-style
+    # Windows stub) passes the -f/-x/-s metadata checks but exits nonzero
+    # (often 127) when actually run. exec consumes the process, so a dead
+    # twin would brick every hook exec and the launcher's fallback ladder
+    # becomes unreachable. Probe exactly like find_interpreter probes
+    # WindowsApps python.exe: 2s timeout, -c "" (no program), stdin from
+    # /dev/null so the hook's real stdin is never consumed by the probe.
+    # On any doubt, keep python.exe (return 0) -- this can only ever opt
+    # INTO pythonw, never block an exec.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 2s "$pythonw" -c "" </dev/null >/dev/null 2>&1 || return 0
+    else
+        "$pythonw" -c "" </dev/null >/dev/null 2>&1 || return 0
+    fi
     _PYW_INTERP="$pythonw"
 }
 
@@ -229,6 +244,14 @@ _exec_cached_interpreter() {
     case "$interp" in
         /*) ;;
         *) return 1 ;;
+    esac
+    # A cache record must name the discovered interpreter (python.exe), never
+    # its pythonw.exe twin (the swap is exec-only, see _maybe_swap_to_pythonw).
+    # A record ending in /pythonw.exe is either poisoned or a stale artefact
+    # of a broken twin that should have been probed out -- reject and let
+    # discovery re-run, rather than exec'ing a possibly-dead twin directly.
+    case "$interp" in
+        */pythonw.exe) return 1 ;;
     esac
     [ -x "$interp" ] && [ -s "$interp" ] || return 1
     # A cache entry never bypasses the anti-PATH-hijack policy.
