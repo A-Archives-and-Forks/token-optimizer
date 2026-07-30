@@ -22,7 +22,7 @@
  */
 
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import type { TrendsStore } from "../storage/trends.js";
 
@@ -82,6 +82,114 @@ export const RESUME_TOPIC_STOPWORDS = new Set([
   "check", "discussed", "talked", "about", "where", "left", "back", "again",
   "what", "that", "this", "with", "from", "into", "please", "yesterday",
 ]);
+
+/** Single-word continuation cues (mirrors Python _CONTINUATION_WORDS). Already
+ *  members of RESUME_TOPIC_STOPWORDS; unioned explicitly for parity with the
+ *  Python ``_recover_item_tokens`` stopword set. */
+const CONTINUATION_WORDS = new Set(["continue", "resume"]);
+
+// ---------------------------------------------------------------------------
+// 3b. Per-item keep/drop filter (GitHub #103) — set-overlap rule, no float
+// ---------------------------------------------------------------------------
+
+// SAME regex as the resume-topic tokenizer (resume-lean.ts:105) so a
+// decision/file naming the current project overlaps the keep set on identical
+// token boundaries across runtimes.
+const RECOVER_TOKEN_RE = /[a-zA-Z0-9_./:-]+/g;
+
+const RECOVER_STOPWORDS: ReadonlySet<string> = new Set<string>([
+  ...RESUME_TOPIC_STOPWORDS,
+  ...CONTINUATION_WORDS,
+]);
+
+/** Distinctive tokens of a recovered item: regex ``[a-zA-Z0-9_./:-]+``,
+ *  lowercased, len > 3, minus resume/continuation glue. Identical extraction
+ *  to Python ``_recover_item_tokens`` so keep/drop parity holds on shared
+ *  token inputs. */
+function recoverItemTokens(text: unknown): Set<string> {
+  const out = new Set<string>();
+  for (const w of String(text ?? "").toLowerCase().match(RECOVER_TOKEN_RE) ?? []) {
+    if (w.length > 3 && !RECOVER_STOPWORDS.has(w)) out.add(w);
+  }
+  return out;
+}
+
+/** Set-overlap keep/drop rule (GitHub #103). KEEP iff < 3 distinctive tokens
+ *  (inconclusive) OR nonempty intersection with keepTokens; DROP iff >= 3
+ *  tokens AND zero overlap. No float threshold. Exported for the parity
+ *  fixture test. */
+export function keepRecoveredItem(itemText: string, keepTokens: Set<string>): boolean {
+  const itemTokens = recoverItemTokens(itemText);
+  if (itemTokens.size < 3) return true;
+  for (const t of itemTokens) {
+    if (keepTokens.has(t)) return true;
+  }
+  return false;
+}
+
+/** Normalized candidate roots for a cwd (resolved + raw, trailing slashes
+ *  stripped). Shared by the in-project path filter. */
+function cwdRoots(cwd: string): Set<string> {
+  const roots = new Set<string>();
+  const rawRoot = cwd.replace(/\/+$/, "");
+  if (rawRoot) roots.add(rawRoot);
+  try {
+    const resolvedRoot = resolve(cwd).replace(/\/+$/, "");
+    if (resolvedRoot) roots.add(resolvedRoot);
+  } catch { /* ignore resolve errors */ }
+  return roots;
+}
+
+function pathUnderRoots(p: string, roots: Set<string>): boolean {
+  if (!p || roots.size === 0) return false;
+  for (const root of roots) {
+    if (p === root || p.startsWith(root + "/")) return true;
+  }
+  return false;
+}
+
+/** The KEPT in-project paths from a checkpoint's active_files (those under
+ *  cwd). Seed the keep-token set so a decision/file naming the current
+ *  project survives the filter. */
+function inProjectPaths(activeFiles: string[], cwd: string): string[] {
+  if (!cwd) return [];
+  const roots = cwdRoots(cwd);
+  if (roots.size === 0) return [];
+  return activeFiles.filter((p) => pathUnderRoots(p, roots));
+}
+
+/** Build the keep-token set: prompt topic tokens ∪ cwd basename tokens ∪
+ *  basenames AND stems of the KEPT in-project paths. Mirrors Python
+ *  ``_continuity_keep_tokens``. */
+function continuityKeepTokens(
+  promptText: string,
+  cwd: string,
+  inProjectPathsList: string[],
+): Set<string> {
+  const keep = recoverItemTokens(promptText);
+  if (cwd) {
+    for (const w of recoverItemTokens(basename(cwd))) keep.add(w);
+  }
+  for (const p of inProjectPathsList) {
+    const ext = extname(p);
+    for (const w of recoverItemTokens(basename(p))) keep.add(w);
+    for (const w of recoverItemTokens(basename(p, ext))) keep.add(w);
+  }
+  return keep;
+}
+
+/** Format the single disclosure line, or null when nothing was dropped.
+ *  Zero-count categories elided. Identical wording across all three runtimes. */
+function formatDisclosure(
+  droppedDecisions: number,
+  droppedFiles: number,
+): string | null {
+  if (droppedDecisions <= 0 && droppedFiles <= 0) return null;
+  const parts: string[] = [];
+  if (droppedDecisions > 0) parts.push(`${droppedDecisions} decision(s)`);
+  if (droppedFiles > 0) parts.push(`${droppedFiles} file(s)`);
+  return `- Omitted (same session, different project): ${parts.join(", ")}`;
+}
 
 /**
  * Precision of the prompt's RESIDUAL topic words (after removing resume cues)
@@ -224,6 +332,8 @@ export function buildLeanResumeContext(
   cp: CheckpointRow,
   sessionId: string,
   maxChars: number = LEAN_MAX_CHARS,
+  promptText: string = "",
+  cwd: string = "",
 ): string {
   const dateStr = new Date(cp.created_at * 1000).toISOString().slice(0, 10);
   const shortId = safeScalar(sessionId, 8).slice(0, 8);
@@ -248,6 +358,14 @@ export function buildLeanResumeContext(
     if (Array.isArray(parsed)) decisions = parsed.filter((d) => typeof d === "string");
   } catch { /* ignore */ }
 
+  // GitHub #103: per-item relevance filter. Filter FIRST, then slice. Disclosure
+  // counts = filter drops ONLY, never slice truncation. Kept items pass through
+  // byte-for-byte (no cascading drops). When promptText/cwd are absent, no
+  // filtering (legacy callers preserve byte-identical output).
+  const keepTokens = (promptText || cwd)
+    ? continuityKeepTokens(promptText, cwd, inProjectPaths(activeFiles, cwd))
+    : null;
+
   // Extract topic summary from content text (it's after "## Topic Summary\n")
   // Run through safeScalar to strip control chars before injection (prompt-injection defense).
   let topicSummary = "";
@@ -260,13 +378,23 @@ export function buildLeanResumeContext(
     body.push(`- Original ask: ${JSON.stringify(topicSummary)}`);
   }
 
-  if (activeFiles.length > 0) {
-    const listed = activeFiles.slice(0, 6).map((p) => safeScalar(p, 140));
+  let droppedFiles = 0;
+  const filesRaw = keepTokens
+    ? activeFiles.filter((p) => keepRecoveredItem(p, keepTokens))
+    : activeFiles;
+  droppedFiles = activeFiles.length - filesRaw.length;
+  if (filesRaw.length > 0) {
+    const listed = filesRaw.slice(0, 6).map((p) => safeScalar(p, 140));
     body.push(`- Modified/read files: ${listed.map((p) => JSON.stringify(p)).join(", ")}`);
   }
 
-  if (decisions.length > 0) {
-    const listed = decisions.slice(0, 4).map((d) => safeScalar(d, 120));
+  let droppedDecisions = 0;
+  const decisionsRaw = keepTokens
+    ? decisions.filter((d) => keepRecoveredItem(d, keepTokens))
+    : decisions;
+  droppedDecisions = decisions.length - decisionsRaw.length;
+  if (decisionsRaw.length > 0) {
+    const listed = decisionsRaw.slice(0, 4).map((d) => safeScalar(d, 120));
     body.push(`- Key decisions: ${listed.map((d) => JSON.stringify(d)).join("; ")}`);
   }
 
@@ -287,6 +415,13 @@ export function buildLeanResumeContext(
   if (cp.quality_score !== null && cp.quality_score !== undefined) {
     const grade = cp.quality_score >= 90 ? "A" : cp.quality_score >= 75 ? "B" : cp.quality_score >= 60 ? "C" : "D";
     body.push(`- Prior context quality: ${grade} (${Math.round(cp.quality_score)}/100)`);
+  }
+
+  // Exactly ONE disclosure line, only when something was dropped. Zero-count
+  // categories elided. Identical wording across all three runtimes.
+  if (keepTokens) {
+    const disclosure = formatDisclosure(droppedDecisions, droppedFiles);
+    if (disclosure) body.push(disclosure);
   }
 
   const footer = [
@@ -456,7 +591,7 @@ export function buildResumeLeanBlock(
   }
 
   const targetSessionId = chosen.session_id || chosen.dbPath.replace(/.*\//, "").replace(".db", "");
-  const block = buildLeanResumeContext(chosen, targetSessionId);
+  const block = buildLeanResumeContext(chosen, targetSessionId, LEAN_MAX_CHARS, userPrompt, cwd);
   return [block, targetSessionId];
 }
 

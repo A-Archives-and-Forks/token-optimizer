@@ -26401,6 +26401,118 @@ def _checkpoint_in_project(sidecar, cwd):
     return False
 
 
+# Tokenizer for the per-item keep/drop rule. SAME regex as the resume-topic
+# tokenizer (measure.py:26336 / :27438) so a decision/file naming the current
+# project overlaps the keep set on identical token boundaries across runtimes.
+_RECOVER_TOKEN_RE = re.compile(r"[a-zA-Z0-9_./:-]+")
+
+
+def _recover_item_tokens(text):
+    """Distinctive tokens of a recovered item for the set-overlap keep/drop rule.
+
+    Regex ``[a-zA-Z0-9_./:-]+``, lowercased, len > 3, minus
+    ``_RESUME_TOPIC_STOPWORDS`` and ``_CONTINUATION_WORDS``. Identical extraction
+    to the resume-topic tokenizer so keep/drop parity holds across runtimes on
+    shared token inputs (no float threshold).
+    """
+    _stop = _RESUME_TOPIC_STOPWORDS | _CONTINUATION_WORDS
+    return {
+        w for w in _RECOVER_TOKEN_RE.findall(str(text or "").lower())
+        if len(w) > 3 and w not in _stop
+    }
+
+
+def _keep_recovered_item(item_text, keep_tokens):
+    """Set-overlap keep/drop rule for a single recovered item (GitHub #103).
+
+    KEEP iff the item has < 3 distinctive tokens (inconclusive -> keep) OR its
+    token set has nonempty intersection with ``keep_tokens``. DROP iff it has
+    >= 3 distinctive tokens AND zero overlap. No float threshold: a
+    cross-project decision that also names the current project overlaps and is
+    kept; a decision naming only the OTHER project drops.
+    """
+    item_tokens = _recover_item_tokens(item_text)
+    if len(item_tokens) < 3:
+        return True
+    return bool(item_tokens & keep_tokens)
+
+
+def _cwd_roots(cwd):
+    """Normalized candidate roots for a cwd (resolved + raw, casefolded on
+    case-insensitive filesystems). Shared by the in-project path filter so the
+    per-item keep set is built from the SAME paths ``_checkpoint_in_project``
+    would accept."""
+    if not cwd:
+        return set()
+    _case_insensitive = platform.system() in ("Windows", "Darwin")
+
+    def _norm(p):
+        s = str(p).replace("\\", "/").rstrip("/")
+        return s.casefold() if _case_insensitive else s
+
+    roots = set()
+    try:
+        roots.add(_norm(Path(cwd).resolve()))
+    except (OSError, RuntimeError, ValueError):
+        pass
+    roots.add(_norm(cwd))
+    return {r for r in roots if r}
+
+
+def _path_under_cwd(p, cwd):
+    """True when path ``p`` is the cwd or lives under it (normalized)."""
+    roots = _cwd_roots(cwd)
+    if not roots or not p:
+        return False
+    _case_insensitive = platform.system() in ("Windows", "Darwin")
+
+    def _norm(x):
+        s = str(x).replace("\\", "/").rstrip("/")
+        return s.casefold() if _case_insensitive else s
+
+    np = _norm(p)
+    return any(np == r or np.startswith(r + "/") for r in roots)
+
+
+def _in_project_paths(sidecar, cwd):
+    """The KEPT in-project paths from a checkpoint sidecar (modified_files +
+    recent_reads that live under cwd). These seed the keep-token set so a
+    decision/file naming the current project survives the filter."""
+    if not isinstance(sidecar, dict) or not cwd:
+        return []
+    paths = []
+    mod = sidecar.get("modified_files")
+    if isinstance(mod, list):
+        for item in mod:
+            p = item.get("path") if isinstance(item, dict) else item
+            if p and _path_under_cwd(p, cwd):
+                paths.append(str(p))
+    reads = sidecar.get("recent_reads")
+    if isinstance(reads, list):
+        for p in reads:
+            if p and _path_under_cwd(p, cwd):
+                paths.append(str(p))
+    return paths
+
+
+def _continuity_keep_tokens(prompt_text, cwd, in_project_paths):
+    """Build the keep-token set for per-item relevance filtering (GitHub #103).
+
+    = prompt topic tokens (same extraction as ``_recover_item_tokens``)
+      ∪ tokens of the cwd basename
+      ∪ tokens of the basenames AND stems of the KEPT in-project paths.
+    """
+    keep = set(_recover_item_tokens(prompt_text))
+    if cwd:
+        keep |= _recover_item_tokens(Path(cwd).name)
+    for p in in_project_paths:
+        name = Path(str(p)).name
+        stem = Path(str(p)).stem
+        keep |= _recover_item_tokens(name)
+        keep |= _recover_item_tokens(stem)
+    return keep
+
+
 def _continuity_resume_block(text, checkpoints, sid_safe, cwd):
     """When the user asks to continue prior work, return a FULL lean
     reconstruction of the right same-project session, or "" to fall through to
@@ -26441,7 +26553,7 @@ def _continuity_resume_block(text, checkpoints, sid_safe, cwd):
         sid = m.group(1) if m else None
     if not sid:
         return ""
-    block = build_lean_resume_context(sid)
+    block = build_lean_resume_context(sid, prompt_text=text, cwd=cwd)
     if block:
         # Count the cold-resume cost this lean reconstruction avoided (idempotent
         # per target session). Token-free; never blocks the injection.
@@ -26642,20 +26754,50 @@ def _continuity_prompt_hint(prompt_text="", session_id=None, cwd=None, max_age_m
             f"- Prior context quality: {quality.get('grade', '?')} "
             f"({quality.get('score', '?')}/100), fill {quality.get('breakdown', {}).get('context_fill_degradation', {}).get('fill_pct', '?')}%"
         )
+    # Per-item relevance filter (GitHub #103): a checkpoint that passed the
+    # same-project gate may still carry session-wide Key Decisions / Files that
+    # name ONLY the other project in a two-project session. Drop those with the
+    # set-overlap rule (no float threshold): filter FIRST, then apply the
+    # existing [:3]/[:5] slices. Disclosure counts = filter drops ONLY, never
+    # slice truncation. Kept items pass through byte-for-byte (no redacting of a
+    # dropped path named inside a kept decision -- cascading drops is the
+    # over-prune failure mode, forbidden).
+    keep_tokens = _continuity_keep_tokens(
+        text, cwd, _in_project_paths(sidecar, cwd))
+    dropped_decisions = 0
     if decisions:
-        safe_decisions = [_safe_recovered_scalar(d, 120) for d in decisions[:3]]
-        lines.append("- Decisions: " + "; ".join(repr(d) for d in safe_decisions if d))
+        kept_decisions = [d for d in decisions if _keep_recovered_item(d, keep_tokens)]
+        dropped_decisions = len(decisions) - len(kept_decisions)
+        safe_decisions = [_safe_recovered_scalar(d, 120) for d in kept_decisions[:3]]
+        if safe_decisions:
+            lines.append("- Decisions: " + "; ".join(repr(d) for d in safe_decisions if d))
     hinted_paths = []
+    dropped_files = 0
     if modified:
-        paths = []
-        for item in modified[:5]:
-            if isinstance(item, dict):
-                p = str(item.get("path") or "")
-                paths.append(p)
-                if p:
-                    hinted_paths.append(p)
+        kept_paths = []
+        for item in modified:
+            if not isinstance(item, dict):
+                continue
+            p = str(item.get("path") or "")
+            if p and not _keep_recovered_item(p, keep_tokens):
+                dropped_files += 1
+                continue
+            kept_paths.append(p)
+        paths = kept_paths[:5]
+        for p in paths:
+            if p:
+                hinted_paths.append(p)
         if paths:
             lines.append("- Files: " + ", ".join(repr(_safe_recovered_scalar(p, 140)) for p in paths))
+    # Exactly ONE disclosure line, only when something was dropped. Zero-count
+    # categories are elided. Identical wording across all three runtimes.
+    if dropped_decisions > 0 or dropped_files > 0:
+        _disc = []
+        if dropped_decisions > 0:
+            _disc.append(f"{dropped_decisions} decision(s)")
+        if dropped_files > 0:
+            _disc.append(f"{dropped_files} file(s)")
+        lines.append("- Omitted (same session, different project): " + ", ".join(_disc))
     if archives:
         summary = []
         for entry in archives[-3:]:
@@ -26850,20 +26992,35 @@ def resume_lean_candidates(limit=15, days=30):
     return out
 
 
-def _lean_list(items, n, width=140):
+def _lean_list(items, n, width=140, keep_tokens=None):
     """Sanitize + cap a list of recovered strings for injection. Tolerates a
-    corrupt/hand-edited sidecar where the field is not a list."""
+    corrupt/hand-edited sidecar where the field is not a list.
+
+    When ``keep_tokens`` is provided, the set-overlap keep/drop filter
+    (``_keep_recovered_item``) is applied FIRST and the ``n`` slice is taken
+    from the survivors (GitHub #103). When ``keep_tokens`` is None the behavior
+    is byte-identical to the pre-filter implementation (first ``n`` items)."""
     if not isinstance(items, (list, tuple)):
         return []
     cleaned = []
-    for item in items[:n]:
+    if keep_tokens is None:
+        for item in items[:n]:
+            s = _safe_recovered_scalar(item, width)
+            if s:
+                cleaned.append(s)
+        return cleaned
+    for item in items:
+        if not _keep_recovered_item(item, keep_tokens):
+            continue
         s = _safe_recovered_scalar(item, width)
         if s:
             cleaned.append(s)
+        if len(cleaned) >= n:
+            break
     return cleaned
 
 
-def build_lean_resume_context(session_id, max_chars=3500):
+def build_lean_resume_context(session_id, max_chars=3500, prompt_text=None, cwd=None):
     """Reconstruct a LEAN, paste-ready context block for a cold session.
 
     Faithful tier (checkpoint present): active task, continuation/handover, open
@@ -26872,6 +27029,12 @@ def build_lean_resume_context(session_id, max_chars=3500):
     Token-free: only reads the sidecar JSON and session_log. Returns "" if the
     session is unknown. Fenced as RECOVERED DATA so a fresh session treats it as
     context, never instructions.
+
+    When ``prompt_text`` and ``cwd`` are both supplied, the per-item relevance
+    filter (GitHub #103) drops Key Decisions / Modified files / Recently read
+    that name only a DIFFERENT project from this same checkpoint, and emits one
+    disclosure line when anything is dropped. Without them (e.g. the CLI
+    ``--resume-lean`` caller) the block is unfiltered for backward compat.
     """
     sid_safe = sanitize_session_id(session_id) if session_id else None
     if not sid_safe:
@@ -26882,6 +27045,10 @@ def build_lean_resume_context(session_id, max_chars=3500):
         return ""
 
     sidecar = _read_checkpoint_sidecar(cp["path"]) if cp else {}
+    keep_tokens = (
+        _continuity_keep_tokens(prompt_text, cwd, _in_project_paths(sidecar, cwd))
+        if (prompt_text and cwd) else None
+    )
     # topic + project come from session_log / sidecar (attacker-influenceable prior
     # conversation text); route BOTH through _safe_recovered_scalar so control
     # chars / null bytes / fence-breakout tokens can't escape the RECOVERED-DATA
@@ -26912,21 +27079,47 @@ def build_lean_resume_context(session_id, max_chars=3500):
         oq = _lean_list(sidecar.get("open_questions", []), 3)
         if oq:
             body.append("- Open questions: " + "; ".join(repr(q) for q in oq))
-        dec = _lean_list(sidecar.get("decisions", []), 4, width=120)
+        # Per-item relevance filter (GitHub #103): filter FIRST, then slice.
+        # Disclosure counts = filter drops ONLY, never slice truncation.
+        dropped_decisions = 0
+        raw_decisions = sidecar.get("decisions", [])
+        if keep_tokens is not None and isinstance(raw_decisions, (list, tuple)):
+            kept_decisions = [d for d in raw_decisions if _keep_recovered_item(d, keep_tokens)]
+            dropped_decisions = len(raw_decisions) - len(kept_decisions)
+            dec = _lean_list(kept_decisions, 4, width=120)
+        else:
+            dec = _lean_list(raw_decisions, 4, width=120)
         if dec:
             body.append("- Key decisions: " + "; ".join(repr(d) for d in dec))
         mod_paths = []
         mod_raw = sidecar.get("modified_files")
         if not isinstance(mod_raw, (list, tuple)):
             mod_raw = []
-        for item in mod_raw[:6]:
+        dropped_mod = 0
+        kept_mod = []
+        for item in mod_raw:
             p = item.get("path") if isinstance(item, dict) else item
-            p = _safe_recovered_scalar(p, 140)
-            if p:
-                mod_paths.append(p)
+            ps = str(p) if p is not None else ""
+            if keep_tokens is not None and ps and not _keep_recovered_item(ps, keep_tokens):
+                dropped_mod += 1
+                continue
+            kept_mod.append(p)
+        for p in kept_mod[:6]:
+            sp = _safe_recovered_scalar(p, 140)
+            if sp:
+                mod_paths.append(sp)
         if mod_paths:
             body.append("- Modified files: " + ", ".join(repr(p) for p in mod_paths))
-        reads = _lean_list(sidecar.get("recent_reads", []), 5, width=140)
+        dropped_reads = 0
+        raw_reads = sidecar.get("recent_reads", [])
+        if not isinstance(raw_reads, (list, tuple)):
+            raw_reads = []
+        if keep_tokens is not None:
+            kept_reads = [r for r in raw_reads if _keep_recovered_item(r, keep_tokens)]
+            dropped_reads = len(raw_reads) - len(kept_reads)
+            reads = _lean_list(kept_reads, 5, width=140)
+        else:
+            reads = _lean_list(raw_reads, 5, width=140)
         if reads:
             body.append("- Recently read: " + ", ".join(repr(p) for p in reads))
         git = sidecar.get("git") if isinstance(sidecar.get("git"), dict) else {}
@@ -26938,6 +27131,19 @@ def build_lean_resume_context(session_id, max_chars=3500):
         q = sidecar.get("quality") if isinstance(sidecar.get("quality"), dict) else {}
         if q.get("grade") is not None:
             body.append(f"- Prior context quality: {q.get('grade')} ({q.get('score')}/100)")
+        # Exactly ONE disclosure line, only when something was dropped. {F} =
+        # dropped Modified files + Recently read combined; zero-count categories
+        # elided. Identical wording across all three runtimes.
+        if keep_tokens is not None:
+            _d_dec = dropped_decisions
+            _d_files = dropped_mod + dropped_reads
+            if _d_dec > 0 or _d_files > 0:
+                _disc = []
+                if _d_dec > 0:
+                    _disc.append(f"{_d_dec} decision(s)")
+                if _d_files > 0:
+                    _disc.append(f"{_d_files} file(s)")
+                body.append("- Omitted (same session, different project): " + ", ".join(_disc))
     else:
         # Thin tier: no checkpoint survived retention; session_log stats only.
         body.append("- (thin reconstruction - checkpoint aged out; only session "

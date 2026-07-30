@@ -26,6 +26,11 @@
  */
 /** Minimum relevance score to emit a hint. Python default: 0.3 */
 export declare const RELEVANCE_THRESHOLD: number;
+/** Set-overlap keep/drop rule (GitHub #103). KEEP iff < 3 distinctive tokens
+ *  (inconclusive) OR nonempty intersection with keepTokens; DROP iff >= 3
+ *  tokens AND zero overlap. No float threshold. Exported for the parity
+ *  fixture test. */
+export declare function keepRecoveredItem(itemText: string, keepTokens: Set<string>): boolean;
 /**
  * Score relevance between prompt text and a checkpoint file path.
  *
@@ -37,7 +42,7 @@ export declare const RELEVANCE_THRESHOLD: number;
  * Returns 0.0 – 1.0.
  */
 export declare function keywordRelevanceScore(text: string, checkpointPath: string, precomputedContent?: string): number;
-interface CheckpointEntry {
+export interface CheckpointEntry {
     /** Absolute path to the .md checkpoint file. */
     path: string;
     /** Session directory name (sanitized sessionId). */
@@ -54,7 +59,7 @@ interface CheckpointEntry {
  * Reads each session's manifest.jsonl (same format written by smart-compact.ts).
  */
 export declare function listAllCheckpoints(maxAgeDays?: number): CheckpointEntry[];
-interface ContinuityCandidate {
+export interface ContinuityCandidate {
     entry: CheckpointEntry;
     score: number;
     content: string;
@@ -84,7 +89,7 @@ export declare function findBestContinuityCheckpoint(promptText: string, current
  *
  * Mirrors the lines[] block in measure.py:_continuity_prompt_hint() (~15883).
  */
-export declare function buildContinuityHint(candidate: ContinuityCandidate): string;
+export declare function buildContinuityHint(candidate: ContinuityCandidate, promptText?: string, cwd?: string): string;
 /**
  * Neutralize a raw checkpoint body before injecting it into context.
  *
@@ -173,7 +178,7 @@ export declare function checkpointInProject(content: string, cwd: string): boole
  *   Thin tier (no checkpoint .md): not implemented — OpenClaw always has the .md
  *   since listAllCheckpoints() only returns valid, in-window checkpoints.
  */
-export declare function buildResumeLeanBlock(entry: CheckpointEntry, content: string, maxChars?: number): string;
+export declare function buildResumeLeanBlock(entry: CheckpointEntry, content: string, maxChars?: number, promptText?: string, cwd?: string): string;
 /**
  * Log a resume_lean savings event.
  * avoided = checkpoint raw bytes / 3.3 (proxy for cache-create tokens — OpenClaw
@@ -214,5 +219,4 @@ export declare function findResumeLeanCheckpoint(promptText: string, currentSess
  * stays free of circular imports and tests can stub it out.
  */
 export declare function tryBuildResumeLeanHint(promptText: string, currentSessionId: string, cwd: string, logSavingsEventFn: (eventType: string, tokensSaved: number, sessionId: string, detail?: string) => void, maxAgeDays?: number): string | null;
-export {};
 //# sourceMappingURL=continuity.d.ts.map
