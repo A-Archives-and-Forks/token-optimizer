@@ -555,6 +555,250 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# ---------------------------------------------------------------------------
+# Uninstall-direction manifest reconcile (issue #106 / F3)
+# ---------------------------------------------------------------------------
+
+_KNOWN_MARKETPLACES_NAME = "known_marketplaces.json"
+# A marketplace entry is "ours" when its name OR installLocation references
+# token-optimizer. Our marketplace names derive from the repo, so they always
+# contain "token-optimizer"; matching the installLocation too catches a
+# renamed entry that still points at our marketplace dir.
+_TOKEN_MARKER = "token-optimizer"
+
+
+def _is_our_marketplace(name: str, entry: object) -> bool:
+    if not isinstance(name, str):
+        return False
+    if _TOKEN_MARKER in name.lower():
+        return True
+    if isinstance(entry, dict):
+        loc = entry.get("installLocation", "")
+        if isinstance(loc, str) and _TOKEN_MARKER in loc.lower():
+            return True
+    return False
+
+
+def _load_known_marketplaces(claude_home_dir: Path) -> dict:
+    """Return the parsed known_marketplaces.json, or {} on any failure."""
+    path = claude_home_dir / "plugins" / _KNOWN_MARKETPLACES_NAME
+    try:
+        if not path.is_file() or path.stat().st_size > _MAX_MANIFEST_BYTES:
+            return {}
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _our_plugin_keys(registry: dict) -> list[str]:
+    """Return our ``token-optimizer@<marketplace>`` keys in installed_plugins."""
+    plugins = registry.get("plugins", {})
+    if not isinstance(plugins, dict):
+        return []
+    return sorted(
+        k for k in plugins
+        if isinstance(k, str) and k.startswith(_PLUGIN_NAME + "@")
+    )
+
+
+def _entry_is_stale(install_path: str) -> bool:
+    """True iff the entry's installPath no longer exists on disk."""
+    if not install_path:
+        return True
+    try:
+        return not Path(install_path).is_dir()
+    except (OSError, ValueError):
+        return True
+
+
+def _atomic_write_json(path: Path, data) -> bool:
+    """Write JSON to ``path`` via a temp file + os.replace. Returns success."""
+    import tempfile
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-", suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2, ensure_ascii=False)
+                fh.write("\n")
+            os.replace(tmp, str(path))
+            return True
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+    except OSError:
+        return False
+
+
+def _backup_file(src: Path, backup_dest_parent: Path) -> Path | None:
+    """Copy a single file into ``backup_dest_parent/<src.name>``. Returns dest or None."""
+    try:
+        dest = backup_dest_parent / src.name
+        i = 1
+        while dest.exists():
+            dest = backup_dest_parent / f"{src.name}-{i}"
+            i += 1
+        shutil.copy2(src, dest)
+        return dest
+    except OSError:
+        return None
+
+
+def reconcile_uninstall(
+    claude_home_dir: Path,
+    *,
+    dry_run: bool = False,
+    remove: bool = False,
+) -> dict:
+    """Report (and optionally remove) our stale host-manifest entries.
+
+    Two Claude Code state files are reconciled on the UNINSTALL direction
+    (issue #106 / F3):
+
+    - ``installed_plugins.json``: our ``token-optimizer@*`` entries whose
+      ``installPath`` no longer exists (left dangling after
+      ``/plugin uninstall`` removed the cache dir but not the manifest key).
+    - ``known_marketplaces.json``: our marketplace entries (name or
+      installLocation references token-optimizer).
+
+    By default (``remove=False``) this only REPORTS what is stale. Under the
+    explicit cleanup command (``remove=True``) it writes a backup of each file
+    first, then removes our STALE entries, leaving other plugins' entries
+    byte-identical. Never raises; all errors land in ``warnings``.
+
+    Returns a result dict with ``reported`` and ``removed`` lists plus
+    ``backup`` (the backup dir created, when any) and ``warnings``.
+    """
+    result: dict = {
+        "dry_run": dry_run,
+        "remove": remove,
+        "reported": [],
+        "removed": [],
+        "backup": None,
+        "warnings": [],
+    }
+    home = claude_home_dir
+    plugins_dir = home / "plugins"
+    installed_path = plugins_dir / _MANIFEST_NAME
+    marketplaces_path = plugins_dir / _KNOWN_MARKETPLACES_NAME
+
+    registry = _load_installed_plugins(home)
+    our_keys = _our_plugin_keys(registry)
+    stale_keys: list[str] = []
+    for key in our_keys:
+        installs = registry.get("plugins", {}).get(key, [])
+        if not isinstance(installs, list) or not installs:
+            stale_keys.append(key)
+            continue
+        # An entry is stale if ALL its install records point at gone paths.
+        all_gone = all(
+            _entry_is_stale(str(inst.get("installPath", "")))
+            for inst in installs if isinstance(inst, dict)
+        ) or not any(isinstance(inst, dict) for inst in installs)
+        if all_gone:
+            stale_keys.append(key)
+        result["reported"].append({
+            "file": str(installed_path),
+            "key": key,
+            "stale": all_gone,
+            "install_path": installs[0].get("installPath", "") if isinstance(installs[0], dict) else "",
+        })
+
+    marketplaces = _load_known_marketplaces(home)
+    our_mkt_keys = sorted(
+        k for k, v in marketplaces.items() if _is_our_marketplace(k, v)
+    )
+    for key in our_mkt_keys:
+        entry = marketplaces.get(key, {})
+        loc = entry.get("installLocation", "") if isinstance(entry, dict) else ""
+        stale = bool(loc) and not Path(loc).is_dir()
+        result["reported"].append({
+            "file": str(marketplaces_path),
+            "key": key,
+            "stale": stale,
+            "install_location": loc,
+        })
+
+    if not remove:
+        return result
+
+    # Removal path: back up both files first, then drop our STALE entries.
+    to_remove_installed = [k for k in stale_keys]
+    to_remove_marketplaces = [
+        k for k in our_mkt_keys
+        if (isinstance(marketplaces.get(k), dict)
+            and _entry_is_stale(str(marketplaces[k].get("installLocation", ""))))
+    ]
+    if not to_remove_installed and not to_remove_marketplaces:
+        return result
+
+    if dry_run:
+        # Dry-run + remove: disclose what WOULD be removed, touch nothing
+        # (no backup dir created, no files written).
+        for key in to_remove_installed:
+            result["removed"].append(f"{installed_path}::{key}")
+        for key in to_remove_marketplaces:
+            result["removed"].append(f"{marketplaces_path}::{key}")
+        return result
+
+    backup_root = home / _BACKUP_ROOT_NAME / _PLUGIN_NAME
+    if not _backup_dir_writable(backup_root):
+        msg = f"[Token Optimizer] ABORT: backup dir {backup_root} not writable; manifest entries left in place."
+        result["warnings"].append(msg)
+        print(msg, file=sys.stderr)
+        return result
+    stamp = _timestamp()
+    backup_dest = backup_root / stamp
+    try:
+        backup_dest.mkdir(parents=True, exist_ok=False)
+    except OSError:
+        msg = f"[Token Optimizer] ABORT: could not create backup dir {backup_dest}; manifest entries left in place."
+        result["warnings"].append(msg)
+        print(msg, file=sys.stderr)
+        return result
+    result["backup"] = str(backup_dest)
+
+    if to_remove_installed and installed_path.is_file():
+        backed = _backup_file(installed_path, backup_dest)
+        if backed is None:
+            msg = f"[Token Optimizer] ABORT: could not back up {installed_path}; installed_plugins entries left in place."
+            result["warnings"].append(msg)
+            print(msg, file=sys.stderr)
+        else:
+            plugins = registry.get("plugins", {})
+            for key in to_remove_installed:
+                plugins.pop(key, None)
+                result["removed"].append(f"{installed_path}::{key}")
+            if not _atomic_write_json(installed_path, registry):
+                msg = f"[Token Optimizer] WARNING: failed to write {installed_path}; entries may remain."
+                result["warnings"].append(msg)
+                print(msg, file=sys.stderr)
+
+    if to_remove_marketplaces and marketplaces_path.is_file():
+        backed = _backup_file(marketplaces_path, backup_dest)
+        if backed is None:
+            msg = f"[Token Optimizer] ABORT: could not back up {marketplaces_path}; known_marketplaces entries left in place."
+            result["warnings"].append(msg)
+            print(msg, file=sys.stderr)
+        else:
+            for key in to_remove_marketplaces:
+                marketplaces.pop(key, None)
+                result["removed"].append(f"{marketplaces_path}::{key}")
+            if not _atomic_write_json(marketplaces_path, marketplaces):
+                msg = f"[Token Optimizer] WARNING: failed to write {marketplaces_path}; entries may remain."
+                result["warnings"].append(msg)
+                print(msg, file=sys.stderr)
+
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     result = detect_and_reconcile(dry_run=args.dry_run)
