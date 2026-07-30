@@ -16,12 +16,14 @@
 import { test, expect } from "bun:test";
 import {
   keepRecoveredItem,
+  crossProjectFileDrop,
   buildResumeLeanBlock,
   buildContinuityHint,
   type CheckpointEntry,
   type ContinuityCandidate,
 } from "./continuity.js";
 import parityFixtureJson from "../../tests/fixtures/keep_recovered_parity.json";
+import dropFixtureJson from "../../tests/fixtures/cross_project_file_drop_parity.json";
 
 // ---------------------------------------------------------------------------
 // Shared parity fixture — single source of truth.
@@ -46,6 +48,34 @@ test("keepRecoveredItem matches the shared parity fixture exactly", () => {
 test("keepRecoveredItem is purely set-overlap, no float threshold", () => {
   expect(keepRecoveredItem("alpha beta gamma delta epsilon zeta", new Set())).toBe(false);
   expect(keepRecoveredItem("alpha beta", new Set())).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+// crossProjectFileDrop parity — path normalization (GAUNTLET C2)
+// Loaded from tests/fixtures/cross_project_file_drop_parity.json, consumed by
+// all 3 suites. Covers backslash, UNC, trailing separator, mixed separators,
+// case mismatch (casefold on Darwin/Win32), relative, and cwd-absent.
+// ---------------------------------------------------------------------------
+
+const _CASEFOLD = process.platform === "win32" || process.platform === "darwin";
+
+interface DropRow {
+  comment: string;
+  path: string;
+  cwd: string;
+  expected_drop: boolean;
+  expected_drop_casefold?: boolean;
+}
+
+test("crossProjectFileDrop matches the shared path-normalization fixture exactly", () => {
+  for (const row of dropFixtureJson as DropRow[]) {
+    const expected =
+      _CASEFOLD && row.expected_drop_casefold !== undefined
+        ? row.expected_drop_casefold
+        : row.expected_drop;
+    const got = crossProjectFileDrop(row.path, row.cwd);
+    expect(got).toBe(expected);
+  }
 });
 
 // ---------------------------------------------------------------------------

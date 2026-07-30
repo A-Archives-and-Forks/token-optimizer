@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import platform
 import sys
 import tempfile
 from datetime import datetime
@@ -45,6 +46,28 @@ with open(REPO / "tests" / "fixtures" / "keep_recovered_parity.json", encoding="
         (row["item_text"], set(row["keep_tokens"]), row["expected_keep"])
         for row in json.load(_f)
     ]
+
+
+# Shared path-normalization fixture for _cross_project_file_drop (GAUNTLET C2).
+# Single source of truth consumed by all 3 suites (Python, OpenClaw TS, OpenCode
+# TS). Each row: (path, cwd, expected_drop_case_sensitive, expected_drop_casefold).
+# expected_drop_casefold is None for rows whose result is platform-independent.
+with open(
+    REPO / "tests" / "fixtures" / "cross_project_file_drop_parity.json",
+    encoding="utf-8",
+) as _f:
+    _DROP_ROWS_RAW = json.load(_f)
+DROP_FIXTURE = [
+    (
+        row["path"],
+        row["cwd"],
+        row["expected_drop"],
+        row.get("expected_drop_casefold"),
+    )
+    for row in _DROP_ROWS_RAW
+]
+
+_CASEFOLD_FS = platform.system() in ("Windows", "Darwin")
 
 
 @pytest.fixture
@@ -97,6 +120,28 @@ def test_keep_recovered_item_no_float_threshold():
     # still keeps. No score is computed.
     assert mod._keep_recovered_item("alpha beta gamma delta epsilon zeta", set()) is False
     assert mod._keep_recovered_item("alpha beta", set()) is True
+
+
+# ---------------------------------------------------------------------------
+# Parity: _cross_project_file_drop on the shared path-normalization fixture
+# (GAUNTLET C2). Covers backslash, UNC, trailing separator, mixed separators,
+# case mismatch (casefold on Darwin/Windows), relative, and cwd-absent.
+# ---------------------------------------------------------------------------
+
+def test_cross_project_file_drop_parity_fixture():
+    """_cross_project_file_drop must match the shared fixture exactly.
+
+    The case-mismatch row has two expectations: expected_drop (case-sensitive,
+    Linux) and expected_drop_casefold (case-insensitive, Darwin/Windows).
+    """
+    mod = importlib.import_module("measure")
+    for path, cwd, expected_cs, expected_cf in DROP_FIXTURE:
+        expected = expected_cf if (_CASEFOLD_FS and expected_cf is not None) else expected_cs
+        got = mod._cross_project_file_drop(path, cwd)
+        assert got is expected, (
+            f"path={path!r} cwd={cwd!r} casefold={_CASEFOLD_FS} "
+            f"expected={expected} got={got}"
+        )
 
 
 # ---------------------------------------------------------------------------

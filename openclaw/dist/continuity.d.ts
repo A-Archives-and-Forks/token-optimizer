@@ -31,6 +31,15 @@ export declare const RELEVANCE_THRESHOLD: number;
  *  tokens AND zero overlap. No float threshold. Exported for the parity
  *  fixture test. */
 export declare function keepRecoveredItem(itemText: string, keepTokens: Set<string>): boolean;
+/** True when file path ``p`` is an attributable absolute path that does NOT
+ *  live under ``cwd`` — a cross-project file (GitHub #103). The set-overlap
+ *  tokenizer treats a full path as a SINGLE token (the regex includes slashes)
+ *  so it has < 3 distinctive tokens and would always be kept by
+ *  ``keepRecoveredItem``; this rule drops such paths at the file-filter sites
+ *  regardless of token overlap, using the EXISTING ``pathUnderRoots`` prefix
+ *  check. Relative/basenames fall through to the token rule. cwd absent ->
+ *  never drop (legacy callers stay unfiltered). */
+export declare function crossProjectFileDrop(p: string, cwd: string): boolean;
 /**
  * Score relevance between prompt text and a checkpoint file path.
  *

@@ -1,0 +1,81 @@
+[
+  {
+    "comment": "unix in-project -> keep (not drop)",
+    "path": "/home/u/foo/bar.py",
+    "cwd": "/home/u/foo",
+    "expected_drop": false
+  },
+  {
+    "comment": "unix cross-project -> drop",
+    "path": "/home/u/other/bar.py",
+    "cwd": "/home/u/foo",
+    "expected_drop": true
+  },
+  {
+    "comment": "Windows backslash in-project -> keep (separator normalization; without _norm the root+'/' prefix check missed backslash paths)",
+    "path": "C:\\Users\\foo\\bar.py",
+    "cwd": "C:\\Users\\foo",
+    "expected_drop": false
+  },
+  {
+    "comment": "Windows backslash cross-project -> drop",
+    "path": "C:\\Users\\other\\bar.py",
+    "cwd": "C:\\Users\\foo",
+    "expected_drop": true
+  },
+  {
+    "comment": "UNC share in-project -> keep (backslashes normalized to forward slashes, isAbsolutePath accepts //server/...)",
+    "path": "\\\\server\\share\\foo\\bar.py",
+    "cwd": "\\\\server\\share\\foo",
+    "expected_drop": false
+  },
+  {
+    "comment": "UNC share cross-project -> drop",
+    "path": "\\\\server\\share\\other\\bar.py",
+    "cwd": "\\\\server\\share\\foo",
+    "expected_drop": true
+  },
+  {
+    "comment": "trailing separator on cwd -> keep (trailing sep stripped by _norm)",
+    "path": "/home/u/foo/bar.py",
+    "cwd": "/home/u/foo/",
+    "expected_drop": false
+  },
+  {
+    "comment": "trailing backslash on cwd -> keep (trailing sep stripped after backslash normalization)",
+    "path": "C:\\Users\\foo\\bar.py",
+    "cwd": "C:\\Users\\foo\\",
+    "expected_drop": false
+  },
+  {
+    "comment": "mixed separators in-project -> keep (backslash normalized to forward slash before prefix check)",
+    "path": "C:\\Users\\foo/bar.py",
+    "cwd": "C:\\Users\\foo",
+    "expected_drop": false
+  },
+  {
+    "comment": "mixed separators cross-project -> drop",
+    "path": "C:\\Users\\other/bar.py",
+    "cwd": "C:\\Users\\foo",
+    "expected_drop": true
+  },
+  {
+    "comment": "case mismatch in-project: on case-insensitive FS (Darwin/Win32) the paths are the SAME dir -> keep; on case-sensitive FS (Linux) they differ -> drop. expected_drop is the case-sensitive result; expected_drop_casefold is the case-insensitive result.",
+    "path": "/Home/U/Foo/bar.py",
+    "cwd": "/home/u/foo",
+    "expected_drop": true,
+    "expected_drop_casefold": false
+  },
+  {
+    "comment": "relative path -> never drop (not attributable to a specific project; falls through to the token-overlap rule)",
+    "path": "bar.py",
+    "cwd": "/home/u/foo",
+    "expected_drop": false
+  },
+  {
+    "comment": "cwd absent -> never drop (legacy callers stay unfiltered)",
+    "path": "/home/u/other/bar.py",
+    "cwd": "",
+    "expected_drop": false
+  }
+]

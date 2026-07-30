@@ -127,14 +127,34 @@ export function keepRecoveredItem(itemText: string, keepTokens: Set<string>): bo
   return false;
 }
 
+// Case-insensitive filesystems normalize away casing in path lookups, so a
+// case-mismatched prefix (macOS `/Home/U/Foo` vs cwd `/home/u/foo`) is the SAME
+// directory and must NOT be judged cross-project. Mirrors Python ``_norm``
+// (measure.py:26369) which casefolds on ``platform.system() in
+// ("Windows","Darwin")``. TS has no ``casefold``; ``toLowerCase`` is the
+// ASCII-path-equivalent (paths are byte-identical under casefold vs
+// toLowerCase for the realistic ASCII subset).
+const _CASE_INSENSITIVE_FS =
+  process.platform === "win32" || process.platform === "darwin";
+
+/** Normalize a path for prefix comparison (mirrors Python ``_norm``):
+ *  backslashes -> forward slashes, strip trailing separator, casefold on
+ *  case-insensitive filesystems. Applied to BOTH the candidate roots and the
+ *  probed path so the prefix check is separator- and case-stable. */
+function _normPath(p: string): string {
+  const s = String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+  return _CASE_INSENSITIVE_FS ? s.toLowerCase() : s;
+}
+
 /** Normalized candidate roots for a cwd (resolved + raw, trailing slashes
- *  stripped). Shared by the in-project path filter. */
+ *  stripped, casefolded on case-insensitive filesystems). Shared by the
+ *  in-project path filter. */
 function cwdRoots(cwd: string): Set<string> {
   const roots = new Set<string>();
-  const rawRoot = cwd.replace(/\/+$/, "");
+  const rawRoot = _normPath(cwd);
   if (rawRoot) roots.add(rawRoot);
   try {
-    const resolvedRoot = resolve(cwd).replace(/\/+$/, "");
+    const resolvedRoot = _normPath(resolve(cwd));
     if (resolvedRoot) roots.add(resolvedRoot);
   } catch { /* ignore resolve errors */ }
   return roots;
@@ -142,8 +162,9 @@ function cwdRoots(cwd: string): Set<string> {
 
 function pathUnderRoots(p: string, roots: Set<string>): boolean {
   if (!p || roots.size === 0) return false;
+  const np = _normPath(p);
   for (const root of roots) {
-    if (p === root || p.startsWith(root + "/")) return true;
+    if (np === root || np.startsWith(root + "/")) return true;
   }
   return false;
 }
@@ -166,7 +187,7 @@ function isAbsolutePath(p: string): boolean {
  *  regardless of token overlap, using the EXISTING ``pathUnderRoots`` prefix
  *  check. Relative/basenames fall through to the token rule. cwd absent ->
  *  never drop (legacy callers stay unfiltered). */
-function crossProjectFileDrop(p: string, cwd: string): boolean {
+export function crossProjectFileDrop(p: string, cwd: string): boolean {
   if (!cwd || !p) return false;
   return isAbsolutePath(p) && !pathUnderRoots(p, cwdRoots(cwd));
 }
