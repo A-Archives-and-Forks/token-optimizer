@@ -93,6 +93,7 @@ except ImportError:  # pragma: no cover - Python < 3.11 fallback
 
 from hook_io import read_stdin_hook_input as _read_stdin_hook_input_shared
 from hook_runtime import HookDeadline, LeaseLock, current_deadline, lease_lock
+import plugin_env
 from plugin_env import (
     _all_plugin_data_dirs,
     interpret_flag_value,
@@ -18879,6 +18880,68 @@ _ALL_WINDOWS_TASK_NAMES = (
 )
 
 
+def _scheduler_names_to_sweep(this_install_only: bool, all_names, active_name):
+    """Scheduler identifiers to unregister (#106 F2 / P2-2).
+
+    ``this_install_only`` scoped the per-identity FILE sweep but not the
+    scheduler loops, so a "just this install" uninstall still booted out every
+    runtime's LaunchAgent/unit/task -- leaving siblings half-dead (files
+    intact, registration gone) and silently tearing down a co-installed
+    Codex/Hermes dashboard. Honor the flag on both halves.
+    """
+    return (active_name,) if this_install_only else tuple(all_names)
+
+
+def _sweep_identity_daemon_files(snap_dir: Path, keys) -> tuple[list[str], list[str]]:
+    """Delete the daemon artifacts named by ``keys`` from one identity.
+
+    Returns ``(removed, failed)`` as path strings. Failures are reported
+    rather than swallowed (#106 F2 / P2-4) so the caller can refuse to claim
+    a clean sweep while a 0600 daemon-token is still on disk.
+    """
+    files = _daemon_per_identity_files(snap_dir)
+    removed: list[str] = []
+    failed: list[str] = []
+    for key in keys:
+        was_removed, did_fail = _unlink_reporting(files[key])
+        if was_removed:
+            removed.append(str(files[key]))
+        elif did_fail:
+            failed.append(str(files[key]))
+    return removed, failed
+
+
+def _print_identity_sweep_report(removed, per_identity_removed, failed, this_install_only):
+    """Shared uninstall reporting for all three platforms (#106 F2 / P2-4).
+
+    Honesty rules preserved from torture-L7 and extended: never print a
+    "Deleted" line for a survivor, keep "Nothing to remove" when nothing
+    existed, and NEVER print the all-identities banner when any artifact
+    resisted deletion -- a surviving token means the sweep was not clean.
+    """
+    if removed:
+        print("[Token Optimizer] Dashboard daemon removed.")
+        for path in removed:
+            print(f"  Deleted: {path}")
+        if per_identity_removed and not this_install_only and not failed:
+            print("  Swept all token-optimizer-* identities:")
+            for snap_dir, items in per_identity_removed:
+                print(f"    {snap_dir}: {len(items)} file(s)")
+    elif not failed:
+        print("[Token Optimizer] No daemon artifacts found. Nothing to remove.")
+    if failed:
+        print(
+            f"  WARNING: {len(failed)} daemon artifact(s) could NOT be removed "
+            "(permission denied or in use)."
+        )
+        for path in failed:
+            print(f"    Survived: {path}")
+        print(
+            "    A surviving daemon-token is a live CSRF secret -- delete these "
+            "manually, then re-run."
+        )
+
+
 def _daemon_per_identity_files(snapshot_dir: Path) -> dict:
     """Per-identity daemon artifact paths rooted at ``snapshot_dir``.
 
@@ -18922,7 +18985,15 @@ def _daemon_identity_snapshot_dirs(this_install_only: bool) -> list[Path]:
     dirs: list[Path] = []
     try:
         for ident in _all_plugin_data_dirs():
-            dirs.append(ident / "data")
+            data_dir = ident / "data"
+            # #106 F2 (P2-1): _all_plugin_data_dirs vets the IDENTITY dir, but
+            # the dir we actually delete from is its `data` child. A real
+            # identity dir whose `data` is a SYMLINK pointed at, say, $HOME
+            # made the sweep unlink daemon-token/dashboard-server.py/etc from
+            # the symlink target -- outside the plugin-data base entirely.
+            # Vet the deletion target itself, not just its parent.
+            if _daemon_sweep_dir_is_safe(data_dir):
+                dirs.append(data_dir)
     except Exception:  # noqa: BLE001
         pass
     if SNAPSHOT_DIR not in dirs:
@@ -18942,15 +19013,79 @@ def _daemon_identity_snapshot_dirs(this_install_only: bool) -> list[Path]:
     return ordered
 
 
-def _unlink_if_exists(path: Path) -> bool:
-    """Delete ``path`` if present. Returns True iff a file was removed."""
+def _daemon_sweep_dir_is_safe(snap_dir: Path) -> bool:
+    """True when ``snap_dir`` is a real directory we may delete daemon files from.
+
+    #106 F2 (P2-1). The sweep deletes a fixed allow-list of filenames out of
+    every identity's ``data`` dir. That dir must therefore be a REAL directory
+    whose realpath lands under the plugin-data base -- otherwise a symlinked
+    ``data`` child redirects the unlinks outside the base (the escape found in
+    review: ``token-optimizer-evil/data -> $HOME`` deleted files from $HOME).
+
+    The resolved ``SNAPSHOT_DIR`` is always allowed even when it sits outside
+    the base, because ``TOKEN_OPTIMIZER_SNAPSHOT_DIR`` (tests, sandboxes) and
+    the legacy script-install layout legitimately point elsewhere. That is the
+    identity we were told to operate on, not one we discovered by globbing.
+    """
     try:
+        if snap_dir.is_symlink() or not snap_dir.is_dir():
+            return False
+        resolved = snap_dir.resolve(strict=True)
+    except (OSError, ValueError):
+        return False
+    try:
+        if resolved == SNAPSHOT_DIR.resolve(strict=False):
+            return True
+    except (OSError, ValueError):
+        pass
+    try:
+        # Read the base off the module (not a from-import binding) so the
+        # check honors a runtime-repointed plugin-data root.
+        base = plugin_env._PLUGIN_DATA_BASE
+        return resolved.is_relative_to(base.resolve(strict=False))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _unlink_if_exists(path: Path) -> bool:
+    """Delete ``path`` if present. Returns True iff a file was removed.
+
+    Never follows a symlink to delete its target: a planted symlink named
+    ``daemon-token`` must be removed as the link itself, not as whatever it
+    points at (#106 F2 P2-1, defense in depth behind
+    ``_daemon_sweep_dir_is_safe``).
+    """
+    try:
+        if path.is_symlink():
+            path.unlink()
+            return True
         if path.exists():
             path.unlink()
             return True
     except OSError:
         pass
     return False
+
+
+def _unlink_reporting(path: Path) -> tuple[bool, bool]:
+    """Delete ``path``; return ``(removed, failed)``.
+
+    #106 F2 (P2-4). ``_unlink_if_exists`` swallows OSError and returns False,
+    which is indistinguishable from "was not there". The sweep then printed
+    "Swept all token-optimizer-* identities" while a 0600 daemon-token it
+    could not delete (read-only dir, EPERM) was still on disk. This variant
+    separates the two so the report can be honest about survivors.
+    """
+    try:
+        if not path.is_symlink() and not path.exists():
+            return (False, False)
+    except OSError:
+        return (False, True)
+    try:
+        path.unlink()
+        return (True, False)
+    except OSError:
+        return (False, True)
 
 
 
@@ -20669,7 +20804,8 @@ def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
     if dry_run:
         # Dry-run: report what WOULD be removed, touch nothing.
         would_remove = []
-        for label in _ALL_LAUNCH_AGENT_LABELS:
+        for label in _scheduler_names_to_sweep(
+                this_install_only, _ALL_LAUNCH_AGENT_LABELS, DAEMON_LABEL):
             plist = LAUNCH_AGENTS_DIR / f"{label}.plist"
             if plist.exists():
                 would_remove.append(str(plist))
@@ -20696,8 +20832,18 @@ def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
     removed = []
     # Sweep the OS scheduler by name across every runtime variant. The plist
     # file lives at a fixed per-runtime path under ~/Library/LaunchAgents.
-    for label in _ALL_LAUNCH_AGENT_LABELS:
+    for label in _scheduler_names_to_sweep(
+            this_install_only, _ALL_LAUNCH_AGENT_LABELS, DAEMON_LABEL):
         plist = LAUNCH_AGENTS_DIR / f"{label}.plist"
+        # #106 F2 (P2-3): bootout by LABEL, unconditionally. The old code only
+        # booted out when the plist FILE existed, so a job still loaded in
+        # launchd whose plist had already been deleted (half-uninstall, manual
+        # rm, platform GC) was never unregistered and kept respawning.
+        try:
+            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
+                           capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
         if plist.exists():
             try:
                 subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)],
@@ -20719,12 +20865,11 @@ def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
         pass
     # Sweep per-identity daemon files across every token-optimizer-* identity.
     per_identity_removed: list[tuple[Path, list[str]]] = []
+    sweep_failed: list[str] = []
     for snap_dir in _daemon_identity_snapshot_dirs(this_install_only):
-        files = _daemon_per_identity_files(snap_dir)
-        identity_removed = []
-        for key in ("daemon_script", "daemon_token", "daemon_host"):
-            if _unlink_if_exists(files[key]):
-                identity_removed.append(str(files[key]))
+        identity_removed, identity_failed = _sweep_identity_daemon_files(
+            snap_dir, ("daemon_script", "daemon_token", "daemon_host"))
+        sweep_failed.extend(identity_failed)
         # #106 F2 (P1): the .daemon-thrash tombstone must PERSIST for every
         # swept identity. Each identity's generated dashboard-server.py checks
         # its OWN breadcrumb path on start and exits "noop-tombstoned"; the
@@ -20737,16 +20882,8 @@ def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
         if identity_removed:
             per_identity_removed.append((snap_dir, identity_removed))
             removed.extend(identity_removed)
-    if removed:
-        print("[Token Optimizer] Dashboard daemon removed.")
-        for path in removed:
-            print(f"  Deleted: {path}")
-        if per_identity_removed and not this_install_only:
-            print("  Swept all token-optimizer-* identities:")
-            for snap_dir, items in per_identity_removed:
-                print(f"    {snap_dir}: {len(items)} file(s)")
-    else:
-        print("[Token Optimizer] No daemon artifacts found. Nothing to remove.")
+    _print_identity_sweep_report(
+        removed, per_identity_removed, sweep_failed, this_install_only)
 
 
 
@@ -21160,7 +21297,8 @@ def _uninstall_task_scheduler_daemon(this_install_only=False, dry_run=False):
     removed = []
     # Sweep the OS scheduler by name across every runtime variant so a task
     # whose data dir already vanished still gets unregistered.
-    for task_name in _ALL_WINDOWS_TASK_NAMES:
+    for task_name in _scheduler_names_to_sweep(
+            this_install_only, _ALL_WINDOWS_TASK_NAMES, WINDOWS_TASK_NAME):
         try:
             subprocess.run(
                 ["schtasks", "/End", "/TN", task_name],
@@ -21179,12 +21317,11 @@ def _uninstall_task_scheduler_daemon(this_install_only=False, dry_run=False):
             removed.append(f"Scheduled Task: {task_name}")
     # Sweep per-identity daemon files across every token-optimizer-* identity.
     per_identity_removed: list[tuple[Path, list[str]]] = []
+    sweep_failed: list[str] = []
     for snap_dir in _daemon_identity_snapshot_dirs(this_install_only):
-        files = _daemon_per_identity_files(snap_dir)
-        identity_removed = []
-        for key in ("daemon_script", "windows_launcher", "daemon_token", "daemon_host"):
-            if _unlink_if_exists(files[key]):
-                identity_removed.append(str(files[key]))
+        identity_removed, identity_failed = _sweep_identity_daemon_files(
+            snap_dir, ("daemon_script", "windows_launcher", "daemon_token", "daemon_host"))
+        sweep_failed.extend(identity_failed)
         # #106 F2 (P1): the .daemon-thrash tombstone must PERSIST for every
         # swept identity. Each identity's generated dashboard-server.py checks
         # its OWN breadcrumb path on start and exits "noop-tombstoned"; the
@@ -21208,16 +21345,8 @@ def _uninstall_task_scheduler_daemon(this_install_only=False, dry_run=False):
         if identity_removed:
             per_identity_removed.append((snap_dir, identity_removed))
             removed.extend(identity_removed)
-    if removed:
-        print("[Token Optimizer] Dashboard daemon removed.")
-        for path in removed:
-            print(f"  Deleted: {path}")
-        if per_identity_removed and not this_install_only:
-            print("  Swept all token-optimizer-* identities:")
-            for snap_dir, items in per_identity_removed:
-                print(f"    {snap_dir}: {len(items)} file(s)")
-    else:
-        print("[Token Optimizer] No daemon artifacts found. Nothing to remove.")
+    _print_identity_sweep_report(
+        removed, per_identity_removed, sweep_failed, this_install_only)
 
 
 
@@ -21535,7 +21664,8 @@ def _uninstall_systemd_user_daemon(this_install_only=False, dry_run=False):
     if dry_run:
         would_remove = []
         per_identity: list[tuple[Path, list[str]]] = []
-        for unit_name in _ALL_SYSTEMD_UNIT_NAMES:
+        for unit_name in _scheduler_names_to_sweep(
+            this_install_only, _ALL_SYSTEMD_UNIT_NAMES, SYSTEMD_UNIT_NAME):
             unit_path = _systemd_user_unit_path_for(unit_name)
             if unit_path.exists():
                 would_remove.append(str(unit_path))
@@ -21560,7 +21690,8 @@ def _uninstall_systemd_user_daemon(this_install_only=False, dry_run=False):
     _write_uninstall_tombstone()
     removed = []
     # Sweep the OS scheduler by name across every runtime variant.
-    for unit_name in _ALL_SYSTEMD_UNIT_NAMES:
+    for unit_name in _scheduler_names_to_sweep(
+            this_install_only, _ALL_SYSTEMD_UNIT_NAMES, SYSTEMD_UNIT_NAME):
         try:
             subprocess.run(
                 ["systemctl", "--user", "disable", "--now", unit_name],
@@ -21593,12 +21724,11 @@ def _uninstall_systemd_user_daemon(this_install_only=False, dry_run=False):
         pass
     # Sweep per-identity daemon files across every token-optimizer-* identity.
     per_identity_removed: list[tuple[Path, list[str]]] = []
+    sweep_failed: list[str] = []
     for snap_dir in _daemon_identity_snapshot_dirs(this_install_only):
-        files = _daemon_per_identity_files(snap_dir)
-        identity_removed = []
-        for key in ("daemon_script", "linux_launcher", "daemon_token", "daemon_host"):
-            if _unlink_if_exists(files[key]):
-                identity_removed.append(str(files[key]))
+        identity_removed, identity_failed = _sweep_identity_daemon_files(
+            snap_dir, ("daemon_script", "linux_launcher", "daemon_token", "daemon_host"))
+        sweep_failed.extend(identity_failed)
         # #106 F2 (P1): the .daemon-thrash tombstone must PERSIST for every
         # swept identity. Each identity's generated dashboard-server.py checks
         # its OWN breadcrumb path on start and exits "noop-tombstoned"; the
@@ -21611,16 +21741,8 @@ def _uninstall_systemd_user_daemon(this_install_only=False, dry_run=False):
         if identity_removed:
             per_identity_removed.append((snap_dir, identity_removed))
             removed.extend(identity_removed)
-    if removed:
-        print("[Token Optimizer] Dashboard daemon removed.")
-        for path in removed:
-            print(f"  Deleted: {path}")
-        if per_identity_removed and not this_install_only:
-            print("  Swept all token-optimizer-* identities:")
-            for snap_dir, items in per_identity_removed:
-                print(f"    {snap_dir}: {len(items)} file(s)")
-    else:
-        print("[Token Optimizer] No daemon artifacts found. Nothing to remove.")
+    _print_identity_sweep_report(
+        removed, per_identity_removed, sweep_failed, this_install_only)
 
 
 
