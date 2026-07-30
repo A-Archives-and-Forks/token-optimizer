@@ -263,3 +263,56 @@ test("buildContinuityHint no filter when promptText present but cwd absent (AND 
   expect(hint).toContain("gamma delta epsilon");
   expect(hint).not.toContain("- Omitted");
 });
+
+// ---------------------------------------------------------------------------
+// C4: the disclosure line must survive the 800-char body slice
+// ---------------------------------------------------------------------------
+
+test("buildContinuityHint disclosure survives when kept body exceeds the 800-char slice", () => {
+  const entry = makeEntry();
+  // Each kept item is capped by safeRecoveredScalar (120 for decisions, 140
+  // for files), so to exceed the 800-char body slice we fill ALL four kept
+  // decision slots and ALL six kept file slots with max-length items, plus
+  // one cross-project FILE that is dropped (so a disclosure is emitted).
+  // 4*~130 + 6*~150 ~= 1420 chars of kept body -> _safeSlice(., 800) truncates
+  // it. Before C4 the disclosure was pushed into the body and the whole
+  // joined body was sliced, so the disclosure (appended last) was cut off.
+  // After C4 the item body is sliced first and the disclosure is appended
+  // outside the truncated region.
+  const longDecision = (i: number) => `beta ${i} ` + "z".repeat(110);
+  const longInProjectFile = (i: number) => `${PROJ_B}/src/${"p".repeat(110)}${i}.py`;
+  const content = [
+    "> Quality: B (82/100)",
+    "",
+    "## Key Decisions",
+    `- ${longDecision(1)}`,
+    `- ${longDecision(2)}`,
+    `- ${longDecision(3)}`,
+    `- ${longDecision(4)}`,
+    "",
+    "## File Changes",
+    `- ${longInProjectFile(1)}`,
+    `- ${longInProjectFile(2)}`,
+    `- ${longInProjectFile(3)}`,
+    `- ${longInProjectFile(4)}`,
+    `- ${longInProjectFile(5)}`,
+    `- ${longInProjectFile(6)}`,
+    `- ${PROJ_A}/src/gamma_engine.py`,
+    "",
+    "## Recent Messages",
+    "### User",
+    "work on the beta feature",
+    "",
+  ].join("\n");
+  const candidate: ContinuityCandidate = { entry, score: 0.9, content };
+  const hint = buildContinuityHint(candidate, "continue the beta work", PROJ_B);
+
+  // The kept item body is truncated by the 800-char slice:
+  expect(hint).toContain("[... truncated]");
+  // ...but the disclosure STILL renders (it sits outside the truncated region):
+  expect(hint).toContain("- Omitted (scoped to current project): 1 file(s)");
+  // And it renders AFTER the truncation marker, inside the fence:
+  const truncIdx = hint.indexOf("[... truncated]");
+  const discIdx = hint.indexOf("- Omitted (scoped to current project): 1 file(s)");
+  expect(discIdx).toBeGreaterThan(truncIdx);
+});
