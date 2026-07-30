@@ -491,3 +491,66 @@ def test_clear_compacted_success_chatter_still_suppressed_by_quiet(tmp_path):
         f"--quiet must suppress the success chatter; stderr={out.stderr!r}"
     )
     assert _file_entries(tmp_path, SESSION_S) == {}, "the clear must have landed"
+
+
+# ---------------------------------------------------------------------------
+# GAUNTLET C9: non-dict stdin (valid JSON but not a dict) must produce a loud
+# warning and return {}, not crash with AttributeError on .get(). The shared
+# read_stdin_hook_input in hook_io.py is the single source of truth.
+# ---------------------------------------------------------------------------
+
+def test_clear_compacted_loud_fail_on_list_stdin(tmp_path):
+    """C9: a JSON list on stdin must not crash; it must warn and no-op."""
+    # _run_read_cache json.dumps the payload, so we need a custom runner for
+    # non-dict JSON (raw string stdin).
+    import subprocess as sp
+    env = dict(os.environ)
+    env["TOKEN_OPTIMIZER_SNAPSHOT_DIR"] = str(tmp_path)
+    env.setdefault("TOKEN_OPTIMIZER_READ_CACHE", "1")
+    result = sp.run(
+        [sys.executable, str(READ_CACHE), "--clear-compacted", "--quiet"],
+        input="[1, 2, 3]",
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "not a dict" in result.stderr, (
+        f"non-dict (list) stdin must warn loudly; stderr={result.stderr!r}"
+    )
+    assert "FAILED" in result.stderr, (
+        f"the C5 loud-fail branch must also fire on the empty dict; "
+        f"stderr={result.stderr!r}"
+    )
+
+
+def test_clear_compacted_loud_fail_on_string_stdin(tmp_path):
+    """C9: a JSON string on stdin must not crash; it must warn and no-op."""
+    import subprocess as sp
+    env = dict(os.environ)
+    env["TOKEN_OPTIMIZER_SNAPSHOT_DIR"] = str(tmp_path)
+    env.setdefault("TOKEN_OPTIMIZER_READ_CACHE", "1")
+    result = sp.run(
+        [sys.executable, str(READ_CACHE), "--clear-compacted", "--quiet"],
+        input='"hello world"',
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "not a dict" in result.stderr, (
+        f"non-dict (str) stdin must warn loudly; stderr={result.stderr!r}"
+    )
+
+
+def test_clear_compacted_loud_fail_on_number_stdin(tmp_path):
+    """C9: a JSON number on stdin must not crash; it must warn and no-op."""
+    import subprocess as sp
+    env = dict(os.environ)
+    env["TOKEN_OPTIMIZER_SNAPSHOT_DIR"] = str(tmp_path)
+    env.setdefault("TOKEN_OPTIMIZER_READ_CACHE", "1")
+    result = sp.run(
+        [sys.executable, str(READ_CACHE), "--clear-compacted", "--quiet"],
+        input="42",
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "not a dict" in result.stderr, (
+        f"non-dict (int) stdin must warn loudly; stderr={result.stderr!r}"
+    )
