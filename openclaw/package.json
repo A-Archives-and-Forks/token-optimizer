@@ -1,6 +1,6 @@
 {
   "name": "token-optimizer-openclaw",
-  "version": "2.4.14",
+  "version": "2.4.15",
   "description": "Token waste auditor for OpenClaw. Detects idle burns, model misrouting, and context bloat with dollar savings.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -32,8 +32,12 @@
     "url": "https://github.com/alexgreensh/token-optimizer"
   },
   "openclaw": {
-    "extensions": ["./dist/index.js"],
-    "hooks": ["./hooks/smart-compact"]
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "hooks": [
+      "./hooks/smart-compact"
+    ]
   },
   "engines": {
     "node": ">=18.0.0"
