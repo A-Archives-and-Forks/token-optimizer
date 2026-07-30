@@ -171,6 +171,19 @@ function crossProjectFileDrop(p: string, cwd: string): boolean {
   return isAbsolutePath(p) && !pathUnderRoots(p, cwdRoots(cwd));
 }
 
+/** True when the checkpoint carries at least one attributable absolute file
+ *  path NOT under ``cwd`` — the checkpoint genuinely spans multiple projects
+ *  (GitHub #103). DECISION filtering is gated on this: a single-project
+ *  checkpoint (every attributable path in-project, or none) has nothing to
+ *  scope, so its decisions are kept verbatim even when they name no project
+ *  token (e.g. "Switched from REST polling to websocket push"). Without this
+ *  gate the token-overlap rule over-prunes generic technical decisions and
+ *  mislabels them "different project". cwd absent -> never multi-project. */
+function checkpointHasCrossProjectPath(paths: string[], cwd: string): boolean {
+  if (!cwd) return false;
+  return paths.some((p) => crossProjectFileDrop(p, cwd));
+}
+
 /** The KEPT in-project paths from a checkpoint's active_files (those under
  *  cwd). Seed the keep-token set so a decision/file naming the current
  *  project survives the filter. */
@@ -211,7 +224,7 @@ function formatDisclosure(
   const parts: string[] = [];
   if (droppedDecisions > 0) parts.push(`${droppedDecisions} decision(s)`);
   if (droppedFiles > 0) parts.push(`${droppedFiles} file(s)`);
-  return `- Omitted (same session, different project): ${parts.join(", ")}`;
+  return `- Omitted (scoped to current project): ${parts.join(", ")}`;
 }
 
 /**
@@ -412,7 +425,13 @@ export function buildLeanResumeContext(
   }
 
   let droppedDecisions = 0;
-  const decisionsRaw = keepTokens
+  // Decision filtering is gated on checkpoint mixture (GitHub #103): a
+  // single-project checkpoint has nothing to scope, so its decisions are kept
+  // verbatim even when they name no project token.
+  const multiProject = keepTokens
+    ? checkpointHasCrossProjectPath(activeFiles, cwd)
+    : false;
+  const decisionsRaw = (keepTokens && multiProject)
     ? decisions.filter((d) => keepRecoveredItem(d, keepTokens))
     : decisions;
   droppedDecisions = decisions.length - decisionsRaw.length;
