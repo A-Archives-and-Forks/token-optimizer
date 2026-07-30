@@ -30260,13 +30260,63 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
     return result.get("score")
 
 
+def _stable_marketplace_script_path(script_name):
+    """Version-INDEPENDENT path to a bundled script, or None.
+
+    Plugin-cache installs live at::
+
+        <claude>/plugins/cache/<marketplace>/<plugin>/<VERSION>/skills/...
+
+    so any absolute path written into settings.json dies on the next update.
+    The marketplace clone at::
+
+        <claude>/plugins/marketplaces/<marketplace>/skills/...
+
+    carries the same tree at a path with no version segment, so it survives
+    updates. Returns that path only when it actually exists and stays confined
+    under the runtime marketplaces dir (no symlink escape); otherwise None, so
+    the caller falls back to the version-pinned write plus self-heal.
+    """
+    try:
+        here = Path(__file__).resolve()
+        parts = here.parts
+        idx = len(parts) - 1 - parts[::-1].index("cache")
+        marketplace = parts[idx + 1]
+    except (ValueError, IndexError, OSError):
+        return None
+    try:
+        base = (CLAUDE_DIR / "plugins" / "marketplaces").resolve(strict=False)
+        candidate = base / marketplace / "skills" / "token-optimizer" / "scripts" / script_name
+        resolved = candidate.resolve(strict=True)
+        if not resolved.is_file() or not resolved.is_relative_to(base):
+            return None
+    except (OSError, ValueError):
+        return None
+    return str(resolved)
+
+
 def _get_statusline_path():
     """Get the path to the bundled statusline.js script.
 
     Always returns an absolute path. Unlike hook commands in hooks.json,
-    settings.json statusLine may not resolve ${CLAUDE_PLUGIN_ROOT}.
-    The self-healing _fix_stale_settings_paths() handles version upgrades.
+    settings.json statusLine may not resolve ${CLAUDE_PLUGIN_ROOT} -- which is
+    why this cannot simply mirror _get_measure_py_path().
+
+    Plugin-cache installs previously got the VERSION-PINNED cache path, which
+    breaks the moment the plugin updates. _fix_stale_settings_paths() repairs
+    it, but only at the NEXT SessionStart, so the first session after an update
+    rendered a blank status line before the heal landed. Prefer the
+    version-independent marketplace clone path when it resolves; fall back to
+    the version-pinned path (still self-healed) when it does not -- a pruned
+    marketplace clone, or any non-plugin-cache install.
+
+    Either way the F1 self-disabling guard inside statusline.js still applies:
+    both candidate trees ship the sibling files it checks for.
     """
+    if _is_running_from_plugin_cache():
+        stable = _stable_marketplace_script_path("statusline.js")
+        if stable:
+            return stable
     return str(Path(__file__).resolve().parent / "statusline.js")
 
 
