@@ -23,8 +23,11 @@ Exits non-zero on first failure.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "token-optimizer" / "scripts"
@@ -32,6 +35,14 @@ sys.path.insert(0, str(SCRIPTS))
 
 import measure  # noqa: E402
 import plugin_env  # noqa: E402
+
+# POSIX-only: every test drives _uninstall_launchd_daemon (launchctl +
+# os.getuid) and 0600 daemon-token modes -- Unix semantics Windows cannot
+# honor. Skip the whole file on Windows; macOS/Linux run it unchanged.
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX daemon semantics (launchctl/os.kill/file modes)",
+)
 
 
 class _Completed:

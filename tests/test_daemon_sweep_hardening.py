@@ -27,6 +27,15 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "token-optimizer" / "scripts"
 
+# POSIX-only: every test drives _uninstall_launchd_daemon (launchctl +
+# os.getuid), symlink containment (Path.symlink_to needs privilege on Windows),
+# or 0600 token modes -- none of which Windows can represent. Skip the whole
+# file on Windows; macOS/Linux run it unchanged.
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX daemon semantics (launchctl/os.kill/file modes)",
+)
+
 
 @pytest.fixture()
 def measure(tmp_path, monkeypatch):
