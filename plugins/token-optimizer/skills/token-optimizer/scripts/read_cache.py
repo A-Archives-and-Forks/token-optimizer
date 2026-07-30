@@ -1915,9 +1915,27 @@ def main() -> None:
 
     if "--clear" in args:
         session_id = "all"
+        has_explicit_session = False
         for index, arg in enumerate(args):
             if arg == "--session" and index + 1 < len(args):
                 session_id = args[index + 1]
+                has_explicit_session = True
+        # C12: bare --clear (no --session) defaults to "all" which wipes EVERY
+        # session's file_reads cache. The PreCompact and CwdChanged hooks call
+        # bare --clear, so a compact or cwd-change in one session nukes the
+        # read cache of all other active sessions too. Scope it: when no
+        # explicit --session is given, read stdin hook_input for the session_id
+        # so only the current session is cleared. Fall back to "all" only when
+        # stdin has no session_id (manual CLI use with no hook context).
+        if not has_explicit_session:
+            hook_input = read_stdin_hook_input(1_000_000)
+            stdin_sid = str(
+                hook_input.get("agent_id")
+                or hook_input.get("session_id")
+                or ""
+            ).strip()
+            if stdin_sid:
+                session_id = stdin_sid
         handle_clear(session_id, quiet)
         return
 

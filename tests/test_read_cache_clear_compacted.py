@@ -554,3 +554,97 @@ def test_clear_compacted_loud_fail_on_number_stdin(tmp_path):
     assert "not a dict" in result.stderr, (
         f"non-dict (int) stdin must warn loudly; stderr={result.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# GAUNTLET C12: bare --clear (no --session) must scope to the stdin session_id
+# instead of defaulting to "all". The PreCompact and CwdChanged hooks call
+# bare --clear, so the old "all" default wiped every active session's cache.
+# ---------------------------------------------------------------------------
+
+def _seed_legacy_cache(tmp_path: Path, session_id: str) -> None:
+    """Seed a legacy JSON cache file for a session."""
+    cache_dir = tmp_path / "read-cache"
+    cache_dir.mkdir(exist_ok=True)
+    (cache_dir / f"{session_id}.json").write_text(
+        json.dumps({"/tmp/test.txt": {"mtime_ns": 123, "size": 100}}),
+        encoding="utf-8",
+    )
+
+
+def _legacy_cache_exists(tmp_path: Path, session_id: str) -> bool:
+    return (tmp_path / "read-cache" / f"{session_id}.json").exists()
+
+
+def test_bare_clear_scopes_to_stdin_session_id(tmp_path):
+    """C12: bare --clear with stdin session_id clears ONLY that session."""
+    _seed_legacy_cache(tmp_path, SESSION_S)
+    _seed_legacy_cache(tmp_path, SESSION_S2)
+    assert _legacy_cache_exists(tmp_path, SESSION_S)
+    assert _legacy_cache_exists(tmp_path, SESSION_S2)
+
+    out = _run_read_cache(
+        tmp_path, ["--clear", "--quiet"], {"session_id": SESSION_S}
+    )
+    assert out.returncode == 0, out.stderr
+
+    assert not _legacy_cache_exists(tmp_path, SESSION_S), (
+        f"session {SESSION_S} cache should be cleared"
+    )
+    assert _legacy_cache_exists(tmp_path, SESSION_S2), (
+        f"session {SESSION_S2} cache should survive (bare --clear scoped to stdin)"
+    )
+
+
+def test_bare_clear_uses_agent_id_fallback(tmp_path):
+    """C12: bare --clear should also check agent_id if session_id is absent."""
+    _seed_legacy_cache(tmp_path, SESSION_S)
+    _seed_legacy_cache(tmp_path, SESSION_S2)
+
+    out = _run_read_cache(
+        tmp_path, ["--clear", "--quiet"], {"agent_id": SESSION_S}
+    )
+    assert out.returncode == 0, out.stderr
+
+    assert not _legacy_cache_exists(tmp_path, SESSION_S), (
+        f"session {SESSION_S} cache should be cleared via agent_id"
+    )
+    assert _legacy_cache_exists(tmp_path, SESSION_S2), (
+        f"session {SESSION_S2} cache should survive"
+    )
+
+
+def test_bare_clear_no_stdin_falls_back_to_all(tmp_path):
+    """C12: bare --clear with no stdin (manual CLI) still clears all
+    (backward compatibility)."""
+    _seed_legacy_cache(tmp_path, SESSION_S)
+    _seed_legacy_cache(tmp_path, SESSION_S2)
+
+    out = _run_read_cache(tmp_path, ["--clear", "--quiet"], None)
+    assert out.returncode == 0, out.stderr
+
+    assert not _legacy_cache_exists(tmp_path, SESSION_S), (
+        "session S should be cleared by all"
+    )
+    assert not _legacy_cache_exists(tmp_path, SESSION_S2), (
+        "session S2 should be cleared by all"
+    )
+
+
+def test_explicit_session_overrides_stdin(tmp_path):
+    """C12: explicit --session takes precedence over stdin session_id."""
+    _seed_legacy_cache(tmp_path, SESSION_S)
+    _seed_legacy_cache(tmp_path, SESSION_S2)
+
+    out = _run_read_cache(
+        tmp_path, ["--clear", "--session", SESSION_S, "--quiet"],
+        {"session_id": SESSION_S2},
+    )
+    assert out.returncode == 0, out.stderr
+
+    assert not _legacy_cache_exists(tmp_path, SESSION_S), (
+        f"explicit --session {SESSION_S} should clear SESSION_S"
+    )
+    assert _legacy_cache_exists(tmp_path, SESSION_S2), (
+        f"SESSION_S2 should survive (explicit --session overrides stdin)"
+    )
