@@ -446,3 +446,48 @@ def test_clear_compacted_screams_on_missing_session(tmp_path):
         f"missing-session abort must emit a stderr note, not silent exit 0; "
         f"stderr={out.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# GAUNTLET C5: --quiet must NOT silence FAILED branches. --quiet suppresses
+# success chatter ONLY. A silent exit-0 no-op on a broken/partial install
+# resurrects #101 with zero signal, contradicting the docstring.
+# ---------------------------------------------------------------------------
+
+def test_clear_compacted_screams_on_no_stdin_even_with_quiet(tmp_path):
+    """C5: the no-stdin FAILED branch stays loud under --quiet."""
+    out = _run_read_cache(tmp_path, ["--clear-compacted", "--quiet"], None)
+    assert out.returncode == 0, out.stderr
+    assert "[read_cache] --clear-compacted FAILED" in out.stderr, (
+        f"--quiet must not silence the no-stdin FAILED branch; "
+        f"stderr={out.stderr!r}"
+    )
+
+
+def test_clear_compacted_screams_on_missing_session_even_with_quiet(tmp_path):
+    """C5: the missing-session_id FAILED branch stays loud under --quiet."""
+    out = _run_read_cache(
+        tmp_path, ["--clear-compacted", "--quiet"], {"tool_name": "Read"}
+    )
+    assert out.returncode == 0, out.stderr
+    assert "[read_cache] --clear-compacted FAILED" in out.stderr, (
+        f"--quiet must not silence the missing-session FAILED branch; "
+        f"stderr={out.stderr!r}"
+    )
+
+
+def test_clear_compacted_success_chatter_still_suppressed_by_quiet(tmp_path):
+    """C5: --quiet still suppresses the SUCCESS chatter (the contract is
+    'quiet suppresses success only', so the success path must stay quiet)."""
+    file_f = str(tmp_path / "ok.txt")
+    Path(file_f).write_text("ok\n", encoding="utf-8")
+    st = os.stat(file_f)
+    _seed_file_entry(tmp_path, SESSION_S, file_f, st.st_mtime_ns, st.st_size)
+    out = _run_read_cache(
+        tmp_path, ["--clear-compacted", "--quiet"], {"session_id": SESSION_S}
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stderr == "", (
+        f"--quiet must suppress the success chatter; stderr={out.stderr!r}"
+    )
+    assert _file_entries(tmp_path, SESSION_S) == {}, "the clear must have landed"
