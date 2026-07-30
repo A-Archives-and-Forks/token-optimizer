@@ -120,3 +120,29 @@ def test_quick_scan_slim_savings_math(measure, monkeypatch):
     expected_savings = 8000 - int(200 * (8000 / 400))
     assert result["quick_win"]["savings"] == expected_savings  # == 4000
     assert "under 200" in result["quick_win"]["action"]
+
+
+def test_quick_scan_token_dense_short_file_does_not_mask_a_valid_slim_win(measure, monkeypatch):
+    """G3 C-P2-1 regression: a token-dense but SHORT file (largest by tokens,
+    <=200 lines) must not suppress a genuine slim win in a different over-200-line
+    file. Old code did max()-by-tokens then gated on lines>200, so the short file
+    won and failed the gate -> quick_win None. The fix filters to qualifying files
+    first, so the 400-line file's win fires and names THAT file."""
+    components = {
+        "claude_md_home": {
+            "path": "/home/u/CLAUDE.md",
+            "exists": True, "tokens": 9000, "lines": 180,  # largest by tokens, short
+        },
+        "claude_md_project_proj": {
+            "path": "/home/u/proj/CLAUDE.md",
+            "exists": True, "tokens": 6000, "lines": 400,  # real slim target
+        },
+    }
+    monkeypatch.setattr(measure, "measure_components", lambda: components)
+    monkeypatch.setattr(measure, "_collect_trends_data", lambda days=30: None)
+    result = measure.quick_scan(as_json=True)
+    assert result["quick_win"] is not None, "valid slim win was masked by the token-dense short file"
+    # Names the over-200-line file, not the short one.
+    assert "/home/u/proj/CLAUDE.md" in result["quick_win"]["action"]
+    assert "400 lines" in result["quick_win"]["action"]
+    assert result["quick_win"]["savings"] == 6000 - int(200 * (6000 / 400))  # == 3000
