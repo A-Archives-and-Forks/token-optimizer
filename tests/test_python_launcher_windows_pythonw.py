@@ -505,3 +505,94 @@ def test_kill_after_present_in_mirror():
         "expected exactly two --kill-after=1s probe sites in the mirror; "
         f"got {source.count(b'--kill-after=1s 2s')}"
     )
+
+
+# ---------------------------------------------------------------------------
+# GAUNTLET C7: _is_safe_prefix version-number globs must be anchored to the
+# path-component boundary. In bash case patterns, * crosses /, so the old
+# Python[23]* matched Python3-evil/python.exe (spoofed dir name). The fix
+# uses extglob +([0-9])/* to require digits-only until the path separator.
+# ---------------------------------------------------------------------------
+
+def _safe_prefix_driver(binpath: str) -> str:
+    """Drive _is_safe_prefix in isolation and print the result.
+    Disables set -e inside the subshell so the expected return 1 is captured."""
+    return _defs() + (
+        f'(set +e; _is_safe_prefix "{binpath}"; echo "safe=$?")\n'
+    )
+
+
+def test_safe_prefix_blocks_program_files_dir_spoof():
+    """C7: Python3-evil under Program Files must NOT pass _is_safe_prefix."""
+    out, rc, _err = _run(
+        _safe_prefix_driver("/c/Program Files/Python3-evil/python.exe"),
+        "",
+        {},
+    )
+    assert "safe=1" in out, (
+        f"Python3-evil spoof must be rejected; got {out!r}"
+    )
+
+
+def test_safe_prefix_blocks_program_files_x86_dir_spoof():
+    """C7: Python3-evil under Program Files (x86) must NOT pass."""
+    out, rc, _err = _run(
+        _safe_prefix_driver("/c/Program Files (x86)/Python3-evil/python.exe"),
+        "",
+        {},
+    )
+    assert "safe=1" in out, (
+        f"Python3-evil spoof under x86 must be rejected; got {out!r}"
+    )
+
+
+def test_safe_prefix_blocks_root_python_dir_spoof():
+    """C7: Python31-evil at drive root must NOT pass _is_safe_prefix."""
+    out, rc, _err = _run(
+        _safe_prefix_driver("/c/Python31-evil/python.exe"),
+        "",
+        {},
+    )
+    assert "safe=1" in out, (
+        f"Python31-evil spoof must be rejected; got {out!r}"
+    )
+
+
+def test_safe_prefix_allows_legit_program_files_python():
+    """C7: Python313 under Program Files still passes (no false reject)."""
+    out, rc, _err = _run(
+        _safe_prefix_driver("/c/Program Files/Python313/python.exe"),
+        "",
+        {},
+    )
+    assert "safe=0" in out, (
+        f"legit Python313 install must pass; got {out!r}"
+    )
+
+
+def test_safe_prefix_allows_legit_root_python():
+    """C7: Python313 at drive root still passes (no false reject)."""
+    out, rc, _err = _run(
+        _safe_prefix_driver("/c/Python313/python.exe"),
+        "",
+        {},
+    )
+    assert "safe=0" in out, (
+        f"legit root Python313 install must pass; got {out!r}"
+    )
+
+
+def test_safe_prefix_extglob_enabled_in_launcher():
+    """C7: the launcher must enable extglob for +([0-9]) to work."""
+    source = LAUNCHER.read_text(encoding="utf-8")
+    assert "shopt -s extglob" in source, (
+        "launcher must enable extglob so +([0-9]) patterns work in case"
+    )
+
+
+def test_safe_prefix_extglob_in_mirror():
+    """C7: the mirror must also enable extglob."""
+    source = MIRROR.read_text(encoding="utf-8")
+    assert "shopt -s extglob" in source, (
+        "mirror launcher must enable extglob so +([0-9]) patterns work"
+    )

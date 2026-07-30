@@ -14,6 +14,10 @@
 # Exits 127 with a diagnostic message if none found.
 
 set -eu
+# C7: extglob enables +([0-9]) in the version-number case patterns below so
+# the glob is anchored to the path-component boundary. Without it, * in a
+# case pattern crosses / and Python[23]* matches Python3-evil/python.exe.
+shopt -s extglob
 
 # Known-safe prefixes for Python interpreter binaries.
 # Binaries outside these directories are rejected even if on PATH.
@@ -41,9 +45,13 @@ _is_safe_prefix() {
     # Drive-letter-anchored to preserve the anti-PATH-hijack intent.
     # Version-number suffixes block directory-name spoofing (e.g. Python3-evil).
     case "$binpath" in
-        /[a-zA-Z]/Program\ Files/Python[23]*)                          return 0 ;;
-        /[a-zA-Z]/Program\ Files\ \(x86\)/Python[23]*)                 return 0 ;;
-        /[a-zA-Z]/Python3[0-9]*)                                       return 0 ;;
+        # C7: +([0-9]) anchors the version suffix to digits-only so a spoofed
+        # dir name like Python3-evil cannot pass (previously * crossed / and
+        # matched Python3-evil/python.exe). The trailing /* requires a path
+        # separator after the version component.
+        /[a-zA-Z]/Program\ Files/Python[23]+([0-9])/*)                 return 0 ;;
+        /[a-zA-Z]/Program\ Files\ \(x86\)/Python[23]+([0-9])/*)        return 0 ;;
+        /[a-zA-Z]/Python3+([0-9])/*)                                   return 0 ;;
         /[a-zA-Z]/Users/*/AppData/Local/Programs/Python/*)              return 0 ;;
         /[a-zA-Z]/Users/*/AppData/Local/Microsoft/WindowsApps/*)        return 0 ;;
         # All-users `py` launcher lives in the (admin-only-writable) Windows dir.
