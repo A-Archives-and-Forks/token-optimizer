@@ -1680,12 +1680,12 @@ def handle_clear_compacted(hook_input: dict[str, Any], quiet: bool) -> None:
         hook_input.get("agent_id") or hook_input.get("session_id") or "unknown"
     )
     if not session_id or session_id == "unknown":
-        if not quiet:
-            print(
-                "[read_cache] --clear-compacted FAILED: no session_id in hook "
-                "input; live session file_reads left intact (#101 not cleared)",
-                file=sys.stderr,
-            )
+        # C5: FAILED branches stay loud even under --quiet.
+        print(
+            "[read_cache] --clear-compacted FAILED: no session_id in hook "
+            "input; live session file_reads left intact (#101 not cleared)",
+            file=sys.stderr,
+        )
         return
     # Per-call busy_timeout: wait out a sibling write lock within the hook
     # budget instead of dying at the 50ms fail-fast default. Tunable for
@@ -1700,12 +1700,12 @@ def handle_clear_compacted(hook_input: dict[str, Any], quiet: bool) -> None:
         busy_timeout_ms = 5000
     store = _make_store(session_id, busy_timeout_ms=busy_timeout_ms)
     if store is None:
-        if not quiet:
-            print(
-                "[read_cache] --clear-compacted FAILED: SessionStore unavailable; "
-                f"file_reads for {session_id} left intact (#101 not cleared)",
-                file=sys.stderr,
-            )
+        # C5: FAILED branches stay loud even under --quiet.
+        print(
+            "[read_cache] --clear-compacted FAILED: SessionStore unavailable; "
+            f"file_reads for {session_id} left intact (#101 not cleared)",
+            file=sys.stderr,
+        )
         return
     try:
         # The per-instance busy_timeout (set on the SessionStore above) is
@@ -1902,12 +1902,13 @@ def main() -> None:
         # branch). Bare --clear semantics are left untouched.
         hook_input = read_stdin_hook_input(1_000_000)
         if not hook_input:
-            if not quiet:
-                print(
-                    "[read_cache] --clear-compacted FAILED: no stdin hook input; "
-                    "live session file_reads left intact (#101 not cleared)",
-                    file=sys.stderr,
-                )
+            # C5: FAILED branches stay loud even under --quiet; --quiet only
+            # suppresses success chatter. A silent exit-0 no-op resurrects #101.
+            print(
+                "[read_cache] --clear-compacted FAILED: no stdin hook input; "
+                "live session file_reads left intact (#101 not cleared)",
+                file=sys.stderr,
+            )
             return
         handle_clear_compacted(hook_input, quiet)
         return
