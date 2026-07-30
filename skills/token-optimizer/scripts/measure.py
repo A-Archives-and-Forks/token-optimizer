@@ -2745,24 +2745,32 @@ def quick_scan(as_json=False):
         # 200-line guidance, with tokens-per-line taken from that one file, and
         # the >200-line guard so a token-dense but short file never gets a
         # self-contradicting "slim to 200 lines, save ~0 tokens".
-        _lk, _lc = max(_claude_md_files, key=lambda kv: kv[1].get("tokens", 0))
-        claude_md_tokens = _lc.get("tokens", 0)
-        claude_md_lines = _lc.get("lines", 0)
-        _lc_path = _lc.get("path", "") or _lk
-        _lc_label = _lc_path.replace(str(HOME), "~") if _lc_path else _lk
-    else:
-        claude_md_tokens = claude_md_lines = 0
-        _lc_label = ""
-    if not quick_win and claude_md_tokens > 5000 and claude_md_lines > 200:
-        tokens_per_line = claude_md_tokens / max(claude_md_lines, 1)
-        savings = max(0, claude_md_tokens - int(200 * tokens_per_line))
-        if savings > 0:
-            quick_win = {
-                "action": f"Slim {_lc_label} from {claude_md_lines} lines to under 200 (per Anthropic guidance)",
-                "savings": savings,
-                "detail": f"save ~{savings:,} tokens/session",
-                "extend": f"Extends peak quality zone by ~{savings:,} tokens",
-            }
+        #
+        # G3 C-P2-1: filter to the files that ACTUALLY qualify (>5000 tokens AND
+        # >200 lines) BEFORE picking the largest. The old code did max()-by-tokens
+        # first and then applied the gate to that one file, so a token-dense but
+        # short (<=200-line) file could win max() and then fail the >200-line
+        # gate -- masking a genuine slim win in a different, over-200-line file
+        # (exactly the multi-file monorepo/ancestor layout PR#100 serves).
+        _qualifying = [
+            (k, c) for k, c in _claude_md_files
+            if c.get("tokens", 0) > 5000 and c.get("lines", 0) > 200
+        ]
+        if _qualifying:
+            _lk, _lc = max(_qualifying, key=lambda kv: kv[1].get("tokens", 0))
+            claude_md_tokens = _lc.get("tokens", 0)
+            claude_md_lines = _lc.get("lines", 0)
+            _lc_path = _lc.get("path", "") or _lk
+            _lc_label = _lc_path.replace(str(HOME), "~") if _lc_path else _lk
+            tokens_per_line = claude_md_tokens / max(claude_md_lines, 1)
+            savings = max(0, claude_md_tokens - int(200 * tokens_per_line))
+            if savings > 0:
+                quick_win = {
+                    "action": f"Slim {_lc_label} from {claude_md_lines} lines to under 200 (per Anthropic guidance)",
+                    "savings": savings,
+                    "detail": f"save ~{savings:,} tokens/session",
+                    "extend": f"Extends peak quality zone by ~{savings:,} tokens",
+                }
 
     # Coaching insight
     coaching = None
