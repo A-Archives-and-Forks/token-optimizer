@@ -456,8 +456,8 @@ class SessionStore:
         """Sum tokens_est of the session's active (repeatedly-read) files.
 
         This is the working set a checkpoint restore lets a resumed session skip
-        re-reading -- the grounded basis for the avoided-reconstruction credit
-        (U-B), in place of the compressed checkpoint's own byte size.
+        re-reading -- the grounded basis for the avoided-reconstruction credit,
+        in place of the compressed checkpoint's own byte size.
         """
         conn = self._connect()
         rows = conn.execute(

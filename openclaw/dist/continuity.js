@@ -578,7 +578,7 @@ function buildContinuityHint(candidate, promptText = "", cwd = "") {
     const dateStr = new Date(entry.createdAt).toISOString().slice(0, 16).replace("T", " ");
     // Extract a brief summary from the checkpoint content (first heading or
     // first non-empty line after the header block).
-    // FIX (torture phase 4): route the extracted summary through safeRecoveredScalar
+    // FIX: route the extracted summary through safeRecoveredScalar
     // so control characters and fence-breakout tokens are neutralized before injection.
     let summaryRaw = "";
     const lines = content.split("\n");
@@ -726,10 +726,10 @@ function neutralizeRecoveredBody(text) {
  * triple-backtick code fence.  A raw ``` in checkpoint content would close the
  * outer fence early and allow injection/breakout.
  *
- * FIX (torture phase 4): replace every occurrence of ``` with a visually
+ * FIX: replace every occurrence of ``` with a visually
  * identical but structurally inert form using a zero-width non-joiner so the
  * fence marker is never reconstructed inside the block.
- * Mirrors the Python torture fix for _continuity_prompt_hint / build_lean_resume_context.
+ * Mirrors the Python fix for _continuity_prompt_hint / build_lean_resume_context.
  */
 function escapeFenceContent(content) {
     // Replace ``` with two backticks + zero-width non-joiner (U+200C) + one backtick.
@@ -884,7 +884,7 @@ function consumePendingContinuityHint(sessionId) {
  * incidental "continue to the next file" style prompts.
  * Mirrors Python _RESUME_INTENT_RE in measure.py.
  */
-// FIX (torture phase 4): tightened `resume` alternative to avoid false-positive
+// FIX: tightened `resume` alternative to avoid false-positive
 // on "resume the nginx process".  `resume the X` only fires when X is a
 // session/work noun, not an arbitrary process or command name.
 // Mirrors Python _RESUME_INTENT_RE (just fixed in measure.py).
@@ -973,7 +973,7 @@ function checkpointFilePaths(content) {
  * Mirrors Python _checkpoint_in_project using sidecar modified_files.
  * Falls back to the content text search (cwd basename appears anywhere).
  *
- * FIX (torture phase 4): compare each path against BOTH the resolved cwd
+ * FIX: compare each path against BOTH the resolved cwd
  * AND the raw cwd so that symlinked working dirs (macOS /tmp -> /private/tmp)
  * don't silently fail the filter and leak cross-project context.  Mirrors the
  * Python fix: build a small set {resolve(cwd), cwd}, trailing-slash-stripped.
@@ -1020,7 +1020,7 @@ function checkpointInProject(content, cwd) {
  * Sanitize a scalar recovered from a checkpoint for injection.
  * Strips control characters, caps length. Mirrors Python _safe_recovered_scalar.
  *
- * FIX (torture phase 4): align to Python's range /[\x00-\x1f\x7f]/ which
+ * FIX: align to Python's range /[\x00-\x1f\x7f]/ which
  * replaces ALL C0 controls (including tab \x09, newline \x0a, CR \x0d) with a
  * space.  The previous range skipped tab/newline/CR (\x09, \x0a, \x0d), which
  * diverged from Python and allowed raw newlines to embed into single-line
