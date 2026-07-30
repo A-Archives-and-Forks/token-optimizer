@@ -761,7 +761,7 @@ export function neutralizeRecoveredBody(text: string): string {
   if (!text) return "";
   // Strip C0 controls except tab (\x09) and newline (\x0a).
   // eslint-disable-next-line no-control-regex
-  text = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, " ");
+  text = text.replace(/[\x00-\x08\x0b\x0c\x0d\x0e-\x1f\x7f]/g, " ");
   // Defang forged open/close sentinels: "[RECOVERED…" → "(RECOVERED…"
   // Covers "[RECOVERED DATA ...]", "[/RECOVERED …]", "[ RECOVERED …]" etc.
   text = text.replace(/\[(\s*\/?\s*RECOVERED\b)/gi, "($1");

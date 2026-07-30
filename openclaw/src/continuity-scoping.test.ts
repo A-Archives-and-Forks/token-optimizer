@@ -17,6 +17,7 @@ import { test, expect } from "bun:test";
 import {
   keepRecoveredItem,
   crossProjectFileDrop,
+  neutralizeRecoveredBody,
   buildResumeLeanBlock,
   buildContinuityHint,
   type CheckpointEntry,
@@ -315,4 +316,30 @@ test("buildContinuityHint disclosure survives when kept body exceeds the 800-cha
   const truncIdx = hint.indexOf("[... truncated]");
   const discIdx = hint.indexOf("- Omitted (scoped to current project): 1 file(s)");
   expect(discIdx).toBeGreaterThan(truncIdx);
+});
+
+// ---------------------------------------------------------------------------
+// C10: neutralizeRecoveredBody must strip CR (\x0d). The old regex kept CR,
+// so Windows \r\n line endings survived and CR could be used for terminal
+// injection. The fix adds \x0d to the strip class.
+// ---------------------------------------------------------------------------
+
+test("neutralizeRecoveredBody strips CR (\\x0d)", () => {
+  const text = "line1\r\nline2\rXoverwritten";
+  const result = neutralizeRecoveredBody(text);
+  expect(result).not.toContain("\r");
+  // LF is preserved (body structure):
+  expect(result).toContain("\n");
+});
+
+test("neutralizeRecoveredBody strips all C0 controls except tab and LF", () => {
+  for (let code = 0x00; code < 0x20; code++) {
+    if (code === 0x09 || code === 0x0a) continue; // tab, LF
+    const ch = String.fromCharCode(code);
+    const result = neutralizeRecoveredBody(`before${ch}after`);
+    expect(result).not.toContain(ch);
+  }
+  // Tab and LF are preserved:
+  expect(neutralizeRecoveredBody("a\tb")).toContain("\t");
+  expect(neutralizeRecoveredBody("a\nb")).toContain("\n");
 });

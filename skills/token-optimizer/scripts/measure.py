@@ -25954,7 +25954,7 @@ def _neutralize_recovered_body(text, limit=4000):
     if not text:
         return ""
     # Strip C0 control chars except tab/newline (keep body structure readable).
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0d\x0e-\x1f\x7f]", " ", text)
     # Defang forged open/close sentinels: "[RECOVERED", "[/RECOVERED",
     # "[ RECOVERED DATA ...]" -> swap the leading bracket so it can't mimic ours.
     text = re.sub(r"\[(\s*/?\s*RECOVERED\b)", r"(\1", text, flags=re.IGNORECASE)

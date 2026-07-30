@@ -275,4 +275,28 @@ function mixedAbCheckpointMd() {
     const discIdx = hint.indexOf("- Omitted (scoped to current project): 1 file(s)");
     (0, bun_test_1.expect)(discIdx).toBeGreaterThan(truncIdx);
 });
+// ---------------------------------------------------------------------------
+// C10: neutralizeRecoveredBody must strip CR (\x0d). The old regex kept CR,
+// so Windows \r\n line endings survived and CR could be used for terminal
+// injection. The fix adds \x0d to the strip class.
+// ---------------------------------------------------------------------------
+(0, bun_test_1.test)("neutralizeRecoveredBody strips CR (\\x0d)", () => {
+    const text = "line1\r\nline2\rXoverwritten";
+    const result = (0, continuity_js_1.neutralizeRecoveredBody)(text);
+    (0, bun_test_1.expect)(result).not.toContain("\r");
+    // LF is preserved (body structure):
+    (0, bun_test_1.expect)(result).toContain("\n");
+});
+(0, bun_test_1.test)("neutralizeRecoveredBody strips all C0 controls except tab and LF", () => {
+    for (let code = 0x00; code < 0x20; code++) {
+        if (code === 0x09 || code === 0x0a)
+            continue; // tab, LF
+        const ch = String.fromCharCode(code);
+        const result = (0, continuity_js_1.neutralizeRecoveredBody)(`before${ch}after`);
+        (0, bun_test_1.expect)(result).not.toContain(ch);
+    }
+    // Tab and LF are preserved:
+    (0, bun_test_1.expect)((0, continuity_js_1.neutralizeRecoveredBody)("a\tb")).toContain("\t");
+    (0, bun_test_1.expect)((0, continuity_js_1.neutralizeRecoveredBody)("a\nb")).toContain("\n");
+});
 //# sourceMappingURL=continuity-scoping.test.js.map

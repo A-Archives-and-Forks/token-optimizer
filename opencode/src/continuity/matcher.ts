@@ -73,7 +73,7 @@ function safeSlice(str: string, maxChars: number): string {
 export function neutralizeRecoveredBody(text: string): string {
   if (!text) return "";
   // Strip C0 control chars except tab (\x09) and newline (\x0a).
-  text = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, " ");
+  text = text.replace(/[\x00-\x08\x0b\x0c\x0d\x0e-\x1f\x7f]/g, " ");
   // Defang forged open/close sentinels: "[RECOVERED...", "[/RECOVERED...", etc.
   text = text.replace(/\[(\s*\/?\s*RECOVERED\b)/gi, "($1");
   // Defang role-prefix lines that could read as a new turn / system instruction.

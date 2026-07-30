@@ -145,6 +145,45 @@ def test_cross_project_file_drop_parity_fixture():
 
 
 # ---------------------------------------------------------------------------
+# C10: _neutralize_recovered_body must strip CR (\x0d). The old regex
+# [\x00-\x08\x0b\x0c\x0e-\x1f\x7f] kept CR, so Windows \r\n line endings
+# survived in the recovered body and CR could be used for terminal injection
+# (CR moves the cursor to column 0, letting later text overwrite the start
+# of a line). The fix adds \x0d to the strip class.
+# ---------------------------------------------------------------------------
+
+def test_neutralize_recovered_body_strips_cr(measure):
+    """C10: CR (\x0d) must be stripped from the recovered body."""
+    mod, _ = measure
+    text = "line1\r\nline2\rXoverwritten"
+    result = mod._neutralize_recovered_body(text)
+    assert "\r" not in result, (
+        f"CR must be stripped from the recovered body; got {result!r}"
+    )
+    # LF is preserved (body structure):
+    assert "\n" in result
+
+
+def test_neutralize_recovered_body_strips_all_c0_except_tab_and_lf(measure):
+    """C10: the strip class covers all C0 controls except tab (\x09) and
+    LF (\x0a), now including CR (\x0d)."""
+    mod, _ = measure
+    # Every C0 control char except \x09 (tab) and \x0a (LF):
+    for code in range(0x00, 0x20):
+        if code in (0x09, 0x0a):
+            continue
+        ch = chr(code)
+        text = f"before{ch}after"
+        result = mod._neutralize_recovered_body(text)
+        assert ch not in result, (
+            f"C0 control \\x{code:02x} must be stripped; got {result!r}"
+        )
+    # Tab and LF are preserved:
+    assert "\t" in mod._neutralize_recovered_body("a\tb")
+    assert "\n" in mod._neutralize_recovered_body("a\nb")
+
+
+# ---------------------------------------------------------------------------
 # build_lean_resume_context — mixed A/B checkpoint queried from B
 # ---------------------------------------------------------------------------
 
