@@ -148,6 +148,73 @@ def test_clone_path_outside_the_marketplaces_dir_is_rejected(tmp_path, monkeypat
     assert path == str(cache_scripts / "statusline.js")
 
 
+# --- G3 C-P2-3: existing installs get MIGRATED to the stable clone path -------
+
+def _write_settings(measure_mod, tmp_path, monkeypatch, statusline_cmd):
+    """Point measure.SETTINGS_PATH at a temp settings.json and seed a statusLine."""
+    settings_path = tmp_path / "claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    import json
+    settings_path.write_text(
+        json.dumps({"statusLine": {"type": "command", "command": statusline_cmd}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(measure_mod, "SETTINGS_PATH", settings_path)
+    return settings_path
+
+
+def _current_statusline_cmd(settings_path):
+    import json
+    return json.loads(settings_path.read_text(encoding="utf-8"))["statusLine"]["command"]
+
+
+def test_existing_version_pinned_statusline_is_migrated_to_clone(tmp_path, monkeypatch):
+    """The installed base (version-pinned cache statusLine) must be lifted onto
+    the update-surviving clone path at ensure-health, not left to keep blanking."""
+    cache_scripts, clone_scripts = _build_install(tmp_path, "5.11.67")
+    m = _load_measure(monkeypatch, tmp_path, cache_scripts / "measure.py")
+    old_cmd = f"node '{cache_scripts / 'statusline.js'}'"
+    settings_path = _write_settings(m, tmp_path, monkeypatch, old_cmd)
+
+    assert m._migrate_statusline_to_stable_path() is True
+    new_cmd = _current_statusline_cmd(settings_path)
+    assert new_cmd == f"node '{clone_scripts / 'statusline.js'}'", new_cmd
+    assert "/plugins/cache/" not in new_cmd
+    assert "5.11.67" not in new_cmd
+
+
+def test_migration_is_idempotent_when_already_on_clone(tmp_path, monkeypatch):
+    cache_scripts, clone_scripts = _build_install(tmp_path, "5.11.67")
+    m = _load_measure(monkeypatch, tmp_path, cache_scripts / "measure.py")
+    clone_cmd = f"node '{clone_scripts / 'statusline.js'}'"
+    settings_path = _write_settings(m, tmp_path, monkeypatch, clone_cmd)
+
+    assert m._migrate_statusline_to_stable_path() is False
+    assert _current_statusline_cmd(settings_path) == clone_cmd
+
+
+def test_migration_noop_when_clone_missing(tmp_path, monkeypatch):
+    """No clone to migrate to -> leave the version-pinned path (self-heal still runs)."""
+    cache_scripts, _clone = _build_install(tmp_path, "5.11.67", with_marketplace_clone=False)
+    m = _load_measure(monkeypatch, tmp_path, cache_scripts / "measure.py")
+    old_cmd = f"node '{cache_scripts / 'statusline.js'}'"
+    settings_path = _write_settings(m, tmp_path, monkeypatch, old_cmd)
+
+    assert m._migrate_statusline_to_stable_path() is False
+    assert _current_statusline_cmd(settings_path) == old_cmd
+
+
+def test_migration_ignores_foreign_statusline(tmp_path, monkeypatch):
+    """A user's own non-token-optimizer statusLine must never be rewritten."""
+    cache_scripts, clone_scripts = _build_install(tmp_path, "5.11.67")
+    m = _load_measure(monkeypatch, tmp_path, cache_scripts / "measure.py")
+    foreign = "node '/home/u/.config/mybar/bar.js'"
+    settings_path = _write_settings(m, tmp_path, monkeypatch, foreign)
+
+    assert m._migrate_statusline_to_stable_path() is False
+    assert _current_statusline_cmd(settings_path) == foreign
+
+
 def test_uninstall_matcher_still_matches_the_written_command(tmp_path, monkeypatch):
     """The F1/uninstall matcher keys on statusline.js + token-optimizer."""
     cache_scripts, clone_scripts = _build_install(tmp_path, "5.11.67")

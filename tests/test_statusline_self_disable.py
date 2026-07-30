@@ -96,6 +96,50 @@ def test_guard_does_not_fire_when_tree_intact(tmp_path):
     )
 
 
+def _build_clone_install(tmp_path, mkt="alexgreensh-token-optimizer", *, with_cache=True, version="5.11.67"):
+    """Marketplace-clone layout the statusLine points at for plugin-cache installs.
+
+    Returns the clone's statusline.js path. When ``with_cache`` the plugin's
+    cache tree exists (healthy install); otherwise it is absent (the state after
+    a native ``/plugin uninstall``, which removes the cache tree but keeps the
+    shared marketplace clone).
+    """
+    plugins = tmp_path / "claude" / "plugins"
+    clone = plugins / "marketplaces" / mkt / "skills" / "token-optimizer" / "scripts"
+    clone.mkdir(parents=True)
+    shutil.copy2(STATUSLINE, clone / "statusline.js")
+    shutil.copy2(SCRIPTS / "measure.py", clone / "measure.py")  # clone keeps its sibling
+    if with_cache:
+        (plugins / "cache" / mkt / "token-optimizer" / version).mkdir(parents=True)
+    return clone / "statusline.js"
+
+
+def test_clone_statusline_self_disables_after_plugin_uninstall(tmp_path):
+    """G3 C-P2-2: statusLine runs from the surviving marketplace clone, but the
+    plugin's cache tree is gone -> the plugin is uninstalled -> render nothing."""
+    if not _node_available():
+        print("  SKIP  node not available")
+        return
+    sl = _build_clone_install(tmp_path, with_cache=False)
+    result = _run_statusline(sl, _minimal_payload())
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert result.stdout == "", f"ghost status line rendered after uninstall: {result.stdout!r}"
+    assert result.stderr == ""
+
+
+def test_clone_statusline_renders_while_plugin_still_installed(tmp_path):
+    """Healthy install: clone present AND cache tree present -> normal render."""
+    if not _node_available():
+        print("  SKIP  node not available")
+        return
+    sl = _build_clone_install(tmp_path, with_cache=True)
+    result = _run_statusline(sl, _minimal_payload())
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert "Test" in result.stdout, (
+        f"guard fired on a healthy clone install (stdout empty): {result.stdout!r}"
+    )
+
+
 def test_uninstall_matcher_still_recognizes_command_shape():
     """The settings.json statusLine uninstall predicate must still match.
 

@@ -30427,6 +30427,63 @@ def _fix_stale_settings_paths():
     return len(stale_roots)
 
 
+def _migrate_statusline_to_stable_path():
+    """Migrate an already-installed statusLine from a version-pinned cache path
+    to the update-surviving marketplace clone path.
+
+    G3 C-P2-3: the ca654fe stable-path fix only reaches FRESH installs.
+    ``setup_quality_bar`` skips the statusLine whenever one is already installed,
+    and ``_is_quality_bar_installed`` counts BOTH the old version-pinned cache
+    path and the new clone path as "installed" (it only matches ``statusline.js``
+    + ``token-optimizer`` in the command). ``_fix_stale_settings_paths`` rewrites
+    cache-root -> *current* cache-root, still version-pinned. So the installed
+    base that originally hit "status line blank after every update" keeps the
+    version-pinned path and keeps hitting the blank-window-on-first-session.
+
+    This lifts them onto the clone path once, at ensure-health. Acts only on
+    plugin-cache installs whose OWN statusLine command still references a
+    ``/plugins/cache/`` version-pinned ``statusline.js`` and where the stable
+    clone path resolves. It does a targeted substring swap (not a wholesale
+    rewrite) so any surrounding command wrapper is preserved. Runs AFTER
+    ``_fix_stale_settings_paths`` so the cache path is already the current
+    version's before it is lifted to the clone.
+
+    Returns True if it rewrote the command, else False.
+    """
+    if not _is_running_from_plugin_cache():
+        return False
+    stable = _stable_marketplace_script_path("statusline.js")
+    if not stable:
+        return False
+    try:
+        settings, _ = _read_settings_json()
+        if not settings:
+            return False
+    except Exception:
+        return False
+    sl = settings.get("statusLine") or {}
+    cmd = sl.get("command", "")
+    if not cmd or "statusline.js" not in cmd or "token-optimizer" not in cmd:
+        return False
+    m = re.search(r'/[^"\'\\]+/plugins/cache/[^/]+/token-optimizer/[^"\'\\]*statusline\.js', cmd)
+    if not m:
+        return False
+    old_path = m.group(0)
+    if old_path == stable:
+        return False
+    new_cmd = cmd.replace(old_path, stable)
+    if new_cmd == cmd:
+        return False
+    new_settings = dict(settings)
+    new_sl = dict(sl)
+    new_sl["command"] = new_cmd
+    new_settings["statusLine"] = new_sl
+    try:
+        return bool(_write_settings_atomic(new_settings))
+    except Exception:
+        return False
+
+
 # Known TO script names used to identify token-optimizer hooks.
 _TO_SCRIPT_NAMES = frozenset({
     "measure.py", "read_cache.py", "bash_hook.py",
@@ -35397,6 +35454,17 @@ def run_ensure_health():
                 print(f"  [Token Optimizer] Fixed {_stale_fixed} stale plugin path(s) in settings.json")
         except Exception as _e:
             print(f"  [Token Optimizer] stale path fix failed: {_e}", file=sys.stderr)
+    # Lift an existing version-pinned statusLine onto the update-surviving
+    # marketplace clone path so the installed base stops seeing a blank status
+    # line on the first session after every plugin update (G3 C-P2-3). Runs
+    # after the stale-path fix so the cache path is already current before it is
+    # migrated to the clone. Claude Code only.
+    if not _is_codex:
+        try:
+            if _migrate_statusline_to_stable_path():
+                print("  [Token Optimizer] Migrated statusLine to the update-surviving path")
+        except Exception as _e:
+            print(f"  [Token Optimizer] statusLine path migration failed: {_e}", file=sys.stderr)
     # Remove malformed hook commands (subshell patterns, double-$HOME paths).
     # Claude Code only: reads/writes ~/.claude/settings.json.
     if not _is_codex:
