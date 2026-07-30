@@ -37,6 +37,14 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+# Windows: a console-subsystem child (python.exe, or an npm .cmd shim hosted by
+# cmd.exe) allocates and flashes a console window unless the parent passes
+# CREATE_NO_WINDOW (#107). getattr -> 0 on POSIX, where creationflags=0 is an
+# accepted no-op (CPython only rejects creationflags != 0 off-Windows).
+# Fire-and-forget spawns go through spawn_utils.spawn_detached instead, whose
+# DETACHED_PROCESS already suppresses console creation.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # ---------------------------------------------------------------------------
 # measure.py location
 # ---------------------------------------------------------------------------
@@ -131,6 +139,7 @@ def _run_measure(args: list[str], *, capture_output: bool = True, timeout: int =
             timeout=timeout,
             env={**os.environ, "TOKEN_OPTIMIZER_RUNTIME": "hermes",
                  "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+            creationflags=_NO_WINDOW,
         )
         if result.returncode != 0 and result.stderr:
             logger.debug(

@@ -368,15 +368,65 @@ function severityIcon(s) {
     }
 }
 function cmdDashboard(days) {
-    const filepath = (0, index_1.generateDashboard)(days);
+    let filepath;
+    try {
+        filepath = (0, index_1.generateDashboard)(days);
+    }
+    catch (err) {
+        // The dashboard write is atomic (temp file + rename), but the final
+        // rename can still fail on Windows when a reader (browser mid-read,
+        // AV/indexer) holds the destination without FILE_SHARE_DELETE. Fail
+        // with a one-line diagnostic instead of an uncaught stack trace.
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`Could not write dashboard: ${msg}. Re-run in a moment.`);
+        process.exit(1);
+    }
     if (!filepath) {
         console.error("OpenClaw not found.");
         process.exit(1);
     }
     console.log(`Dashboard written to: ${filepath}`);
-    // Open in default browser
-    const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-    (0, child_process_1.execFile)(opener, [filepath], { windowsHide: true }, () => { });
+    const openFailed = (err) => {
+        // #107 shipped unnoticed for months because this callback was a noop. Any
+        // opener failure now names itself and tells the user what to open by hand.
+        if (err) {
+            console.error(`Could not open a browser (${err.message}). Open manually: ${filepath}`);
+        }
+    };
+    // Open in default browser.
+    //
+    // #107 history, both wrong shapes:
+    //  1. the opener was the bare string "start", but `start` is a cmd.exe
+    //     BUILTIN -- there is no start.exe -- so execFile failed with ENOENT and
+    //     the browser never opened (swallowed by the old noop callback);
+    //  2. the first fix was `cmd /c start "" <path>`, which hands the path to
+    //     cmd.exe's PARSER. libuv's quote_cmd_arg quotes an argument only on
+    //     space/tab/quote -- never on & ^ | ( ) -- and `&` is a legal Windows
+    //     account-name character, so `C:\Users\R&D\.openclaw\...\dashboard.html`
+    //     arrived unquoted, cmd split at the `&` and ran the tail as a second
+    //     command relative to the CWD. `%VAR%` also expands inside quotes, and
+    //     the bare image name `cmd` is resolved CWD-FIRST, so a planted cmd.exe
+    //     in an untrusted working directory would have been executed windowless.
+    //     The path comes from HOME/USERPROFILE, so this was injection, not just
+    //     breakage.
+    //
+    // Node has no os.startfile (the Python lane's fix), so use the standard
+    // Windows shell-open trampoline instead: rundll32 url.dll,FileProtocolHandler
+    // calls ShellExecute on its argument. execFile passes the path as a real
+    // ARGV entry to a GUI-subsystem exe -- no cmd, no parser, no console, no
+    // metacharacter or %VAR% handling, and it accepts both plain paths and
+    // file://+http:// URLs. rundll32 is addressed absolutely under %SystemRoot%
+    // so it cannot be resolved out of the current directory either. windowsHide
+    // covers only this trampoline; the browser ShellExecute launches gets its own
+    // SW_SHOWNORMAL and stays visible.
+    if (process.platform === "win32") {
+        const systemRoot = process.env.SystemRoot || process.env.windir || "C:\\Windows";
+        const rundll32 = `${systemRoot}\\System32\\rundll32.exe`;
+        (0, child_process_1.execFile)(rundll32, ["url.dll,FileProtocolHandler", filepath], { windowsHide: true }, openFailed);
+        return;
+    }
+    const opener = process.platform === "darwin" ? "open" : "xdg-open";
+    (0, child_process_1.execFile)(opener, [filepath], { windowsHide: true }, openFailed);
 }
 function cmdContext(json) {
     const dir = (0, session_parser_1.findOpenClawDir)();

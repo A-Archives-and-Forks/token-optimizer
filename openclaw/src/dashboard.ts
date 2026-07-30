@@ -2970,7 +2970,27 @@ const DASHBOARD_PATH = path.join(DASHBOARD_DIR, "dashboard.html");
 export function writeDashboard(data: DashboardData): string {
   fs.mkdirSync(DASHBOARD_DIR, { recursive: true });
   const html = generateDashboardHtml(data);
-  fs.writeFileSync(DASHBOARD_PATH, html, { encoding: "utf-8", mode: 0o600 });
+  // Atomic: write a sibling temp file and rename it onto the final path.
+  // The old truncate-in-place write meant a second invocation could hand the
+  // browser (still resolving the file association from the first one) a
+  // zero-byte or half-written page, and on Windows a reader holding the file
+  // without FILE_SHARE_WRITE made the truncating writeFileSync throw a
+  // sharing violation. renameSync is atomic on POSIX and
+  // MoveFileExW+REPLACE_EXISTING on Windows, so readers always see a complete
+  // old or complete new file and concurrent writers last-write-win. The pid
+  // suffix keeps two concurrent writers off each other's temp file.
+  const tmpPath = `${DASHBOARD_PATH}.tmp.${process.pid}`;
+  try {
+    fs.writeFileSync(tmpPath, html, { encoding: "utf-8", mode: 0o600 });
+    fs.renameSync(tmpPath, DASHBOARD_PATH);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      /* temp file already gone */
+    }
+    throw err;
+  }
   return DASHBOARD_PATH;
 }
 

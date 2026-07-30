@@ -196,7 +196,19 @@ def test_python3_exe_swaps_to_pythonw(tmp_path):
     assert out.strip() == str(pw)
 
 
-def test_py_launcher_is_not_swapped(tmp_path):
+def test_py_launcher_swaps_to_pyw(tmp_path):
+    """#107: py.exe swaps to its GUI-subsystem twin pyw.exe (`pyw -3` execs
+    pythonw.exe), so py-launcher-only installs no longer flash a console."""
+    pyl = _fake_interp(tmp_path, "py.exe", "PY_SELECTED")
+    pyw = _fake_interp(tmp_path, "pyw.exe", "PYW_SELECTED")
+    out, rc, _err = _run(_selection_driver(str(pyl), msys=True, safe=True), "", {})
+    assert rc == 0
+    assert out.strip() == str(pyw)
+
+
+def test_py_launcher_ignores_pythonw_twin(tmp_path):
+    """py.exe's twin is pyw.exe, not pythonw.exe: a pythonw.exe in the same
+    directory (a different install's twin) must never be selected for py.exe."""
     pyl = _fake_interp(tmp_path, "py.exe", "PY_SELECTED")
     _fake_interp(tmp_path, "pythonw.exe", "PYTHONW_SELECTED")
     out, rc, _err = _run(_selection_driver(str(pyl), msys=True, safe=True), "", {})
@@ -467,10 +479,13 @@ def test_cache_record_naming_pythonw_exe_is_rejected(tmp_path):
 
 
 
-def test_documents_py_launcher_only_installs_still_flash():
+def test_documents_py_launcher_pyw_swap():
+    """#107 flipped the old "py-launcher-only installs still flash" carve-out:
+    py.exe now swaps to pyw.exe. The source must document the swap and must
+    no longer claim the flash is unfixed."""
     source = LAUNCHER.read_text(encoding="utf-8")
-    assert "py-launcher-only" in source
-    assert "still flash" in source
+    assert "pyw.exe" in source
+    assert "still flash" not in source
 
 
 def test_mirror_remains_byte_identical():
@@ -513,9 +528,12 @@ def test_kill_after_present_in_mirror():
     assert b"--kill-after=1s 2s" in source, (
         "the mirror launcher must carry --kill-after=1s on both probe sites"
     )
-    # Exactly two occurrences (one per probe site):
-    assert source.count(b"--kill-after=1s 2s") == 2, (
-        "expected exactly two --kill-after=1s probe sites in the mirror; "
+    # Exactly three occurrences (one per probe site): the _maybe_swap_to_pythonw
+    # liveness probe, the F2 GUI-twin proof-of-life probe, and the console
+    # --version fallback probe (both now in _probe_windowsapps_candidate).
+    # Updated from 2 when F2/#107 added the flash-free twin probe.
+    assert source.count(b"--kill-after=1s 2s") == 3, (
+        "expected exactly three --kill-after=1s probe sites in the mirror; "
         f"got {source.count(b'--kill-after=1s 2s')}"
     )
 

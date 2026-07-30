@@ -40,6 +40,14 @@ import tempfile
 import time
 from pathlib import Path
 
+# Windows console-flash guard (#107). A console-subsystem child spawned from a
+# console-less parent gets a NEW console allocated by Windows -- the flashing cmd
+# window. CREATE_NO_WINDOW suppresses it. The attribute exists only on Windows
+# builds, so getattr(..., 0) makes this a no-op on POSIX (0 is the documented
+# creationflags default). This script is a maintainer-run experiment, never
+# shipped to a user's plugin dir, so the guard is uniformity, not a live fix.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 TOTAL_BUDGET_USD = 2.00
 PER_CALL_BUDGET_USD = 0.50
 # Haiku: cheapest adequate model. The experiment reads usage metadata, not
@@ -129,7 +137,8 @@ def run_claude(args, cwd, label):
     ]
     try:
         proc = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, timeout=300
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=300,
+            creationflags=_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
         # A hung claude must route through the normal _error path (which the HARD
@@ -198,9 +207,19 @@ def main() -> int:
     else:
         _results["billing"] = "api_key"
 
-    help_text = subprocess.run(
-        [CLAUDE_BIN, "--help"], capture_output=True, text=True
-    ).stdout
+    # Guarded like run_claude (T1 Finding 6): a missing/hung `claude` must
+    # route through fail() (clean ABORT + result json) instead of raising a
+    # bare FileNotFoundError/TimeoutExpired out of main() before any result
+    # is emitted. FileNotFoundError is an OSError subclass.
+    try:
+        help_text = subprocess.run(
+            [CLAUDE_BIN, "--help"], capture_output=True, text=True,
+            timeout=60, creationflags=_NO_WINDOW,
+        ).stdout
+    except subprocess.TimeoutExpired:
+        fail("`claude --help` timed out after 60s")
+    except OSError as exc:
+        fail(f"cannot run {CLAUDE_BIN!r}: {exc}")
     for flag in ("--no-session-persistence", "--fork-session",
                  "--max-budget-usd", "--output-format"):
         if flag not in help_text:

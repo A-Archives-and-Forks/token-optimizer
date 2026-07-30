@@ -35,7 +35,17 @@ export function createDashboardTool(
         } else if (platform === "linux") {
           try { execFileSync("xdg-open", [outputPath], hide); } catch { execFileSync("sensible-browser", [outputPath], hide); }
         } else if (platform === "win32") {
-          execFileSync("cmd", ["/c", "start", "", outputPath], hide);
+          // #107: NOT `cmd /c start "" <path>`. That hands the path to cmd.exe's
+          // parser, and libuv's quote_cmd_arg quotes an argument only on
+          // space/tab/quote -- never on & ^ | ( ). `&` is a legal Windows
+          // account-name character, so C:\Users\R&D\...\dashboard.html arrived
+          // unquoted, cmd split at the `&` and ran the tail as a second command
+          // relative to the CWD. A bare image name `cmd` also resolves CWD-first.
+          // rundll32 url.dll,FileProtocolHandler is the documented shell-open
+          // trampoline: execFileSync passes the path as one real argv entry, so
+          // no interpreter ever parses it. Addressed absolutely under %SystemRoot%.
+          const systemRoot = process.env.SystemRoot || process.env.windir || "C:\\Windows";
+          execFileSync(`${systemRoot}\\System32\\rundll32.exe`, ["url.dll,FileProtocolHandler", outputPath], hide);
         }
 
         return {

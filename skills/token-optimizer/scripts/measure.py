@@ -106,6 +106,35 @@ from utf8_io import enforce_utf8_io, reexec_in_utf8_mode
 from runtime_env import claude_home, detect_runtime, runtime_home, runtime_name_for_humans
 from spawn_utils import spawn_detached
 
+# issue #107: every console-attached child we spawn on Windows flashes a cmd
+# window when the host is the GitHub Desktop app (no inherited console). The
+# getattr degrades to 0 on POSIX and on Windows builds without the constant, so
+# `creationflags=_NO_WINDOW` is a literal no-op everywhere but Windows. Detached
+# spawns (spawn_utils.spawn_detached) OR this in on top of DETACHED_PROCESS --
+# CreateProcess ignores CREATE_NO_WINDOW when DETACHED_PROCESS is set, so the OR
+# is harmless and keeps a single grep-able invariant across every spawn site.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _detached_python_exe():
+    """Interpreter to use for FIRE-AND-FORGET python children.
+
+    issue #107, belt-and-suspenders on top of the detach flags: on Windows,
+    prefer the GUI-subsystem ``pythonw.exe`` twin next to ``sys.executable`` so
+    the child cannot allocate a console even if a future edit drops
+    ``DETACHED_PROCESS``/``CREATE_NO_WINDOW``, or a host launches us in a way we
+    do not control. Falls back to ``sys.executable`` when no usable twin exists
+    (MS Store alias, no twin) and is a pure no-op off Windows -- POSIX behaviour
+    is byte-identical.
+
+    ONLY for children whose stdio is DEVNULL. Do NOT use it for
+    ``capture_output=True`` runs: those already suppress the window via
+    ``creationflags=_NO_WINDOW``, and swapping the interpreter there would trade
+    a solved problem for pythonw's None-stdio semantics.
+    """
+    return _windows_gui_python() or sys.executable or "python3"
+
+
 import codex_io
 import codex_session
 import codex_state
@@ -3023,6 +3052,36 @@ def doctor(as_json=False):
         checks.append(("OK", "Plugin paths clean", "no duplicates or suspicious sources"))
         score += 1
 
+    # 13. Dashboard daemon (#107 torture T3-H5: doctor had ZERO daemon checks,
+    # so a wedged sticky marker was invisible to the one command named for the
+    # job). Fail-open: a probe error must not break doctor.
+    total += 1
+    try:
+        if _daemon_install_failed_marker_present():
+            _mk = _daemon_install_failed_reason()
+            checks.append(("!!", "Dashboard daemon",
+                           f"self-heal disabled by a permanent install failure "
+                           f"({_mk or 'reason unknown'}) "
+                           "(fix: python3 measure.py setup-daemon)"))
+        elif _daemon_resurrection_blocked() is not None:
+            checks.append(("OK", "Dashboard daemon", "disabled by user (opt-out honored)"))
+            score += 1
+        elif _verify_daemon_port(timeout_seconds=1, retries=1, retry_sleep=0):
+            checks.append(("OK", "Dashboard daemon",
+                           f"running at http://localhost:{DAEMON_PORT}/token-optimizer"))
+            score += 1
+        elif _daemon_service_installed(_normalized_platform()):
+            checks.append(("!!", "Dashboard daemon",
+                           "installed but not serving "
+                           "(fix: python3 measure.py setup-daemon)"))
+        else:
+            checks.append(("OK", "Dashboard daemon",
+                           "not installed (self-installs at SessionStart)"))
+            score += 1
+    except Exception:
+        checks.append(("OK", "Dashboard daemon", "status unknown (probe failed)"))
+        score += 1
+
     if as_json:
         result = {
             "score": score,
@@ -3852,9 +3911,9 @@ def _open_in_browser(filepath):
     system = platform.system()
     try:
         if system == "Darwin":
-            subprocess.run(["open", filepath], check=True, timeout=10)
+            subprocess.run(["open", filepath], check=True, timeout=10, creationflags=_NO_WINDOW)
         elif system == "Linux":
-            subprocess.run(["xdg-open", filepath], check=True, timeout=10)
+            subprocess.run(["xdg-open", filepath], check=True, timeout=10, creationflags=_NO_WINDOW)
         elif system == "Windows":
             os.startfile(filepath)
         else:
@@ -3883,9 +3942,9 @@ def _open_dashboard(fallback_filepath):
         system = platform.system()
         try:
             if system == "Darwin":
-                subprocess.run(["open", url], check=True, timeout=10)
+                subprocess.run(["open", url], check=True, timeout=10, creationflags=_NO_WINDOW)
             elif system == "Linux":
-                subprocess.run(["xdg-open", url], check=True, timeout=10)
+                subprocess.run(["xdg-open", url], check=True, timeout=10, creationflags=_NO_WINDOW)
             elif system == "Windows":
                 os.startfile(url)
             else:
@@ -6094,7 +6153,7 @@ def _defer_session_end_flush(args):
     """Detach the expensive dashboard/session refresh so Stop returns quickly."""
     try:
         cmd = [
-            sys.executable or "python3",
+            _detached_python_exe(),
             str(Path(__file__).resolve()),
             "session-end-flush-worker",
             *args[1:],
@@ -11430,7 +11489,7 @@ def _gh_available():
         # Short timeout: this runs inside ensure-health's SessionStart budget.
         # Two gate calls (this + the starred check) must fit well under it.
         r = subprocess.run(
-            ["gh", "auth", "status"], capture_output=True, timeout=3)
+            ["gh", "auth", "status"], capture_output=True, timeout=3, creationflags=_NO_WINDOW)
         return r.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
@@ -11450,7 +11509,7 @@ def _gh_repo_is_starred(slug=_STAR_REPO_SLUG):
         # Short timeout: runs inside ensure-health's SessionStart budget.
         r = subprocess.run(
             ["gh", "api", "/user/starred/%s" % slug],
-            capture_output=True, timeout=3)
+            capture_output=True, timeout=3, creationflags=_NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         return None
     if r.returncode == 0:
@@ -11550,7 +11609,7 @@ def star_now(slug=_STAR_REPO_SLUG):
     try:
         r = subprocess.run(
             ["gh", "api", "-X", "PUT", "/user/starred/%s" % slug],
-            capture_output=True, timeout=10)
+            capture_output=True, timeout=10, creationflags=_NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as exc:
         return (False, "Star request failed: %s." % type(exc).__name__)
     if r.returncode == 0:
@@ -12153,14 +12212,14 @@ def _keepwarm_scheduler_install_macos(quiet=False):
     try:
         subprocess.run(
             ["launchctl", "bootout", f"gui/{uid}", str(plist_path)],
-            capture_output=True, text=True, errors="replace", timeout=10,
+            capture_output=True, text=True, errors="replace", timeout=10, creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.TimeoutExpired):
         pass
     try:
         result = subprocess.run(
             ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
-            capture_output=True, text=True, errors="replace", timeout=10,
+            capture_output=True, text=True, errors="replace", timeout=10, creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         # Bootstrap could not even run: record the failed attempt in the marker
@@ -12234,7 +12293,7 @@ def keepwarm_scheduler_uninstall(quiet=False):
         try:
             subprocess.run(
                 ["launchctl", "bootout", f"gui/{uid}", str(plist_path)],
-                capture_output=True, text=True, errors="replace", timeout=10,
+                capture_output=True, text=True, errors="replace", timeout=10, creationflags=_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -13070,7 +13129,7 @@ def _keepwarm_fire_ping(record, now=None, runner=None):
                 return subprocess.run(
                     cmd, cwd=cwd, env=env, timeout=timeout,
                     capture_output=True, text=True,
-                    encoding="utf-8", errors="replace")
+                    encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
 
         # Real monotonic start (NOT the injected logical `now`) so duration_s is
         # sane even on backfill/replay paths that pass a synthetic now (lang M1).
@@ -17383,7 +17442,7 @@ def _collect_git_commits(days=30):
             proc = subprocess.run(
                 ["git", "-C", repo_path, "log", "--oneline",
                  f"--since={cutoff_date}", "--format=%ai|%s"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
             )
             if proc.returncode != 0 or not proc.stdout.strip():
                 continue
@@ -17623,7 +17682,7 @@ def _find_session_version_for_pid(pid):
             capture_output=True, text=True, timeout=5,
             # Force C locale so ps emits English lstart regardless of host
             # locale (e.g. he_IL.UTF-8 emits Hebrew month names). GitHub #73.
-            env={**os.environ, "LC_ALL": "C", "LC_TIME": "C"},
+            env={**os.environ, "LC_ALL": "C", "LC_TIME": "C"}, creationflags=_NO_WINDOW,
         )
         if result.returncode != 0:
             return None
@@ -17728,7 +17787,7 @@ def _collect_posix_claude_sessions(process_name="claude"):
             # non-English locales (e.g. he_IL.UTF-8) ps emits localized dates
             # with a different field count, breaking the positional parse below
             # and dropping every session. GitHub #73.
-            env={**os.environ, "LC_ALL": "C", "LC_TIME": "C"},
+            env={**os.environ, "LC_ALL": "C", "LC_TIME": "C"}, creationflags=_NO_WINDOW,
         )
     except (subprocess.SubprocessError, OSError):
         return None
@@ -17848,7 +17907,7 @@ def _windows_process_creation(pid):
         result = subprocess.run(
             ["wmic", "process", "where", f"ProcessId={int(pid)}",
              "get", "CreationDate", "/format:list"],
-            capture_output=True, text=True, timeout=10, errors="replace",
+            capture_output=True, text=True, timeout=10, errors="replace", creationflags=_NO_WINDOW,
         )
         if result.returncode == 0:
             for line in result.stdout.splitlines():
@@ -17868,7 +17927,7 @@ def _windows_process_creation(pid):
         )
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True, text=True, timeout=10, errors="replace",
+            capture_output=True, text=True, timeout=10, errors="replace", creationflags=_NO_WINDOW,
         )
         if result.returncode == 0 and result.stdout.strip():
             parsed = _parse_iso_process_datetime(result.stdout.strip())
@@ -17905,7 +17964,7 @@ def _collect_windows_claude_sessions():
     try:
         result = subprocess.run(
             ["tasklist", "/v", "/fo", "csv", "/nh"],
-            capture_output=True, text=True, timeout=10, errors="replace",
+            capture_output=True, text=True, timeout=10, errors="replace", creationflags=_NO_WINDOW,
         )
     except (subprocess.SubprocessError, OSError, FileNotFoundError):
         return sessions
@@ -18025,7 +18084,7 @@ def _collect_health_data():
     try:
         result = subprocess.run(
             [_resolve_runtime_bin(process_name), "--version"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
         )
         if result.returncode == 0:
             raw_version = result.stdout.strip()
@@ -18093,7 +18152,7 @@ def _collect_health_data():
         try:
             result = subprocess.run(
                 ["launchctl", "list"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
             )
             if result.returncode == 0:
                 for line in result.stdout.strip().split("\n"):
@@ -18109,7 +18168,7 @@ def _collect_health_data():
             import io as _io
             result = subprocess.run(
                 ["schtasks", "/Query", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=10, errors="replace",
+                capture_output=True, text=True, timeout=10, errors="replace", creationflags=_NO_WINDOW,
             )
             if result.returncode == 0:
                 for row in _csv.reader(_io.StringIO(result.stdout)):
@@ -18224,7 +18283,7 @@ def health_selfcheck():
         try:
             res = subprocess.run(
                 ["tasklist", "/v", "/fo", "csv", "/nh"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
             )
             ok = res.returncode == 0 and len(res.stdout.strip()) > 0
             check("tasklist /v /fo csv", ok,
@@ -18246,7 +18305,7 @@ def health_selfcheck():
             res = subprocess.run(
                 ["wmic", "process", "where", f"ProcessId={own_pid}",
                  "get", "CreationDate", "/format:list"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW,
             )
             wmic_ok = res.returncode == 0 and "CreationDate=" in res.stdout
             check("wmic CreationDate probe (self-pid)", wmic_ok,
@@ -18261,7 +18320,7 @@ def health_selfcheck():
                 capture_output=True, text=True, timeout=10,
                 # Match the production collectors: force C locale so this
                 # diagnostic mirrors what _collect_posix_claude_sessions sees. GitHub #73.
-                env={**os.environ, "LC_ALL": "C", "LC_TIME": "C"},
+                env={**os.environ, "LC_ALL": "C", "LC_TIME": "C"}, creationflags=_NO_WINDOW,
             )
             ok = res.returncode == 0 and len(res.stdout.strip().split("\n")) > 1
             check("ps -eo pid,tty,lstart,etime,command", ok,
@@ -18932,6 +18991,35 @@ DAEMON_THRASH_BREADCRUMB = SNAPSHOT_DIR / ".daemon-thrash"  # adv-005 tombstone
 # tombstone after 60s and minted a fresh CSRF token post-uninstall. Give the
 # uninstall tombstone distinctive content so the daemon can honor it forever.
 _UNINSTALL_TOMBSTONE_MARKER = "uninstalled"
+
+# issue #107: STICKY install-failed marker. Lives in the same state dir as the
+# .daemon-thrash tombstone and follows the same convention (a dot-prefixed
+# breadcrumb whose PRESENCE is authoritative, independent of config.json, which
+# a corrupt read could silently flip back to permissive).
+#
+# Why it exists: before this, a daemon install that failed for a structural
+# reason (no `schtasks` on the PATH, a locked SNAPSHOT_DIR, a Python that cannot
+# spawn) was retried by `_ensure_dashboard_daemon` on the next SessionStart and
+# by `_daemon_midsession_pulse` every ~5min. On Windows each retry shells out to
+# schtasks/netstat, so a permanently-broken install flashed a cmd window on
+# essentially every prompt, forever. The throttles bound the RATE, not the
+# lifetime -- they never stop.
+#
+# Lifetime (#107 torture, Cluster A): armed ONLY by DEFINITIVE, permanent
+# failure classes -- an MS-Store Python alias (structurally impossible install),
+# schtasks missing from the machine, or task creation denied by policy
+# ("Access is denied"). TRANSIENT classes (a subprocess timeout, a one-off
+# nonzero exit, a fork EAGAIN, a lost install-lock race, a momentarily-bound
+# port, a missing dashboard file) must NEVER arm it -- those are already
+# bounded by the 24h ensure throttle / 300s revive throttle / 24h heal
+# throttle, and a single launchctl hiccup on macOS must not permanently kill a
+# daemon over a Windows-only cosmetic bug. It never expires on time, but it IS
+# cleared by any later VERIFIED success: an explicit `setup-daemon` that
+# succeeds, or the ensure path observing a live, identity-verified daemon
+# (which disproves the "structurally broken" claim -- e.g. the install-lock
+# race where the loser armed it while the winner installed fine).
+DAEMON_INSTALL_FAILED_BREADCRUMB = SNAPSHOT_DIR / ".daemon-install-failed"
+
 DAEMON_IDENTITY_MAGIC = (
     f"token-optimizer-{_DAEMON_RUNTIME_SUFFIX}-dashboard-v1"
     if _DAEMON_RUNTIME_SUFFIX != "claude"
@@ -19340,6 +19428,7 @@ def _generate_daemon_script():
     token_path_literal = repr(str(DAEMON_TOKEN_PATH))
     host_path_literal = repr(str(DAEMON_HOST_PATH))
     thrash_path_literal = repr(str(DAEMON_THRASH_BREADCRUMB))
+    log_dir_literal = repr(str(DAEMON_LOG_DIR))
     tombstone_marker_literal = repr(_UNINSTALL_TOMBSTONE_MARKER)
     magic_literal = repr(DAEMON_IDENTITY_MAGIC)
     return f'''#!/usr/bin/env python3
@@ -19353,8 +19442,36 @@ import http.server
 import json
 import os
 import socketserver
+import subprocess
 import sys
 import time
+
+# issue #107: the daemon shells out to `python measure.py ...` for the v5-toggle,
+# skill/MCP-manage, and manual-regenerate endpoints. python.exe is a console
+# subsystem binary, so without CREATE_NO_WINDOW each of those spawns flashes a
+# cmd window on Windows. getattr -> 0 on POSIX makes it a no-op there.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+LOG_DIR = {log_dir_literal}
+
+# issue #107: the Scheduled Task now launches this script with pythonw.exe
+# (GUI subsystem) instead of the .cmd launcher, because Task Scheduler paints a
+# console window for any console-subsystem action and no creationflags of ours
+# can stop it. pythonw gives the process NO std handles at all, so the
+# stdout.log / stderr.log trail the .cmd used to provide would vanish -- and a
+# silent daemon death is exactly the failure mode that once looked healthy for
+# two days. Reopen the handles onto the same log files before anything runs.
+if sys.stdout is None or sys.stderr is None:
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        if sys.stdout is None:
+            sys.stdout = open(os.path.join(LOG_DIR, "stdout.log"), "a",
+                              encoding="utf-8", errors="replace", buffering=1)
+        if sys.stderr is None:
+            sys.stderr = open(os.path.join(LOG_DIR, "stderr.log"), "a",
+                              encoding="utf-8", errors="replace", buffering=1)
+    except OSError:
+        pass
 
 DASHBOARD = {dashboard_literal}
 TOKEN_PATH = {token_path_literal}
@@ -19719,7 +19836,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             try:
                 result = subprocess.run(
                     [sys.executable, _resolve_measure_py(), "v5", action, name, "--json"],
-                    capture_output=True, text=True, timeout=10
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=_NO_WINDOW
                 )
             except (subprocess.TimeoutExpired, OSError) as e:
                 self._json_response(500, {{"ok": False, "msg": "toggle backend unavailable: " + str(e)}})
@@ -19764,7 +19882,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             try:
                 result = subprocess.run(
                     [sys.executable, _resolve_measure_py(), "api-manage", endpoint, name],
-                    capture_output=True, text=True, timeout=15
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=_NO_WINDOW
                 )
             except (subprocess.TimeoutExpired, OSError) as e:
                 self._json_response(500, {{"ok": False, "msg": "manage backend unavailable: " + str(e)}})
@@ -19803,6 +19922,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     r = subprocess.run(
                         [sys.executable, target, step, "--quiet"],
                         capture_output=True, text=True, timeout=REGEN_STEP_TIMEOUT,
+                        creationflags=_NO_WINDOW,
                     )
                     if r.returncode != 0:
                         msg = (r.stderr or r.stdout or "").strip()[:300] or ("%s exited %d" % (step, r.returncode))
@@ -20679,7 +20799,7 @@ def _reclaim_posix_daemon_port(port=DAEMON_PORT, script_name="dashboard-server.p
     try:
         lsof = subprocess.run(
             ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW,
         )
     except (subprocess.SubprocessError, OSError, FileNotFoundError):
         return
@@ -20693,7 +20813,7 @@ def _reclaim_posix_daemon_port(port=DAEMON_PORT, script_name="dashboard-server.p
         try:
             ps_out = subprocess.run(
                 ["ps", "-o", "command=", "-p", str(pid)],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW,
             )
         except (subprocess.SubprocessError, OSError, FileNotFoundError):
             continue
@@ -20833,7 +20953,7 @@ def _install_launchd_daemon(dry_run=False, soft_fail=False, effective_host=None)
         # exit when nothing is loaded is expected and ignored).
         try:
             subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(PLIST_PATH)],
-                           capture_output=True, timeout=10)
+                           capture_output=True, timeout=10, creationflags=_NO_WINDOW)
         except (OSError, subprocess.TimeoutExpired):
             pass
         # bootout drops the launchd job but doesn't SIGTERM the Python
@@ -20844,7 +20964,7 @@ def _install_launchd_daemon(dry_run=False, soft_fail=False, effective_host=None)
         # Start daemon
         try:
             result = subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST_PATH)],
-                                    capture_output=True, text=True, timeout=20)
+                                    capture_output=True, text=True, timeout=20, creationflags=_NO_WINDOW)
         except (OSError, subprocess.TimeoutExpired) as e:
             return _fail(f"[Error] launchctl bootstrap failed: {e}")
         if result.returncode != 0:
@@ -20920,6 +21040,153 @@ def _write_uninstall_tombstone(snapshot_dir=None):
         )
 
 
+# ---------------------------------------------------------------------------
+# issue #107: sticky install-failed marker (no-revive after a failed install)
+# ---------------------------------------------------------------------------
+
+def _daemon_install_failed_marker_state():
+    """Tri-state stat of the sticky marker: 'present' | 'absent' | 'unknown'.
+
+    #107 torture T3-F9: the old implementation used ``os.path.exists``, which
+    maps EVERY OSError to False -- so the written ``except OSError`` policy was
+    dead code, and (worse) an AV/permission denial made a PRESENT marker read
+    as ABSENT, silently reopening the retry loop the marker exists to stop --
+    intermittently, which is the worst kind of flap to debug. ``os.stat`` with
+    explicit errno handling makes present-but-unreadable ('unknown')
+    distinguishable from a definitive ENOENT ('absent'). Never raises.
+    """
+    try:
+        os.stat(str(DAEMON_INSTALL_FAILED_BREADCRUMB))
+        return "present"
+    except (FileNotFoundError, NotADirectoryError):
+        # The only DEFINITIVE evidence of absence: the path (or a parent
+        # component) does not exist.
+        return "absent"
+    except OSError:
+        # EACCES/EIO/...: the marker may well exist; we just cannot see it.
+        return "unknown"
+
+
+def _daemon_install_failed_marker_present():
+    """True when a prior daemon install/revive/self-heal failed and has NOT been
+    cleared (by an explicit successful ``setup-daemon``, or by a verified-live
+    daemon disproving the record).
+
+    Checked FIRST by every path that would otherwise (re)spawn an installer:
+    ``_ensure_dashboard_daemon`` (SessionStart self-heal AND the ``daemon-revive``
+    subcommand, including ``force=True``) and ``_daemon_midsession_pulse``
+    (per-turn revive). A filesystem breadcrumb, not a config flag, for the same
+    reason the uninstall tombstone is: a corrupt/unreadable config.json must not
+    silently re-arm the retry loop.
+
+    Policy (T3-F9, now explicit instead of an accident of exists()):
+    'unknown' counts as PRESENT. This gate only ever suppresses a costly
+    retry, so failing CLOSED on a transient stat error keeps the gate stable
+    -- a momentary AV denial must not flap it open and resume the per-prompt
+    retry loop. Only a definitive ENOENT reads as absent, and the
+    clear-on-verified-healthy path in ``_ensure_dashboard_daemon`` still
+    un-wedges a stale marker the moment the daemon is observably alive.
+    """
+    return _daemon_install_failed_marker_state() != "absent"
+
+
+def _daemon_install_failed_reason():
+    """First line of the sticky marker (``<iso8601> <reason>``), or None.
+
+    Purely for user-facing surfaces (ensure-health's one-liner, doctor) --
+    presence, not content, is what gates behaviour. Never raises.
+    """
+    try:
+        line = DAEMON_INSTALL_FAILED_BREADCRUMB.read_text(
+            encoding="utf-8", errors="replace").strip().splitlines()
+        return line[0] if line else None
+    except OSError:
+        return None
+
+
+def _write_daemon_install_failed_marker(reason):
+    """Persist the sticky install-failed marker. Best effort, never raises.
+
+    #107 torture Cluster A: callers must only arm this for DEFINITIVE,
+    permanent failure classes (MS-Store alias, schtasks missing, task creation
+    denied by policy) -- see the DAEMON_INSTALL_FAILED_BREADCRUMB comment.
+    Transient failures rely on the existing throttles instead.
+
+    Content is ``<iso8601> <reason>`` for the user/support (surfaced by
+    ensure-health and doctor): only the file's PRESENCE is load-bearing.
+    """
+    try:
+        if _daemon_install_failed_marker_present():
+            return
+        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            # T7-M: match take_snapshot's 0o700 -- when this mkdir is the
+            # first creator, the state dir must not land world-readable.
+            os.chmod(str(SNAPSHOT_DIR), 0o700)
+        except OSError:
+            pass
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with open(DAEMON_INSTALL_FAILED_BREADCRUMB, "w", encoding="utf-8") as f:
+            f.write(f"{stamp} {reason}\n")
+    except OSError as _e:
+        # An unwritable state dir means we cannot make the refusal sticky. The
+        # throttles still bound the retry rate; do not crash a hook over it --
+        # but SAY so (T3-F10): a silently-degraded stickiness would leave the
+        # per-window retry (and its Windows flashes) with zero explanation.
+        try:
+            print(
+                "[Token Optimizer] Warning: could not persist the daemon "
+                f"install-failed marker ({DAEMON_INSTALL_FAILED_BREADCRUMB}): "
+                f"{_e}. Failed installs will keep retrying on the normal "
+                "throttle instead of stopping permanently.",
+                file=sys.stderr,
+            )
+        except Exception:
+            pass
+
+
+def _clear_daemon_install_failed_marker():
+    """Remove the sticky install-failed marker.
+
+    Legitimate callers, and NOTHING else (a time- or session-based clear would
+    restore the per-prompt retry loop #107 exists to stop):
+      * ``setup_daemon``'s explicit install branch, after the platform
+        installer reports success -- the user proved the problem is fixed;
+      * ``_ensure_dashboard_daemon`` on VERIFIED success -- a live,
+        identity-checked daemon (or a completed install/restart) disproves the
+        "structurally broken" record, e.g. after the install-lock race where
+        the losing session armed the marker while the winner installed fine.
+
+    #107 torture T3-F7: returns True only when the marker is VERIFIABLY gone
+    (read back after the unlink, never assumed). A clear that did not clear
+    warns on stderr -- the pre-fix shape swallowed the OSError, so
+    ``setup-daemon`` printed its full "installed and running" success story
+    while every self-heal path stayed permanently disabled, undiagnosably.
+    Never raises.
+    """
+    try:
+        DAEMON_INSTALL_FAILED_BREADCRUMB.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        pass
+    # Read back: only a definitive ENOENT counts as cleared. 'present' AND
+    # 'unknown' both mean the wedge may still stand -- say so.
+    if _daemon_install_failed_marker_state() == "absent":
+        return True
+    try:
+        print(
+            "[Token Optimizer] Warning: could not remove "
+            f"{DAEMON_INSTALL_FAILED_BREADCRUMB} -- daemon self-heal stays "
+            "DISABLED until this file is removed (delete it manually, then "
+            "re-run: python3 measure.py setup-daemon).",
+            file=sys.stderr,
+        )
+    except Exception:
+        pass
+    return False
+
+
 def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
     """macOS: stop and remove the LaunchAgent + daemon script(s).
 
@@ -20982,13 +21249,13 @@ def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
         # rm, platform GC) was never unregistered and kept respawning.
         try:
             subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
-                           capture_output=True, timeout=10)
+                           capture_output=True, timeout=10, creationflags=_NO_WINDOW)
         except (OSError, subprocess.TimeoutExpired):
             pass
         if plist.exists():
             try:
                 subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)],
-                               capture_output=True, timeout=10)
+                               capture_output=True, timeout=10, creationflags=_NO_WINDOW)
             except (OSError, subprocess.TimeoutExpired):
                 pass
             if _unlink_if_exists(plist):
@@ -21066,6 +21333,66 @@ def _resolve_windows_pythonw():
     return None
 
 
+def _windows_gui_python():
+    """pythonw.exe (GUI subsystem) next to ``sys.executable``, or None.
+
+    issue #107: the ONE interpreter that never allocates a console. Every
+    console-subsystem child (python.exe, py.exe, cmd.exe) gets a window from
+    Windows itself unless the PARENT passes CREATE_NO_WINDOW -- and when the
+    parent is Task Scheduler, we do not get to pass anything. Launching
+    pythonw.exe moves the guarantee into the binary, where no parent can undo it.
+
+    Thin alias over ``_resolve_windows_pythonw`` (which already refuses MS Store
+    App Execution Aliases -- those do not resolve under Task Scheduler's launch
+    context) so #107 call sites read by intent rather than by platform trivia.
+    Returns None off Windows and whenever no usable twin exists; every caller
+    must fall back to its pre-#107 behaviour.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        return _resolve_windows_pythonw()
+    except Exception:
+        # Interpreter SELECTION must never be able to break a spawn. The
+        # resolver builds a WindowsPath, which raises on a host whose pathlib
+        # flavour disagrees with os.name (real case: a POSIX box with os.name
+        # monkeypatched; plausible case: an embedded/frozen interpreter with a
+        # non-path sys.executable). Degrade to "no twin" -> caller keeps
+        # sys.executable, which is exactly the pre-#107 behaviour.
+        return None
+
+
+def _windows_task_exec_action(daemon_script_path, launcher_path):
+    """Return ``(command, arguments)`` for the Scheduled Task's ``<Exec>``.
+
+    issue #107 (the idle-pop): the task action used to be the generated
+    ``dashboard-launcher.cmd``. Task Scheduler runs a .cmd through cmd.exe, a
+    CONSOLE-subsystem process, so EVERY fire of the task painted a console
+    window on the user's desktop -- at logon, at boot, and on each
+    ``schtasks /Run`` from the daemon revive / restart self-heal (which is what
+    made windows pop while the machine looked idle). ``<Hidden>true</Hidden>``
+    does NOT suppress this; it only hides the task from the Task Scheduler UI's
+    default filter. CREATE_NO_WINDOW cannot help either -- our process is not
+    the parent, Task Scheduler is.
+
+    Preferred action: ``pythonw.exe <daemon_script>``. pythonw is GUI-subsystem,
+    so Windows never allocates a console for it no matter who launches it.
+
+    Fallback (no usable pythonw -- MS Store alias, or no twin next to
+    sys.executable): the old .cmd launcher, which still WORKS and still captures
+    stdout/stderr, it just keeps the console window. Better a visible window than
+    a daemon that will not start.
+
+    The .cmd is written either way: it stays the fallback, it is what the
+    uninstall sweep already knows to delete (``_daemon_per_identity_files``), and
+    it is a usable manual repro for a user debugging a dead daemon.
+    """
+    pyw = _windows_gui_python()
+    if pyw:
+        return pyw, f'"{daemon_script_path}"'
+    return str(launcher_path), ""
+
+
 def _compose_windows_user_id():
     """Return DOMAIN\\user when domain-joined, bare username in workgroup.
 
@@ -21095,15 +21422,73 @@ def _generate_windows_launcher_cmd(daemon_script_path, log_dir):
     Rationale (torture HIGH-2, MEDIUM-4, MEDIUM-6): pointing Task
     Scheduler directly at a versioned pythonw.exe path breaks on Python
     upgrades and loses stdout/stderr. A .cmd wrapper dispatches via
-    `py -3` (Python Launcher, version-stable) with pythonw/python
-    fallbacks, and captures daemon output into DAEMON_LOG_DIR so port
-    conflicts and import errors no longer silently vanish.
+    a runtime interpreter ladder and captures daemon output into
+    DAEMON_LOG_DIR so port conflicts and import errors no longer
+    silently vanish.
+
+    issue #107 -- READ THIS BEFORE REORDERING ANYTHING:
+
+    * This shim is now the FALLBACK path only. The Scheduled Task action
+      normally points straight at pythonw.exe (see
+      ``_windows_task_exec_action``), because Task Scheduler hosts a .cmd
+      inside console-subsystem cmd.exe and paints a window on EVERY fire --
+      logon, boot, and each ``schtasks /Run`` from the revive/restart
+      self-heal. Nothing inside a .cmd can prevent its own cmd.exe host.
+      **HONEST LIMIT: when this shim is the task action, #107 is NOT fixed,
+      only REDUCED -- from several console processes per fire (the cmd.exe
+      host plus up to three where.exe probes plus a console-subsystem
+      interpreter) down to the one unavoidable cmd.exe host window. One flash
+      per fire remains for this population, and no rewrite of the shim's
+      CONTENTS can ever remove it.** That is why the shim is used only when no
+      usable pythonw twin exists.
+    * The interpreter ladder was ``py.exe -3`` FIRST, which is exactly
+      backwards: py.exe is console-subsystem and wins on any host with the
+      Python Launcher installed (the common case), so the LONG-LIVED daemon
+      itself ran as a console process. GUI-subsystem interpreters now come
+      first: pythonw.exe -> pyw.exe -3 -> py.exe -3 -> python.exe.
+    * The three ``where <exe>`` probes are gone. where.exe is itself a console
+      binary, so the old shim spawned up to three extra console processes per
+      fire. Detection is now cmd's own "command not found" code (9009) from a
+      direct invocation, which costs no extra process.
+
+    The ladder is written FLAT (no parenthesised blocks) on purpose:
+    ``%ERRORLEVEL%`` inside a ``( ... )`` block expands once at block-parse
+    time, so a block form would test a stale value.
+
+    #107 torture T5-M -- the bare-PATH ``pythonw.exe`` rung needs a
+    WindowsApps guard: a Microsoft Store App Execution Alias exits 0 SILENTLY
+    under Task Scheduler's non-interactive token, so an unguarded first rung
+    would "succeed", ``exit /b 0``, and no daemon would ever start -- on hosts
+    where the pre-#107 ``py -3``-first ladder worked. The rung therefore
+    resolves the PATH hit with ``%%~$PATH:I`` (pure cmd, no extra process --
+    where.exe is banned here) and skips itself when the hit lives under
+    WindowsApps. pyw.exe/py.exe are real launchers in C:\\Windows, never Store
+    aliases, so they keep plain rungs.
+
+    #107 torture T7-M -- ``%`` is legal in Windows paths but expands at cmd
+    parse time (``%VAR%``), silently mis-targeting DAEMON_SCRIPT and both log
+    redirects; ``%%`` is cmd's literal-percent escape inside a batch file, so
+    interpolated paths are escaped below.
     """
+    def _rung(invocation):
+        return (
+            f'{invocation} "%DAEMON_SCRIPT%" 1>>"%STDOUT_LOG%" 2>>"%STDERR_LOG%"\r\n'
+            'if not "%ERRORLEVEL%"=="9009" exit /b %ERRORLEVEL%\r\n'
+        )
+
+    daemon_script_path = str(daemon_script_path).replace("%", "%%")
+    log_dir = str(log_dir).replace("%", "%%")
+
     return (
         "@echo off\r\n"
         "REM Token Optimizer dashboard daemon launcher (v5.3.2+).\r\n"
         "REM Auto-generated. Resolves Python at runtime so interpreter upgrades\r\n"
         "REM do not break the scheduled task.\r\n"
+        "REM #107: GUI-subsystem interpreters first (pythonw/pyw) so the daemon\r\n"
+        "REM itself never owns a console. 9009 = cmd's 'command not found'.\r\n"
+        "REM The pythonw.exe rung skips Microsoft Store aliases (WindowsApps):\r\n"
+        "REM they exit 0 silently under Task Scheduler and would end the ladder\r\n"
+        "REM with no daemon started.\r\n"
         "setlocal\r\n"
         f'set "DAEMON_SCRIPT={daemon_script_path}"\r\n'
         f'set "STDOUT_LOG={log_dir}\\stdout.log"\r\n'
@@ -21112,22 +21497,15 @@ def _generate_windows_launcher_cmd(daemon_script_path, log_dir):
         '  echo [%DATE% %TIME%] daemon script missing: %DAEMON_SCRIPT% >> "%STDERR_LOG%"\r\n'
         "  exit /b 1\r\n"
         ")\r\n"
-        "where py.exe >nul 2>&1\r\n"
-        "if %ERRORLEVEL% EQU 0 (\r\n"
-        '  py.exe -3 "%DAEMON_SCRIPT%" 1>>"%STDOUT_LOG%" 2>>"%STDERR_LOG%"\r\n'
-        "  exit /b %ERRORLEVEL%\r\n"
-        ")\r\n"
-        "where pythonw.exe >nul 2>&1\r\n"
-        "if %ERRORLEVEL% EQU 0 (\r\n"
-        '  pythonw.exe "%DAEMON_SCRIPT%" 1>>"%STDOUT_LOG%" 2>>"%STDERR_LOG%"\r\n'
-        "  exit /b %ERRORLEVEL%\r\n"
-        ")\r\n"
-        "where python.exe >nul 2>&1\r\n"
-        "if %ERRORLEVEL% EQU 0 (\r\n"
-        '  python.exe "%DAEMON_SCRIPT%" 1>>"%STDOUT_LOG%" 2>>"%STDERR_LOG%"\r\n'
-        "  exit /b %ERRORLEVEL%\r\n"
-        ")\r\n"
-        'echo [%DATE% %TIME%] No Python found on PATH -- install python.org or winget install Python.Python.3 >> "%STDERR_LOG%"\r\n'
+        'set "PYW_EXE="\r\n'
+        'for %%I in (pythonw.exe) do set "PYW_EXE=%%~$PATH:I"\r\n'
+        'if defined PYW_EXE if /i not "%PYW_EXE:windowsapps=%"=="%PYW_EXE%" set "PYW_EXE="\r\n'
+        'if defined PYW_EXE "%PYW_EXE%" "%DAEMON_SCRIPT%" 1>>"%STDOUT_LOG%" 2>>"%STDERR_LOG%"\r\n'
+        'if defined PYW_EXE if not "%ERRORLEVEL%"=="9009" exit /b %ERRORLEVEL%\r\n'
+        + _rung("pyw.exe -3")
+        + _rung("py.exe -3")
+        + _rung("python.exe")
+        + 'echo [%DATE% %TIME%] No Python found on PATH -- install python.org or winget install Python.Python.3 >> "%STDERR_LOG%"\r\n'
         "exit /b 2\r\n"
     )
 
@@ -21143,7 +21521,7 @@ def _probe_windows_port_owner(port):
     try:
         result = subprocess.run(
             ["netstat", "-ano"],
-            capture_output=True, text=True, timeout=10, errors="replace",
+            capture_output=True, text=True, timeout=10, errors="replace", creationflags=_NO_WINDOW,
         )
     except (subprocess.SubprocessError, OSError, FileNotFoundError):
         return None
@@ -21158,7 +21536,7 @@ def _probe_windows_port_owner(port):
     return None
 
 
-def _generate_schtasks_xml(task_name, user_id, launcher_path):
+def _generate_schtasks_xml(task_name, user_id, command, arguments=""):
     """Build a Task Scheduler XML payload for the dashboard daemon.
 
     Uses the documented Task Scheduler 1.2 schema (MS-LEARN:
@@ -21172,6 +21550,12 @@ def _generate_schtasks_xml(task_name, user_id, launcher_path):
       - ExecutionTimeLimit=PT0S = no time limit (daemon runs forever).
       - DisallowStartIfOnBatteries=false so laptop users get their
         bookmarkable URL on battery power too.
+
+    issue #107: ``command``/``arguments`` come from
+    ``_windows_task_exec_action`` and are normally pythonw.exe + the daemon
+    script, NOT the .cmd launcher. See that helper for why <Hidden> was never
+    enough. ``<Arguments>`` is emitted only when non-empty so the .cmd fallback
+    still produces the exact pre-#107 XML shape.
     """
     from xml.sax.saxutils import escape as _xml_escape
 
@@ -21229,8 +21613,10 @@ def _generate_schtasks_xml(task_name, user_id, launcher_path):
         "  </Settings>\n"
         '  <Actions Context="Author">\n'
         "    <Exec>\n"
-        f"      <Command>{xml_escape(launcher_path)}</Command>\n"
-        "    </Exec>\n"
+        f"      <Command>{xml_escape(str(command))}</Command>\n"
+        + (f"      <Arguments>{xml_escape(str(arguments))}</Arguments>\n"
+           if arguments else "")
+        + "    </Exec>\n"
         "  </Actions>\n"
         "</Task>\n"
     )
@@ -21253,10 +21639,20 @@ def _install_task_scheduler_daemon(dry_run=False, soft_fail=False, effective_hos
     Windows user to run this is the de facto smoke test. Full rollback
     is one command: `measure.py setup-daemon --uninstall`.
     """
-    def _fail(msg, *extra):
-        print(msg)
+    def _fail(msg, *extra, permanent_reason=None):
+        # #107 torture Cluster A: only DEFINITIVE, permanent failure classes
+        # arm the sticky no-retry marker (MS-Store alias, schtasks missing,
+        # policy-denied task creation). Transient failures stay retryable and
+        # are bounded by the existing ensure/revive/heal throttles.
+        if permanent_reason:
+            _write_daemon_install_failed_marker(permanent_reason)
+        # Cluster B (T7-H3/T2-F9): under soft_fail we are inside a hook --
+        # stdout is session-visible context, so route errors to stderr instead
+        # of spamming "[Error] ..." into every SessionStart transcript.
+        out = sys.stderr if soft_fail else sys.stdout
+        print(msg, file=out)
         for line in extra:
-            print(line)
+            print(line, file=out)
         if soft_fail:
             return False
         sys.exit(1)
@@ -21294,6 +21690,9 @@ def _install_task_scheduler_daemon(dry_run=False, soft_fail=False, effective_hos
             "    winget install Python.Python.3.12",
             "  or download from python.org (make sure 'Add to PATH' is checked).",
             "  Then re-run: python -m measure setup-daemon",
+            # Structurally impossible until the user installs a real Python --
+            # exactly the class the sticky marker exists for.
+            permanent_reason="ms-store-python-alias",
         )
 
     # HIGH-3: compose DOMAIN\user when domain-joined so LogonTrigger
@@ -21330,16 +21729,31 @@ def _install_task_scheduler_daemon(dry_run=False, soft_fail=False, effective_hos
         # .cmd launcher resolves Python at runtime (py -> pythonw ->
         # python) and redirects daemon stdout/stderr into logs so future
         # failures leave a trail instead of vanishing.
+        # write_BYTES, not write_text: the shim is explicitly CRLF, and
+        # text-mode writing translates "\n" to os.linesep, which on Windows
+        # turns every "\r\n" into "\r\r\n". Bytes also makes the file
+        # byte-comparable, which is what lets _heal_windows_launcher_shim be
+        # idempotent instead of rewriting it on every ensure-health.
         launcher_path = SNAPSHOT_DIR / WINDOWS_LAUNCHER_NAME
-        launcher_path.write_text(
-            _generate_windows_launcher_cmd(str(daemon_script), str(DAEMON_LOG_DIR)),
-            encoding="utf-8",
+        launcher_path.write_bytes(
+            _generate_windows_launcher_cmd(
+                str(daemon_script), str(DAEMON_LOG_DIR)).encode("utf-8"),
         )
 
+        # issue #107: prefer a GUI-subsystem pythonw.exe action over the .cmd
+        # launcher so Task Scheduler cannot paint a console window on every
+        # fire (logon, boot, and every `schtasks /Run` from the revive path).
+        _task_command, _task_arguments = _windows_task_exec_action(
+            str(daemon_script), str(launcher_path))
+        if not _task_arguments:
+            print("[Token Optimizer] Note: pythonw.exe not found next to this "
+                  "interpreter; falling back to the .cmd launcher, which shows "
+                  "a console window when the task runs.")
         xml_payload = _generate_schtasks_xml(
             task_name=WINDOWS_TASK_NAME,
             user_id=user_id,
-            launcher_path=str(launcher_path),
+            command=_task_command,
+            arguments=_task_arguments,
         )
         # UTF-16 LE with BOM: matches schtasks /Query native output and
         # pins the byte order so future Python encoding defaults can't
@@ -21348,27 +21762,46 @@ def _install_task_scheduler_daemon(dry_run=False, soft_fail=False, effective_hos
         xml_path.write_bytes(b"\xff\xfe" + xml_payload.encode("utf-16-le"))
 
         # Stop any prior instance -- safe to fail if task doesn't exist.
-        subprocess.run(
-            ["schtasks", "/End", "/TN", WINDOWS_TASK_NAME],
-            capture_output=True, text=True, errors="replace",
-        )
-        # Register (or overwrite) the task.
-        create = subprocess.run(
-            ["schtasks", "/Create", "/XML", str(xml_path),
-             "/TN", WINDOWS_TASK_NAME, "/F"],
-            capture_output=True, text=True, errors="replace",
-        )
+        # FileNotFoundError here means schtasks.exe itself is missing from the
+        # machine: a STRUCTURAL condition (no scheduler to register with), the
+        # one exception class worth the sticky marker.
+        try:
+            subprocess.run(
+                ["schtasks", "/End", "/TN", WINDOWS_TASK_NAME],
+                capture_output=True, text=True, errors="replace", creationflags=_NO_WINDOW,
+            )
+            # Register (or overwrite) the task.
+            create = subprocess.run(
+                ["schtasks", "/Create", "/XML", str(xml_path),
+                 "/TN", WINDOWS_TASK_NAME, "/F"],
+                capture_output=True, text=True, errors="replace", creationflags=_NO_WINDOW,
+            )
+        except FileNotFoundError:
+            return _fail(
+                "[Error] schtasks.exe not found on this system.",
+                "  The dashboard daemon needs the Windows Task Scheduler CLI.",
+                permanent_reason="schtasks-missing",
+            )
         if create.returncode != 0:
+            _stderr_lower = (create.stderr or "").lower()
+            # "Access is denied" / GPO-blocked task creation is a policy
+            # decision, not a blip -- it will fail identically next prompt.
+            # Everything else (transient service hiccup, odd one-off exit)
+            # stays retryable under the throttles.
+            _denied = ("access is denied" in _stderr_lower
+                       or "denied" in _stderr_lower)
             return _fail(
                 f"[Error] schtasks /Create failed: {create.stderr.strip()}",
                 "  Common causes: locked-down enterprise policy blocking task",
                 "  creation, or schtasks.exe missing. Try manually with:",
                 f"    schtasks /Create /XML \"{xml_path}\" /TN {WINDOWS_TASK_NAME} /F",
+                permanent_reason=(
+                    "schtasks-create-access-denied" if _denied else None),
             )
         # Fire the task immediately so the user's first URL click works.
         subprocess.run(
             ["schtasks", "/Run", "/TN", WINDOWS_TASK_NAME],
-            capture_output=True, text=True, errors="replace",
+            capture_output=True, text=True, errors="replace", creationflags=_NO_WINDOW,
         )
         time.sleep(1)
         if _verify_daemon_port():
@@ -21444,14 +21877,14 @@ def _uninstall_task_scheduler_daemon(this_install_only=False, dry_run=False):
         try:
             subprocess.run(
                 ["schtasks", "/End", "/TN", task_name],
-                capture_output=True, text=True, errors="replace", timeout=10,
+                capture_output=True, text=True, errors="replace", timeout=10, creationflags=_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired):
             pass
         try:
             delete = subprocess.run(
                 ["schtasks", "/Delete", "/TN", task_name, "/F"],
-                capture_output=True, text=True, errors="replace", timeout=10,
+                capture_output=True, text=True, errors="replace", timeout=10, creationflags=_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired):
             delete = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="timeout")
@@ -21553,7 +21986,7 @@ def _probe_systemd_user_bus():
     try:
         result = subprocess.run(
             ["systemctl", "--user", "list-units", "--no-legend"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW,
         )
     except (subprocess.SubprocessError, OSError, FileNotFoundError):
         return False
@@ -21698,7 +22131,7 @@ def _install_systemd_user_daemon(dry_run=False, soft_fail=False, effective_host=
         # so re-running doesn't inherit a broken half-install.
         subprocess.run(
             ["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT_NAME],
-            capture_output=True, text=True, errors="replace",
+            capture_output=True, text=True, errors="replace", creationflags=_NO_WINDOW,
         )
         _reclaim_posix_daemon_port()
 
@@ -21742,12 +22175,12 @@ def _install_systemd_user_daemon(dry_run=False, soft_fail=False, effective_host=
                     pass
             subprocess.run(
                 ["systemctl", "--user", "daemon-reload"],
-                capture_output=True, text=True, errors="replace",
+                capture_output=True, text=True, errors="replace", creationflags=_NO_WINDOW,
             )
 
         reload_result = subprocess.run(
             ["systemctl", "--user", "daemon-reload"],
-            capture_output=True, text=True, errors="replace",
+            capture_output=True, text=True, errors="replace", creationflags=_NO_WINDOW,
         )
         if reload_result.returncode != 0:
             _rollback("daemon-reload failed")
@@ -21755,7 +22188,7 @@ def _install_systemd_user_daemon(dry_run=False, soft_fail=False, effective_host=
 
         enable_result = subprocess.run(
             ["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT_NAME],
-            capture_output=True, text=True, errors="replace",
+            capture_output=True, text=True, errors="replace", creationflags=_NO_WINDOW,
         )
         if enable_result.returncode != 0:
             _rollback("enable failed")
@@ -21837,7 +22270,7 @@ def _uninstall_systemd_user_daemon(this_install_only=False, dry_run=False):
         try:
             subprocess.run(
                 ["systemctl", "--user", "disable", "--now", unit_name],
-                capture_output=True, text=True, errors="replace", timeout=10,
+                capture_output=True, text=True, errors="replace", timeout=10, creationflags=_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -21849,7 +22282,7 @@ def _uninstall_systemd_user_daemon(this_install_only=False, dry_run=False):
     try:
         subprocess.run(
             ["systemctl", "--user", "daemon-reload"],
-            capture_output=True, text=True, errors="replace", timeout=10,
+            capture_output=True, text=True, errors="replace", timeout=10, creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.TimeoutExpired):
         pass
@@ -21962,15 +22395,22 @@ def setup_daemon(dry_run=False, uninstall=False, this_install_only=False):
     if not dry_run:
         _set_daemon_disabled(False)
     if system == "Darwin":
-        _install_launchd_daemon(dry_run=dry_run, effective_host=effective_host)
+        _installed_ok = _install_launchd_daemon(dry_run=dry_run, effective_host=effective_host)
     elif system == "Windows":
-        _install_task_scheduler_daemon(dry_run=dry_run, effective_host=effective_host)
+        _installed_ok = _install_task_scheduler_daemon(dry_run=dry_run, effective_host=effective_host)
     elif system == "Linux":
-        _install_systemd_user_daemon(dry_run=dry_run, effective_host=effective_host)
+        _installed_ok = _install_systemd_user_daemon(dry_run=dry_run, effective_host=effective_host)
     else:
         print(f"[Error] Dashboard daemon not supported on {system}.")
         print(f"  Open the dashboard file directly: {DASHBOARD_PATH.as_uri()}")
         sys.exit(1)
+    # issue #107: THE ONLY place the sticky install-failed marker is cleared.
+    # An explicit `setup-daemon` that actually succeeded is the user telling us
+    # the structural problem is fixed. Not on dry-run (side-effect-free), and
+    # not on a failed install -- the installers return False under soft_fail and
+    # sys.exit(1) otherwise, so neither reaches here with a truthy result.
+    if not dry_run and _installed_ok:
+        _clear_daemon_install_failed_marker()
 
 
 # ---------------------------------------------------------------------------
@@ -22290,7 +22730,7 @@ def _daemon_service_installed(system=None):
             try:
                 rc = subprocess.run(
                     ["schtasks", "/Query", "/TN", WINDOWS_TASK_NAME],
-                    capture_output=True, timeout=5,
+                    capture_output=True, timeout=5, creationflags=_NO_WINDOW,
                 ).returncode
                 return rc == 0
             except (OSError, subprocess.TimeoutExpired):
@@ -22356,16 +22796,31 @@ def _ensure_dashboard_daemon(force=False):
     handles the ABSENT / dead-service case. Run this AFTER the update block so
     update owns has-daemon and ensure owns no-daemon.
 
-    Returns one of: 'noop-foreign', 'noop-disabled', 'noop-unsupported',
-    'noop-healthy', 'noop-throttled', 'installed', 'install-failed',
-    'restarted', 'restart-stale', 'restart-failed'. ('restart-stale' propagates
-    up from _restart_dashboard_daemon's landing-verification.) Never raises.
+    Returns one of: 'noop-foreign', 'noop-disabled', 'noop-install-failed',
+    'noop-unsupported', 'noop-healthy', 'noop-throttled', 'installed',
+    'install-failed', 'restarted', 'restart-stale', 'restart-failed'.
+    ('restart-stale' propagates up from _restart_dashboard_daemon's
+    landing-verification.) Never raises.
     """
     # Cheapest gates first -- all pure/stat, no subprocess.
     if _is_foreign_runtime() or detect_runtime() != "claude":
         return "noop-foreign"
     if _read_config_flag("daemon_disabled", False):
         return "noop-disabled"
+    # issue #107: a prior install/self-heal failed for a DEFINITIVE reason.
+    # Refuse. BEFORE the `force` check on purpose -- `daemon-revive`
+    # (force=True) is the per-turn retry path this marker exists to stop, and
+    # on Windows each retry costs the user a cmd-window flash.
+    # Torture Cluster A: a live, identity-verified daemon DISPROVES the
+    # "structurally broken" record (the classic case: an install-lock race
+    # where the losing session armed the marker while the winner installed
+    # fine). One cheap sleepless socket probe -- no subprocess, cannot flash --
+    # buys the un-wedge; otherwise the refusal stands until `setup-daemon`.
+    if _daemon_install_failed_marker_present():
+        if _verify_daemon_port(timeout_seconds=1, retries=1, retry_sleep=0):
+            _clear_daemon_install_failed_marker()
+            return "noop-healthy"
+        return "noop-install-failed"
     system = _normalized_platform()
     if system not in ("Darwin", "Linux", "Windows"):
         return "noop-unsupported"
@@ -22397,7 +22852,17 @@ def _ensure_dashboard_daemon(force=False):
 
     if installed:
         # Installed but dead -> restart (lock-free, idempotent).
-        return _restart_dashboard_daemon(system)
+        # #107 torture Cluster A (T3-H3, T7-H2): 'restart-failed' is NOT
+        # marker-worthy. It is reached through a blanket `except Exception`
+        # whose common inhabitants are TRANSIENT -- a 5s launchctl kickstart
+        # TimeoutExpired on a busy Mac, a slow systemd, an AV-locked schtasks.
+        # An INSTALLED daemon proves the structure works; the 24h ensure
+        # throttle already bounds retry cost. A verified restart clears any
+        # stale marker a concurrent session may have raced in.
+        _status = _restart_dashboard_daemon(system)
+        if _status == "restarted":
+            _clear_daemon_install_failed_marker()
+        return _status
 
     # Not installed -> run the platform installer. Each installer self-locks with
     # soft_fail so a concurrent session can't deadlock or double-install. Force
@@ -22406,6 +22871,8 @@ def _ensure_dashboard_daemon(force=False):
     # edit that reintroduces sys.exit must NEVER kill the SessionStart hook.
     try:
         if not _ensure_dashboard_file():
+            # Transient class (disk full once, a regen hiccup): the 24h
+            # throttle bounds the retry. Never marker-worthy (Cluster A).
             return "install-failed"
         _get_or_create_daemon_token()
         if system == "Darwin":
@@ -22417,9 +22884,16 @@ def _ensure_dashboard_daemon(force=False):
         if ok is False:
             # Real failure OR a concurrent installer won the lock and soft-skipped
             # us. Resolve from reality so a race doesn't log a false failure.
+            # #107 torture T3-H1: the loser's instantaneous recheck races the
+            # winner's multi-second install window -- an ambiguous result must
+            # NOT arm the sticky marker (the installer itself arms it at the
+            # exact sites that can classify a failure as permanent).
             if _daemon_service_installed(system):
+                _clear_daemon_install_failed_marker()
                 return "installed"
             return "install-failed"
+        # Verified success supersedes any failure record.
+        _clear_daemon_install_failed_marker()
         return "installed"
     except (Exception, SystemExit) as _e:
         try:
@@ -22430,6 +22904,10 @@ def _ensure_dashboard_daemon(force=False):
             )
         except Exception:
             pass
+        # A raised exception is UNCLASSIFIED -- OSError from a full disk, an
+        # AV-locked file, a gui-domain bootstrap over SSH. All recoverable by
+        # tomorrow; the throttle bounds them. Definitive classes are armed
+        # inside the installer where they can actually be identified.
         return "install-failed"
 
 
@@ -22524,6 +23002,13 @@ def _daemon_midsession_pulse():
             pass
         if _read_config_flag("daemon_disabled", False):
             return "noop-disabled"
+        # issue #107: sticky install-failed marker. Checked here, alongside the
+        # tombstone and BEFORE the probe throttle, so a permanently-broken
+        # install stops costing a revive spawn (and on Windows a cmd-window
+        # flash) every ~5min for the rest of time. Cleared only by an explicit
+        # successful `setup-daemon`.
+        if _daemon_install_failed_marker_present():
+            return "noop-install-failed"
         if _normalized_platform() not in ("Darwin", "Linux", "Windows"):
             return "noop-unsupported"
         # Probe throttle: within the window the remaining cost is one config read.
@@ -22557,16 +23042,457 @@ def _daemon_midsession_pulse():
         # Routed through spawn_detached (single source of truth) so the
         # CREATE_BREAKAWAY_FROM_JOB retry path is included at the exact CXP-1
         # site it was built for.
+        # #107: pythonw.exe on Windows (GUI subsystem) in addition to the
+        # detach flags -- the revive child is stdio-DEVNULL fire-and-forget.
         _proc = spawn_detached(
-            [sys.executable, str(MEASURE_PY_PATH), "daemon-revive"],
+            [_detached_python_exe(), str(MEASURE_PY_PATH), "daemon-revive"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL)
         if _proc is None:
             _log_spawn_failure("daemon-revive spawn failed")
+            # #107 torture Cluster A (T3-H2, T5-F5): a failed spawn is the
+            # LEAST structural failure in the set -- fork EAGAIN under load,
+            # AV transiently locking the exe, a corrupt-but-replaceable
+            # pythonw twin. The 300s revive throttle already bounds the retry
+            # cost, and a failed CreateProcess never painted a window anyway.
+            # Never arm the sticky marker from here.
             return "revive-spawn-failed"
         return "revive-spawned"
     except Exception:
         return "pulse-error"
+
+
+# Task-action binaries that own a console, i.e. that Windows paints a window
+# for when Task Scheduler launches them. Only the interpreter names OUR
+# installers have ever baked as an <Exec> command -- #107 torture T2-F5:
+# generic ``cmd.exe``/``conhost.exe`` were dropped because we never register
+# those shapes, and matching them meant a user's own wrapper arrangement in
+# our task slot would be "positively identified as ours" and wiped.
+_WINDOWS_CONSOLE_ACTION_EXES = frozenset({
+    "py.exe", "python.exe", "python3.exe",
+})
+
+
+def _windows_action_is_console_flasher(command):
+    """True when a Scheduled Task ``<Command>`` is OUR console-subsystem
+    action shape (and therefore safe to rewrite).
+
+    Conservative on BOTH sides on purpose. An unrecognised command (a venv
+    shim, a user-edited action, a wrapper we do not ship) returns False: we only
+    rewrite actions we can positively identify as ours-and-broken, because the
+    repair re-registers the whole task. #107 torture T2-F5: "positively
+    identify" now means it -- a ``.cmd``/``.bat`` matches ONLY when its
+    basename is the one launcher we actually generate
+    (``WINDOWS_LAUNCHER_NAME``), not any batch file that happens to sit in our
+    task slot. And ``pythonw.exe``/``pyw.exe`` return False so the heal is
+    idempotent by construction -- once migrated, the same check reports "not
+    broken" and nothing runs.
+
+    #107 torture T2-F10: the value arrives from ``schtasks /Query /XML``, so
+    entities are unescaped first (``&quot;C:\\...\\dashboard-launcher.cmd&quot;``
+    must classify the same as its unquoted form) -- consistent with
+    ``_windows_action_is_dead_path``.
+    """
+    if not command:
+        return False
+    try:
+        from xml.sax.saxutils import unescape as _xml_unescape
+        # Default unescape covers only &amp;/&lt;/&gt; -- the quote entities
+        # schtasks emits for a quoted <Command> need the extra dict.
+        cleaned = _xml_unescape(
+            str(command), {"&quot;": '"', "&apos;": "'"}
+        ).strip().strip('"').strip()
+    except Exception:
+        cleaned = str(command).strip().strip('"').strip()
+    name = cleaned.replace("/", "\\").rsplit("\\", 1)[-1].strip().strip('"').lower()
+    if name.endswith(".cmd") or name.endswith(".bat"):
+        return name == WINDOWS_LAUNCHER_NAME.lower()
+    return name in _WINDOWS_CONSOLE_ACTION_EXES
+
+
+def _windows_task_action_info(task_name=None):
+    """Return ``(command, enabled)`` for the registered task, or ``(None, None)``
+    if the task does not exist / cannot be read.
+
+    ``command`` is the task's ``<Command>``. A None command means "no task" and
+    every caller MUST treat it as "do nothing" -- never as "install one".
+    Healing an absent task would resurrect a daemon the user declined or
+    uninstalled (#59).
+
+    ``enabled`` is the SETTINGS-level ``<Enabled>`` from the same XML (the
+    trigger-level ``<Enabled>`` elements live outside ``<Settings>`` and are
+    ignored): False when the user disabled the task (Task Scheduler UI
+    right-click Disable, or ``schtasks /Change /DISABLE``), True when
+    explicitly enabled, None when the XML carries no Settings-level flag.
+    #107 torture T2-H1: a disabled task must be treated exactly like a
+    tombstone -- pre-#107 that opt-out was durable, and the heal must not
+    re-register it ``<Enabled>true</Enabled>``.
+
+    ``schtasks /Query /XML`` emits UTF-16, which text-mode decoding turns into
+    ASCII interleaved with NULs; stripping NULs recovers the payload under both
+    that and a plain UTF-8 console.
+    """
+    try:
+        query = subprocess.run(
+            ["schtasks", "/Query", "/TN", task_name or WINDOWS_TASK_NAME,
+             "/XML", "ONE"],
+            capture_output=True, text=True, errors="replace", timeout=10,
+            creationflags=_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    if query.returncode != 0:
+        return None, None
+    raw = (query.stdout or "").replace("\x00", "")
+    match = re.search(r"<Command>(.*?)</Command>", raw, re.S | re.I)
+    if not match:
+        return None, None
+    command = match.group(1).strip()
+    enabled = None
+    settings_match = re.search(r"<Settings>(.*?)</Settings>", raw, re.S | re.I)
+    if settings_match:
+        en = re.search(r"<Enabled>\s*(true|false)\s*</Enabled>",
+                       settings_match.group(1), re.I)
+        if en:
+            enabled = en.group(1).lower() == "true"
+    return command, enabled
+
+
+def _windows_task_action_command(task_name=None):
+    """Back-compat shim over ``_windows_task_action_info`` (command only)."""
+    return _windows_task_action_info(task_name)[0]
+
+
+def _windows_action_path_exists(path):
+    """``os.path.exists`` behind a seam so tests can stub filesystem reality
+    for Windows-shaped paths that cannot exist on the test host. Never raises."""
+    try:
+        return os.path.exists(path)
+    except (OSError, ValueError):
+        return False
+
+
+def _windows_action_is_dead_path(command):
+    """True when the task ``<Command>`` is an absolute Windows path that no
+    longer exists on disk.
+
+    #107 torture T5-H1: the preferred task action bakes the ABSOLUTE path of
+    the pythonw twin that ran the install. Versioned python.org installs and
+    deletable venvs make that path go dead on upgrade/uninstall -- and a dead
+    pythonw path is invisible to ``_windows_action_is_console_flasher`` (it
+    classifies the NAME, not liveness), so without this check no heal layer
+    ever repairs it and the daemon is permanently dead behind green
+    diagnostics.
+
+    Only absolute (drive-letter or UNC) paths are judged; a bare PATH-resolved
+    name ("pythonw.exe") cannot be classified dead from here. The XML value is
+    unescaped and unquoted first so ``&amp;`` / quoted paths round-trip.
+    Never raises.
+    """
+    if not command:
+        return False
+    try:
+        from xml.sax.saxutils import unescape as _xml_unescape
+        cmd = _xml_unescape(
+            str(command), {"&quot;": '"', "&apos;": "'"}
+        ).strip().strip('"').strip()
+        if not cmd:
+            return False
+        if not (re.match(r"^[A-Za-z]:[\\/]", cmd) or cmd.startswith("\\\\")):
+            return False
+        return not _windows_action_path_exists(cmd)
+    except Exception:
+        return False
+
+
+def _daemon_resurrection_blocked():
+    """THE shared #59/#107 refusal gate for every daemon heal/revive path.
+
+    #107 torture item 4: the individual heal entry points each grew their own
+    subset of these checks, and the ones that forgot (the second
+    ``_heal_windows_task_action`` call site inside ``_restart_dashboard_daemon``,
+    the ensure-health auto-update block) became resurrection doors for daemons
+    the user turned off. One helper, checked by every path that could
+    (re)start a daemon, so no future call site can bypass a gate by accident.
+
+    Returns the blocking reason (``"tombstoned"`` | ``"disabled"`` |
+    ``"install-failed"``) or None when the action may proceed. The tombstone
+    stat fails open (matching ``_daemon_install_failed_marker_present``: an
+    unreadable state dir is not evidence of intent). Never raises.
+    """
+    try:
+        if os.path.exists(str(DAEMON_THRASH_BREADCRUMB)):
+            return "tombstoned"
+    except OSError:
+        pass
+    if _read_config_flag("daemon_disabled", False):
+        return "disabled"
+    if _daemon_install_failed_marker_present():
+        return "install-failed"
+    return None
+
+
+def _heal_windows_task_action(stop_first=False, throttle=False):
+    """issue #107 one-shot migration: lift an already-registered Scheduled Task
+    off a console action (the .cmd launcher, or a bare py.exe/python.exe) onto
+    the GUI-subsystem pythonw.exe action.
+
+    Without this, only NEW installs get the fix. Every existing Windows user
+    keeps the console action forever, because the auto-update path refreshes
+    ``dashboard-server.py`` and then merely ``/End`` + ``/Run``s the task that is
+    already registered -- it never re-writes the task definition.
+
+    Deliberately narrow, because re-registering a scheduled task is not free:
+      * Windows only, and only when a usable pythonw twin actually exists --
+        there is nothing better to migrate TO otherwise.
+      * Only when the task EXISTS and its action is positively identified as a
+        console flasher. An absent task is left absent (#59).
+      * Re-registers through ``_install_task_scheduler_daemon``, the same code
+        path a fresh install uses, so heal and install can never drift.
+      * Preserves the user's persisted bind host (``persist=False`` reads the
+        env > file > default chain WITHOUT writing), so a migration cannot
+        silently move a deliberately network-exposed daemon back to loopback.
+
+    ``stop_first``: ``_install_task_scheduler_daemon`` refuses to install while
+    something holds DAEMON_PORT, and a running daemon is exactly that. Callers
+    that have already stopped the task (``_restart_dashboard_daemon``, between
+    its /End and /Run) pass False. The ensure-health entry point passes True.
+    On failure the restoring ``/Run`` fires from a ``finally`` (T2-H3: an
+    installer that RAISES must not strand the daemon) -- but ONLY when the
+    still-registered action is neither a console flasher nor a dead path
+    (Cluster B: /Run-ing a .cmd action IS one extra console flash per session,
+    the exact bug #107 set out to remove; the LogonTrigger revives the daemon
+    at next logon instead).
+
+    ``throttle``: the ensure-health path passes True so a persistently-failing
+    heal attempts at most once per ensure-throttle window (24h) instead of
+    /End-ing the live daemon + sleeping 2s on every SessionStart. The
+    restart-path caller passes False -- it is already bounded by its own
+    throttles and runs with the port freed.
+
+    Returns True only when the re-registration succeeded. Never raises.
+    """
+    try:
+        if os.name != "nt":
+            return False
+        # UNIFIED GATE (#107 torture item 4): the #59 refusal gates live HERE,
+        # inside the primitive, so BOTH call sites (ensure-health heal and
+        # _restart_dashboard_daemon's /End->/Run window) and any future one
+        # are gated by construction.
+        if _daemon_resurrection_blocked() is not None:
+            return False
+        command, task_enabled = _windows_task_action_info()
+        if command is None:
+            return False  # no task -> nothing to heal, and nothing to create
+        if task_enabled is False:
+            # T2-H1 (#59): the user DISABLED our task -- the natural Windows
+            # "off without uninstalling". Same posture as the tombstone:
+            # leave it alone; never re-register it <Enabled>true</Enabled>.
+            return False
+        flasher = _windows_action_is_console_flasher(command)
+        dead = _windows_action_is_dead_path(command)
+        if not flasher and not dead:
+            return False  # already hidden and alive; idempotent no-op
+        if flasher and not dead and not _windows_gui_python():
+            return False  # nothing better to migrate TO (a DEAD action is
+            # always worth re-registering: the .cmd fallback beats a daemon
+            # that can never start again -- T5-H1)
+        if throttle:
+            # Cluster B: a heal that keeps failing (policy-blocked /Create,
+            # foreign process on the port) must not bounce the daemon every
+            # SessionStart. Stamp BEFORE the attempt, mirroring the ensure
+            # throttle; a SUCCESSFUL heal makes the next classify a no-op
+            # above, so the stamp never delays healthy behaviour.
+            try:
+                last = _read_config_flag("last_daemon_flash_heal_attempt", 0)
+                if (time.time() - float(last or 0)
+                        < _daemon_ensure_throttle_seconds()):
+                    return False
+            except (TypeError, ValueError):
+                pass
+            try:
+                _write_config_flag(
+                    "last_daemon_flash_heal_attempt", int(time.time()))
+            except Exception:
+                pass
+        if stop_first:
+            try:
+                subprocess.run(
+                    ["schtasks", "/End", "/TN", WINDOWS_TASK_NAME],
+                    capture_output=True, timeout=5, creationflags=_NO_WINDOW,
+                )
+                time.sleep(2)  # let the daemon release DAEMON_PORT
+            except (OSError, subprocess.SubprocessError):
+                pass
+        ok = False
+        try:
+            host = _persist_dashboard_host(persist=False)
+            ok = bool(_install_task_scheduler_daemon(
+                soft_fail=True, effective_host=host))
+        finally:
+            if not ok and stop_first:
+                # We stopped a working daemon and failed to re-register it
+                # (returned False OR raised -- hence the finally, T2-H3).
+                # Put it back ONLY if firing it cannot flash: re-read the
+                # action and refuse to /Run a still-flasher or dead command.
+                try:
+                    _current, _en = _windows_task_action_info()
+                    if (_current is not None
+                            and not _windows_action_is_console_flasher(_current)
+                            and not _windows_action_is_dead_path(_current)):
+                        subprocess.run(
+                            ["schtasks", "/Run", "/TN", WINDOWS_TASK_NAME],
+                            capture_output=True, timeout=5,
+                            creationflags=_NO_WINDOW,
+                        )
+                except (OSError, subprocess.SubprocessError):
+                    pass
+        return ok
+    except Exception:
+        return False
+
+
+def _legacy_daemon_dir():
+    """Pre-plugin-data-migration daemon dir (the auto-update block writes the
+    refreshed ``dashboard-server.py`` here too). Behind a helper so tests can
+    pin it into a sandbox -- RUNTIME_DIR is NOT covered by the
+    TOKEN_OPTIMIZER_SNAPSHOT_DIR override."""
+    return RUNTIME_DIR / "_backups" / "token-optimizer"
+
+
+def _heal_one_launcher_shim(launcher, daemon_script):
+    """Rewrite ONE existing launcher shim to today's generated content.
+
+    Shared mechanics for both shim locations: byte-compare, link-safety
+    refusal, atomic mkstemp+os.replace. Returns True when the file was
+    rewritten. Never raises past its caller's guard.
+    """
+    if not launcher.is_file():
+        return False
+    # BYTES on both sides. The shim is explicitly CRLF, and text-mode I/O
+    # rewrites line endings in both directions (universal-newlines on read,
+    # os.linesep on write), so a text comparison would never match and this
+    # would rewrite the file on every single ensure-health.
+    desired = _generate_windows_launcher_cmd(
+        str(daemon_script), str(DAEMON_LOG_DIR)).encode("utf-8")
+    if launcher.read_bytes() == desired:
+        return False
+    # T7-M (link-safety): refuse to write through a symlink or a
+    # hardlinked name -- a planted link would turn this rewrite into an
+    # arbitrary-file overwrite with known content (Windows hardlinks need
+    # no privilege at all).
+    if launcher.is_symlink():
+        return False
+    if os.lstat(str(launcher)).st_nlink > 1:
+        return False
+    # The regenerated ladder redirects into DAEMON_LOG_DIR; a legacy-era shim
+    # may predate that dir, and a missing redirect target fails the rung.
+    try:
+        DAEMON_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    # Atomic replace (the _heal_keepwarm_plist_path pattern): a crash
+    # mid-write must not leave a truncated .cmd that Task Scheduler would
+    # still execute, and cmd.exe must never resume reading a half-written
+    # batch file at its saved byte offset (T2-F4).
+    fd, tmp = tempfile.mkstemp(prefix=".dashboard-launcher.",
+                               suffix=".tmp", dir=str(launcher.parent))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(desired)
+        os.replace(tmp, str(launcher))
+        tmp = None
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return True
+
+
+def _heal_windows_launcher_shim():
+    """Rewrite an on-disk ``dashboard-launcher.cmd`` left by an older build.
+
+    The shim generated before #107 tried console ``py.exe -3`` FIRST and probed
+    with three ``where.exe`` calls, so on any host with the Python Launcher
+    installed the long-lived daemon itself ran as a console process. Even where
+    the shim is only the fallback action, an installed copy keeps that shape
+    until something rewrites it.
+
+    #107 torture T2-F10: BOTH shim locations are healed -- the plugin-data
+    SNAPSHOT_DIR and the legacy pre-migration dir
+    (``~/.claude/_backups/token-optimizer``). The auto-update block already
+    knows about both paths for ``dashboard-server.py``; users whose Scheduled
+    Task action still points at the LEGACY .cmd would otherwise keep the
+    console-first ladder forever. Each shim is regenerated against its own
+    directory's daemon script so the legacy action keeps launching the legacy
+    (auto-update-refreshed) script.
+
+    Only touches files that ALREADY EXIST (never creates one -- that would be
+    half-installing a daemon the user may have declined), and only when the
+    content differs from what we would generate today, which makes it a no-op
+    on the second run. Returns True when anything was rewritten. Never raises.
+    """
+    healed_any = False
+    if os.name != "nt":
+        return False
+    for base_dir in (SNAPSHOT_DIR, _legacy_daemon_dir()):
+        try:
+            launcher = base_dir / WINDOWS_LAUNCHER_NAME
+            daemon_script = base_dir / "dashboard-server.py"
+            if _heal_one_launcher_shim(launcher, daemon_script):
+                healed_any = True
+        except OSError:
+            continue
+        except Exception:
+            continue
+    return healed_any
+
+
+def _heal_windows_console_flash():
+    """issue #107 runtime self-heal: repair already-installed Windows artifacts
+    that flash a console window.
+
+    A generator fix only helps the NEXT install. The reporter already has the
+    flashing task and shim on disk, and nothing in the update path rewrites
+    either -- the auto-update block refreshes ``dashboard-server.py`` and
+    restarts the task it finds. This is the migration that reaches the installed
+    base, and it is modelled on ``_heal_keepwarm_plist_path`` /
+    ``_migrate_statusline_to_stable_path``: best-effort, fail-open, called once
+    per ensure-health.
+
+    Repairs, in order:
+      (a) the on-disk ``dashboard-launcher.cmd`` shim (console-first interpreter
+          ladder + where.exe probes), and
+      (b) the Scheduled Task action, onto hidden pythonw.exe -- via the same
+          generation code a fresh install uses, so heal and install cannot drift.
+
+    Refusal gates, checked FIRST, so a heal can never resurrect something the
+    user turned off:
+      * not Windows -> strict no-op (macOS/Linux never reach schtasks);
+      * ``_daemon_resurrection_blocked()`` -- THE shared #59/#107 gate
+        (uninstall/thrash tombstone, sticky ``daemon_disabled`` opt-out,
+        sticky ``.daemon-install-failed`` marker). The task heal re-checks the
+        same gate internally (plus the task's own user-set ``<Enabled>``
+        state), so its other call sites are equally safe.
+
+    IDEMPOTENT: both steps compare against the value they would write and return
+    False when it already matches, so a second run does nothing and the printed
+    line appears exactly once. The task heal is additionally THROTTLED
+    (``throttle=True``): a persistently-failing re-registration attempts at
+    most once per ensure-throttle window instead of bouncing the live daemon
+    on every SessionStart (#107 torture Cluster B).
+
+    Returns True when anything was actually repaired. Never raises.
+    """
+    if os.name != "nt":
+        return False
+    if _daemon_resurrection_blocked() is not None:
+        return False
+    healed_shim = _heal_windows_launcher_shim()
+    healed_task = _heal_windows_task_action(stop_first=True, throttle=True)
+    return bool(healed_shim or healed_task)
 
 
 def _restart_dashboard_daemon(system):
@@ -22604,28 +23530,36 @@ def _restart_dashboard_daemon(system):
         except Exception:
             pass
 
+        _run_result = None  # Windows-only landing signal (schtasks /Run rc)
         if system == "Darwin":
             uid = subprocess.run(
-                ["id", "-u"], capture_output=True, text=True
+                ["id", "-u"], capture_output=True, text=True, creationflags=_NO_WINDOW
             ).stdout.strip()
             subprocess.run(
                 ["launchctl", "kickstart", "-k", f"gui/{uid}/{DAEMON_LABEL}"],
-                capture_output=True, timeout=5,
+                capture_output=True, timeout=5, creationflags=_NO_WINDOW,
             )
         elif system == "Linux":
             subprocess.run(
                 ["systemctl", "--user", "restart", SYSTEMD_UNIT_NAME],
-                capture_output=True, timeout=10,
+                capture_output=True, timeout=10, creationflags=_NO_WINDOW,
             )
         elif system == "Windows":
             subprocess.run(
                 ["schtasks", "/End", "/TN", WINDOWS_TASK_NAME],
-                capture_output=True, timeout=5,
+                capture_output=True, timeout=5, creationflags=_NO_WINDOW,
             )
             time.sleep(2)
-            subprocess.run(
+            # issue #107: an install registered by an older build still has the
+            # .cmd launcher as its task ACTION, and End/Run just re-runs whatever
+            # is registered -- so the console flash would survive every update
+            # for the entire installed base. Migrate the action here, between
+            # /End and /Run: the task is stopped, so the port is free and the
+            # re-registration's port-owner pre-check can pass.
+            _heal_windows_task_action()
+            _run_result = subprocess.run(
                 ["schtasks", "/Run", "/TN", WINDOWS_TASK_NAME],
-                capture_output=True, timeout=5,
+                capture_output=True, timeout=5, creationflags=_NO_WINDOW,
             )
         else:
             return "restart-failed"
@@ -22637,6 +23571,17 @@ def _restart_dashboard_daemon(system):
         served = _daemon_served_version()
         if served is not None and served != TOKEN_OPTIMIZER_VERSION:
             return "restart-stale"
+        # #107 torture T5-H1/T3-F11: a nonzero `schtasks /Run` with nothing
+        # serving the port is a DEMONSTRABLY failed restart (e.g. a disabled
+        # task, or an action whose baked interpreter path went dead). The
+        # None-version safe-degrade above must not convert that into a false
+        # "restarted" -- that is how a permanently-dead daemon stayed green.
+        if (_run_result is not None
+                and getattr(_run_result, "returncode", 0) != 0
+                and served is None
+                and not _verify_daemon_port(
+                    timeout_seconds=1, retries=1, retry_sleep=0)):
+            return "restart-failed"
         return "restarted"
     except Exception:
         return "restart-failed"
@@ -26469,8 +27414,8 @@ def _capture_git_state(cwd=None):
         kw = {"capture_output": True, "text": True, "timeout": 2}
         if cwd:
             kw["cwd"] = cwd
-        br = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], **kw)
-        sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], **kw)
+        br = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], **kw, creationflags=_NO_WINDOW)
+        sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], **kw, creationflags=_NO_WINDOW)
         if br.returncode == 0 and sha.returncode == 0:
             return br.stdout.strip() or None, sha.stdout.strip() or None
     except Exception:
@@ -30622,7 +31567,7 @@ def _heal_keepwarm_plist_path():
                      ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)]):
             try:
                 subprocess.run(argv, capture_output=True, text=True,
-                               errors="replace", timeout=10)
+                               errors="replace", timeout=10, creationflags=_NO_WINDOW)
             except (OSError, subprocess.TimeoutExpired):
                 pass
     return True
@@ -30892,7 +31837,7 @@ def _ensure_vscode_extension():
     _write_config_flag("vscode_ext_last_check", now)
     try:
         listed = subprocess.run(
-            [cli, "--list-extensions"], capture_output=True, text=True, timeout=15
+            [cli, "--list-extensions"], capture_output=True, text=True, timeout=15, creationflags=_NO_WINDOW
         )
     except (OSError, subprocess.SubprocessError):
         return
@@ -30901,7 +31846,7 @@ def _ensure_vscode_extension():
     try:
         r = subprocess.run(
             [cli, "--install-extension", _VSCODE_EXTENSION_ID],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=120, creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return
@@ -35143,7 +36088,7 @@ def validate_impact(strategy="auto", days=30, as_json=False):
                     ["git", "log", "--tags", "--simplify-by-decoration",
                      "--format=%ai", "-1"],
                     capture_output=True, text=True, timeout=5,
-                    cwd=str(Path(__file__).parent),
+                    cwd=str(Path(__file__).parent), creationflags=_NO_WINDOW,
                 )
                 if result.returncode == 0 and result.stdout.strip():
                     tag_date = result.stdout.strip()
@@ -35502,12 +36447,17 @@ def run_ensure_health():
                     # apply escalation + honest logging. Extracted to
                     # _apply_daemon_restart_outcome for testability (the reap /
                     # kickstart / verify path is the single source of truth).
-                    _level, _msg = _apply_daemon_restart_outcome(
-                        _restart_dashboard_daemon(_normalized_platform()))
-                    if _level in ("ok", "ok-reinstall"):
-                        print(f"  [Token Optimizer] {_msg}")
-                    else:
-                        print(f"  [Token Optimizer] {_msg}", file=sys.stderr)
+                    # #107 torture T3-F6: gate the restart on the SHARED #59
+                    # gate -- a version bump must not /Run a daemon whose user
+                    # tombstoned/disabled it or whose install is condemned.
+                    # The script write above is inert and may stand either way.
+                    if _daemon_resurrection_blocked() is None:
+                        _level, _msg = _apply_daemon_restart_outcome(
+                            _restart_dashboard_daemon(_normalized_platform()))
+                        if _level in ("ok", "ok-reinstall"):
+                            print(f"  [Token Optimizer] {_msg}")
+                        else:
+                            print(f"  [Token Optimizer] {_msg}", file=sys.stderr)
     except Exception as _e:
         print(f"  [Token Optimizer] daemon auto-update check failed: {_e}", file=sys.stderr)
 
@@ -35535,6 +36485,15 @@ def run_ensure_health():
             # window (a crashed-on-bind daemon would otherwise go unreported).
             print("  [Token Optimizer] dashboard daemon restarted but still "
                   "serving a stale version; run: measure.py setup-daemon",
+                  file=sys.stderr)
+        elif _daemon_ensure == "noop-install-failed":
+            # #107 torture T3-H5: the sticky marker used to wedge SILENTLY --
+            # the dashboard died and every diagnostic said OK. Name the state
+            # and the exact command that clears it, every time it suppresses.
+            _mk_reason = _daemon_install_failed_reason()
+            print("  [Token Optimizer] dashboard daemon self-heal is disabled: "
+                  f"a previous install failed permanently ({_mk_reason or 'reason unknown'}). "
+                  "To retry, run: python3 measure.py setup-daemon",
                   file=sys.stderr)
     except Exception as _e:
         print(f"  [Token Optimizer] dashboard daemon self-heal failed: {_e}", file=sys.stderr)
@@ -35649,6 +36608,18 @@ def run_ensure_health():
                 print("  [Token Optimizer] Healed keep-warm agent to the update-surviving path")
         except Exception as _e:
             print(f"  [Token Optimizer] keep-warm path heal failed: {_e}", file=sys.stderr)
+        # issue #107, same class again: a Windows install made by an older build
+        # already has a console-flashing Scheduled Task action and .cmd shim on
+        # disk. Fixing the generators only helps the next install, so repair the
+        # installed artifacts in place. Strict no-op off Windows, and gated so it
+        # can never resurrect a declined/uninstalled/failed daemon.
+        try:
+            if _heal_windows_console_flash():
+                print("  [Token Optimizer] Healed Windows daemon launcher -- console "
+                      "flashing removed where a pythonw.exe twin exists, reduced to "
+                      "the single cmd.exe host window where none does")
+        except Exception as _e:
+            print(f"  [Token Optimizer] Windows console-flash heal failed: {_e}", file=sys.stderr)
     # Remove malformed hook commands (subshell patterns, double-$HOME paths).
     # Claude Code only: reads/writes ~/.claude/settings.json.
     if not _is_codex:
@@ -38054,7 +39025,7 @@ if __name__ == "__main__":
                 try:
                     _r = subprocess.run(
                         [_cli, "--uninstall-extension", _VSCODE_EXTENSION_ID],
-                        capture_output=True, text=True, timeout=60,
+                        capture_output=True, text=True, timeout=60, creationflags=_NO_WINDOW,
                     )
                     _removed = _r.returncode == 0
                 except (OSError, subprocess.SubprocessError):
@@ -38080,7 +39051,7 @@ if __name__ == "__main__":
             if _cli:
                 try:
                     _r = subprocess.run([_cli, "--list-extensions"], capture_output=True,
-                                        text=True, timeout=15)
+                                        text=True, timeout=15, creationflags=_NO_WINDOW)
                     _state = ("installed" if _r.returncode == 0
                               and _VSCODE_EXTENSION_ID.lower() in (_r.stdout or "").lower()
                               else "not installed")
@@ -38359,7 +39330,7 @@ if __name__ == "__main__":
             import subprocess
             subprocess.run(
                 [sys.executable, str(rc_script), "--clear", "--session", sid] + (["--quiet"] if quiet else []),
-                timeout=5
+                timeout=5, creationflags=_NO_WINDOW
             )
     elif args[0] == "read-cache-stats":
         # Show read cache stats
@@ -38373,7 +39344,7 @@ if __name__ == "__main__":
             import subprocess
             subprocess.run(
                 [sys.executable, str(rc_script), "--stats", "--session", sid],
-                timeout=5
+                timeout=5, creationflags=_NO_WINDOW
             )
     elif args[0] == "structure-proof":
         from pathlib import Path as _P
@@ -38382,7 +39353,7 @@ if __name__ == "__main__":
             print(f"[Token Optimizer] structure_replay.py not found at {proof_script}")
             sys.exit(1)
         import subprocess
-        result = subprocess.run([sys.executable, str(proof_script)] + args[1:])
+        result = subprocess.run([sys.executable, str(proof_script)] + args[1:], creationflags=_NO_WINDOW)
         sys.exit(result.returncode)
     else:
         print("Usage:")
