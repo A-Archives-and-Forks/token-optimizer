@@ -148,6 +148,29 @@ function pathUnderRoots(p: string, roots: Set<string>): boolean {
   return false;
 }
 
+/** True when ``p`` is an attributable absolute path (unix ``/`` or a Windows
+ *  drive root). Backslashes normalized so Windows paths are recognized on any
+ *  host. Relative/basenames are NOT attributable to a specific project, so
+ *  they fall through to the token-overlap rule instead of being path-dropped. */
+function isAbsolutePath(p: string): boolean {
+  const s = String(p ?? "").replace(/\\/g, "/").trim();
+  if (!s) return false;
+  return s.startsWith("/") || /^[A-Za-z]:\//.test(s);
+}
+
+/** True when file path ``p`` is an attributable absolute path that does NOT
+ *  live under ``cwd`` — a cross-project file (GitHub #103). The set-overlap
+ *  tokenizer treats a full path as a SINGLE token (the regex includes slashes)
+ *  so it has < 3 distinctive tokens and would always be kept by
+ *  ``keepRecoveredItem``; this rule drops such paths at the file-filter sites
+ *  regardless of token overlap, using the EXISTING ``pathUnderRoots`` prefix
+ *  check. Relative/basenames fall through to the token rule. cwd absent ->
+ *  never drop (legacy callers stay unfiltered). */
+function crossProjectFileDrop(p: string, cwd: string): boolean {
+  if (!cwd || !p) return false;
+  return isAbsolutePath(p) && !pathUnderRoots(p, cwdRoots(cwd));
+}
+
 /** The KEPT in-project paths from a checkpoint's active_files (those under
  *  cwd). Seed the keep-token set so a decision/file naming the current
  *  project survives the filter. */
@@ -380,7 +403,7 @@ export function buildLeanResumeContext(
 
   let droppedFiles = 0;
   const filesRaw = keepTokens
-    ? activeFiles.filter((p) => keepRecoveredItem(p, keepTokens))
+    ? activeFiles.filter((p) => !crossProjectFileDrop(p, cwd) && keepRecoveredItem(p, keepTokens))
     : activeFiles;
   droppedFiles = activeFiles.length - filesRaw.length;
   if (filesRaw.length > 0) {
