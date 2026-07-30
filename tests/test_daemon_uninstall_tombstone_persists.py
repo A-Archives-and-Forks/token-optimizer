@@ -17,9 +17,17 @@ Contract pinned here:
   1. After uninstall, EVERY swept identity has a tombstone (not just the
      active one) -- a sibling's orphaned daemon must stay dead too.
   2. ``--this-install-only`` still tombstones the identity it did sweep.
-  3. A legitimate reinstall is the ONLY thing that clears the tombstone
-     (``setup_daemon`` unlinks it before starting), so uninstall never
-     re-arms revive.
+  3. A legitimate reinstall is the ONLY thing that clears the UNINSTALL
+     tombstone (``setup_daemon`` unlinks it before starting), so uninstall
+     never re-arms revive.
+
+Gauntlet3 B-F2 reconciliation: the ``.daemon-thrash`` breadcrumb has two kinds
+with opposite lifetimes. The UNINSTALL tombstone (content ==
+``_UNINSTALL_TOMBSTONE_MARKER``) is permanent -- the generated daemon honors it
+forever, so a surviving daemon script cannot self-clear it after 60s and mint a
+fresh CSRF token post-uninstall. The 3-strikes THRASH tombstone (an EMPTY file)
+still self-heals after 60s once the dashboard is back. The runtime tests below
+pin both behaviors against the ACTUAL generated ``_thrash_check_and_update``.
 
 Run: python3 -m pytest tests/test_daemon_uninstall_tombstone_persists.py -q
 """
@@ -27,7 +35,9 @@ Run: python3 -m pytest tests/test_daemon_uninstall_tombstone_persists.py -q
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -136,23 +146,97 @@ def test_reinstall_is_the_only_path_that_clears_the_tombstone(measure, tmp_path)
     )
 
 
+def _extract_thrash_fn(measure, thrash_path: Path, dashboard_path: Path):
+    """Exec the ACTUAL generated _thrash_check_and_update in an isolated namespace
+    with paths pointed at the temp tree, so we test the code the daemon runs."""
+    src = measure._generate_daemon_script()
+    start = src.index("def _thrash_check_and_update():")
+    end = src.index("\nif not _thrash_check_and_update():")
+    func_src = src[start:end]
+    ns = {
+        "os": os, "time": time, "sys": sys,
+        "THRASH_PATH": str(thrash_path),
+        "DASHBOARD": str(dashboard_path),
+        "UNINSTALL_MARKER": measure._UNINSTALL_TOMBSTONE_MARKER,
+        "THRASH_LIMIT": 3,
+    }
+    exec(compile(func_src, "<daemon-thrash>", "exec"), ns)
+    return ns["_thrash_check_and_update"]
+
+
+def _age_file(path: Path, seconds: float) -> None:
+    old = time.time() - seconds
+    os.utime(path, (old, old))
+
+
+def test_generated_daemon_never_resurrects_after_uninstall(measure, tmp_path):
+    """Gauntlet3 B-F2: an aged UNINSTALL tombstone next to a live dashboard must
+    NOT self-clear. The surviving daemon must stay dead, not mint a fresh token."""
+    snap = tmp_path / "active" / "data"
+    snap.mkdir(parents=True)
+    thrash = snap / TOMBSTONE
+    dashboard = snap / "dashboard.html"
+    dashboard.write_text("<html></html>", encoding="utf-8")  # preserved user data
+    # Write a real uninstall tombstone, then age it well past the 60s window.
+    measure._write_uninstall_tombstone(snap)
+    assert thrash.read_text(encoding="utf-8").strip() == measure._UNINSTALL_TOMBSTONE_MARKER
+    _age_file(thrash, 120)
+
+    fn = _extract_thrash_fn(measure, thrash, dashboard)
+    assert fn() is False, "daemon resurrected itself after a reported uninstall"
+    assert thrash.exists(), "uninstall tombstone was self-cleared (must be permanent)"
+
+
+def test_generated_daemon_fresh_uninstall_tombstone_stays_dead(measure, tmp_path):
+    snap = tmp_path / "active" / "data"
+    snap.mkdir(parents=True)
+    thrash = snap / TOMBSTONE
+    dashboard = snap / "dashboard.html"
+    dashboard.write_text("<html></html>", encoding="utf-8")
+    measure._write_uninstall_tombstone(snap)  # fresh (age ~0)
+
+    fn = _extract_thrash_fn(measure, thrash, dashboard)
+    assert fn() is False
+    assert thrash.exists()
+
+
+def test_generated_daemon_empty_thrash_tombstone_still_self_heals(measure, tmp_path):
+    """The 3-strikes thrash tombstone (EMPTY file) must still self-heal after 60s
+    when the dashboard is back -- the reconciliation must not break that path."""
+    snap = tmp_path / "active" / "data"
+    snap.mkdir(parents=True)
+    thrash = snap / TOMBSTONE
+    dashboard = snap / "dashboard.html"
+    dashboard.write_text("<html></html>", encoding="utf-8")
+    thrash.write_text("", encoding="utf-8")  # empty = transient thrash tombstone
+    _age_file(thrash, 120)
+
+    fn = _extract_thrash_fn(measure, thrash, dashboard)
+    assert fn() is True, "an aged empty thrash tombstone no longer self-heals"
+    assert not thrash.exists(), "self-heal should have cleared the empty thrash tombstone"
+
+
 def test_uninstall_reclaims_the_daemon_port(measure, tmp_path, monkeypatch):
-    """#106 F2 (P1b): unregistering must be followed by an actual process kill."""
+    """#106 F2 (P1b): unregistering must be followed by an actual process kill.
+
+    Gauntlet3 B-F1: a sweep-all uninstall reclaims EVERY runtime's port, not
+    just the resolved runtime's, or a sibling daemon + live CSRF token survives.
+    """
     active = tmp_path / "active" / "data"
     _seed_identity(active)
-    calls = []
+    ports = []
     monkeypatch.setattr(
         measure, "_daemon_identity_snapshot_dirs", lambda only: [active]
     )
     monkeypatch.setattr(measure, "_ALL_LAUNCH_AGENT_LABELS", ())
     monkeypatch.setattr(
         measure, "_reclaim_posix_daemon_port",
-        lambda *a, **k: calls.append("reclaim"),
+        lambda port=measure.DAEMON_PORT, **k: ports.append(port),
     )
 
-    measure._uninstall_launchd_daemon()
+    measure._uninstall_launchd_daemon()  # default = sweep all identities
 
-    assert calls == ["reclaim"], (
-        "uninstall did not reclaim the daemon port -- the running daemon keeps "
-        "serving with its CSRF token in memory (#106 F2 P1b)"
+    assert set(ports) == {24842, 24843, 24844, 24845}, (
+        "uninstall did not reclaim every runtime's daemon port -- a sibling "
+        "runtime's daemon keeps serving its CSRF token (#106 F2 P1b / G3 B-F1)"
     )
