@@ -46,10 +46,11 @@ PARITY_FIXTURE = [
     # >= 3 distinctive tokens, nonempty overlap -> keep
     ("refactor gamma delta alpha module", {"alpha", "beta"}, True),
     # Full paths are SINGLE tokens with regex [a-zA-Z0-9_./:-]+ (slashes are
-    # in the class), so they have < 3 distinctive tokens -> always kept.
-    # This is by design: the same-project gate (_checkpoint_in_project) handles
-    # checkpoint-level path filtering; the per-item filter targets session-wide
-    # TEXT fields (Key Decisions) that lack path structure.
+    # in the class), so they have < 3 distinctive tokens -> ``_keep_recovered_item``
+    # always keeps them. Cross-project FILE paths are dropped by a SEPARATE
+    # rule at the filter sites (``_cross_project_file_drop``: an absolute-path
+    # prefix check against cwd), NOT by this decision function; the per-item
+    # token filter targets session-wide TEXT fields (Key Decisions).
     ("/home/u/alpha/src/main.py", {"alpha", "main"}, True),
     ("/home/u/gamma/src/other.py", {"alpha", "main"}, True),
     # empty item -> keep
@@ -140,11 +141,9 @@ def _ab_sidecar(proj_a, proj_b):
 
 def test_lean_resume_keeps_only_b_overlap_and_emits_disclosure(measure):
     """Mixed A/B checkpoint queried from project B drops A-only DECISIONS
-    (multi-word, zero overlap with keep_tokens) and emits exactly ONE
-    disclosure line. File paths are single tokens with the spec regex
-    ([a-zA-Z0-9_./:-]+ includes slashes) so they have < 3 distinctive tokens
-    and are kept — the same-project gate handles checkpoint-level path
-    filtering. The per-item filter targets session-wide TEXT fields."""
+    (multi-word, zero overlap with keep_tokens) AND A-only FILE paths
+    (cross-project absolute paths not under cwd) and emits exactly ONE
+    disclosure line reporting both categories."""
     mod, cp_dir = measure
     proj_b = "/home/u/beta"
     proj_a = "/home/u/gamma"
@@ -159,12 +158,16 @@ def test_lean_resume_keeps_only_b_overlap_and_emits_disclosure(measure):
     # A-only DECISION dropped (names only gamma/alpha, zero overlap with
     # keep_tokens={beta, beta_router, ...}):
     assert "gamma delta epsilon" not in block
-    # Exactly one disclosure line. Files are single-token paths -> kept, so
-    # F=0 is elided. Only the 1 dropped decision is reported:
+    # A-only FILE paths dropped (cross-project absolute paths not under cwd):
+    assert "gamma_engine" not in block
+    assert "gamma_design" not in block
+    # B files/reads kept:
+    assert "README.md" in block
+    # Exactly one disclosure line. Both the A-only decision AND the A-only
+    # file paths (modified_files + recent_reads) are dropped, so the
+    # disclosure reports both categories:
     assert block.count("- Omitted (same session, different project):") == 1
-    assert "- Omitted (same session, different project): 1 decision(s)" in block
-    # No file count in the disclosure (paths are single tokens, never dropped):
-    assert "file(s)" not in block
+    assert "- Omitted (same session, different project): 1 decision(s), 2 file(s)" in block
 
 
 def test_lean_resume_single_project_emits_no_disclosure(measure):
@@ -238,8 +241,11 @@ def test_continuity_prompt_hint_filters_and_discloses(measure, monkeypatch):
     monkeypatch.setattr(mod, "_checkpoint_in_project", lambda sc, c: True)
     monkeypatch.setattr(mod, "_external_memory_present", lambda: False)
 
+    # Non-resume-intent prompt so we exercise the LIGHTWEIGHT hint rendering
+    # path (the hint file-filter site), not the resume-intent lean-block path
+    # that "continue the beta work" would short-circuit into.
     hint = mod._continuity_prompt_hint(
-        prompt_text="continue the beta work",
+        prompt_text="beta feature",
         session_id="zzzzzzzzzzzz",  # a different session so the checkpoint isn't skipped
         cwd=proj_b)
 
@@ -247,11 +253,13 @@ def test_continuity_prompt_hint_filters_and_discloses(measure, monkeypatch):
     assert "beta_router" in hint
     # A-only DECISION dropped from the hint:
     assert "gamma delta epsilon" not in hint
-    # Exactly one disclosure line. File paths are single tokens -> kept, so
-    # F=0 is elided. Only the 1 dropped decision is reported:
+    # A-only FILE path dropped (cross-project absolute path not under cwd):
+    assert "gamma_engine" not in hint
+    # Exactly one disclosure line. The hint surface filters modified_files
+    # only (no recent_reads), so both the A-only decision AND the A-only
+    # file path are dropped -> disclosure reports both categories:
     assert hint.count("- Omitted (same session, different project):") == 1
-    assert "- Omitted (same session, different project): 1 decision(s)" in hint
-    assert "file(s)" not in hint
+    assert "- Omitted (same session, different project): 1 decision(s), 1 file(s)" in hint
 
 
 def test_continuity_prompt_hint_single_project_no_disclosure(measure, monkeypatch):

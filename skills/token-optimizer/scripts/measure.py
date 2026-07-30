@@ -26474,6 +26474,36 @@ def _path_under_cwd(p, cwd):
     return any(np == r or np.startswith(r + "/") for r in roots)
 
 
+def _is_absolute_path(p):
+    """True when ``p`` is an attributable absolute path (unix ``/`` or a
+    Windows drive root). Backslashes are normalized to forward slashes so
+    Windows paths are recognized on any host. A relative path or bare
+    basename is NOT attributable to a specific project, so it falls through
+    to the token-overlap rule instead of being path-dropped."""
+    s = str(p).replace("\\", "/").strip()
+    if not s:
+        return False
+    return s.startswith("/") or bool(re.match(r"[A-Za-z]:/", s))
+
+
+def _cross_project_file_drop(p, cwd):
+    """True when file path ``p`` is an attributable absolute path that does
+    NOT live under ``cwd`` — a cross-project file (GitHub #103).
+
+    The set-overlap tokenizer treats a full path as a SINGLE token (the
+    regex ``[a-zA-Z0-9_./:-]+`` includes slashes), so it has < 3 distinctive
+    tokens and would ALWAYS be kept by ``_keep_recovered_item``. That let
+    project-A file paths render into a project-B hint under a disclosure
+    claiming it was scoped. This rule drops such paths at the file-filter
+    sites regardless of token overlap, using the EXISTING ``_path_under_cwd``
+    prefix check. Relative/basename paths are not attributable to a specific
+    project and fall through to the token-overlap rule. ``cwd`` absent ->
+    never drop (legacy callers stay unfiltered)."""
+    if not cwd or not p:
+        return False
+    return _is_absolute_path(p) and not _path_under_cwd(p, cwd)
+
+
 def _in_project_paths(sidecar, cwd):
     """The KEPT in-project paths from a checkpoint sidecar (modified_files +
     recent_reads that live under cwd). These seed the keep-token set so a
@@ -26779,6 +26809,9 @@ def _continuity_prompt_hint(prompt_text="", session_id=None, cwd=None, max_age_m
             if not isinstance(item, dict):
                 continue
             p = str(item.get("path") or "")
+            if p and _cross_project_file_drop(p, cwd):
+                dropped_files += 1
+                continue
             if p and not _keep_recovered_item(p, keep_tokens):
                 dropped_files += 1
                 continue
@@ -27100,6 +27133,9 @@ def build_lean_resume_context(session_id, max_chars=3500, prompt_text=None, cwd=
         for item in mod_raw:
             p = item.get("path") if isinstance(item, dict) else item
             ps = str(p) if p is not None else ""
+            if keep_tokens is not None and ps and _cross_project_file_drop(ps, cwd):
+                dropped_mod += 1
+                continue
             if keep_tokens is not None and ps and not _keep_recovered_item(ps, keep_tokens):
                 dropped_mod += 1
                 continue
@@ -27115,7 +27151,14 @@ def build_lean_resume_context(session_id, max_chars=3500, prompt_text=None, cwd=
         if not isinstance(raw_reads, (list, tuple)):
             raw_reads = []
         if keep_tokens is not None:
-            kept_reads = [r for r in raw_reads if _keep_recovered_item(r, keep_tokens)]
+            kept_reads = []
+            for r in raw_reads:
+                rs = str(r) if r is not None else ""
+                if rs and _cross_project_file_drop(rs, cwd):
+                    continue
+                if not _keep_recovered_item(r, keep_tokens):
+                    continue
+                kept_reads.append(r)
             dropped_reads = len(raw_reads) - len(kept_reads)
             reads = _lean_list(kept_reads, 5, width=140)
         else:

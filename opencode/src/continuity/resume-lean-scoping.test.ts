@@ -28,9 +28,11 @@ const PARITY_FIXTURE: Array<[string, Set<string>, boolean]> = [
   // >= 3 distinctive tokens, nonempty overlap -> keep
   ["refactor gamma delta alpha module", new Set(["alpha", "beta"]), true],
   // Full paths are SINGLE tokens with regex [a-zA-Z0-9_./:-]+ (slashes are
-  // in the class), so they have < 3 distinctive tokens -> always kept.
-  // This is by design: the same-project gate handles checkpoint-level path
-  // filtering; the per-item filter targets session-wide TEXT fields.
+  // in the class), so they have < 3 distinctive tokens -> keepRecoveredItem
+  // always keeps them. Cross-project FILE paths are dropped by a SEPARATE
+  // rule at the filter sites (crossProjectFileDrop: an absolute-path prefix
+  // check against cwd), NOT by this decision function; the per-item token
+  // filter targets session-wide TEXT fields (Key Decisions).
   ["/home/u/alpha/src/main.py", new Set(["alpha", "main"]), true],
   ["/home/u/gamma/src/other.py", new Set(["alpha", "main"]), true],
   // empty item -> keep
@@ -105,12 +107,13 @@ test("buildLeanResumeContext drops A-only decisions and emits one disclosure", (
   expect(block).toContain("beta_router");
   // A-only DECISION dropped:
   expect(block).not.toContain("gamma delta epsilon");
-  // Exactly one disclosure line. File paths are single-token -> kept, so
-  // F=0 is elided. Only the 1 dropped decision is reported:
+  // A-only FILE path dropped (cross-project absolute path not under cwd):
+  expect(block).not.toContain("gamma_engine");
+  // Exactly one disclosure line. Both the A-only decision AND the A-only
+  // file path are dropped, so the disclosure reports both categories:
   const disclosureCount = (block.match(/- Omitted \(same session, different project\):/g) || []).length;
   expect(disclosureCount).toBe(1);
-  expect(block).toContain("- Omitted (same session, different project): 1 decision(s)");
-  expect(block).not.toContain("file(s)");
+  expect(block).toContain("- Omitted (same session, different project): 1 decision(s), 1 file(s)");
 });
 
 test("buildLeanResumeContext single-project checkpoint emits NO disclosure", () => {
