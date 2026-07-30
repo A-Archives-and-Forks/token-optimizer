@@ -22146,6 +22146,13 @@ def cleanup(dry_run=False, this_install_only=False):
     # 1. Daemon
     print("  [1/3] Dashboard daemon")
     setup_daemon(dry_run=dry_run, uninstall=True, this_install_only=this_install_only)
+    # The launchd LaunchAgent plist is removed by the macOS uninstaller only.
+    # Defensively unlink it here too so a stray plist (a HOME migrated or
+    # restored from a Mac, a copied backup) is always cleared, regardless of
+    # the platform running cleanup -- it is just a file. Skipped on dry-run so
+    # the preview stays side-effect-free.
+    if not dry_run:
+        _unlink_if_exists(PLIST_PATH)
     print()
 
     # 2. settings.json
