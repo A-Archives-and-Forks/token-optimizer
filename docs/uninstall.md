@@ -31,9 +31,17 @@ reconciles both.
 ### One-command cleanup (recommended after `/plugin uninstall`)
 
 ```bash
+# 1. Preview. Changes nothing, and lists every data path that is retained.
 python3 ~/.claude/skills/token-optimizer/scripts/measure.py cleanup --dry-run
-python3 ~/.claude/skills/token-optimizer/scripts/measure.py cleanup
+
+# 2. Apply. --confirm is required; a bare `cleanup` refuses and explains why,
+#    so a mistyped --dry-run can never perform a real run.
+python3 ~/.claude/skills/token-optimizer/scripts/measure.py cleanup --confirm
 ```
+
+Add `--this-install-only` to either form when you deliberately run
+side-by-side installs and want only this one removed (it scopes both the file
+sweep and the OS scheduler cleanup to the active identity).
 
 `cleanup` orchestrates the three uninstall surfaces in one call:
 
@@ -102,12 +110,22 @@ rm -f  ~/.claude/.settings.lock           # advisory lock file
 
 ### Self-disabling status line
 
-If the plugin tree is partially removed (e.g. a manual `rm -rf` that leaves
-`statusline.js` in `settings.json` but deletes its sibling `measure.py`),
-the status line self-disables: it exits quietly with no output and no
-stderr spew, so a dangling reference renders as a blank line (what a
-missing command already produces) instead of an error. The command string
-shape is not changed, so the existing uninstall matcher keeps working.
+If the plugin tree is **partially** removed (e.g. a manual `rm -rf` that
+leaves `statusline.js` on disk and referenced in `settings.json` but deletes
+its sibling `measure.py`), the status line self-disables: it exits quietly
+with no output and no stderr spew, so a dangling reference renders as a
+blank line instead of a broken-command state. The command string shape is
+not changed, so the existing uninstall matcher keeps working.
+
+Scope, stated plainly: the guard covers the partial-removal case **only**.
+When `statusline.js` itself is deleted — what `/plugin uninstall` and a full
+`rm -rf` actually do — the guard cannot run, because there is no file left to
+run it. Claude Code renders a `statusLine` whose command is missing as a
+blank status line with no error surfaced (visible only under
+`claude --debug`), which is the same end state, but it is the host's
+behavior, not ours. The `statusLine` key itself still lingers in your
+`settings.json` until it is removed — run `measure.py cleanup` (see below)
+before uninstalling, or delete the key by hand afterwards.
 
 ## Codex
 
