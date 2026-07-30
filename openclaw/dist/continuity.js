@@ -643,23 +643,32 @@ function buildContinuityHint(candidate, promptText = "", cwd = "") {
         droppedFiles = sections.fileChanges.length - keptFilesRaw.length;
         const files = keptFilesRaw.slice(0, 6)
             .map((f) => safeRecoveredScalar(f, 140)).filter(Boolean);
-        const bodyLines = [];
+        const itemLines = [];
         if (decisions.length > 0) {
-            bodyLines.push("Key decisions: " + decisions.map((d) => JSON.stringify(d)).join("; "));
+            itemLines.push("Key decisions: " + decisions.map((d) => JSON.stringify(d)).join("; "));
         }
         if (files.length > 0) {
-            bodyLines.push("File changes: " + files.map((f) => JSON.stringify(f)).join(", "));
+            itemLines.push("File changes: " + files.map((f) => JSON.stringify(f)).join(", "));
         }
         const disclosure = formatDisclosure(droppedDecisions, droppedFiles);
-        if (disclosure)
-            bodyLines.push(disclosure);
-        if (bodyLines.length > 0) {
-            fencedBody = escapeFenceContent(_safeSlice(neutralizeRecoveredBody(bodyLines.join("\n")), 800));
+        // C4: slice the item body FIRST, then append the disclosure OUTSIDE the
+        // truncated region so the transparency line survives even when kept
+        // decisions + files exceed the 800-char budget. Previously the disclosure
+        // was pushed into bodyLines and the whole joined body was _safeSlice(...,
+        // 800)-ed, so the disclosure (appended last) was cut off precisely when
+        // the hint was largest, i.e. when the most was dropped. The disclosure
+        // stays inside the fence and is itself unsliced (it is one short line).
+        if (itemLines.length > 0 || disclosure) {
+            const slicedItems = itemLines.length > 0
+                ? escapeFenceContent(_safeSlice(neutralizeRecoveredBody(itemLines.join("\n")), 800))
+                : "";
+            const disclosureFenced = disclosure
+                ? escapeFenceContent(neutralizeRecoveredBody(disclosure))
+                : "";
+            fencedBody = [slicedItems, disclosureFenced].filter(Boolean).join("\n");
         }
         else {
-            // Everything filtered out -> no structured body to fence. Still emit the
-            // disclosure so the omission is transparent.
-            fencedBody = disclosure ? escapeFenceContent(neutralizeRecoveredBody(disclosure)) : null;
+            fencedBody = null;
         }
     }
     else {
