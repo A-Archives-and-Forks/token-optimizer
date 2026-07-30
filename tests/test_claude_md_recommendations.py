@@ -56,8 +56,8 @@ def test_no_slim_when_under_200_lines_even_if_token_dense(measure):
     a self-contradicting 'slim to 200 lines' advice for a file already under 200."""
     components = _claude_md_components(lines=150, tokens=7000)
     plan, _ = measure.generate_auto_recommendations(components)
-    assert "Slim CLAUDE.md" not in plan
-    assert "Consider slimming CLAUDE.md" not in plan
+    assert "**Slim " not in plan
+    assert "Consider slimming " not in plan
 
 
 def test_quick_tier_recoverable_math(measure):
@@ -65,7 +65,7 @@ def test_quick_tier_recoverable_math(measure):
     The old heuristic would have reported 8000 - 4500 = 3500; the new math reports 4000."""
     components = _claude_md_components(lines=400, tokens=8000)
     plan, _ = measure.generate_auto_recommendations(components)
-    assert "Slim CLAUDE.md" in plan
+    assert "**Slim /fake/CLAUDE.md" in plan
     # New math: 8000 - int(200 * 20.0) = 8000 - 4000 = 4000.
     assert "~4,000 tokens recoverable" in plan
     # Old heuristic figure must not appear.
@@ -77,8 +77,8 @@ def test_medium_tier_fires_for_over_200_lines_and_over_5000_tokens(measure):
     fires (lines > 200 and tokens > 5000). Reports both line count and token count."""
     components = _claude_md_components(lines=250, tokens=5500)
     plan, _ = measure.generate_auto_recommendations(components)
-    assert "Consider slimming CLAUDE.md" in plan
-    assert "Slim CLAUDE.md" not in plan  # quick tier must not fire
+    assert "Consider slimming /fake/CLAUDE.md" in plan
+    assert "**Slim " not in plan  # quick tier must not fire
     assert "250 lines" in plan
     assert "5,500 tokens" in plan
 
@@ -87,8 +87,8 @@ def test_medium_tier_does_not_fire_when_under_200_lines(measure):
     """A 150-line / 5500-token file: neither tier fires (lines <= 200)."""
     components = _claude_md_components(lines=150, tokens=5500)
     plan, _ = measure.generate_auto_recommendations(components)
-    assert "Slim CLAUDE.md" not in plan
-    assert "Consider slimming CLAUDE.md" not in plan
+    assert "**Slim " not in plan
+    assert "Consider slimming " not in plan
 
 
 # --- quick_scan: guard + savings math ---------------------------------------
