@@ -58,6 +58,15 @@ _is_safe_prefix() {
         # Exact filename keeps the anti-hijack intent (no wildcard in that dir).
         /[a-zA-Z]/Windows/py.exe)                                      return 0 ;;
     esac
+    # C8: case-insensitive WindowsApps allow for Windows-style drive-letter
+    # paths. On a case-insensitive FS the dir can be any casing; the drive-
+    # letter anchor ([a-zA-Z]/) constrains this to Windows-style paths so
+    # Linux is unaffected.
+    case "$binpath" in
+        /[a-zA-Z]/*)
+            _path_contains_windowsapps "$binpath" && return 0
+            ;;
+    esac
     return 1
 }
 
@@ -71,6 +80,21 @@ _is_msys_platform() {
     platform=$(uname -s 2>/dev/null) || return 1
     case "$platform" in
         MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    esac
+    return 1
+}
+
+# C8: Windows is case-insensitive, so the WindowsApps directory can appear in
+# any casing (WindowsApps, windowsapps, WINDOWSAPPS, Windowsapps). The old
+# explicit-variant patterns (*/WindowsApps/*|*/windowsapps/*) only covered
+# two casings and would miss others, letting a Store AppExecutionAlias stub
+# through unprobed or skipping a legit Store install in the safe-prefix list.
+# tr is POSIX and present in every supported hook env including Git Bash.
+_path_contains_windowsapps() {
+    local lower
+    lower=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    case "$lower" in
+        */windowsapps/*) return 0 ;;
     esac
     return 1
 }
@@ -204,9 +228,8 @@ _maybe_swap_to_pythonw() {
     pythonw="${dir}/pythonw.exe"
     [ -f "$pythonw" ] && [ -x "$pythonw" ] && [ -s "$pythonw" ] || return 0
     _is_safe_prefix "$pythonw" || return 0
-    case "$pythonw" in
-        */WindowsApps/*|*/windowsapps/*) return 0 ;;
-    esac
+    # C8: case-insensitive WindowsApps skip (any casing on case-insensitive FS).
+    _path_contains_windowsapps "$pythonw" && return 0
     # Liveness-probe the twin before committing to it. A corrupt/garbage
     # pythonw.exe (e.g. a half-overwritten install twin, or a 0xC000-style
     # Windows stub) passes the -f/-x/-s metadata checks but exits nonzero
@@ -337,21 +360,20 @@ find_interpreter() {
             # Reject interpreters outside known-safe prefix directories.
             # Prevents PATH-order attacks where a malicious dir appears first.
             _is_safe_prefix "$binpath" || continue
-            case "$binpath" in
-                */WindowsApps/*|*/windowsapps/*)
-                    # WindowsApps may contain real Store-installed Python OR
-                    # non-functional AppExecutionAlias stubs (non-zero-byte, pass -s).
-                    # Probe with --version (2s timeout) to distinguish them.
-                    # C6: --kill-after=1s escalates to SIGKILL 1s after SIGTERM.
-                    # A Store stub can spawn a child that ignores SIGTERM, leaving
-                    # the probe hung past the 2s budget and stalling discovery.
-                    if command -v timeout >/dev/null 2>&1; then
-                        timeout --kill-after=1s 2s "$binpath" --version >/dev/null 2>&1 || continue
-                    else
-                        "$binpath" --version >/dev/null 2>&1 || continue
-                    fi
-                    ;;
-            esac
+            # C8: case-insensitive WindowsApps detection (any casing on
+            # case-insensitive FS). WindowsApps may contain real Store-installed
+            # Python OR non-functional AppExecutionAlias stubs (non-zero-byte,
+            # pass -s). Probe with --version (2s timeout) to distinguish them.
+            # C6: --kill-after=1s escalates to SIGKILL 1s after SIGTERM.
+            # A Store stub can spawn a child that ignores SIGTERM, leaving
+            # the probe hung past the 2s budget and stalling discovery.
+            if _path_contains_windowsapps "$binpath"; then
+                if command -v timeout >/dev/null 2>&1; then
+                    timeout --kill-after=1s 2s "$binpath" --version >/dev/null 2>&1 || continue
+                else
+                    "$binpath" --version >/dev/null 2>&1 || continue
+                fi
+            fi
             printf "%s\n" "$binpath"
             return 0
         done

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import pty
+import pytest
 import subprocess
 import sys
 import time
@@ -596,3 +597,58 @@ def test_safe_prefix_extglob_in_mirror():
     assert "shopt -s extglob" in source, (
         "mirror launcher must enable extglob so +([0-9]) patterns work"
     )
+
+
+# ---------------------------------------------------------------------------
+# GAUNTLET C8: WindowsApps skip must be case-insensitive. Windows is a
+# case-insensitive FS, so the directory can appear as WindowsApps,
+# windowsapps, WINDOWSAPPS, Windowsapps, etc. The old explicit-variant
+# patterns (*/WindowsApps/*|*/windowsapps/*) only covered two casings.
+# ---------------------------------------------------------------------------
+
+def _windowsapps_driver(binpath: str) -> str:
+    """Drive _path_contains_windowsapps in isolation."""
+    return _defs() + (
+        f'(set +e; _path_contains_windowsapps "{binpath}"; echo "wa=$?")\n'
+    )
+
+
+@pytest.mark.parametrize("casing", [
+    "WindowsApps",
+    "windowsapps",
+    "WINDOWSAPPS",
+    "Windowsapps",
+    "WINDOWsapPS",
+])
+def test_windowsapps_detected_case_insensitive(casing):
+    """C8: any casing of the WindowsApps directory must be detected."""
+    path = f"/c/Users/x/AppData/Local/Microsoft/{casing}/python.exe"
+    out, rc, _err = _run(_windowsapps_driver(path), "", {})
+    assert "wa=0" in out, (
+        f"casing {casing!r} must be detected as WindowsApps; got {out!r}"
+    )
+
+
+def test_windowsapps_not_detected_for_unrelated_path():
+    """C8: a path that does not contain windowsapps (any casing) must not
+    be detected."""
+    out, rc, _err = _run(
+        _windowsapps_driver("/c/Users/x/AppData/Local/Microsoft/NotApps/python.exe"),
+        "",
+        {},
+    )
+    assert "wa=1" in out, (
+        f"unrelated path must not be detected; got {out!r}"
+    )
+
+
+def test_windowsapps_helper_in_both_launchers():
+    """C8: both launchers must define _path_contains_windowsapps."""
+    for launcher, label in [(LAUNCHER, "canonical"), (MIRROR, "mirror")]:
+        source = launcher.read_text(encoding="utf-8")
+        assert "_path_contains_windowsapps" in source, (
+            f"{label} launcher must define _path_contains_windowsapps"
+        )
+        assert "tr '[:upper:]' '[:lower:]'" in source, (
+            f"{label} launcher must use tr for case-insensitive matching"
+        )
