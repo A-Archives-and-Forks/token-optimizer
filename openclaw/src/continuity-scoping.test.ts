@@ -147,6 +147,17 @@ test("buildResumeLeanBlock no filter when cwd absent (backward compat)", () => {
   expect(block).not.toContain("- Omitted");
 });
 
+test("buildResumeLeanBlock no filter when promptText present but cwd absent (AND gate)", () => {
+  const entry = makeEntry();
+  const content = mixedAbCheckpointMd();
+  // AND gate: promptText alone (no cwd) -> no filtering, no fabricated
+  // disclosure. The OR gate would have filtered on prompt tokens alone.
+  const block = buildResumeLeanBlock(entry, content, 3500, "beta feature");
+
+  expect(block).toContain("gamma delta epsilon");
+  expect(block).not.toContain("- Omitted");
+});
+
 // ---------------------------------------------------------------------------
 // buildContinuityHint — filtered rebuild replaces raw 800-char excerpt
 // ---------------------------------------------------------------------------
@@ -204,5 +215,21 @@ test("buildContinuityHint single-project checkpoint emits NO disclosure", () => 
   expect(hint).toContain("beta feature");
   // The non-basename decision is kept (single-project -> no filtering):
   expect(hint).toContain("Switched from REST polling to websocket push");
+  expect(hint).not.toContain("- Omitted");
+});
+
+test("buildContinuityHint no filter when promptText present but cwd absent (AND gate)", () => {
+  const entry = makeEntry();
+  const content = mixedAbCheckpointMd();
+  const candidate: ContinuityCandidate = {
+    entry,
+    score: 0.9,
+    content,
+  };
+  // AND gate: promptText alone (no cwd) -> no filtering, no fabricated
+  // disclosure. The OR gate would have filtered on prompt tokens alone.
+  const hint = buildContinuityHint(candidate, "beta feature");
+
+  expect(hint).toContain("gamma delta epsilon");
   expect(hint).not.toContain("- Omitted");
 });

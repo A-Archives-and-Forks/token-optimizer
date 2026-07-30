@@ -135,3 +135,13 @@ test("buildLeanResumeContext no filter when cwd absent (backward compat)", () =>
   expect(block).toContain("gamma delta epsilon");
   expect(block).not.toContain("- Omitted");
 });
+
+test("buildLeanResumeContext no filter when promptText present but cwd absent (AND gate)", () => {
+  const cp = mixedAbCheckpoint();
+  // AND gate: promptText alone (no cwd) -> no filtering, no fabricated
+  // disclosure. The OR gate would have filtered on prompt tokens alone.
+  const block = buildLeanResumeContext(cp, "abcdefgh1234", 3500, "beta feature");
+
+  expect(block).toContain("gamma delta epsilon");
+  expect(block).not.toContain("- Omitted");
+});
