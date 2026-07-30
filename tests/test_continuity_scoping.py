@@ -13,9 +13,10 @@ These tests cover the three Python surfaces that filter:
   * ``build_lean_resume_context`` (the cold-resume-lean block)
   * ``_continuity_prompt_hint`` (the lightweight prompt-continuity hint)
 
-The parity fixture (``PARITY_FIXTURE``) is duplicated verbatim in the OpenClaw
-and OpenCode TS scoping tests so all three runtimes' keep/drop decisions are
-asserted against the SAME token inputs.
+The parity fixture (``PARITY_FIXTURE``) is loaded from a single shared JSON
+file (``tests/fixtures/keep_recovered_parity.json``) that is also consumed by
+the OpenClaw and OpenCode TS scoping tests, so all three runtimes' keep/drop
+decisions are asserted against the SAME token inputs with no copy drift.
 """
 
 from __future__ import annotations
@@ -34,28 +35,16 @@ SCRIPTS = REPO / "skills" / "token-optimizer" / "scripts"
 
 
 # ---------------------------------------------------------------------------
-# Shared parity fixture — MUST stay byte-identical to the TS scoping tests.
-# (item_text, keep_tokens, expected_keep)
+# Shared parity fixture — single source of truth.
+# Loaded from tests/fixtures/keep_recovered_parity.json, consumed by all 3
+# suites (Python, OpenClaw TS, OpenCode TS). (item_text, keep_tokens, expected_keep)
 # ---------------------------------------------------------------------------
 
-PARITY_FIXTURE = [
-    # < 3 distinctive tokens -> inconclusive -> keep (even with zero overlap)
-    ("gamma delta", {"alpha", "beta"}, True),
-    # >= 3 distinctive tokens, zero overlap -> DROP
-    ("refactor gamma delta epsilon module", {"alpha", "beta"}, False),
-    # >= 3 distinctive tokens, nonempty overlap -> keep
-    ("refactor gamma delta alpha module", {"alpha", "beta"}, True),
-    # Full paths are SINGLE tokens with regex [a-zA-Z0-9_./:-]+ (slashes are
-    # in the class), so they have < 3 distinctive tokens -> ``_keep_recovered_item``
-    # always keeps them. Cross-project FILE paths are dropped by a SEPARATE
-    # rule at the filter sites (``_cross_project_file_drop``: an absolute-path
-    # prefix check against cwd), NOT by this decision function; the per-item
-    # token filter targets session-wide TEXT fields (Key Decisions).
-    ("/home/u/alpha/src/main.py", {"alpha", "main"}, True),
-    ("/home/u/gamma/src/other.py", {"alpha", "main"}, True),
-    # empty item -> keep
-    ("", {"alpha"}, True),
-]
+with open(REPO / "tests" / "fixtures" / "keep_recovered_parity.json", encoding="utf-8") as _f:
+    PARITY_FIXTURE = [
+        (row["item_text"], set(row["keep_tokens"]), row["expected_keep"])
+        for row in json.load(_f)
+    ]
 
 
 @pytest.fixture

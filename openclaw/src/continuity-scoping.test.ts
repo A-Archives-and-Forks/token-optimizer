@@ -8,9 +8,10 @@
  * the existing slices, with one disclosure line emitted only when something
  * is dropped.
  *
- * The parity fixture (``PARITY_FIXTURE``) is duplicated verbatim in the Python
- * and OpenCode scoping tests so all three runtimes' keep/drop decisions are
- * asserted against the SAME token inputs.
+ * The parity fixture (``PARITY_FIXTURE``) is loaded from a single shared JSON
+ * file (``tests/fixtures/keep_recovered_parity.json``) that is also consumed
+ * by the Python and OpenCode TS scoping tests, so all three runtimes' keep/drop
+ * decisions are asserted against the SAME token inputs with no copy drift.
  */
 import { test, expect } from "bun:test";
 import {
@@ -20,30 +21,16 @@ import {
   type CheckpointEntry,
   type ContinuityCandidate,
 } from "./continuity.js";
+import parityFixtureJson from "../../tests/fixtures/keep_recovered_parity.json";
 
 // ---------------------------------------------------------------------------
-// Shared parity fixture — MUST stay byte-identical to the Python + OpenCode
-// scoping tests. (item_text, keep_tokens, expected_keep)
+// Shared parity fixture — single source of truth.
+// Loaded from tests/fixtures/keep_recovered_parity.json, consumed by all 3
+// suites (Python, OpenClaw TS, OpenCode TS). (item_text, keep_tokens, expected_keep)
 // ---------------------------------------------------------------------------
 
-const PARITY_FIXTURE: Array<[string, Set<string>, boolean]> = [
-  // < 3 distinctive tokens -> inconclusive -> keep (even with zero overlap)
-  ["gamma delta", new Set(["alpha", "beta"]), true],
-  // >= 3 distinctive tokens, zero overlap -> DROP
-  ["refactor gamma delta epsilon module", new Set(["alpha", "beta"]), false],
-  // >= 3 distinctive tokens, nonempty overlap -> keep
-  ["refactor gamma delta alpha module", new Set(["alpha", "beta"]), true],
-  // Full paths are SINGLE tokens with regex [a-zA-Z0-9_./:-]+ (slashes are
-  // in the class), so they have < 3 distinctive tokens -> keepRecoveredItem
-  // always keeps them. Cross-project FILE paths are dropped by a SEPARATE
-  // rule at the filter sites (crossProjectFileDrop: an absolute-path prefix
-  // check against cwd), NOT by this decision function; the per-item token
-  // filter targets session-wide TEXT fields (Key Decisions).
-  ["/home/u/alpha/src/main.py", new Set(["alpha", "main"]), true],
-  ["/home/u/gamma/src/other.py", new Set(["alpha", "main"]), true],
-  // empty item -> keep
-  ["", new Set(["alpha"]), true],
-];
+const PARITY_FIXTURE: Array<[string, Set<string>, boolean]> = (parityFixtureJson as Array<{item_text: string; keep_tokens: string[]; expected_keep: boolean}>)
+  .map((row) => [row.item_text, new Set(row.keep_tokens), row.expected_keep] as [string, Set<string>, boolean]);
 
 // ---------------------------------------------------------------------------
 // Parity: the decision function on a shared token fixture

@@ -1,0 +1,38 @@
+[
+  {
+    "comment": "< 3 distinctive tokens -> inconclusive -> keep (even with zero overlap)",
+    "item_text": "gamma delta",
+    "keep_tokens": ["alpha", "beta"],
+    "expected_keep": true
+  },
+  {
+    "comment": ">= 3 distinctive tokens, zero overlap -> DROP",
+    "item_text": "refactor gamma delta epsilon module",
+    "keep_tokens": ["alpha", "beta"],
+    "expected_keep": false
+  },
+  {
+    "comment": ">= 3 distinctive tokens, nonempty overlap -> keep",
+    "item_text": "refactor gamma delta alpha module",
+    "keep_tokens": ["alpha", "beta"],
+    "expected_keep": true
+  },
+  {
+    "comment": "Full paths are SINGLE tokens with regex [a-zA-Z0-9_./:-]+ (slashes are in the class), so they have < 3 distinctive tokens -> keepRecoveredItem always keeps them. Cross-project FILE paths are dropped by a SEPARATE rule at the filter sites (crossProjectFileDrop: an absolute-path prefix check against cwd), NOT by this decision function; the per-item token filter targets session-wide TEXT fields (Key Decisions).",
+    "item_text": "/home/u/alpha/src/main.py",
+    "keep_tokens": ["alpha", "main"],
+    "expected_keep": true
+  },
+  {
+    "comment": "Full path, cross-project, still kept by keepRecoveredItem (see above)",
+    "item_text": "/home/u/gamma/src/other.py",
+    "keep_tokens": ["alpha", "main"],
+    "expected_keep": true
+  },
+  {
+    "comment": "empty item -> keep",
+    "item_text": "",
+    "keep_tokens": ["alpha"],
+    "expected_keep": true
+  }
+]
