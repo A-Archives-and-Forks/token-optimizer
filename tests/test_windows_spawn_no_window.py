@@ -916,6 +916,225 @@ def test_utf8_io_reexec_posix_no_creationflags(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# utf8_io.py: #105 -- explicit std-handle passing + pre-spawn flush on nt.
+# CREATE_NO_WINDOW left all three of stdin/stdout/stderr None, so CPython did
+# not set STARTF_USESTDHANDLES and the child's stdio bound to a NEW hidden
+# console: every byte written was discarded and stdin read empty (the "silent
+# no-op" on a cp1252 host). The fix passes the parent's real handles
+# explicitly (via a fileno()-safe resolver) and flushes BEFORE the spawn so
+# parent-buffered text does not interleave behind the child's output.
+# ---------------------------------------------------------------------------
+class _FilenoStream:
+    """A stand-in for a real OS-backed std stream: has a working fileno()."""
+    def __init__(self, fd, tag):
+        self._fd = fd
+        self.tag = tag
+        self.flushes = 0
+    def fileno(self):
+        return self._fd
+    def flush(self):
+        self.flushes += 1
+
+
+class _NoFilenoStream:
+    """A stream wrapper with no OS handle (pytest capture, embedded hosts)."""
+    def flush(self):
+        pass
+
+
+def _utf8_io_nt_reexec_env(monkeypatch, streams=None):
+    """Configure utf8_io for the nt re-exec path with controllable std streams.
+
+    Returns ``(module, capture_dict, fake_subprocess_module)``. ``streams``
+    maps 'stdin'/'stdout'/'stderr' to objects installed on a FAKE sys module
+    (never the real one -- patching real sys.stdout to None would break
+    pytest's own capture). Defaults to the real sys.std*.
+    """
+    if "utf8_io" in sys.modules:
+        del sys.modules["utf8_io"]
+    import utf8_io as u
+    monkeypatch.setattr(u, "os", _make_fake_os("nt"))
+
+    fake_sub = types.ModuleType("subprocess")
+    for _name, _val in _NT_FLAGS.items():
+        setattr(fake_sub, _name, _val)
+    fake_sub.DEVNULL = subprocess.DEVNULL
+    fake_sub.SubprocessError = subprocess.SubprocessError
+    cap = {}
+    class _FakeProc:
+        returncode = 0
+        def wait(self):
+            return 0
+    def fake_popen(argv, **k):
+        cap.update(k)
+        cap["argv"] = argv
+        return _FakeProc()
+    fake_sub.Popen = fake_popen
+    monkeypatch.setitem(sys.modules, "subprocess", fake_sub)
+
+    _streams = streams or {}
+    fake_sys = types.SimpleNamespace(
+        platform="win32",
+        flags=types.SimpleNamespace(utf8_mode=0),
+        argv=["script.py"],
+        executable=sys.executable,
+        stdin=_streams.get("stdin", sys.stdin),
+        stdout=_streams.get("stdout", sys.stdout),
+        stderr=_streams.get("stderr", sys.stderr),
+    )
+    monkeypatch.setattr(u, "sys", fake_sys)
+
+    # Clear the re-exec sentinel AND the env vars reexec writes so they cannot
+    # leak into sibling tests in this process (monkeypatch restores on teardown).
+    monkeypatch.delenv(u._REEXEC_FLAG, raising=False)
+    monkeypatch.delenv("PYTHONUTF8", raising=False)
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+
+    import locale as _locale_mod
+    monkeypatch.setattr(_locale_mod, "getpreferredencoding", lambda *a: "cp1252")
+
+    # Stop os._exit from killing the test process.
+    monkeypatch.setattr(u.os, "_exit", lambda code=0: None)
+    return u, cap, fake_sub
+
+
+def test_utf8_io_reexec_nt_passes_std_handles(monkeypatch):
+    """#105: on nt the re-exec Popen must receive stdin/stdout/stderr bound to
+    the parent's real sys.* handles (so the child's stdio attaches to the
+    parent's pipe, not a hidden console), AND keep CREATE_NO_WINDOW."""
+    stdin_s = _FilenoStream(0, "stdin")
+    stdout_s = _FilenoStream(1, "stdout")
+    stderr_s = _FilenoStream(2, "stderr")
+    u, cap, _ = _utf8_io_nt_reexec_env(monkeypatch, streams={
+        "stdin": stdin_s, "stdout": stdout_s, "stderr": stderr_s,
+    })
+    u.reexec_in_utf8_mode()
+    assert cap.get("stdin") is stdin_s, "stdin must be passed explicitly"
+    assert cap.get("stdout") is stdout_s, "stdout must be passed explicitly"
+    assert cap.get("stderr") is stderr_s, "stderr must be passed explicitly"
+    assert cap.get("creationflags") == _CREATE_NO_WINDOW
+    assert "start_new_session" not in cap
+
+
+def test_utf8_io_reexec_nt_keeps_create_no_window_when_stdout_not_tty(monkeypatch):
+    """#105: CREATE_NO_WINDOW must be retained even when stdout is a pipe (not
+    a tty). The flash-sensitive case is exactly the host-spawned hook whose
+    stdout is a pipe; dropping the flag there would reinstate the #104 console
+    flash while fixing nothing (handles are now passed explicitly). A future
+    'drop it when not a tty' refactor must fail this test."""
+    stdout_s = _FilenoStream(1, "stdout")  # a pipe has a fileno but is not a tty
+    u, cap, _ = _utf8_io_nt_reexec_env(monkeypatch, streams={"stdout": stdout_s})
+    u.reexec_in_utf8_mode()
+    assert cap.get("creationflags") == _CREATE_NO_WINDOW
+    assert cap.get("stdout") is stdout_s
+
+
+def test_utf8_io_reexec_nt_safe_when_stdout_lacks_fileno(monkeypatch):
+    """#105: if sys.stdout has no fileno (pytest capture, embedded hosts),
+    Popen must still be called (no exception escapes) and stdout simply
+    omitted from kwargs. A UTF-8 convenience re-exec must never crash the CLI."""
+    u, cap, _ = _utf8_io_nt_reexec_env(monkeypatch, streams={"stdout": _NoFilenoStream()})
+    u.reexec_in_utf8_mode()  # must not raise
+    assert "argv" in cap, "Popen must still be called when a stream lacks fileno"
+    assert "stdout" not in cap, "a fileno-less stream must be omitted, not passed"
+    assert cap.get("creationflags") == _CREATE_NO_WINDOW
+
+
+def test_utf8_io_reexec_nt_safe_when_stdout_none(monkeypatch):
+    """#105: sys.stdout can be None under pythonw (#104 launcher swap). Popen
+    must still be called and stdout omitted, not crash the CLI."""
+    u, cap, _ = _utf8_io_nt_reexec_env(monkeypatch, streams={"stdout": None})
+    u.reexec_in_utf8_mode()  # must not raise
+    assert "argv" in cap, "Popen must still be called when sys.stdout is None"
+    assert "stdout" not in cap
+
+
+def test_utf8_io_reexec_nt_flushes_stdout_stderr_before_popen(monkeypatch):
+    """#105: parent stdout/stderr must be flushed BEFORE the Popen spawn so
+    parent-buffered text does not interleave behind the child's output (both
+    then write to the same fd). The post-wait flush is kept as a safety net,
+    not as the only flush."""
+    order = []
+    class _OrderStream:
+        def __init__(self, tag):
+            self.tag = tag
+        def fileno(self):
+            return -1  # no real handle -> omitted from kwargs, but flush recorded
+        def flush(self):
+            order.append("flush:" + self.tag)
+    u, cap, fake_sub = _utf8_io_nt_reexec_env(monkeypatch, streams={
+        "stdout": _OrderStream("stdout"), "stderr": _OrderStream("stderr"),
+    })
+    # Re-wrap Popen to record call order relative to the flushes.
+    def ordered_popen(argv, **k):
+        order.append("popen")
+        cap.update(k)
+        cap["argv"] = argv
+        class _P:
+            returncode = 0
+            def wait(self):
+                return 0
+        return _P()
+    fake_sub.Popen = ordered_popen
+
+    u.reexec_in_utf8_mode()
+
+    assert "popen" in order, "Popen must be called"
+    popen_idx = order.index("popen")
+    assert order.index("flush:stdout") < popen_idx, (
+        "sys.stdout must be flushed BEFORE the Popen spawn"
+    )
+    assert order.index("flush:stderr") < popen_idx, (
+        "sys.stderr must be flushed BEFORE the Popen spawn"
+    )
+    # The post-wait safety-net flush still runs.
+    assert "flush:stdout" in order[popen_idx + 1:], (
+        "post-wait flush safety net must still run"
+    )
+
+
+def test_utf8_io_reexec_pipe_round_trip(tmp_path):
+    """#105 end-to-end: `measure.py version` under a non-UTF-8 locale (which
+    triggers reexec_in_utf8_mode) with stdout as a pipe must produce the same
+    non-empty output as a UTF-8-locale run. On POSIX this exercises the execv
+    round-trip; the Windows Popen discard is covered by the unit tests above.
+    Cheap: `version` prints one line and exits 0 with no side effects."""
+    env_base = dict(os.environ)
+    env_base["TOKEN_OPTIMIZER_SNAPSHOT_DIR"] = str(tmp_path)
+
+    env_nonutf = dict(env_base)
+    env_nonutf["PYTHONUTF8"] = "0"
+    env_nonutf["LC_ALL"] = "C"
+    env_nonutf.pop("PYTHONIOENCODING", None)
+
+    env_utf = dict(env_base)
+    env_utf["PYTHONUTF8"] = "1"
+
+    def _run(env):
+        return subprocess.run(
+            [sys.executable, "measure.py", "version"],
+            cwd=str(SCRIPTS), env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30,
+        )
+
+    r_nonutf = _run(env_nonutf)
+    r_utf = _run(env_utf)
+    assert r_nonutf.returncode == 0, (
+        "non-UTF-8 run failed: " + r_nonutf.stderr.decode("utf-8", "replace")
+    )
+    assert r_utf.returncode == 0, (
+        "UTF-8 run failed: " + r_utf.stderr.decode("utf-8", "replace")
+    )
+    assert r_nonutf.stdout, (
+        "non-UTF-8 re-exec run produced empty stdout (the #105 discard signature)"
+    )
+    assert r_nonutf.stdout == r_utf.stdout, (
+        "re-exec round-trip must not alter the command's stdout"
+    )
+
+
+# ---------------------------------------------------------------------------
 # measure.py _log_spawn_failure: durable breadcrumb on spawn_detached None
 # ---------------------------------------------------------------------------
 def test_log_spawn_failure_writes_durable_line(m, monkeypatch, tmp_path):
