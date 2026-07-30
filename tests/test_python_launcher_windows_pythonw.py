@@ -15,12 +15,23 @@ Covers the FABLE red-team amendments:
 from __future__ import annotations
 
 import os
-import pty
 import pytest
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+try:
+    import pty  # POSIX-only; imports termios, absent on Windows.
+except ImportError:  # pragma: no cover - exercised only on Windows CI.
+    pty = None
+
+# Skip marker for tests that drive a real PTY (fd 1 = tty). pty is unavailable
+# on Windows (no termios), so these must skip cleanly there while the rest of
+# the module still collects and runs.
+requires_pty = pytest.mark.skipif(
+    pty is None, reason="pty/termios unavailable on this platform (Windows)"
+)
 
 REPO = Path(__file__).resolve().parent.parent
 LAUNCHER = REPO / "hooks" / "python-launcher.sh"
@@ -207,6 +218,7 @@ def test_non_windows_is_noop_even_with_pythonw_present(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@requires_pty
 def test_tty_stdout_keeps_python_exe(tmp_path):
     py = _fake_interp(tmp_path, "python.exe", "PYTHON_SELECTED")
     _fake_interp(tmp_path, "pythonw.exe", "PYTHONW_SELECTED")
