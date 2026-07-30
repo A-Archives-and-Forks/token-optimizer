@@ -411,7 +411,7 @@ exports.default = definePluginEntry({
             if (checkpoint && session.inject) {
                 session.inject(checkpoint);
                 api.logger.info(`[token-optimizer] Checkpoint restored for session ${session.sessionId}`);
-                // T4 (U-B): credit the avoided reconstruction.
+                // Credit the avoided reconstruction.
                 // Floor = checkpoint content byte size / 3.3 (calibrated estimator).
                 // Active = sum of tokensEst for files read >=2x this session (working set).
                 // credited = min(200 000, max(floor, active)).
@@ -499,7 +499,7 @@ exports.default = definePluginEntry({
                                 const candidate = (0, continuity_1.findBestContinuityCheckpoint)(promptText, event.sessionId, _cwd);
                                 if (candidate) {
                                     const hint = (0, continuity_1.buildContinuityHint)(candidate, promptText, _cwd);
-                                    // T5 (U-G) serve side: record which files this hint surfaced so a
+                                    // Serve side: record which files this hint surfaced so a
                                     // later Read of one can claim the avoided-search credit. Best-effort:
                                     // never let this bookkeeping break the hint itself.
                                     try {

@@ -164,7 +164,7 @@ export declare function resumeTopicScore(promptText: string, checkpointContent: 
  * Mirrors Python _checkpoint_in_project using sidecar modified_files.
  * Falls back to the content text search (cwd basename appears anywhere).
  *
- * FIX (torture phase 4): compare each path against BOTH the resolved cwd
+ * FIX: compare each path against BOTH the resolved cwd
  * AND the raw cwd so that symlinked working dirs (macOS /tmp -> /private/tmp)
  * don't silently fail the filter and leak cross-project context.  Mirrors the
  * Python fix: build a small set {resolve(cwd), cwd}, trailing-slash-stripped.

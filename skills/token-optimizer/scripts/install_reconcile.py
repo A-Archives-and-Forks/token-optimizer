@@ -211,7 +211,7 @@ def _is_confined_to_cache(target: Path, home: Path) -> bool:
 
     Guards ``shutil.rmtree`` against an intermediate symlinked path component
     (or a crafted ``installPath`` in installed_plugins.json) redirecting a
-    delete outside the plugin cache tree (issue #57 torture finding). Resolving
+    delete outside the plugin cache tree (issue #57). Resolving
     both paths catches symlink escapes (a symlinked component would resolve
     outside the cache root); the per-component check additionally refuses to
     rmtree *through* any symlink even when it resolves back inside the cache.

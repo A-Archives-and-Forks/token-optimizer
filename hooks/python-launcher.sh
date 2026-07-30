@@ -195,7 +195,7 @@ _setup_interpreter_cache() {
 #     python.exe (same install, same version). We never synthesise a path
 #     from PATH.
 #   * Skip WindowsApps: a Microsoft Store pythonw AppExecutionAlias exits
-#     silently outside an interactive token (see measure.py torture HIGH-1).
+#     silently outside an interactive token (see measure.py).
 #   * stdout must be a pipe, not a tty: pythonw is GUI-subsystem. When its
 #     std handles are not valid pipes, CPython sets sys.stdout/sys.stderr to
 #     None and the hook protocol goes dark while the process exits 0 -- the
@@ -360,7 +360,7 @@ _exec_cached_interpreter "$@" || :
 # python3.exe, pythonw.exe) together, so the GUI-subsystem twin's liveness
 # proves the install is real, and a GUI binary allocates no console -- no
 # flash. A GUI binary's bare exit code is NOT trusted (a dead alias can exit
-# 0 silently outside an interactive token, see measure.py torture HIGH-1):
+# 0 silently outside an interactive token, see measure.py):
 # the twin must supply POSITIVE PROOF OF LIFE by writing a marker to a temp
 # file whose content we then require. A dead alias exits without writing.
 #
