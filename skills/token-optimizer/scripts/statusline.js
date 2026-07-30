@@ -15,6 +15,40 @@ const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
 
+// --- Self-disabling guard (issue #106 / F1) ---
+// Claude Code has NO plugin uninstall/teardown hook, so a `/plugin uninstall`
+// (or a manual `rm -rf` of the plugin tree) can leave this statusLine command
+// pointing at a script whose plugin tree has been removed. A missing command
+// makes the status line go silently blank with no error surfaced to the user
+// (visible only under `claude --debug`). Rather than emit a broken-command
+// state, we self-disable: if our own plugin tree is gone (this script's
+// directory no longer holds the sibling files a real install always ships),
+// exit 0 with no output. A blank status line is exactly what a missing command
+// already produces, so this changes nothing while installed and removes the
+// dangling-reference state after removal. The guard runs BEFORE reading stdin
+// so a deleted tree never pays the parse cost.
+//
+// We do NOT change the command string shape for existing installs (per the
+// locked design decision): the command stays `node '<path>/statusline.js'`.
+// When the script file itself is deleted, node fails to load it before this
+// guard runs, and the host already renders that as a blank line, so the guard
+// targets the partial-removal case (script present, tree gutted).
+function _pluginTreeGone() {
+  // __dirname is this script's directory: <tree>/skills/token-optimizer/scripts
+  // (plugin cache) or <repo>/skills/token-optimizer/scripts (dev/script install).
+  // measure.py is the canonical sibling every real install ships alongside
+  // statusline.js. If it is gone while statusline.js remains, the plugin tree
+  // is being or has been removed, and a working status line would be a lie.
+  try {
+    if (!fs.existsSync(path.join(__dirname, 'measure.py'))) return true;
+  } catch (e) { return true; }
+  return false;
+}
+
+if (_pluginTreeGone()) {
+  process.exit(0);
+}
+
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => input += chunk);
