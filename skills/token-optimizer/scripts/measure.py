@@ -20601,7 +20601,7 @@ def _install_launchd_daemon(dry_run=False, soft_fail=False, effective_host=None)
         return True
 
 
-def _write_uninstall_tombstone():
+def _write_uninstall_tombstone(snapshot_dir=None):
     """v5.4.19 (adv-006): write an empty breadcrumb file so that if the daemon
     process somehow respawns (e.g., an orphaned LaunchAgent the user didn't clean
     up), it exits cleanly on next start instead of resurrecting.
@@ -20609,15 +20609,27 @@ def _write_uninstall_tombstone():
     Torture-room H-4 (2026-04-16): surface failures to stderr so a silently
     broken tombstone (e.g. SNAPSHOT_DIR unwritable) is visible to the user
     rather than leaving them thinking uninstall succeeded while the daemon
-    keeps respawning."""
+    keeps respawning.
+
+    #106 F2 (P1): the tombstone must OUTLIVE the uninstall. Each generated
+    dashboard-server.py bakes in its OWN identity's breadcrumb path (see the
+    `thrash_path_literal` in the daemon template) and checks it on start
+    ("noop-tombstoned"), so a per-identity tombstone is what keeps that
+    identity's orphaned daemon dead. `snapshot_dir` targets one identity; the
+    uninstall sweep calls this once per swept identity so no sibling is left
+    revivable. A legitimate reinstall clears it (setup_daemon unlinks the
+    tombstone before starting), which is the ONLY place it may be removed.
+    """
+    snap = SNAPSHOT_DIR if snapshot_dir is None else Path(snapshot_dir)
+    breadcrumb = snap / ".daemon-thrash"
     try:
-        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-        with open(DAEMON_THRASH_BREADCRUMB, "w", encoding="utf-8") as f:
+        snap.mkdir(parents=True, exist_ok=True)
+        with open(breadcrumb, "w", encoding="utf-8") as f:
             f.write("")
     except OSError as e:
         sys.stderr.write(
             f"[Token Optimizer] Warning: could not write uninstall tombstone "
-            f"at {DAEMON_THRASH_BREADCRUMB}: {e}\n"
+            f"at {breadcrumb}: {e}\n"
             f"  If the daemon is still running after uninstall, remove the "
             f"LaunchAgent/task/unit manually.\n"
         )
@@ -20685,6 +20697,17 @@ def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
                 pass
             if _unlink_if_exists(plist):
                 removed.append(str(plist))
+    # #106 F2 (P1): unregistering the job does NOT stop the process --
+    # `launchctl bootout` / `systemctl disable` drop the registration without
+    # SIGTERMing the running child, so the daemon kept serving its port with
+    # the 0600 CSRF token live in memory until logout. Reclaim the port now
+    # that the tombstone is down (so nothing races a respawn) and the job is
+    # unregistered. Never kills a foreign process on the port -- the helper
+    # verifies the command line is our own dashboard-server.py.
+    try:
+        _reclaim_posix_daemon_port()
+    except Exception:  # noqa: BLE001 -- uninstall must never crash on cleanup
+        pass
     # Sweep per-identity daemon files across every token-optimizer-* identity.
     per_identity_removed: list[tuple[Path, list[str]]] = []
     for snap_dir in _daemon_identity_snapshot_dirs(this_install_only):
@@ -20693,12 +20716,15 @@ def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
         for key in ("daemon_script", "daemon_token", "daemon_host"):
             if _unlink_if_exists(files[key]):
                 identity_removed.append(str(files[key]))
-        # The .daemon-thrash tombstone is our own ephemeral marker (written
-        # first per adv-006 to catch racing respawns during the uninstall,
-        # then cleaned up here). It is NOT counted toward `removed` so the
-        # "Nothing to remove" honesty invariant stays intact when no real
-        # daemon artifacts ever existed.
-        _unlink_if_exists(files["thrash_breadcrumb"])
+        # #106 F2 (P1): the .daemon-thrash tombstone must PERSIST for every
+        # swept identity. Each identity's generated dashboard-server.py checks
+        # its OWN breadcrumb path on start and exits "noop-tombstoned"; the
+        # previous unlink here re-armed self-revive, so an orphaned LaunchAgent
+        # /task/unit could resurrect the daemon and mint a fresh 0600 token
+        # after a "successful" uninstall. Only a legitimate reinstall clears it
+        # (setup_daemon unlinks before start). NOT counted toward `removed` so
+        # the "Nothing to remove" honesty invariant holds.
+        _write_uninstall_tombstone(snap_dir)
         if identity_removed:
             per_identity_removed.append((snap_dir, identity_removed))
             removed.extend(identity_removed)
@@ -21150,10 +21176,15 @@ def _uninstall_task_scheduler_daemon(this_install_only=False, dry_run=False):
         for key in ("daemon_script", "windows_launcher", "daemon_token", "daemon_host"):
             if _unlink_if_exists(files[key]):
                 identity_removed.append(str(files[key]))
-        # The .daemon-thrash tombstone is our own ephemeral marker (written
-        # first per adv-006, then cleaned up here); NOT counted toward
-        # `removed` so the "Nothing to remove" honesty invariant holds.
-        _unlink_if_exists(files["thrash_breadcrumb"])
+        # #106 F2 (P1): the .daemon-thrash tombstone must PERSIST for every
+        # swept identity. Each identity's generated dashboard-server.py checks
+        # its OWN breadcrumb path on start and exits "noop-tombstoned"; the
+        # previous unlink here re-armed self-revive, so an orphaned LaunchAgent
+        # /task/unit could resurrect the daemon and mint a fresh 0600 token
+        # after a "successful" uninstall. Only a legitimate reinstall clears it
+        # (setup_daemon unlinks before start). NOT counted toward `removed` so
+        # the "Nothing to remove" honesty invariant holds.
+        _write_uninstall_tombstone(snap_dir)
         # Glob-clean any schtasks XML regardless of version-specific naming
         # (".schtasks-daemon.xml", "schtasks-daemon.xml", etc.).
         try:
@@ -21540,6 +21571,17 @@ def _uninstall_systemd_user_daemon(this_install_only=False, dry_run=False):
         )
     except (OSError, subprocess.TimeoutExpired):
         pass
+    # #106 F2 (P1): unregistering the job does NOT stop the process --
+    # `launchctl bootout` / `systemctl disable` drop the registration without
+    # SIGTERMing the running child, so the daemon kept serving its port with
+    # the 0600 CSRF token live in memory until logout. Reclaim the port now
+    # that the tombstone is down (so nothing races a respawn) and the job is
+    # unregistered. Never kills a foreign process on the port -- the helper
+    # verifies the command line is our own dashboard-server.py.
+    try:
+        _reclaim_posix_daemon_port()
+    except Exception:  # noqa: BLE001 -- uninstall must never crash on cleanup
+        pass
     # Sweep per-identity daemon files across every token-optimizer-* identity.
     per_identity_removed: list[tuple[Path, list[str]]] = []
     for snap_dir in _daemon_identity_snapshot_dirs(this_install_only):
@@ -21548,10 +21590,15 @@ def _uninstall_systemd_user_daemon(this_install_only=False, dry_run=False):
         for key in ("daemon_script", "linux_launcher", "daemon_token", "daemon_host"):
             if _unlink_if_exists(files[key]):
                 identity_removed.append(str(files[key]))
-        # The .daemon-thrash tombstone is our own ephemeral marker (written
-        # first per adv-006, then cleaned up here); NOT counted toward
-        # `removed` so the "Nothing to remove" honesty invariant holds.
-        _unlink_if_exists(files["thrash_breadcrumb"])
+        # #106 F2 (P1): the .daemon-thrash tombstone must PERSIST for every
+        # swept identity. Each identity's generated dashboard-server.py checks
+        # its OWN breadcrumb path on start and exits "noop-tombstoned"; the
+        # previous unlink here re-armed self-revive, so an orphaned LaunchAgent
+        # /task/unit could resurrect the daemon and mint a fresh 0600 token
+        # after a "successful" uninstall. Only a legitimate reinstall clears it
+        # (setup_daemon unlinks before start). NOT counted toward `removed` so
+        # the "Nothing to remove" honesty invariant holds.
+        _write_uninstall_tombstone(snap_dir)
         if identity_removed:
             per_identity_removed.append((snap_dir, identity_removed))
             removed.extend(identity_removed)
