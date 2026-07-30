@@ -372,11 +372,15 @@ def _is_contextignored(file_path: str) -> bool:
 # Cache operations
 # ---------------------------------------------------------------------------
 
-def _make_store(session_id: str) -> Optional["SessionStore"]:
+def _make_store(
+    session_id: str, busy_timeout_ms: Optional[int] = None
+) -> Optional["SessionStore"]:
     if SessionStore is None:
         return None
     try:
-        return SessionStore(session_id)
+        if busy_timeout_ms is None:
+            return SessionStore(session_id)
+        return SessionStore(session_id, busy_timeout_ms=busy_timeout_ms)
     except Exception:
         return None
 
@@ -1660,17 +1664,63 @@ def handle_clear_compacted(hook_input: dict[str, Any], quiet: bool) -> None:
     on every compaction. ``cached_content`` is intentionally kept: the delta-read
     path is gated on the file entry existing, so clearing only ``file_reads`` is
     safe and preserves the delta baseline for an edited file.
+
+    Contention-safe (#101 follow-up): SessionStore connects fail-fast
+    (``busy_timeout=50ms``), so under a sibling SessionStart compact-restore or
+    PostToolUse archive write holding the same per-session sqlite write lock, a
+    bare ``clear_file_entries()`` raised ``sqlite3.OperationalError('database is
+    locked')`` BEFORE the DELETE, ``main()`` exited 0, and #101 silently
+    resurrected. This path raises a per-call ``busy_timeout`` (default 5000ms,
+    tunable via ``TOKEN_OPTIMIZER_CLEAR_COMPACTED_BUSY_TIMEOUT``) so it waits out
+    a short lock within the 10s hook budget, and wraps the clear in
+    ``try/except sqlite3.OperationalError`` emitting a LOUD stderr line on
+    failure instead of a silent exit-0 no-op.
     """
     session_id = str(
         hook_input.get("agent_id") or hook_input.get("session_id") or "unknown"
     )
     if not session_id or session_id == "unknown":
+        if not quiet:
+            print(
+                "[read_cache] --clear-compacted FAILED: no session_id in hook "
+                "input; live session file_reads left intact (#101 not cleared)",
+                file=sys.stderr,
+            )
         return
-    store = _make_store(session_id)
+    # Per-call busy_timeout: wait out a sibling write lock within the hook
+    # budget instead of dying at the 50ms fail-fast default. Tunable for
+    # environments with a different hook budget.
+    try:
+        busy_timeout_ms = int(
+            os.environ.get(
+                "TOKEN_OPTIMIZER_CLEAR_COMPACTED_BUSY_TIMEOUT", "5000"
+            )
+        )
+    except ValueError:
+        busy_timeout_ms = 5000
+    store = _make_store(session_id, busy_timeout_ms=busy_timeout_ms)
     if store is None:
+        if not quiet:
+            print(
+                "[read_cache] --clear-compacted FAILED: SessionStore unavailable; "
+                f"file_reads for {session_id} left intact (#101 not cleared)",
+                file=sys.stderr,
+            )
         return
     try:
+        # The per-instance busy_timeout (set on the SessionStore above) is
+        # honored by _connect() for BOTH the schema init and the DELETE, so the
+        # clear waits out a sibling write lock within the hook budget instead
+        # of dying at the 50ms fail-fast default during _init_schema.
         store.clear_file_entries()
+    except sqlite3.OperationalError as exc:
+        # LOUD failure: never a silent exit-0 no-op that resurrects #101.
+        print(
+            f"[read_cache] --clear-compacted FAILED: {exc}; file_reads for "
+            f"{session_id} left intact (#101 not cleared)",
+            file=sys.stderr,
+        )
+        return
     finally:
         store.close()
     if not quiet:
@@ -1852,6 +1902,12 @@ def main() -> None:
         # branch). Bare --clear semantics are left untouched.
         hook_input = read_stdin_hook_input(1_000_000)
         if not hook_input:
+            if not quiet:
+                print(
+                    "[read_cache] --clear-compacted FAILED: no stdin hook input; "
+                    "live session file_reads left intact (#101 not cleared)",
+                    file=sys.stderr,
+                )
             return
         handle_clear_compacted(hook_input, quiet)
         return
