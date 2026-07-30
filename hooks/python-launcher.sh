@@ -6,6 +6,11 @@
 #   - Windows py-launcher-only installs (py -3)
 #   - Windows Store Python (real installs probed with --version; non-functional
 #     AppExecutionAlias stubs skipped automatically)
+# On Windows (Git Bash/MSYS), exec prefers pythonw.exe (GUI subsystem) over
+# python.exe to avoid the per-hook console-window flash and orphaned
+# conhost.exe. See _maybe_swap_to_pythonw for the constraints. py-launcher-only
+# installs (`py -3`) still flash: py.exe has no GUI twin in its own directory
+# and would need pyw.exe plus a new safe-prefix entry; documented, not fixed.
 # Exits 127 with a diagnostic message if none found.
 
 set -eu
@@ -142,6 +147,76 @@ _setup_interpreter_cache() {
     _PY_CACHE_FILE="${cache_dir%/}/interpreter-${plugin_hash}-${path_hash}.cache"
 }
 
+# On Windows (Git Bash/MSYS), python.exe is a console-subsystem binary: each
+# hook invocation allocates a transient console window (the "flash") and can
+# orphan a conhost.exe. pythonw.exe is the GUI-subsystem twin shipped beside
+# it by python.org; launching it allocates no console. We prefer pythonw.exe
+# at EXEC time (not discovery time) so a stale cache record that still names
+# python.exe does not keep flashing forever -- the cache key is unchanged, so
+# the swap must happen on every exec, in both _exec_cached_interpreter and
+# _exec_discovered_interpreter.
+#
+# Constraints (each is a real failure mode, not paranoia):
+#   * Same directory only: pythonw.exe must sit next to the resolved
+#     python.exe (same install, same version). We never synthesise a path
+#     from PATH.
+#   * Skip WindowsApps: a Microsoft Store pythonw AppExecutionAlias exits
+#     silently outside an interactive token (see measure.py torture HIGH-1).
+#   * stdout must be a pipe, not a tty: pythonw is GUI-subsystem. When its
+#     std handles are not valid pipes, CPython sets sys.stdout/sys.stderr to
+#     None and the hook protocol goes dark while the process exits 0 -- the
+#     top regression for this change. A tty on fd 1 means a console is
+#     already attached (no flash to avoid) AND pythonw could null it, so we
+#     keep python.exe there. The hook context always provides a pipe, which
+#     pythonw inherits intact.
+#   * Non-Windows is a strict no-op: the MSYS guard short-circuits before any
+#     filesystem probe, so POSIX behaviour is byte-for-byte unchanged.
+#   * py.exe (the `py -3` launcher) is NOT swapped: its GUI twin would be
+#     pyw.exe plus a new safe-prefix entry, and `py -3` resolves to python.exe
+#     anyway. py-launcher-only installs therefore still flash; documented,
+#     not fixed here.
+#
+# Sets _PYW_INTERP to the chosen interpreter (pythonw.exe when swapped, else
+# the input unchanged). Selection never fails -- on any doubt we keep the
+# caller's interpreter, so this can only ever opt INTO pythonw, never block
+# an exec. Uses a variable (not stdout) so the [ -t 1 ] guard sees the
+# launcher's real fd 1, not a command-substitution pipe.
+_maybe_swap_to_pythonw() {
+    local interp="$1" dir pythonw
+    _PYW_INTERP="$interp"
+    case "$interp" in
+        */python.exe|*/python3.exe) ;;
+        *) return 0 ;;
+    esac
+    _is_msys_platform || return 0
+    if [ -t 1 ]; then
+        return 0
+    fi
+    dir=${interp%/*}
+    pythonw="${dir}/pythonw.exe"
+    [ -f "$pythonw" ] && [ -x "$pythonw" ] && [ -s "$pythonw" ] || return 0
+    _is_safe_prefix "$pythonw" || return 0
+    case "$pythonw" in
+        */WindowsApps/*|*/windowsapps/*) return 0 ;;
+    esac
+    # Liveness-probe the twin before committing to it. A corrupt/garbage
+    # pythonw.exe (e.g. a half-overwritten install twin, or a 0xC000-style
+    # Windows stub) passes the -f/-x/-s metadata checks but exits nonzero
+    # (often 127) when actually run. exec consumes the process, so a dead
+    # twin would brick every hook exec and the launcher's fallback ladder
+    # becomes unreachable. Probe exactly like find_interpreter probes
+    # WindowsApps python.exe: 2s timeout, -c "" (no program), stdin from
+    # /dev/null so the hook's real stdin is never consumed by the probe.
+    # On any doubt, keep python.exe (return 0) -- this can only ever opt
+    # INTO pythonw, never block an exec.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 2s "$pythonw" -c "" </dev/null >/dev/null 2>&1 || return 0
+    else
+        "$pythonw" -c "" </dev/null >/dev/null 2>&1 || return 0
+    fi
+    _PYW_INTERP="$pythonw"
+}
+
 _exec_cached_interpreter() {
     local record payload interp marker
 
@@ -170,8 +245,23 @@ _exec_cached_interpreter() {
         /*) ;;
         *) return 1 ;;
     esac
+    # A cache record must name the discovered interpreter (python.exe), never
+    # its pythonw.exe twin (the swap is exec-only, see _maybe_swap_to_pythonw).
+    # A record ending in /pythonw.exe is either poisoned or a stale artefact
+    # of a broken twin that should have been probed out -- reject and let
+    # discovery re-run, rather than exec'ing a possibly-dead twin directly.
+    case "$interp" in
+        */pythonw.exe) return 1 ;;
+    esac
     [ -x "$interp" ] && [ -s "$interp" ] || return 1
     # A cache entry never bypasses the anti-PATH-hijack policy.
+    _is_safe_prefix "$interp" || return 1
+    # Windows: prefer the GUI-subsystem pythonw.exe twin at exec time so a
+    # cached python.exe record does not keep flashing. No-op off-Windows.
+    _maybe_swap_to_pythonw "$interp"
+    interp=$_PYW_INTERP
+    [ -n "$interp" ] || return 1
+    [ -x "$interp" ] && [ -s "$interp" ] || return 1
     _is_safe_prefix "$interp" || return 1
 
     if [ "$marker" = "-3" ]; then
@@ -204,6 +294,16 @@ _exec_discovered_interpreter() {
     # makes that invariant explicit at the shared cache-write/exec boundary.
     _is_safe_prefix "$interp" || return 1
     _write_interpreter_cache "$interp" "$marker"
+    # Windows: prefer the GUI-subsystem pythonw.exe twin at exec time. The
+    # cache record keeps naming python.exe (the discovered interpreter), and
+    # the swap is reapplied on every exec -- including cache hits -- so a
+    # stale record never freezes us on the flashing python.exe. No-op
+    # off-Windows.
+    _maybe_swap_to_pythonw "$interp"
+    interp=$_PYW_INTERP
+    [ -n "$interp" ] || return 1
+    [ -x "$interp" ] && [ -s "$interp" ] || return 1
+    _is_safe_prefix "$interp" || return 1
     if [ "$marker" = "-3" ]; then
         exec "$interp" -3 "$@"
     fi

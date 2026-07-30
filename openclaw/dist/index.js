@@ -498,7 +498,7 @@ exports.default = definePluginEntry({
                             else {
                                 const candidate = (0, continuity_1.findBestContinuityCheckpoint)(promptText, event.sessionId, _cwd);
                                 if (candidate) {
-                                    const hint = (0, continuity_1.buildContinuityHint)(candidate);
+                                    const hint = (0, continuity_1.buildContinuityHint)(candidate, promptText, _cwd);
                                     // T5 (U-G) serve side: record which files this hint surfaced so a
                                     // later Read of one can claim the avoided-search credit. Best-effort:
                                     // never let this bookkeeping break the hint itself.
