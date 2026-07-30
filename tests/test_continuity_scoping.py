@@ -372,3 +372,51 @@ def test_continuity_prompt_hint_no_filter_when_cwd_absent(measure, monkeypatch):
     assert "gamma_engine" in hint
     # No fabricated disclosure:
     assert "- Omitted" not in hint
+
+
+def test_continuity_prompt_hint_no_crash_when_keep_tokens_none(measure, monkeypatch):
+    """GAUNTLET C3: site 1 of the hint decision filter must guard
+    ``keep_tokens is not None``.
+
+    ``keep_tokens`` is ``... if (text and cwd) else None``. When it is None
+    but the checkpoint is multi-project, site 1 ran
+    ``_keep_recovered_item(d, None)`` -> ``TypeError: unsupported operand
+    type(s) for &: 'set' and 'NoneType'``. The prompt-continuity hook wraps
+    the call in ``except Exception: hint=""``, so the symptom was the ENTIRE
+    continuity hint vanishing for that turn, silently. Site 2 already guarded;
+    site 1 was the lone outlier.
+
+    Through the public entry an empty prompt early-returns before site 1, so
+    the None sentinel is simulated here by stubbing ``_continuity_keep_tokens``
+    to return None while keeping a non-empty prompt + cwd on a multi-project
+    checkpoint. Before the guard this raised TypeError; after, decisions are
+    kept verbatim (no filtering on None) with NO disclosure.
+    """
+    mod, cp_dir = measure
+    proj_b = "/home/u/beta"
+    proj_a = "/home/u/gamma"
+    _write_checkpoint(cp_dir, "abcdefgh1234", _ab_sidecar(proj_a, proj_b))
+    checkpoints = mod.list_checkpoints()
+    cp = checkpoints[0]
+    sidecar = mod._read_checkpoint_sidecar(cp["path"])
+    monkeypatch.setattr(mod, "_checkpoint_topic_score", lambda text, c, cwd=None: (0.9, sidecar))
+    monkeypatch.setattr(mod, "_checkpoint_in_project", lambda s, c: True)
+    monkeypatch.setattr(mod, "_external_memory_present", lambda: False)
+    # Force the None sentinel at site 1 (simulates the (text and cwd)-falsy
+    # branch without tripping the empty-prompt early return).
+    monkeypatch.setattr(mod, "_continuity_keep_tokens", lambda *a, **k: None)
+
+    hint = mod._continuity_prompt_hint(
+        prompt_text="beta feature",
+        session_id="zzzzzzzzzzzz",
+        cwd=proj_b)
+
+    # Did not crash, and decisions are kept verbatim (no token filtering on
+    # None -> the decision drop count stays 0):
+    assert "gamma delta epsilon" in hint
+    # The cross-project FILE path is still path-dropped (that rule is
+    # path-based, independent of keep_tokens), so the disclosure reports the
+    # file drop ONLY -- it must NOT claim a decision was dropped, because no
+    # decision was filtered on the None sentinel:
+    assert "- Omitted (scoped to current project): 1 file(s)" in hint
+    assert "decision(s)" not in hint

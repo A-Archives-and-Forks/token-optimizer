@@ -26838,7 +26838,7 @@ def _continuity_prompt_hint(prompt_text="", session_id=None, cwd=None, max_age_m
     _multi_project = _checkpoint_has_cross_project_path(sidecar, cwd)
     dropped_decisions = 0
     if decisions:
-        if _multi_project:
+        if keep_tokens is not None and _multi_project:
             kept_decisions = [d for d in decisions if _keep_recovered_item(d, keep_tokens)]
             dropped_decisions = len(decisions) - len(kept_decisions)
         else:
