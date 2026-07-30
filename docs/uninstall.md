@@ -20,9 +20,64 @@ That removes the plugin and its hooks. To also drop the marketplace:
 /plugin marketplace remove alexgreensh-token-optimizer
 ```
 
-**Script install** (`bash install.sh`), undo each opt-in component you
-enabled. Each `--uninstall` removes ONLY Token Optimizer's own entries and
-leaves your other hooks intact:
+`/plugin uninstall` removes the plugin cache dir but does NOT clean the
+plugin's keys in `installed_plugins.json` or `known_marketplaces.json`
+(Claude Code ages orphaned entries out on its own schedule), and a manual
+`rm -rf` of the plugin tree can leave the `statusLine` command in
+`settings.json` pointing at a script whose plugin tree has been removed
+(the status line then goes silently blank). The `cleanup` command below
+reconciles both.
+
+### One-command cleanup (recommended after `/plugin uninstall`)
+
+```bash
+python3 ~/.claude/skills/token-optimizer/scripts/measure.py cleanup --dry-run
+python3 ~/.claude/skills/token-optimizer/scripts/measure.py cleanup
+```
+
+`cleanup` orchestrates the three uninstall surfaces in one call:
+
+1. **Daemon**: stops and removes the dashboard daemon across ALL
+   `token-optimizer-*` identities (not just the currently-resolved one),
+   and unregisters every runtime's scheduler artifact (LaunchAgent /
+   systemd unit / scheduled task) by name. A sibling identity's
+   `dashboard-server.py` + `0600 daemon-token` (a live local HTTP daemon
+   plus its CSRF secret) would otherwise outlive the uninstall.
+2. **Host config** (`settings.json`): backs up first, then removes ONLY
+   Token Optimizer's own entries (`statusLine`, `quality-cache` hook,
+   `SessionEnd` hooks), leaving your other hooks and every other settings
+   key byte-identical.
+3. **Manifests** (`installed_plugins.json` / `known_marketplaces.json`):
+   backs up first, then removes our STALE entries (whose `installPath` no
+   longer exists), leaving other plugins' entries byte-identical. Active
+   (still-installed) entries of ours are reported but kept.
+
+**`--dry-run` is side-effect-free** (no processes stopped, no files
+deleted, no config written) and doubles as **retained-paths disclosure**:
+it prints exactly what WOULD be removed and what stays, so you can review
+before agreeing to a real cleanup.
+
+**`--this-install-only`** scopes the daemon sweep to the currently-resolved
+identity only, for users intentionally running side-by-side installs who
+only want this one gone. Host config and manifest cleanup still run
+(they are host-level, not identity-scoped).
+
+### What is preserved by design
+
+Session data, compaction checkpoints, trend aggregates, and the quality-bar
+cache are NOT removed by `cleanup`. They are yours. The `--dry-run` report
+lists every retained path with its on-disk status. To also purge them
+(optional, full wipe):
+
+```bash
+rm -rf ~/.claude/plugins/data/token-optimizer-*   # all identities' session data
+```
+
+### Per-component uninstall (script install or granular control)
+
+`bash install.sh`, undo each opt-in component you enabled. Each
+`--uninstall` removes ONLY Token Optimizer's own entries and leaves your
+other hooks intact:
 
 ```bash
 python3 ~/.claude/skills/token-optimizer/scripts/measure.py setup-smart-compact --uninstall
@@ -32,6 +87,10 @@ python3 ~/.claude/skills/token-optimizer/scripts/measure.py setup-coach-injectio
 python3 ~/.claude/skills/token-optimizer/scripts/measure.py setup-hook --uninstall
 ```
 
+`setup-daemon --uninstall` is identity-sweeping by default (all
+`token-optimizer-*` identities). Add `--this-install-only` to clean only
+the resolved identity. Add `--dry-run` to preview.
+
 Then remove the skill tree and tracking data (optional, full wipe):
 
 ```bash
@@ -40,6 +99,15 @@ rm -rf ~/.claude/skills/token-optimizer   # the skill tree
 rm -rf ~/.claude/_backups/token-optimizer # backups written on hook changes
 rm -f  ~/.claude/.settings.lock           # advisory lock file
 ```
+
+### Self-disabling status line
+
+If the plugin tree is partially removed (e.g. a manual `rm -rf` that leaves
+`statusline.js` in `settings.json` but deletes its sibling `measure.py`),
+the status line self-disables: it exits quietly with no output and no
+stderr spew, so a dangling reference renders as a blank line (what a
+missing command already produces) instead of an error. The command string
+shape is not changed, so the existing uninstall matcher keeps working.
 
 ## Codex
 
