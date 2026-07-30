@@ -177,6 +177,55 @@ def test_nothing_to_remove_honesty_preserved(tmp_path, monkeypatch, capsys):
     assert "Deleted:" not in out
 
 
+def test_ports_to_reclaim_scope():
+    """Gauntlet3 B-F1: sweep-all must reclaim EVERY runtime's port, not just the
+    resolved runtime's, or a sibling daemon + live CSRF token survives."""
+    all_ports = set(measure._daemon_ports_to_reclaim(this_install_only=False))
+    assert all_ports == {24842, 24843, 24844, 24845}
+    scoped = measure._daemon_ports_to_reclaim(this_install_only=True)
+    assert scoped == (measure.DAEMON_PORT,)
+
+
+def test_sweep_all_reclaims_every_runtime_port(tmp_path, monkeypatch):
+    """The uninstall must SIGTERM-reclaim all four runtime ports on sweep-all so
+    a sibling runtime's running daemon (e.g. Codex on 24843) does not keep
+    serving its token-authed API after a reported uninstall."""
+    _setup_two_identities(tmp_path, monkeypatch)
+    reclaimed = []
+    monkeypatch.setattr(
+        measure, "_reclaim_posix_daemon_port",
+        lambda port=measure.DAEMON_PORT, **k: reclaimed.append(port),
+    )
+    measure._uninstall_launchd_daemon(this_install_only=False)
+    assert set(reclaimed) == {24842, 24843, 24844, 24845}
+
+
+def test_this_install_only_reclaims_resolved_port_only(tmp_path, monkeypatch):
+    _setup_two_identities(tmp_path, monkeypatch)
+    reclaimed = []
+    monkeypatch.setattr(
+        measure, "_reclaim_posix_daemon_port",
+        lambda port=measure.DAEMON_PORT, **k: reclaimed.append(port),
+    )
+    measure._uninstall_launchd_daemon(this_install_only=True)
+    assert reclaimed == [measure.DAEMON_PORT]
+
+
+def test_reclaim_of_one_port_never_aborts_the_others(tmp_path, monkeypatch):
+    """A raise while reclaiming one port must not skip the remaining ports."""
+    _setup_two_identities(tmp_path, monkeypatch)
+    seen = []
+
+    def flaky(port=measure.DAEMON_PORT, **k):
+        seen.append(port)
+        if port == 24843:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(measure, "_reclaim_posix_daemon_port", flaky)
+    measure._uninstall_launchd_daemon(this_install_only=False)
+    assert set(seen) == {24842, 24843, 24844, 24845}
+
+
 if __name__ == "__main__":
     import tempfile
 
