@@ -44,6 +44,11 @@ def measure(tmp_path, monkeypatch):
 # P2-7: symlinked settings.json + mode
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX symlink + file-mode semantics; Windows symlink_to needs "
+    "privilege and cannot represent 0o644",
+)
 def test_symlinked_settings_stays_a_symlink(measure, tmp_path, monkeypatch):
     real_dir = tmp_path / "dotfiles"
     real_dir.mkdir()
@@ -66,6 +71,11 @@ def test_symlinked_settings_stays_a_symlink(measure, tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX file-mode semantics; Windows cannot represent 0o644 "
+    "(os.stat reports 0o666)",
+)
 def test_file_mode_is_preserved(measure, tmp_path, monkeypatch):
     settings = tmp_path / "settings.json"
     settings.write_text("{}", encoding="utf-8")
