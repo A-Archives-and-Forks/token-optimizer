@@ -46,6 +46,14 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "token-optimizer" / "scripts"
 TOMBSTONE = ".daemon-thrash"
 
+# POSIX-only: the uninstall path (_uninstall_launchd_daemon -> launchctl +
+# os.getuid) and 0600 token modes are Unix semantics Windows cannot honor.
+# Skip the whole file on Windows; macOS/Linux run it unchanged.
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX daemon semantics (launchctl/os.kill/file modes)",
+)
+
 
 @pytest.fixture()
 def measure(tmp_path, monkeypatch):
