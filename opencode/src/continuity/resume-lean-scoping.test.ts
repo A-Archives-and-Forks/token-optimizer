@@ -174,3 +174,38 @@ test("buildLeanResumeContext no filter when promptText present but cwd absent (A
   expect(block).toContain("gamma delta epsilon");
   expect(block).not.toContain("- Omitted");
 });
+
+// ---------------------------------------------------------------------------
+// C11: .filter(Boolean) on decisions/files prevents empty-string slots in the
+// rendered body. safeScalar returns "" for null/undefined or whitespace-only
+// entries; without .filter(Boolean) the join produces "dec1; ; dec3".
+// ---------------------------------------------------------------------------
+
+test("buildLeanResumeContext filters empty decisions and files from the rendered body", () => {
+  const cp = makeCheckpointRow({
+    active_files: JSON.stringify([
+      `${PROJ_B}/src/beta_router.py`,
+      "",            // empty string -> safeScalar returns ""
+      "   ",         // whitespace-only -> safeScalar returns ""
+      `${PROJ_B}/src/beta_core.py`,
+    ]),
+    decisions: JSON.stringify([
+      "Ship the beta feature behind a feature flag",
+      "",            // empty string
+      "   \t  ",     // whitespace-only
+      null as unknown as string,  // null -> safeScalar returns ""
+      "Wire beta_router into the request pipeline",
+    ]),
+  });
+  const block = buildLeanResumeContext(cp, "abcdefgh1234", 3500, "continue the beta work", PROJ_B);
+
+  // The two real decisions are present:
+  expect(block).toContain("beta feature behind a feature flag");
+  expect(block).toContain("beta_router");
+  // No empty slots in the decisions join (JSON.stringify("") is "", so an
+  // empty slot produces '"; ""' or '""; "' in the joined output):
+  expect(block).not.toContain('""');
+  // The two real files are present:
+  expect(block).toContain("beta_router.py");
+  expect(block).toContain("beta_core.py");
+});

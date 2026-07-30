@@ -442,7 +442,9 @@ export function buildLeanResumeContext(
     : activeFiles;
   droppedFiles = activeFiles.length - filesRaw.length;
   if (filesRaw.length > 0) {
-    const listed = filesRaw.slice(0, 6).map((p) => safeScalar(p, 140));
+    // C11: .filter(Boolean) drops empty strings from safeScalar (null/undefined
+    // or whitespace-only entries), preventing "file1, , file3" renderings.
+    const listed = filesRaw.slice(0, 6).map((p) => safeScalar(p, 140)).filter(Boolean);
     body.push(`- Modified/read files: ${listed.map((p) => JSON.stringify(p)).join(", ")}`);
   }
 
@@ -458,7 +460,9 @@ export function buildLeanResumeContext(
     : decisions;
   droppedDecisions = decisions.length - decisionsRaw.length;
   if (decisionsRaw.length > 0) {
-    const listed = decisionsRaw.slice(0, 4).map((d) => safeScalar(d, 120));
+    // C11: .filter(Boolean) drops empty strings from safeScalar (null/undefined
+    // or whitespace-only decisions), preventing "decision1; ; decision3" renderings.
+    const listed = decisionsRaw.slice(0, 4).map((d) => safeScalar(d, 120)).filter(Boolean);
     body.push(`- Key decisions: ${listed.map((d) => JSON.stringify(d)).join("; ")}`);
   }
 
