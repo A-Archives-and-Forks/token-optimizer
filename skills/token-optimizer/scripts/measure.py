@@ -93,6 +93,7 @@ except ImportError:  # pragma: no cover - Python < 3.11 fallback
 from hook_io import read_stdin_hook_input as _read_stdin_hook_input_shared
 from hook_runtime import HookDeadline, LeaseLock, current_deadline, lease_lock
 from plugin_env import (
+    _all_plugin_data_dirs,
     interpret_flag_value,
     reclaim_orphaned_plugin_data_dirs,
     resolve_plugin_data_dir,
@@ -18840,6 +18841,108 @@ DAEMON_IDENTITY_MAGIC = (
     else "token-optimizer-dashboard-v1"
 )
 
+# v5.11.68 (#106 / F2): every runtime suffix that can register a daemon
+# scheduler artifact. Daemon uninstall sweeps ALL of these by name so a
+# scheduler registration whose plugin-data dir already vanished (e.g. a
+# sibling identity removed by the platform's own GC) still gets unregistered,
+# not just the currently-resolved runtime's. The per-runtime label/unit/task
+# names are derived from the suffix the same way DAEMON_LABEL /
+# SYSTEMD_UNIT_NAME / WINDOWS_TASK_NAME are above.
+_DAEMON_ALL_SUFFIXES = ("claude", "codex", "hermes", "copilot")
+_ALL_LAUNCH_AGENT_LABELS = tuple(
+    "com.token-optimizer.dashboard" if s == "claude"
+    else f"com.token-optimizer.{s}-dashboard"
+    for s in _DAEMON_ALL_SUFFIXES
+)
+_ALL_SYSTEMD_UNIT_NAMES = tuple(
+    "token-optimizer-dashboard.service" if s == "claude"
+    else f"token-optimizer-{s}-dashboard.service"
+    for s in _DAEMON_ALL_SUFFIXES
+)
+# Windows task names mirror the WINDOWS_TASK_NAME ternary below: copilot has
+# no dedicated branch there (it falls into the `else` -> TokenOptimizerDashboard
+# bucket), so the variant set is these three.
+_ALL_WINDOWS_TASK_NAMES = (
+    "TokenOptimizerDashboard",
+    "TokenOptimizerCodexDashboard",
+    "TokenOptimizerHermesDashboard",
+)
+
+
+def _daemon_per_identity_files(snapshot_dir: Path) -> dict:
+    """Per-identity daemon artifact paths rooted at ``snapshot_dir``.
+
+    These are the files that live INSIDE a single plugin-data identity's data
+    dir (one per ``token-optimizer-*`` install): the generated daemon script,
+    the 0600 CSRF token, the persisted bind-host, the adv-006 tombstone, and
+    the platform launcher/XML. The OS scheduler REGISTRATION (LaunchAgent
+    plist / scheduled task / systemd unit) is per-RUNTIME and shared across
+    identities of the same runtime, so it is removed once, not per-identity.
+    """
+    return {
+        "daemon_script": snapshot_dir / "dashboard-server.py",
+        "daemon_token": snapshot_dir / "daemon-token",
+        "daemon_host": snapshot_dir / "dashboard-host",
+        "thrash_breadcrumb": snapshot_dir / ".daemon-thrash",
+        "windows_launcher": snapshot_dir / WINDOWS_LAUNCHER_NAME,
+        "linux_launcher": snapshot_dir / LINUX_LAUNCHER_NAME,
+    }
+
+
+def _daemon_identity_snapshot_dirs(this_install_only: bool) -> list[Path]:
+    """Snapshot dirs to sweep during daemon uninstall (issue #106 / F2).
+
+    Root cause: daemon paths derive from one module-level ``SNAPSHOT_DIR``
+    (the resolved identity), but multiple installs create multiple
+    ``token-optimizer-*`` identities. An identity-scoped uninstall leaves the
+    sibling's ``dashboard-server.py`` + ``0600 daemon-token`` (a live local
+    HTTP daemon plus its CSRF secret) on disk.
+
+    By default (sweep-all): every ``token-optimizer-*`` plugin-data identity's
+    ``data`` dir, so no sibling outlives the uninstall. With
+    ``this_install_only``: just the resolved ``SNAPSHOT_DIR`` (the pre-fix
+    behavior), for a user intentionally running side-by-side installs who only
+    wants this one gone. Reuses ``plugin_env._all_plugin_data_dirs`` rather
+    than a fourth glob, and always includes the resolved ``SNAPSHOT_DIR`` even
+    when it is not under the standard base (e.g. a
+    ``TOKEN_OPTIMIZER_SNAPSHOT_DIR`` sandbox override).
+    """
+    if this_install_only:
+        return [SNAPSHOT_DIR]
+    dirs: list[Path] = []
+    try:
+        for ident in _all_plugin_data_dirs():
+            dirs.append(ident / "data")
+    except Exception:  # noqa: BLE001
+        pass
+    if SNAPSHOT_DIR not in dirs:
+        dirs.append(SNAPSHOT_DIR)
+    # Deterministic order, de-duplicated by resolved path.
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for d in sorted(dirs, key=lambda p: str(p)):
+        try:
+            r = d.resolve(strict=False)
+        except (OSError, ValueError):
+            r = d
+        if r in seen:
+            continue
+        seen.add(r)
+        ordered.append(d)
+    return ordered
+
+
+def _unlink_if_exists(path: Path) -> bool:
+    """Delete ``path`` if present. Returns True iff a file was removed."""
+    try:
+        if path.exists():
+            path.unlink()
+            return True
+    except OSError:
+        pass
+    return False
+
+
 
 def _get_or_create_daemon_token():
     """Return the per-install daemon auth token, creating it on first use.
@@ -20519,49 +20622,67 @@ def _write_uninstall_tombstone():
         )
 
 
-def _uninstall_launchd_daemon():
-    """macOS: stop and remove the LaunchAgent + daemon script.
+def _uninstall_launchd_daemon(this_install_only=False):
+    """macOS: stop and remove the LaunchAgent + daemon script(s).
 
     Unified output (torture-room L7, 2026-04-14): track what is actually
     deleted so we don't print a contradictory "Nothing to remove" header
     followed by a "Deleted: script.py" line when the plist is gone but
     the script file remains from a half-uninstall.
+
+    v5.11.68 (#106 / F2): identity-sweeping by default. The LaunchAgent plist
+    is per-RUNTIME (shared across ``token-optimizer-*`` identities of the same
+    runtime), so it is removed once. The per-identity files
+    (``dashboard-server.py``, ``daemon-token``, ``dashboard-host``,
+    ``.daemon-thrash``) live in EACH identity's snapshot dir; a sibling
+    identity's daemon script + 0600 CSRF token would otherwise outlive the
+    uninstall. Sweep every identity unless ``this_install_only`` opts out.
+    Also bootout every runtime's LaunchAgent by name so a registration whose
+    data dir already vanished still gets unregistered.
     """
     # adv-006: tombstone FIRST so any racing respawn exits cleanly.
     _write_uninstall_tombstone()
     removed = []
-    if PLIST_PATH.exists():
-        try:
-            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(PLIST_PATH)],
-                           capture_output=True, timeout=10)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        try:
-            PLIST_PATH.unlink()
-            removed.append(str(PLIST_PATH))
-        except OSError:
-            pass
-    daemon_script = SNAPSHOT_DIR / "dashboard-server.py"
-    if daemon_script.exists():
-        try:
-            daemon_script.unlink()
-            removed.append(str(daemon_script))
-        except OSError:
-            pass
-    # Clean up per-install token (not a secret the user needs to keep) and the
-    # persisted dashboard host (#59) so a fresh install starts from defaults.
-    for _state_path in (DAEMON_TOKEN_PATH, DAEMON_HOST_PATH):
-        try:
-            if _state_path.exists():
-                _state_path.unlink()
-        except OSError:
-            pass
+    # Sweep the OS scheduler by name across every runtime variant. The plist
+    # file lives at a fixed per-runtime path under ~/Library/LaunchAgents.
+    for label in _ALL_LAUNCH_AGENT_LABELS:
+        plist = LAUNCH_AGENTS_DIR / f"{label}.plist"
+        if plist.exists():
+            try:
+                subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)],
+                               capture_output=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if _unlink_if_exists(plist):
+                removed.append(str(plist))
+    # Sweep per-identity daemon files across every token-optimizer-* identity.
+    per_identity_removed: list[tuple[Path, list[str]]] = []
+    for snap_dir in _daemon_identity_snapshot_dirs(this_install_only):
+        files = _daemon_per_identity_files(snap_dir)
+        identity_removed = []
+        for key in ("daemon_script", "daemon_token", "daemon_host"):
+            if _unlink_if_exists(files[key]):
+                identity_removed.append(str(files[key]))
+        # The .daemon-thrash tombstone is our own ephemeral marker (written
+        # first per adv-006 to catch racing respawns during the uninstall,
+        # then cleaned up here). It is NOT counted toward `removed` so the
+        # "Nothing to remove" honesty invariant stays intact when no real
+        # daemon artifacts ever existed.
+        _unlink_if_exists(files["thrash_breadcrumb"])
+        if identity_removed:
+            per_identity_removed.append((snap_dir, identity_removed))
+            removed.extend(identity_removed)
     if removed:
         print("[Token Optimizer] Dashboard daemon removed.")
         for path in removed:
             print(f"  Deleted: {path}")
+        if per_identity_removed and not this_install_only:
+            print("  Swept all token-optimizer-* identities:")
+            for snap_dir, items in per_identity_removed:
+                print(f"    {snap_dir}: {len(items)} file(s)")
     else:
         print("[Token Optimizer] No daemon artifacts found. Nothing to remove.")
+
 
 
 WINDOWS_TASK_NAME = (
@@ -20924,63 +21045,81 @@ def _install_task_scheduler_daemon(dry_run=False, soft_fail=False, effective_hos
         return True
 
 
-def _uninstall_task_scheduler_daemon():
+def _uninstall_task_scheduler_daemon(this_install_only=False):
     """Windows: stop and remove the dashboard daemon scheduled task.
 
     Cleans orphan XML files from any prior naming convention (torture
     LOW-8) via glob so version drift doesn't leave artifacts behind.
+
+    v5.11.68 (#106 / F2): identity-sweeping by default. The scheduled task is
+    per-RUNTIME (shared across ``token-optimizer-*`` identities of the same
+    runtime), so it is removed once, and we query+delete EVERY runtime's task
+    name so a task whose data dir already vanished still gets unregistered.
+    The per-identity files (``dashboard-server.py``, the .cmd launcher, the
+    schtasks XML, ``daemon-token``, ``dashboard-host``, ``.daemon-thrash``)
+    live in EACH identity's snapshot dir; a sibling's daemon script + 0600
+    CSRF token would otherwise outlive the uninstall. Sweep every identity
+    unless ``this_install_only`` opts out.
     """
     # adv-006: tombstone FIRST so any racing respawn exits cleanly.
     _write_uninstall_tombstone()
     removed = []
-    # Stop running instance (safe to fail if already stopped).
-    try:
-        subprocess.run(
-            ["schtasks", "/End", "/TN", WINDOWS_TASK_NAME],
-            capture_output=True, text=True, errors="replace", timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    try:
-        delete = subprocess.run(
-            ["schtasks", "/Delete", "/TN", WINDOWS_TASK_NAME, "/F"],
-            capture_output=True, text=True, errors="replace", timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        delete = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="timeout")
-    if delete.returncode == 0:
-        removed.append(f"Scheduled Task: {WINDOWS_TASK_NAME}")
-    for artifact_name in ("dashboard-server.py", WINDOWS_LAUNCHER_NAME):
-        artifact = SNAPSHOT_DIR / artifact_name
-        if artifact.exists():
-            try:
-                artifact.unlink()
-                removed.append(str(artifact))
-            except OSError:
-                pass
-    # Glob-clean any schtasks XML regardless of version-specific naming
-    # (".schtasks-daemon.xml", "schtasks-daemon.xml", etc.).
-    try:
-        for xml_path in SNAPSHOT_DIR.glob("*schtasks-daemon*.xml"):
-            try:
-                xml_path.unlink()
-            except OSError:
-                pass
-    except OSError:
-        pass
-    # Clean up per-install token + persisted dashboard host (#59).
-    for _state_path in (DAEMON_TOKEN_PATH, DAEMON_HOST_PATH):
+    # Sweep the OS scheduler by name across every runtime variant so a task
+    # whose data dir already vanished still gets unregistered.
+    for task_name in _ALL_WINDOWS_TASK_NAMES:
         try:
-            if _state_path.exists():
-                _state_path.unlink()
+            subprocess.run(
+                ["schtasks", "/End", "/TN", task_name],
+                capture_output=True, text=True, errors="replace", timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        try:
+            delete = subprocess.run(
+                ["schtasks", "/Delete", "/TN", task_name, "/F"],
+                capture_output=True, text=True, errors="replace", timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            delete = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="timeout")
+        if delete.returncode == 0:
+            removed.append(f"Scheduled Task: {task_name}")
+    # Sweep per-identity daemon files across every token-optimizer-* identity.
+    per_identity_removed: list[tuple[Path, list[str]]] = []
+    for snap_dir in _daemon_identity_snapshot_dirs(this_install_only):
+        files = _daemon_per_identity_files(snap_dir)
+        identity_removed = []
+        for key in ("daemon_script", "windows_launcher", "daemon_token", "daemon_host"):
+            if _unlink_if_exists(files[key]):
+                identity_removed.append(str(files[key]))
+        # The .daemon-thrash tombstone is our own ephemeral marker (written
+        # first per adv-006, then cleaned up here); NOT counted toward
+        # `removed` so the "Nothing to remove" honesty invariant holds.
+        _unlink_if_exists(files["thrash_breadcrumb"])
+        # Glob-clean any schtasks XML regardless of version-specific naming
+        # (".schtasks-daemon.xml", "schtasks-daemon.xml", etc.).
+        try:
+            for xml_path in snap_dir.glob("*schtasks-daemon*.xml"):
+                try:
+                    xml_path.unlink()
+                    identity_removed.append(str(xml_path))
+                except OSError:
+                    pass
         except OSError:
             pass
+        if identity_removed:
+            per_identity_removed.append((snap_dir, identity_removed))
+            removed.extend(identity_removed)
     if removed:
         print("[Token Optimizer] Dashboard daemon removed.")
         for path in removed:
             print(f"  Deleted: {path}")
+        if per_identity_removed and not this_install_only:
+            print("  Swept all token-optimizer-* identities:")
+            for snap_dir, items in per_identity_removed:
+                print(f"    {snap_dir}: {len(items)} file(s)")
     else:
         print("[Token Optimizer] No daemon artifacts found. Nothing to remove.")
+
 
 
 # Runtime-suffix-derived (not a codex-vs-else ternary) so hermes/copilot get
@@ -21061,6 +21200,18 @@ def _systemd_user_unit_path():
     xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
     base = Path(xdg) if xdg else Path.home() / ".config"
     return base / "systemd" / "user" / SYSTEMD_UNIT_NAME
+
+
+def _systemd_user_unit_path_for(unit_name: str) -> Path:
+    """Resolve the unit path for an arbitrary unit name (issue #106 / F2).
+
+    Same base resolution as ``_systemd_user_unit_path`` but for any runtime
+    variant's unit name, so the sweeping uninstall can remove a sibling
+    runtime's registration whose data dir already vanished.
+    """
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "systemd" / "user" / unit_name
 
 
 def _generate_systemd_user_unit(launcher_path, log_dir):
@@ -21265,26 +21416,35 @@ def _install_systemd_user_daemon(dry_run=False, soft_fail=False, effective_host=
         return True
 
 
-def _uninstall_systemd_user_daemon():
-    """Linux: stop and remove the systemd --user dashboard unit."""
+def _uninstall_systemd_user_daemon(this_install_only=False):
+    """Linux: stop and remove the systemd --user dashboard unit.
+
+    v5.11.68 (#106 / F2): identity-sweeping by default. The systemd unit is
+    per-RUNTIME (shared across ``token-optimizer-*`` identities of the same
+    runtime), so it is removed once, and we disable+remove EVERY runtime's
+    unit so a unit whose data dir already vanished still gets unregistered.
+    The per-identity files (``dashboard-server.py``, the launcher script,
+    ``daemon-token``, ``dashboard-host``, ``.daemon-thrash``) live in EACH
+    identity's snapshot dir; a sibling's daemon script + 0600 CSRF token
+    would otherwise outlive the uninstall. Sweep every identity unless
+    ``this_install_only`` opts out.
+    """
     # adv-006: tombstone FIRST so any racing respawn exits cleanly.
     _write_uninstall_tombstone()
     removed = []
-    try:
-        subprocess.run(
-            ["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT_NAME],
-            capture_output=True, text=True, errors="replace", timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    unit_path = _systemd_user_unit_path()
-    if unit_path.exists():
+    # Sweep the OS scheduler by name across every runtime variant.
+    for unit_name in _ALL_SYSTEMD_UNIT_NAMES:
         try:
-            unit_path.unlink()
-            removed.append(str(unit_path))
-        except OSError:
+            subprocess.run(
+                ["systemctl", "--user", "disable", "--now", unit_name],
+                capture_output=True, text=True, errors="replace", timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
             pass
-    # daemon-reload AFTER unit file removal so systemd drops the unit
+        unit_path = _systemd_user_unit_path_for(unit_name)
+        if _unlink_if_exists(unit_path):
+            removed.append(str(unit_path))
+    # daemon-reload AFTER unit file removal so systemd drops the units
     # from its in-memory catalog.
     try:
         subprocess.run(
@@ -21293,27 +21453,32 @@ def _uninstall_systemd_user_daemon():
         )
     except (OSError, subprocess.TimeoutExpired):
         pass
-    for artifact_name in ("dashboard-server.py", LINUX_LAUNCHER_NAME):
-        artifact = SNAPSHOT_DIR / artifact_name
-        if artifact.exists():
-            try:
-                artifact.unlink()
-                removed.append(str(artifact))
-            except OSError:
-                pass
-    # Clean up per-install token + persisted dashboard host (#59).
-    for _state_path in (DAEMON_TOKEN_PATH, DAEMON_HOST_PATH):
-        try:
-            if _state_path.exists():
-                _state_path.unlink()
-        except OSError:
-            pass
+    # Sweep per-identity daemon files across every token-optimizer-* identity.
+    per_identity_removed: list[tuple[Path, list[str]]] = []
+    for snap_dir in _daemon_identity_snapshot_dirs(this_install_only):
+        files = _daemon_per_identity_files(snap_dir)
+        identity_removed = []
+        for key in ("daemon_script", "linux_launcher", "daemon_token", "daemon_host"):
+            if _unlink_if_exists(files[key]):
+                identity_removed.append(str(files[key]))
+        # The .daemon-thrash tombstone is our own ephemeral marker (written
+        # first per adv-006, then cleaned up here); NOT counted toward
+        # `removed` so the "Nothing to remove" honesty invariant holds.
+        _unlink_if_exists(files["thrash_breadcrumb"])
+        if identity_removed:
+            per_identity_removed.append((snap_dir, identity_removed))
+            removed.extend(identity_removed)
     if removed:
         print("[Token Optimizer] Dashboard daemon removed.")
         for path in removed:
             print(f"  Deleted: {path}")
+        if per_identity_removed and not this_install_only:
+            print("  Swept all token-optimizer-* identities:")
+            for snap_dir, items in per_identity_removed:
+                print(f"    {snap_dir}: {len(items)} file(s)")
     else:
         print("[Token Optimizer] No daemon artifacts found. Nothing to remove.")
+
 
 
 def _normalized_platform():
@@ -21335,7 +21500,7 @@ def _normalized_platform():
     return raw
 
 
-def setup_daemon(dry_run=False, uninstall=False):
+def setup_daemon(dry_run=False, uninstall=False, this_install_only=False):
     """Install or remove the persistent dashboard HTTP server daemon.
 
     Dispatches to a platform-specific installer/uninstaller. macOS uses
@@ -21343,15 +21508,22 @@ def setup_daemon(dry_run=False, uninstall=False):
     releases. All platforms share the daemon script and port
     (DAEMON_PORT = 24842) so the bookmarkable URL is identical
     everywhere.
+
+    v5.11.68 (#106 / F2): ``--uninstall`` is identity-sweeping by default
+    (removes the daemon script + 0600 CSRF token from EVERY
+    ``token-optimizer-*`` identity, and unregisters every runtime's scheduler
+    artifact). Pass ``this_install_only=True`` (``--this-install-only``) to
+    clean only the resolved identity, for a user intentionally running
+    side-by-side installs who only wants this one gone.
     """
     system = _normalized_platform()
     if uninstall:
         if system == "Darwin":
-            _uninstall_launchd_daemon()
+            _uninstall_launchd_daemon(this_install_only=this_install_only)
         elif system == "Windows":
-            _uninstall_task_scheduler_daemon()
+            _uninstall_task_scheduler_daemon(this_install_only=this_install_only)
         elif system == "Linux":
-            _uninstall_systemd_user_daemon()
+            _uninstall_systemd_user_daemon(this_install_only=this_install_only)
         else:
             print(f"[Token Optimizer] Unsupported platform for daemon uninstall: {system}")
         # Sticky opt-out: persist the user's intent so the SessionStart ensure-
@@ -35697,7 +35869,8 @@ if __name__ == "__main__":
     elif args[0] == "setup-daemon":
         dry = "--dry-run" in args
         uninstall = "--uninstall" in args
-        setup_daemon(dry_run=dry, uninstall=uninstall)
+        this_install_only = "--this-install-only" in args
+        setup_daemon(dry_run=dry, uninstall=uninstall, this_install_only=this_install_only)
     elif args[0] in ("inject-routing", "inject-coach", "setup-coach-injection"):
         from injection import inject_managed_block, remove_managed_block
 
