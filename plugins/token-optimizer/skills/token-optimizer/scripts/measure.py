@@ -18506,10 +18506,18 @@ def _write_settings_atomic(settings_data):
     None after a successful os.replace prevents the finally clause from
     unlinking the already-renamed destination. Any exception encountered
     during the write propagates naturally after cleanup.
+
+    Returns True iff the write actually landed, False when the advisory lease
+    was denied and nothing was written (#106 F3 P1). Callers that report
+    success to the user MUST check this -- a lease miss is a silent no-op, and
+    `cleanup` was printing "Removed: statusLine" / "Cleanup complete" for a
+    write that never happened, leaving the dangling statusLine #106 exists to
+    fix. Existing fire-and-forget callers can ignore the return value; the
+    previous behavior was an implicit None, which is falsey either way.
     """
     with _settings_lock() as acquired:
         if not acquired:
-            return
+            return False
         tmp_fd, tmp_path = tempfile.mkstemp(
             dir=str(SETTINGS_PATH.parent),
             prefix=".settings-",
@@ -18527,6 +18535,7 @@ def _write_settings_atomic(settings_data):
                     os.unlink(tmp_path)
                 except OSError:
                     pass
+    return True
 
 
 # Env vars that should be auto-removed from settings.json.
@@ -21840,8 +21849,15 @@ def cleanup(dry_run=False, this_install_only=False):
     settings, _ = _read_settings_json()
     our_entries = _remove_our_settings_entries(settings)  # mutate a copy
     if our_entries:
-        for entry in our_entries:
-            print(f"    Would remove: {entry}" if dry_run else f"    Removed: {entry}")
+        if dry_run:
+            for entry in our_entries:
+                print(f"    Would remove: {entry}")
+        else:
+            # #106 F3 P1: do NOT claim "Removed" before the write lands. The
+            # entries are echoed after a confirmed successful write below; a
+            # refused read or a denied lease prints a WARNING instead, so the
+            # report can never assert a removal that did not happen.
+            pass
         if not dry_run:
             backup_root = CLAUDE_DIR / "_backups" / "token-optimizer"
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -21850,11 +21866,37 @@ def cleanup(dry_run=False, this_install_only=False):
             if backed is None:
                 print(f"    WARNING: could not back up settings.json; entries left in place.")
             else:
-                # Re-read, re-remove, write atomically.
-                fresh, _ = _read_settings_json()
-                _remove_our_settings_entries(fresh)
-                _write_settings_atomic(fresh)
-                print(f"    Backup: {backed}")
+                # Re-read under the backup, re-remove, write atomically.
+                #
+                # #106 F3 P1a: a failed re-read yields {} ("unknown"), and
+                # writing that would erase every key the user owns. Refuse to
+                # write on a bad read and say so -- their entries stay in
+                # place, which is recoverable; an emptied settings.json is not.
+                fresh, _, read_ok = _read_settings_json_checked()
+                if not read_ok:
+                    print(
+                        "    WARNING: settings.json became unreadable (malformed "
+                        "or permission denied) after the backup; refusing to "
+                        "write.\n"
+                        f"    Entries left in place. Backup: {backed}"
+                    )
+                else:
+                    _remove_our_settings_entries(fresh)
+                    # #106 F3 P1b: a denied advisory lease makes the write a
+                    # silent no-op. Reporting "Removed" for a write that never
+                    # landed leaves the user with the dangling statusLine this
+                    # command exists to clear, so surface it instead.
+                    if _write_settings_atomic(fresh):
+                        for entry in our_entries:
+                            print(f"    Removed: {entry}")
+                        print(f"    Backup: {backed}")
+                    else:
+                        print(
+                            "    WARNING: settings.json is locked by another "
+                            "Token Optimizer process; NOTHING was removed.\n"
+                            "    Re-run cleanup in a few seconds (no Claude Code "
+                            f"session should be starting). Backup: {backed}"
+                        )
     else:
         print("    No Token Optimizer entries found in settings.json.")
     print()
@@ -28496,14 +28538,36 @@ def _get_measure_py_path():
 
 
 def _read_settings_json():
-    """Read ~/.claude/settings.json, return (data, path)."""
+    """Read ~/.claude/settings.json, return (data, path).
+
+    Lossy by design for read-only callers: a missing file, malformed JSON, and
+    an unreadable file all collapse to ``{}``. Any caller that will WRITE the
+    result back must use ``_read_settings_json_checked`` instead -- see #106
+    F3 P1, where a failed re-read returned ``{}`` and that empty dict was
+    written straight over the user's whole settings.json.
+    """
+    data, path, _ok = _read_settings_json_checked()
+    return data, path
+
+
+def _read_settings_json_checked():
+    """Read settings.json, return (data, path, ok).
+
+    ``ok`` is False when the file exists but could not be parsed or read
+    (malformed JSON, permission denied, I/O error) -- i.e. when ``{}`` means
+    "unknown", not "empty". A missing file is ``({}, path, True)``: genuinely
+    empty and safe to build on.
+
+    Write paths MUST branch on ``ok`` and refuse to write when it is False;
+    round-tripping an unknown-state ``{}`` destroys every key the user has.
+    """
     if SETTINGS_PATH.exists():
         try:
             with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-                return json.load(f), SETTINGS_PATH
+                return json.load(f), SETTINGS_PATH, True
         except (json.JSONDecodeError, PermissionError, OSError):
-            pass
-    return {}, SETTINGS_PATH
+            return {}, SETTINGS_PATH, False
+    return {}, SETTINGS_PATH, True
 
 
 def _smart_compact_hook_commands():
