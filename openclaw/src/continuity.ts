@@ -125,6 +125,159 @@ const CONTINUATION_PHRASES = new Set([
 const CONTINUATION_WORDS = new Set(["continue", "resume"]);
 
 // ---------------------------------------------------------------------------
+// Per-item keep/drop filter (GitHub #103) — set-overlap rule, no float threshold
+// ---------------------------------------------------------------------------
+
+// SAME regex as the resume-topic tokenizer (continuity.ts:749) so a
+// decision/file naming the current project overlaps the keep set on identical
+// token boundaries across runtimes.
+const RECOVER_TOKEN_RE = /[a-zA-Z0-9_./:-]+/g;
+
+// Combined stopword set for the keep/drop tokenizer (mirrors Python
+// _RESUME_TOPIC_STOPWORDS | _CONTINUATION_WORDS). Lazily computed on first use
+// because RESUME_TOPIC_STOPWORDS is declared further down this file (TDZ).
+let _RECOVER_STOPWORDS: ReadonlySet<string> | null = null;
+function recoverStopwords(): ReadonlySet<string> {
+  if (_RECOVER_STOPWORDS) return _RECOVER_STOPWORDS;
+  _RECOVER_STOPWORDS = new Set<string>([
+    ...RESUME_TOPIC_STOPWORDS,
+    ...CONTINUATION_WORDS,
+  ]);
+  return _RECOVER_STOPWORDS;
+}
+
+/** Distinctive tokens of a recovered item: regex ``[a-zA-Z0-9_./:-]+``,
+ *  lowercased, len > 3, minus resume/continuation glue. Identical extraction
+ *  to the Python ``_recover_item_tokens`` so keep/drop parity holds on shared
+ *  token inputs. */
+function recoverItemTokens(text: unknown): Set<string> {
+  const stop = recoverStopwords();
+  const out = new Set<string>();
+  for (const w of String(text ?? "").toLowerCase().match(RECOVER_TOKEN_RE) ?? []) {
+    if (w.length > 3 && !stop.has(w)) out.add(w);
+  }
+  return out;
+}
+
+/** Set-overlap keep/drop rule (GitHub #103). KEEP iff < 3 distinctive tokens
+ *  (inconclusive) OR nonempty intersection with keepTokens; DROP iff >= 3
+ *  tokens AND zero overlap. No float threshold. Exported for the parity
+ *  fixture test. */
+export function keepRecoveredItem(itemText: string, keepTokens: Set<string>): boolean {
+  const itemTokens = recoverItemTokens(itemText);
+  if (itemTokens.size < 3) return true;
+  for (const t of itemTokens) {
+    if (keepTokens.has(t)) return true;
+  }
+  return false;
+}
+
+/** Normalized candidate roots for a cwd (resolved + raw, trailing slashes
+ *  stripped). Shared by the in-project path filter. */
+function cwdRoots(cwd: string): Set<string> {
+  const roots = new Set<string>();
+  if (!cwd) return roots;
+  try {
+    const resolved = path.resolve(cwd).replace(/\/+$/, "");
+    if (resolved) roots.add(resolved);
+  } catch { /* ignore resolve errors */ }
+  const raw = cwd.replace(/\/+$/, "");
+  if (raw) roots.add(raw);
+  return roots;
+}
+
+function pathUnderRoots(p: string, roots: Set<string>): boolean {
+  if (!p || roots.size === 0) return false;
+  for (const root of roots) {
+    if (p === root || p.startsWith(root + "/") || p.startsWith(root + "\\")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** True when ``p`` is an attributable absolute path (unix ``/`` or a Windows
+ *  drive root). Backslashes normalized so Windows paths are recognized on any
+ *  host. Relative/basenames are NOT attributable to a specific project, so
+ *  they fall through to the token-overlap rule instead of being path-dropped. */
+function isAbsolutePath(p: string): boolean {
+  const s = String(p ?? "").replace(/\\/g, "/").trim();
+  if (!s) return false;
+  return s.startsWith("/") || /^[A-Za-z]:\//.test(s);
+}
+
+/** True when file path ``p`` is an attributable absolute path that does NOT
+ *  live under ``cwd`` — a cross-project file (GitHub #103). The set-overlap
+ *  tokenizer treats a full path as a SINGLE token (the regex includes slashes)
+ *  so it has < 3 distinctive tokens and would always be kept by
+ *  ``keepRecoveredItem``; this rule drops such paths at the file-filter sites
+ *  regardless of token overlap, using the EXISTING ``pathUnderRoots`` prefix
+ *  check. Relative/basenames fall through to the token rule. cwd absent ->
+ *  never drop (legacy callers stay unfiltered). */
+function crossProjectFileDrop(p: string, cwd: string): boolean {
+  if (!cwd || !p) return false;
+  return isAbsolutePath(p) && !pathUnderRoots(p, cwdRoots(cwd));
+}
+
+/** True when the checkpoint carries at least one attributable absolute file
+ *  path NOT under ``cwd`` — the checkpoint genuinely spans multiple projects
+ *  (GitHub #103). DECISION filtering is gated on this: a single-project
+ *  checkpoint (every attributable path in-project, or none) has nothing to
+ *  scope, so its decisions are kept verbatim even when they name no project
+ *  token (e.g. "Switched from REST polling to websocket push"). Without this
+ *  gate the token-overlap rule over-prunes generic technical decisions and
+ *  mislabels them "different project". cwd absent -> never multi-project. */
+function checkpointHasCrossProjectPath(paths: string[], cwd: string): boolean {
+  if (!cwd) return false;
+  return paths.some((p) => crossProjectFileDrop(p, cwd));
+}
+
+/** The KEPT in-project file paths from a checkpoint (## File Changes entries
+ *  that live under cwd). Seed the keep-token set so a decision/file naming the
+ *  current project survives the filter. */
+function inProjectFilePaths(content: string, cwd: string): string[] {
+  if (!cwd) return [];
+  const roots = cwdRoots(cwd);
+  if (roots.size === 0) return [];
+  const all = checkpointFilePaths(content);
+  return all.filter((p) => pathUnderRoots(p, roots));
+}
+
+/** Build the keep-token set: prompt topic tokens ∪ cwd basename tokens ∪
+ *  basenames AND stems of the KEPT in-project paths. Mirrors Python
+ *  ``_continuity_keep_tokens``. */
+function continuityKeepTokens(
+  promptText: string,
+  cwd: string,
+  inProjectPaths: string[],
+): Set<string> {
+  const keep = recoverItemTokens(promptText);
+  if (cwd) {
+    for (const w of recoverItemTokens(path.basename(cwd))) keep.add(w);
+  }
+  for (const p of inProjectPaths) {
+    const ext = path.extname(p);
+    for (const w of recoverItemTokens(path.basename(p))) keep.add(w);
+    for (const w of recoverItemTokens(path.basename(p, ext))) keep.add(w);
+  }
+  return keep;
+}
+
+/** Format the single disclosure line, or null when nothing was dropped.
+ *  Zero-count categories are elided. Identical wording across all three
+ *  runtimes (the parity fixture string-matches it). */
+function formatDisclosure(
+  droppedDecisions: number,
+  droppedFiles: number,
+): string | null {
+  if (droppedDecisions <= 0 && droppedFiles <= 0) return null;
+  const parts: string[] = [];
+  if (droppedDecisions > 0) parts.push(`${droppedDecisions} decision(s)`);
+  if (droppedFiles > 0) parts.push(`${droppedFiles} file(s)`);
+  return `- Omitted (scoped to current project): ${parts.join(", ")}`;
+}
+
+// ---------------------------------------------------------------------------
 // Core scoring: keyword_relevance_score port
 // ---------------------------------------------------------------------------
 
@@ -198,7 +351,7 @@ export function keywordRelevanceScore(
 // Cross-session checkpoint enumeration
 // ---------------------------------------------------------------------------
 
-interface CheckpointEntry {
+export interface CheckpointEntry {
   /** Absolute path to the .md checkpoint file. */
   path: string;
   /** Session directory name (sanitized sessionId). */
@@ -348,7 +501,7 @@ function checkpointTopicScore(
 // Cross-session candidate selection
 // ---------------------------------------------------------------------------
 
-interface ContinuityCandidate {
+export interface ContinuityCandidate {
   entry: CheckpointEntry;
   score: number;
   content: string;
@@ -424,7 +577,11 @@ export function findBestContinuityCheckpoint(
  *
  * Mirrors the lines[] block in measure.py:_continuity_prompt_hint() (~15883).
  */
-export function buildContinuityHint(candidate: ContinuityCandidate): string {
+export function buildContinuityHint(
+  candidate: ContinuityCandidate,
+  promptText: string = "",
+  cwd: string = "",
+): string {
   const { entry, score, content } = candidate;
 
   // Parse a human-readable date from createdAt
@@ -467,22 +624,76 @@ export function buildContinuityHint(candidate: ContinuityCandidate): string {
     hintLines.push(`- Prior topic: ${summary}`);
   }
 
-  // Neutralize the raw body BEFORE slicing + fence-escaping (defense-in-depth).
-  // Even though the content is inside a code fence, this defangs forged sentinels
-  // and role-prefix lines that could be interpreted as instructions if the fence
-  // is somehow broken.  Mirrors Python _neutralize_recovered_body applied to
-  // the checkpoint body before the [RECOVERED DATA ...] sentinel is printed.
-  // FIX (torture phase 4): escape triple-backtick sequences in the embedded
-  // checkpoint content before fencing so that ``` inside checkpoint text cannot
-  // close the outer fence and escape (injection / prompt-injection breakout).
-  const safeFencedContent = escapeFenceContent(_safeSlice(neutralizeRecoveredBody(content), 800));
+  // GitHub #103: rebuild the body from filtered parseCheckpointSections output
+  // instead of dumping a raw 800-char excerpt. A two-project checkpoint would
+  // otherwise leak the OTHER project's Key Decisions / File Changes into this
+  // hint. Filter FIRST (set-overlap rule, no float threshold), then apply the
+  // existing [:4]/[:6] slices. Disclosure counts = filter drops ONLY. Kept
+  // items pass through byte-for-byte (no cascading drops). Enable-gate is AND:
+  // filtering activates only when BOTH promptText AND cwd are present (full
+  // topic + project context). Either alone -> keepTokens is null -> no
+  // filtering, fall back to the raw excerpt (legacy callers).
+  const sections = parseCheckpointSections(content);
+  const keepTokens = (promptText && cwd)
+    ? continuityKeepTokens(promptText, cwd, inProjectFilePaths(content, cwd))
+    : null;
+
+  let droppedDecisions = 0;
+  let droppedFiles = 0;
+  let fencedBody: string | null = null;
+
+  if (keepTokens) {
+    // Decision filtering is gated on checkpoint mixture (GitHub #103): a
+    // single-project checkpoint has nothing to scope, so its decisions are
+    // kept verbatim even when they name no project token. Only a checkpoint
+    // that genuinely spans projects gets its decisions token-filtered.
+    const multiProject = checkpointHasCrossProjectPath(sections.fileChanges, cwd);
+    const keptDecisionsRaw = multiProject
+      ? sections.keyDecisions.filter((d) => keepRecoveredItem(d, keepTokens))
+      : sections.keyDecisions;
+    droppedDecisions = sections.keyDecisions.length - keptDecisionsRaw.length;
+    const decisions = keptDecisionsRaw.slice(0, 4)
+      .map((d) => safeRecoveredScalar(d, 120)).filter(Boolean);
+
+    const keptFilesRaw = sections.fileChanges.filter(
+      (f) => !crossProjectFileDrop(f, cwd) && keepRecoveredItem(f, keepTokens));
+    droppedFiles = sections.fileChanges.length - keptFilesRaw.length;
+    const files = keptFilesRaw.slice(0, 6)
+      .map((f) => safeRecoveredScalar(f, 140)).filter(Boolean);
+
+    const bodyLines: string[] = [];
+    if (decisions.length > 0) {
+      bodyLines.push("Key decisions: " + decisions.map((d) => JSON.stringify(d)).join("; "));
+    }
+    if (files.length > 0) {
+      bodyLines.push("File changes: " + files.map((f) => JSON.stringify(f)).join(", "));
+    }
+    const disclosure = formatDisclosure(droppedDecisions, droppedFiles);
+    if (disclosure) bodyLines.push(disclosure);
+
+    if (bodyLines.length > 0) {
+      fencedBody = escapeFenceContent(_safeSlice(neutralizeRecoveredBody(bodyLines.join("\n")), 800));
+    } else {
+      // Everything filtered out -> no structured body to fence. Still emit the
+      // disclosure so the omission is transparent.
+      fencedBody = disclosure ? escapeFenceContent(neutralizeRecoveredBody(disclosure)) : null;
+    }
+  } else {
+    // Legacy/no-filter path: preserve the raw 800-char excerpt.
+    fencedBody = escapeFenceContent(_safeSlice(neutralizeRecoveredBody(content), 800));
+  }
+
+  if (fencedBody) {
+    hintLines.push(
+      "",
+      keepTokens ? "Recovered checkpoint (filtered):" : "Checkpoint excerpt (first 800 chars):",
+      "```",
+      fencedBody,
+      "```",
+    );
+  }
 
   hintLines.push(
-    "",
-    "Checkpoint excerpt (first 800 chars):",
-    "```",
-    safeFencedContent,
-    "```",
     "",
     "Use this only if it matches the user's current request. " +
       "If you use it, briefly tell the user you found a relevant prior session " +
@@ -966,13 +1177,24 @@ function estimateTokens(text: string): number {
 export function buildResumeLeanBlock(
   entry: CheckpointEntry,
   content: string,
-  maxChars = 3500
+  maxChars = 3500,
+  promptText: string = "",
+  cwd: string = "",
 ): string {
   const dateStr = new Date(entry.createdAt).toISOString().slice(0, 10);
   const sessionLabel = entry.sessionDirName.slice(0, 8);
 
   const { keyDecisions, fileChanges, userInstructions, activeTaskGuess, headerMeta } =
     parseCheckpointSections(content);
+
+  // GitHub #103: per-item relevance filter. Filter FIRST, then slice. Disclosure
+  // counts = filter drops ONLY, never slice truncation. Kept items pass through
+  // byte-for-byte (no cascading drops). Enable-gate is AND: filtering activates
+  // only when BOTH promptText AND cwd are present (full topic + project context).
+  // Either alone -> no filtering (legacy callers preserve byte-identical output).
+  const keepTokens = (promptText && cwd)
+    ? continuityKeepTokens(promptText, cwd, inProjectFilePaths(content, cwd))
+    : null;
 
   const header = [
     `[Token Optimizer] Cold-resume-lean reconstruction (session ${sessionLabel}, ${dateStr}):`,
@@ -994,15 +1216,31 @@ export function buildResumeLeanBlock(
     body.push(`- Active task at pause: ${JSON.stringify(activeTask)}`);
   }
 
-  if (keyDecisions.length > 0) {
-    const decisions = keyDecisions.slice(0, 4).map((d) => safeRecoveredScalar(d, 120)).filter(Boolean);
+  let droppedDecisions = 0;
+  let droppedFiles = 0;
+  // Decision filtering is gated on checkpoint mixture (GitHub #103): a
+  // single-project checkpoint has nothing to scope, so its decisions are kept
+  // verbatim even when they name no project token.
+  const multiProject = keepTokens
+    ? checkpointHasCrossProjectPath(fileChanges, cwd)
+    : false;
+  const decisionsRaw = (keepTokens && multiProject)
+    ? keyDecisions.filter((d) => keepRecoveredItem(d, keepTokens))
+    : keyDecisions;
+  droppedDecisions = keyDecisions.length - decisionsRaw.length;
+  if (decisionsRaw.length > 0) {
+    const decisions = decisionsRaw.slice(0, 4).map((d) => safeRecoveredScalar(d, 120)).filter(Boolean);
     if (decisions.length > 0) {
       body.push(`- Key decisions: ${decisions.map((d) => JSON.stringify(d)).join("; ")}`);
     }
   }
 
-  if (fileChanges.length > 0) {
-    const files = fileChanges.slice(0, 6).map((f) => safeRecoveredScalar(f, 140)).filter(Boolean);
+  const filesRaw = keepTokens
+    ? fileChanges.filter((f) => !crossProjectFileDrop(f, cwd) && keepRecoveredItem(f, keepTokens))
+    : fileChanges;
+  droppedFiles = fileChanges.length - filesRaw.length;
+  if (filesRaw.length > 0) {
+    const files = filesRaw.slice(0, 6).map((f) => safeRecoveredScalar(f, 140)).filter(Boolean);
     if (files.length > 0) {
       body.push(`- Modified files: ${files.map((f) => JSON.stringify(f)).join(", ")}`);
     }
@@ -1014,6 +1252,13 @@ export function buildResumeLeanBlock(
   }
   if (headerMeta["fill"]) {
     body.push(`- Fill at capture: ${safeRecoveredScalar(headerMeta["fill"], 20)}`);
+  }
+
+  // Exactly ONE disclosure line, only when something was dropped. Zero-count
+  // categories elided. Identical wording across all three runtimes.
+  if (keepTokens) {
+    const disclosure = formatDisclosure(droppedDecisions, droppedFiles);
+    if (disclosure) body.push(disclosure);
   }
 
   const footer = [
@@ -1228,7 +1473,7 @@ export function tryBuildResumeLeanHint(
     const match = findResumeLeanCheckpoint(promptText, currentSessionId, cwd, maxAgeDays);
     if (!match) return null;
 
-    const block = buildResumeLeanBlock(match.entry, match.content);
+    const block = buildResumeLeanBlock(match.entry, match.content, 3500, promptText, cwd);
     if (!block) return null;
 
     // Log savings (idempotent, best-effort)
