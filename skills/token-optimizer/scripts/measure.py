@@ -2663,17 +2663,24 @@ def quick_scan(as_json=False):
         if eager > 0:
             detail += f" ({eager} with eager-loaded tools)"
         offenders.append(("mcp", mcp_count, mcp.get("tokens", 0), detail))
-    claude_md_tokens = sum(
-        components[k].get("tokens", 0)
-        for k in components if k.startswith("claude_md") and components[k].get("exists")
-    )
-    claude_md_lines = sum(
-        components[k].get("lines", 0)
-        for k in components if k.startswith("claude_md") and components[k].get("exists")
-    )
-    if claude_md_tokens > 0:
-        offenders.append(("claude_md", claude_md_lines, claude_md_tokens,
-                         f"CLAUDE.md ({claude_md_lines} lines)"))
+    # Per-file CLAUDE.md offenders (PR #100, danikdanik). measure_components()
+    # keys each ancestor CLAUDE.md separately (claude_md_global,
+    # claude_md_home, claude_md_project_<dir>), mirroring how Claude Code loads
+    # them up the directory tree. Blending them into one "CLAUDE.md" entry
+    # produced a token/line count that was no single file's size and a
+    # "slim to N lines" action that was not actionable on any one file.
+    _claude_md_files = [
+        (k, components[k]) for k in sorted(components)
+        if k.startswith("claude_md") and components[k].get("exists")
+    ]
+    for _k, _c in _claude_md_files:
+        _f_tokens = _c.get("tokens", 0)
+        _f_lines = _c.get("lines", 0)
+        _f_path = _c.get("path", "") or _k
+        _f_label = _f_path.replace(str(HOME), "~") if _f_path else _k
+        if _f_tokens > 0:
+            offenders.append(("claude_md", _f_lines, _f_tokens,
+                             f"{_f_label} ({_f_lines} lines)"))
     if detect_runtime() == "codex":
         agents_md_tokens = sum(
             components[k].get("tokens", 0)
@@ -2731,18 +2738,27 @@ def quick_scan(as_json=False):
                 "detail": f"save ~{savings:,} tokens/session",
                 "extend": f"Improves stable prompt-cache prefix and extends peak quality by ~{savings:,} tokens",
             }
+    if not quick_win and _claude_md_files:
+        # PR #100 (danikdanik): pick the LARGEST single CLAUDE.md rather than
+        # blending every ancestor file, so the action names a file the user can
+        # actually open. Savings math stays ours: Anthropic's documented
+        # 200-line guidance, with tokens-per-line taken from that one file, and
+        # the >200-line guard so a token-dense but short file never gets a
+        # self-contradicting "slim to 200 lines, save ~0 tokens".
+        _lk, _lc = max(_claude_md_files, key=lambda kv: kv[1].get("tokens", 0))
+        claude_md_tokens = _lc.get("tokens", 0)
+        claude_md_lines = _lc.get("lines", 0)
+        _lc_path = _lc.get("path", "") or _lk
+        _lc_label = _lc_path.replace(str(HOME), "~") if _lc_path else _lk
+    else:
+        claude_md_tokens = claude_md_lines = 0
+        _lc_label = ""
     if not quick_win and claude_md_tokens > 5000 and claude_md_lines > 200:
-        # Savings target = Anthropic's documented 200-line guidance. Compute
-        # tokens-per-line from the measured file so the savings figure matches
-        # the "to under 200" target in the action text, not the old ~4,500-token
-        # internal heuristic. Guard on claude_md_lines > 200 so we don't emit a
-        # no-op "save ~0 tokens" recommendation when a long-but-short file
-        # trips the token threshold but is already under the line guidance.
         tokens_per_line = claude_md_tokens / max(claude_md_lines, 1)
         savings = max(0, claude_md_tokens - int(200 * tokens_per_line))
         if savings > 0:
             quick_win = {
-                "action": f"Slim CLAUDE.md from {claude_md_lines} lines to under 200 (per Anthropic guidance)",
+                "action": f"Slim {_lc_label} from {claude_md_lines} lines to under 200 (per Anthropic guidance)",
                 "savings": savings,
                 "detail": f"save ~{savings:,} tokens/session",
                 "extend": f"Extends peak quality zone by ~{savings:,} tokens",
@@ -6272,45 +6288,53 @@ def generate_auto_recommendations(components, trends=None, days=30):
             f"Keep MEMORY.md as an index of high-signal, frequently-referenced items."
         )
 
-    # --- Rule 2: CLAUDE.md too large ---
-    claude_tokens = 0
-    claude_lines = 0
-    for key in components:
-        if key.startswith("claude_md") and components[key].get("exists"):
-            claude_tokens += components[key].get("tokens", 0)
-            claude_lines += components[key].get("lines", 0)
-    if claude_tokens > 6000 and claude_lines > 200:
-        # Savings target = Anthropic's documented 200-line guidance. Compute
-        # tokens-per-line from this file's own measurements so "tokens
-        # recoverable" actually corresponds to slimming to 200 lines, not to
-        # the old ~4,500-token internal heuristic. Guard on claude_lines > 200
-        # so a token-dense but short file doesn't get a "slim to 200 lines"
-        # recommendation with ~0 tokens recoverable (self-contradicting).
-        tokens_per_line = claude_tokens / max(claude_lines, 1)
-        target_tokens = int(200 * tokens_per_line)
-        recoverable = max(0, claude_tokens - target_tokens)
-        if recoverable > 0:
-            quick.append(
-                f"**Slim CLAUDE.md ({claude_tokens:,} tokens, target under 200 lines)**: "
-                f"Everything in CLAUDE.md loads every single message you send. "
-                f"Anthropic recommends under 200 lines per CLAUDE.md file (https://code.claude.com/docs/en/memory). "
-                f"The ~300 lines / ~4,500 tokens figure is an internal heuristic, not an Anthropic recommendation — "
-                f"Anthropic documents only the 200-line target, no token threshold.\n"
-                f"  Move to skills (loaded on-demand, ~100 tokens in menu): workflow guides, coding standards, "
-                f"deployment procedures, detailed templates. "
-                f"Move to reference files (zero cost until read): API docs, config examples, architecture notes. "
-                f"Keep in CLAUDE.md: identity/personality, critical behavioral rules, key file paths, "
-                f"and short pointers to skills and references. "
-                f"Don't delete content, reorganize it. A 2-line pointer to a skill costs 100x less than "
-                f"the same content inline. ~{recoverable:,} tokens recoverable (slimming to 200 lines at ~{tokens_per_line:.1f} tokens/line)."
+    # --- Rule 2: CLAUDE.md too large (PER FILE) ---
+    # PR #100 (danikdanik). measure_components() keys each ancestor CLAUDE.md as
+    # its own component (claude_md_global, claude_md_home,
+    # claude_md_project_<dir>), mirroring how Claude Code loads CLAUDE.md files
+    # up the directory tree. Summing N files into one "Slim CLAUDE.md" number
+    # is not actionable on any single file someone owns, and could fire on a
+    # combined total when no individual file was over the threshold. Each file
+    # is now evaluated and reported on its own.
+    #
+    # Savings math is ours, unchanged: Anthropic's documented 200-line guidance
+    # with tokens-per-line derived from that file, plus the >200-line guard so a
+    # token-dense but short file never gets a "slim to 200 lines" line with ~0
+    # tokens recoverable.
+    for key in sorted(components):
+        if not key.startswith("claude_md") or not components[key].get("exists"):
+            continue
+        _c = components[key]
+        claude_tokens = _c.get("tokens", 0)
+        claude_lines = _c.get("lines", 0)
+        _path = _c.get("path", "") or key
+        _label = _path.replace(str(HOME), "~") if _path else key
+        if claude_tokens > 6000 and claude_lines > 200:
+            tokens_per_line = claude_tokens / max(claude_lines, 1)
+            target_tokens = int(200 * tokens_per_line)
+            recoverable = max(0, claude_tokens - target_tokens)
+            if recoverable > 0:
+                quick.append(
+                    f"**Slim {_label} ({claude_tokens:,} tokens, {claude_lines} lines; target under 200 lines)**: "
+                    f"Everything in this CLAUDE.md loads every single message you send. "
+                    f"Anthropic recommends under 200 lines per CLAUDE.md file (https://code.claude.com/docs/en/memory). "
+                    f"The ~300 lines / ~4,500 tokens figure is an internal heuristic, not an Anthropic recommendation — "
+                    f"Anthropic documents only the 200-line target, no token threshold.\n"
+                    f"  Move to skills (loaded on-demand, ~100 tokens in menu): workflow guides, coding standards, "
+                    f"deployment procedures, detailed templates. "
+                    f"Move to reference files (zero cost until read): API docs, config examples, architecture notes. "
+                    f"Keep in CLAUDE.md: identity/personality, critical behavioral rules, key file paths, "
+                    f"and short pointers to skills and references. "
+                    f"Don't delete content, reorganize it. A 2-line pointer to a skill costs 100x less than "
+                    f"the same content inline. ~{recoverable:,} tokens recoverable (slimming to 200 lines at ~{tokens_per_line:.1f} tokens/line)."
+                )
+        elif claude_lines > 200 and claude_tokens > 5000:
+            medium.append(
+                f"**Consider slimming {_label} ({claude_lines} lines, {claude_tokens:,} tokens)**: "
+                f"This CLAUDE.md is over Anthropic's documented 200-line guidance (https://code.claude.com/docs/en/memory) but not critically large. "
+                f"Review for any sections that could become skills or reference files. "
+                f"Focus on content that's only relevant for specific workflows."
             )
-    elif claude_lines > 200 and claude_tokens > 5000:
-        medium.append(
-            f"**Consider slimming CLAUDE.md ({claude_lines} lines, {claude_tokens:,} tokens)**: "
-            f"Your CLAUDE.md is over Anthropic's documented 200-line guidance (https://code.claude.com/docs/en/memory) but not critically large. "
-            f"Review for any sections that could become skills or reference files. "
-            f"Focus on content that's only relevant for specific workflows."
-        )
 
     # --- Rule 3: Unused skills (requires trends data) ---
     # Use actual measured avg if available, else fallback to constant
