@@ -45,7 +45,38 @@ function _pluginTreeGone() {
   return false;
 }
 
-if (_pluginTreeGone()) {
+// --- Clone-path uninstall guard (issue #106 / F1, G3 C-P2-2) ---
+// For plugin-cache installs the statusLine command now points at the marketplace
+// CLONE (<claude>/plugins/marketplaces/<mkt>/skills/token-optimizer/scripts/
+// statusline.js) so it survives version bumps. But a native `/plugin uninstall
+// token-optimizer` removes only the plugin's CACHE tree
+// (<claude>/plugins/cache/<mkt>/token-optimizer/<ver>) and leaves the shared
+// marketplace clone in place. The clone still ships measure.py next to
+// statusline.js, so _pluginTreeGone() stays false and we would render a working
+// "ghost" status line for an uninstalled plugin. Detect that: when we are
+// running FROM a marketplace clone and no token-optimizer cache install remains
+// under the same <plugins> root, the plugin has been uninstalled -> self-disable.
+function _pluginUninstalledFromClone() {
+  try {
+    const parts = __dirname.split(path.sep);
+    const mi = parts.lastIndexOf('marketplaces');
+    if (mi <= 0) return false;               // not running from a clone
+    const marketplace = parts[mi + 1];
+    if (!marketplace) return false;
+    const pluginsDir = parts.slice(0, mi).join(path.sep);  // <claude>/plugins
+    const cachePluginDir = path.join(pluginsDir, 'cache', marketplace, 'token-optimizer');
+    // A live plugin-cache install has at least one <version> dir here. The dir
+    // gone (or emptied) means `/plugin uninstall` removed the cache tree.
+    if (!fs.existsSync(cachePluginDir)) return true;
+    return fs.readdirSync(cachePluginDir).length === 0;
+  } catch (e) {
+    // Never blank a healthy line on an unexpected error: a lingering ghost is
+    // strictly less harmful than blanking a working status line.
+    return false;
+  }
+}
+
+if (_pluginTreeGone() || _pluginUninstalledFromClone()) {
   process.exit(0);
 }
 
