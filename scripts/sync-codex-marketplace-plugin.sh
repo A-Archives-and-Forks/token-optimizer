@@ -21,8 +21,9 @@
 #   silently breaks. So hooks/ ships alongside skills/.
 #
 # Run before any release that touches skills/, hooks/, or the Codex plugin version.
-# Enforcement: scripts/sign-release.sh runs this and aborts the release if the committed
-# mirror drifted; tests/test_codex_marketplace_parity.py is the local dev parity check.
+# Enforcement: scripts/sign-release.sh regenerates the mirror and `git diff --quiet --
+# plugins/token-optimizer`, aborting the release if the committed mirror drifted. Run this
+# script locally to refresh the mirror before committing.
 # Idempotent: running on an in-sync tree produces no git diff.
 set -euo pipefail
 
@@ -95,8 +96,8 @@ fi
 # --- Exclude dev-only files not needed by the installed Codex skill. benchmark.py is a
 #     standalone benchmarking tool whose security test fixtures contain intentionally-fake
 #     secret-shaped strings (SLACK_TOKEN=..., GITHUB_TOKEN=ghp_...) that trip GitHub push
-#     protection when duplicated. Keep this list in sync with EXCLUDE_NAMES in
-#     tests/test_codex_marketplace_parity.py.
+#     protection when duplicated. This exclude list is maintained here; the release gate
+#     (scripts/sign-release.sh) regenerates from it, so a drifted mirror cannot ship.
 find "${STAGE}" -name 'benchmark.py' -exec rm -f {} + 2>/dev/null || true
 
 # --- Verify the staged result BEFORE swapping. Empty/partial plugin must never ship.
