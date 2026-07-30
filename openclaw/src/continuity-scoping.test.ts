@@ -114,9 +114,9 @@ test("buildResumeLeanBlock drops A-only decisions and emits one disclosure", () 
   expect(block).not.toContain("gamma_engine");
   // Exactly one disclosure line. Both the A-only decision AND the A-only
   // file path are dropped, so the disclosure reports both categories:
-  const disclosureCount = (block.match(/- Omitted \(same session, different project\):/g) || []).length;
+  const disclosureCount = (block.match(/- Omitted \(scoped to current project\):/g) || []).length;
   expect(disclosureCount).toBe(1);
-  expect(block).toContain("- Omitted (same session, different project): 1 decision(s), 1 file(s)");
+  expect(block).toContain("- Omitted (scoped to current project): 1 decision(s), 1 file(s)");
 });
 
 test("buildResumeLeanBlock single-project checkpoint emits NO disclosure", () => {
@@ -127,6 +127,9 @@ test("buildResumeLeanBlock single-project checkpoint emits NO disclosure", () =>
     "## Key Decisions",
     "- Ship the beta feature behind a feature flag",
     "- Wire beta_router into the request pipeline",
+    // Names NO project token: would be dropped by the token-overlap rule
+    // alone, but the mixture gate keeps it (single-project checkpoint).
+    "- Switched from REST polling to websocket push",
     "",
     "## File Changes",
     `- ${PROJ_B}/src/beta_router.py`,
@@ -141,6 +144,8 @@ test("buildResumeLeanBlock single-project checkpoint emits NO disclosure", () =>
 
   expect(block).toContain("beta feature");
   expect(block).toContain("beta_router");
+  // The non-basename decision is kept (single-project -> no filtering):
+  expect(block).toContain("Switched from REST polling to websocket push");
   expect(block).not.toContain("- Omitted");
 });
 
@@ -177,9 +182,9 @@ test("buildContinuityHint drops A-only decisions and emits disclosure", () => {
   expect(hint).not.toContain("gamma_engine");
   // Exactly one disclosure line. Both the A-only decision AND the A-only
   // file path are dropped, so the disclosure reports both categories:
-  const disclosureCount = (hint.match(/- Omitted \(same session, different project\):/g) || []).length;
+  const disclosureCount = (hint.match(/- Omitted \(scoped to current project\):/g) || []).length;
   expect(disclosureCount).toBe(1);
-  expect(hint).toContain("- Omitted (same session, different project): 1 decision(s), 1 file(s)");
+  expect(hint).toContain("- Omitted (scoped to current project): 1 decision(s), 1 file(s)");
 });
 
 test("buildContinuityHint single-project checkpoint emits NO disclosure", () => {
@@ -189,6 +194,9 @@ test("buildContinuityHint single-project checkpoint emits NO disclosure", () => 
     "",
     "## Key Decisions",
     "- Ship the beta feature behind a feature flag",
+    // Names NO project token: would be dropped by the token-overlap rule
+    // alone, but the mixture gate keeps it (single-project checkpoint).
+    "- Switched from REST polling to websocket push",
     "",
     "## File Changes",
     `- ${PROJ_B}/src/beta_router.py`,
@@ -203,8 +211,11 @@ test("buildContinuityHint single-project checkpoint emits NO disclosure", () => 
     score: 0.9,
     content,
   };
-  const hint = buildContinuityHint(candidate, "continue the beta work", PROJ_B);
+  // Non-resume prompt so the lightweight hint path runs (not the lean block).
+  const hint = buildContinuityHint(candidate, "beta feature", PROJ_B);
 
   expect(hint).toContain("beta feature");
+  // The non-basename decision is kept (single-project -> no filtering):
+  expect(hint).toContain("Switched from REST polling to websocket push");
   expect(hint).not.toContain("- Omitted");
 });

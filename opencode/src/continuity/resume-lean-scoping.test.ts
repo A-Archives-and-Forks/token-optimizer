@@ -111,9 +111,9 @@ test("buildLeanResumeContext drops A-only decisions and emits one disclosure", (
   expect(block).not.toContain("gamma_engine");
   // Exactly one disclosure line. Both the A-only decision AND the A-only
   // file path are dropped, so the disclosure reports both categories:
-  const disclosureCount = (block.match(/- Omitted \(same session, different project\):/g) || []).length;
+  const disclosureCount = (block.match(/- Omitted \(scoped to current project\):/g) || []).length;
   expect(disclosureCount).toBe(1);
-  expect(block).toContain("- Omitted (same session, different project): 1 decision(s), 1 file(s)");
+  expect(block).toContain("- Omitted (scoped to current project): 1 decision(s), 1 file(s)");
 });
 
 test("buildLeanResumeContext single-project checkpoint emits NO disclosure", () => {
@@ -125,12 +125,17 @@ test("buildLeanResumeContext single-project checkpoint emits NO disclosure", () 
     decisions: JSON.stringify([
       "Ship the beta feature behind a feature flag",
       "Wire beta_router into the request pipeline",
+      // Names NO project token: would be dropped by the token-overlap rule
+      // alone, but the mixture gate keeps it (single-project checkpoint).
+      "Switched from REST polling to websocket push",
     ]),
   });
   const block = buildLeanResumeContext(cp, "abcdefgh1234", 3500, "continue the beta work", PROJ_B);
 
   expect(block).toContain("beta feature");
   expect(block).toContain("beta_router");
+  // The non-basename decision is kept (single-project -> no filtering):
+  expect(block).toContain("Switched from REST polling to websocket push");
   expect(block).not.toContain("- Omitted");
 });
 

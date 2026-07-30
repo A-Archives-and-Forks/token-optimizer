@@ -26504,6 +26504,35 @@ def _cross_project_file_drop(p, cwd):
     return _is_absolute_path(p) and not _path_under_cwd(p, cwd)
 
 
+def _checkpoint_has_cross_project_path(sidecar, cwd):
+    """True when the checkpoint sidecar carries at least one attributable
+    absolute file path that is NOT under ``cwd`` — the checkpoint genuinely
+    spans multiple projects (GitHub #103).
+
+    DECISION filtering is gated on this: a single-project checkpoint (every
+    attributable path in-project, or no attributable paths) has nothing to
+    scope, so its decisions are kept verbatim even when they name no project
+    token (e.g. "Switched from REST polling to websocket push"). Without this
+    gate the token-overlap rule over-prunes generic technical decisions and
+    mislabels them "different project". ``cwd`` absent -> never multi-project
+    (legacy callers stay unfiltered)."""
+    if not isinstance(sidecar, dict) or not cwd:
+        return False
+    candidates = []
+    mod = sidecar.get("modified_files")
+    if isinstance(mod, list):
+        for item in mod:
+            p = item.get("path") if isinstance(item, dict) else item
+            if p:
+                candidates.append(str(p))
+    reads = sidecar.get("recent_reads")
+    if isinstance(reads, list):
+        for p in reads:
+            if p:
+                candidates.append(str(p))
+    return any(_cross_project_file_drop(p, cwd) for p in candidates)
+
+
 def _in_project_paths(sidecar, cwd):
     """The KEPT in-project paths from a checkpoint sidecar (modified_files +
     recent_reads that live under cwd). These seed the keep-token set so a
@@ -26794,10 +26823,19 @@ def _continuity_prompt_hint(prompt_text="", session_id=None, cwd=None, max_age_m
     # over-prune failure mode, forbidden).
     keep_tokens = _continuity_keep_tokens(
         text, cwd, _in_project_paths(sidecar, cwd))
+    # Decision filtering is gated on checkpoint mixture (GitHub #103): a
+    # single-project checkpoint has nothing to scope, so its decisions are
+    # kept verbatim even when they name no project token. Only a checkpoint
+    # that genuinely spans projects (>= 1 attributable path outside cwd) gets
+    # its decisions token-filtered.
+    _multi_project = _checkpoint_has_cross_project_path(sidecar, cwd)
     dropped_decisions = 0
     if decisions:
-        kept_decisions = [d for d in decisions if _keep_recovered_item(d, keep_tokens)]
-        dropped_decisions = len(decisions) - len(kept_decisions)
+        if _multi_project:
+            kept_decisions = [d for d in decisions if _keep_recovered_item(d, keep_tokens)]
+            dropped_decisions = len(decisions) - len(kept_decisions)
+        else:
+            kept_decisions = list(decisions)
         safe_decisions = [_safe_recovered_scalar(d, 120) for d in kept_decisions[:3]]
         if safe_decisions:
             lines.append("- Decisions: " + "; ".join(repr(d) for d in safe_decisions if d))
@@ -26830,7 +26868,7 @@ def _continuity_prompt_hint(prompt_text="", session_id=None, cwd=None, max_age_m
             _disc.append(f"{dropped_decisions} decision(s)")
         if dropped_files > 0:
             _disc.append(f"{dropped_files} file(s)")
-        lines.append("- Omitted (same session, different project): " + ", ".join(_disc))
+        lines.append("- Omitted (scoped to current project): " + ", ".join(_disc))
     if archives:
         summary = []
         for entry in archives[-3:]:
@@ -27114,9 +27152,12 @@ def build_lean_resume_context(session_id, max_chars=3500, prompt_text=None, cwd=
             body.append("- Open questions: " + "; ".join(repr(q) for q in oq))
         # Per-item relevance filter (GitHub #103): filter FIRST, then slice.
         # Disclosure counts = filter drops ONLY, never slice truncation.
+        # Decision filtering is gated on checkpoint mixture: a single-project
+        # checkpoint has nothing to scope, so its decisions are kept verbatim.
         dropped_decisions = 0
         raw_decisions = sidecar.get("decisions", [])
-        if keep_tokens is not None and isinstance(raw_decisions, (list, tuple)):
+        _multi_project = _checkpoint_has_cross_project_path(sidecar, cwd)
+        if keep_tokens is not None and _multi_project and isinstance(raw_decisions, (list, tuple)):
             kept_decisions = [d for d in raw_decisions if _keep_recovered_item(d, keep_tokens)]
             dropped_decisions = len(raw_decisions) - len(kept_decisions)
             dec = _lean_list(kept_decisions, 4, width=120)
@@ -27186,7 +27227,7 @@ def build_lean_resume_context(session_id, max_chars=3500, prompt_text=None, cwd=
                     _disc.append(f"{_d_dec} decision(s)")
                 if _d_files > 0:
                     _disc.append(f"{_d_files} file(s)")
-                body.append("- Omitted (same session, different project): " + ", ".join(_disc))
+                body.append("- Omitted (scoped to current project): " + ", ".join(_disc))
     else:
         # Thin tier: no checkpoint survived retention; session_log stats only.
         body.append("- (thin reconstruction - checkpoint aged out; only session "

@@ -166,13 +166,15 @@ def test_lean_resume_keeps_only_b_overlap_and_emits_disclosure(measure):
     # Exactly one disclosure line. Both the A-only decision AND the A-only
     # file paths (modified_files + recent_reads) are dropped, so the
     # disclosure reports both categories:
-    assert block.count("- Omitted (same session, different project):") == 1
-    assert "- Omitted (same session, different project): 1 decision(s), 2 file(s)" in block
+    assert block.count("- Omitted (scoped to current project):") == 1
+    assert "- Omitted (scoped to current project): 1 decision(s), 2 file(s)" in block
 
 
 def test_lean_resume_single_project_emits_no_disclosure(measure):
     """A single-project checkpoint (everything under cwd) drops nothing and
-    emits NO disclosure line."""
+    emits NO disclosure line. Includes a decision that names NO project token
+    so the test genuinely exercises the mixture gate (without the gate the
+    token-overlap rule would drop it and mislabel it "different project")."""
     mod, cp_dir = measure
     proj = "/home/u/beta"
     sidecar = {
@@ -181,6 +183,10 @@ def test_lean_resume_single_project_emits_no_disclosure(measure):
         "decisions": [
             "Ship the beta feature behind a feature flag",
             "Wire beta_router into the request pipeline",
+            # Names NO project token (no beta/beta_router/...): would be
+            # dropped by the token-overlap rule alone, but the mixture gate
+            # keeps it because the checkpoint is single-project.
+            "Switched from REST polling to websocket push",
         ],
         "modified_files": [
             {"path": f"{proj}/src/beta_router.py"},
@@ -197,6 +203,8 @@ def test_lean_resume_single_project_emits_no_disclosure(measure):
     assert "beta feature" in block
     assert "beta_router" in block
     assert "beta_core" in block
+    # The non-basename decision is kept (single-project -> no filtering):
+    assert "Switched from REST polling to websocket push" in block
     assert "- Omitted" not in block
 
 
@@ -258,18 +266,26 @@ def test_continuity_prompt_hint_filters_and_discloses(measure, monkeypatch):
     # Exactly one disclosure line. The hint surface filters modified_files
     # only (no recent_reads), so both the A-only decision AND the A-only
     # file path are dropped -> disclosure reports both categories:
-    assert hint.count("- Omitted (same session, different project):") == 1
-    assert "- Omitted (same session, different project): 1 decision(s), 1 file(s)" in hint
+    assert hint.count("- Omitted (scoped to current project):") == 1
+    assert "- Omitted (scoped to current project): 1 decision(s), 1 file(s)" in hint
 
 
 def test_continuity_prompt_hint_single_project_no_disclosure(measure, monkeypatch):
-    """Lightweight hint on a single-project checkpoint emits NO disclosure."""
+    """Lightweight hint on a single-project checkpoint emits NO disclosure.
+    Uses a non-resume prompt so the lightweight hint rendering path runs
+    (not the resume-intent lean block), and includes a decision that names no
+    project token so the mixture gate is genuinely exercised."""
     mod, cp_dir = measure
     proj = "/home/u/beta"
     sidecar = {
         "session_id": "abcdefgh1234",
         "active_task": "work on the beta feature",
-        "decisions": ["Ship the beta feature behind a feature flag"],
+        "decisions": [
+            "Ship the beta feature behind a feature flag",
+            # Names NO project token: would be dropped by the token-overlap
+            # rule alone, but the mixture gate keeps it (single-project).
+            "Switched from REST polling to websocket push",
+        ],
         "modified_files": [{"path": f"{proj}/src/beta_router.py"}],
         "recent_reads": [f"{proj}/README.md"],
         "git": {"branch": "main", "sha": "abc123"},
@@ -283,10 +299,12 @@ def test_continuity_prompt_hint_single_project_no_disclosure(measure, monkeypatc
     monkeypatch.setattr(mod, "_external_memory_present", lambda: False)
 
     hint = mod._continuity_prompt_hint(
-        prompt_text="continue the beta work",
+        prompt_text="beta feature",
         session_id="zzzzzzzzzzzz",
         cwd=proj)
 
     assert "beta feature" in hint
     assert "beta_router" in hint
+    # The non-basename decision is kept (single-project -> no filtering):
+    assert "Switched from REST polling to websocket push" in hint
     assert "- Omitted" not in hint
