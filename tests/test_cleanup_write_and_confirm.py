@@ -93,11 +93,41 @@ def test_missing_file_still_written(measure, tmp_path, monkeypatch):
 
 def _run_cleanup(tmp_path, *flags):
     env = dict(os.environ)
+    # HOST SAFETY (incident 2026-07-30): `cleanup` resolves settings.json from
+    # CLAUDE_DIR = claude_home(), which is INDEPENDENT of
+    # TOKEN_OPTIMIZER_SNAPSHOT_DIR. Pinning only the snapshot dir left these
+    # subprocesses pointed at the developer's REAL ~/.claude, and
+    # `cleanup --confirm` removed a live statusLine. claude_home() honors
+    # CLAUDE_CONFIG_DIR (absolute, existing, non-symlink), so every subprocess
+    # here MUST pin it. _assert_isolated below proves the pin actually held
+    # rather than trusting it.
+    cfg = tmp_path / "claude-home"
+    cfg.mkdir(parents=True, exist_ok=True)
+    env["CLAUDE_CONFIG_DIR"] = str(cfg)
+    env["HOME"] = str(tmp_path)
     env["TOKEN_OPTIMIZER_SNAPSHOT_DIR"] = str(tmp_path / "data")
-    return subprocess.run(
+    proc = subprocess.run(
         [sys.executable, str(MEASURE), "cleanup", *flags],
         capture_output=True, text=True, env=env, timeout=120,
     )
+    _assert_isolated(cfg, proc)
+    return proc
+
+
+def _assert_isolated(cfg: Path, proc) -> None:
+    """Fail loudly if the subprocess escaped the fixture.
+
+    claude_home() prints a warning to stderr when CLAUDE_CONFIG_DIR is
+    rejected (relative, missing, symlinked) and silently falls back to
+    ~/.claude -- exactly the silent escape that caused the incident. Treat any
+    such warning as a hard test failure, so a future refactor of the resolver
+    cannot quietly re-point these destructive runs at a real machine.
+    """
+    assert "CLAUDE_CONFIG_DIR" not in (proc.stderr or ""), (
+        "cleanup subprocess REJECTED the fixture config dir and fell back to "
+        f"the real ~/.claude -- refusing to trust this result.\n{proc.stderr}"
+    )
+    assert cfg.is_dir()
 
 
 def test_bare_cleanup_refuses_without_confirm(tmp_path):
@@ -124,9 +154,32 @@ def test_dry_run_needs_no_confirm(tmp_path):
 
 
 def test_confirm_proceeds(tmp_path):
+    """The one mutating case -- it must operate on the FIXTURE, provably.
+
+    Seeds a statusLine of ours into the fixture settings.json and asserts the
+    fixture file is what changed. If CLAUDE_CONFIG_DIR were ever ignored again,
+    the fixture would come back untouched and this fails, instead of quietly
+    editing someone's real config.
+    """
+    cfg = tmp_path / "claude-home"
+    cfg.mkdir(parents=True, exist_ok=True)
+    settings = cfg / "settings.json"
+    settings.write_text(json.dumps({
+        "model": "opus",
+        "statusLine": {"type": "command",
+                       "command": "node '/p/token-optimizer/statusline.js'"},
+    }, indent=2), encoding="utf-8")
+
     p = _run_cleanup(tmp_path, "--confirm")
+
     assert p.returncode == 0, p.stderr
     assert "Nothing was changed" not in p.stdout
+    after = json.loads(settings.read_text(encoding="utf-8"))
+    assert "statusLine" not in after, (
+        "the FIXTURE settings.json was not modified -- the subprocess did not "
+        "operate on the fixture (possible escape to the real ~/.claude)"
+    )
+    assert after.get("model") == "opus", "user key lost in the fixture"
 
 
 def test_known_flags_combine(tmp_path):
