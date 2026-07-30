@@ -69,6 +69,7 @@ import hmac
 import json
 import math
 import os
+import stat
 import glob
 import re
 import secrets
@@ -18519,8 +18520,22 @@ def _write_settings_atomic(settings_data):
     with _settings_lock() as acquired:
         if not acquired:
             return False
+        # #106 F3 (P2-7): write THROUGH a symlink and preserve the mode.
+        # os.replace onto the link path detaches it, turning a dotfiles-managed
+        # symlink into a regular file (the user's repo silently stops tracking
+        # their settings) and dropping 0644 to mkstemp's 0600. Resolve the link
+        # first so the temp file lands in the real target's directory, and copy
+        # the destination's existing mode onto it.
+        try:
+            dest = SETTINGS_PATH.resolve(strict=False)
+        except (OSError, ValueError):
+            dest = SETTINGS_PATH
+        try:
+            dest_mode = stat.S_IMODE(os.stat(dest).st_mode)
+        except OSError:
+            dest_mode = None
         tmp_fd, tmp_path = tempfile.mkstemp(
-            dir=str(SETTINGS_PATH.parent),
+            dir=str(dest.parent),
             prefix=".settings-",
             suffix=".json",
         )
@@ -18528,7 +18543,12 @@ def _write_settings_atomic(settings_data):
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 json.dump(settings_data, f, indent=2, ensure_ascii=False)
                 f.write("\n")
-            os.replace(tmp_path, str(SETTINGS_PATH))
+            if dest_mode is not None:
+                try:
+                    os.chmod(tmp_path, dest_mode)
+                except OSError:
+                    pass
+            os.replace(tmp_path, str(dest))
             tmp_path = None  # successfully replaced; do not unlink the destination
         finally:
             if tmp_path is not None:
@@ -36448,8 +36468,29 @@ if __name__ == "__main__":
         this_install_only = "--this-install-only" in args
         setup_daemon(dry_run=dry, uninstall=uninstall, this_install_only=this_install_only)
     elif args[0] == "cleanup":
+        # #106 F3 (P2-8): confirm gate. `dry = "--dry-run" in args` meant a
+        # typo ("--dryrun", "--dry_run", "-dry-run") silently performed the
+        # REAL destructive run -- the flag you reach for to stay safe is
+        # exactly the one whose typo costs you. Unknown flags are now rejected,
+        # and mutating requires an explicit --confirm.
+        _known = {"--dry-run", "--this-install-only", "--confirm"}
+        _unknown = [a for a in args[1:] if a.startswith("-") and a not in _known]
+        if _unknown:
+            print(f"[Token Optimizer] Unknown flag(s): {', '.join(_unknown)}")
+            print("  Usage: measure.py cleanup [--dry-run] [--confirm] "
+                  "[--this-install-only]")
+            print("  Nothing was changed.")
+            sys.exit(2)
         dry = "--dry-run" in args
         this_install_only = "--this-install-only" in args
+        if not dry and "--confirm" not in args:
+            print("[Token Optimizer] cleanup removes installed components "
+                  "(daemon, statusLine, hooks, manifest entries).")
+            print("  Session data, checkpoints, and trends are PRESERVED.")
+            print("  Preview first:  measure.py cleanup --dry-run")
+            print("  Then run:       measure.py cleanup --confirm")
+            print("  Nothing was changed.")
+            sys.exit(1)
         cleanup(dry_run=dry, this_install_only=this_install_only)
     elif args[0] in ("inject-routing", "inject-coach", "setup-coach-injection"):
         from injection import inject_managed_block, remove_managed_block
