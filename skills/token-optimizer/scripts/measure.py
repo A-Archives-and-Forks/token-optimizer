@@ -3983,6 +3983,22 @@ def _serve_dashboard(filepath, port=8080, host="127.0.0.1"):
                     return
                 self._json_response(200, {"token": _read_daemon_token()})
                 return
+            # Live savings recompute. A browser refresh against the daemon shows
+            # current savings/cache numbers WITHOUT paying for a full (multi-second)
+            # dashboard regen: the page fetches this and patches the tiles in place.
+            # Read-only, localhost-guarded (same DNS-rebinding defense as the static
+            # assets below), fail-open (a slow/failed eval degrades to a safe shape).
+            if path_only == "/api/savings":
+                if not _is_localhost_host_header(self.headers.get("Host", "")):
+                    self.send_error(421, "Misdirected Request")
+                    return
+                try:
+                    payload = _live_savings_payload(days=30)
+                except Exception:
+                    self._json_response(500, {"ok": False})
+                    return
+                self._json_response(200, payload)
+                return
             if self._redirect_root():
                 return
             if not self._check_allowed():
@@ -11773,12 +11789,20 @@ def _keepwarm_read_tick_stamp():
 
 
 def _keepwarm_measure_script_path():
-    """Absolute path to THIS measure.py for the agent's ProgramArguments.
+    """Absolute path to measure.py for the agent's ProgramArguments.
 
-    The scheduler points the agent at the real, resolved measure.py so a moved
-    plugin cache or a dev symlink resolves to a stable file (parity with how the
-    daemon embeds an absolute script path).
+    Prefers the version-INDEPENDENT marketplace clone path so the agent survives
+    plugin updates: a version-pinned ``/plugins/cache/.../<VERSION>/`` path dies on
+    the next update, and the launchd agent then runs an old measure.py (or none),
+    freezing the dashboard's savings — the exact staleness _heal_keepwarm_plist_path
+    repairs for already-installed agents. Falls back to this file's resolved path
+    when the stable clone can't be resolved (dev checkouts, non-cache installs), so
+    a moved cache or a dev symlink still resolves to a real file (parity with how
+    the daemon embeds an absolute script path).
     """
+    stable = _stable_marketplace_script_path("measure.py")
+    if stable:
+        return stable
     return str(Path(__file__).resolve())
 
 
@@ -30524,6 +30548,86 @@ def _migrate_statusline_to_stable_path():
         return False
 
 
+def _heal_keepwarm_plist_path():
+    """Rewrite an installed keep-warm launchd plist whose measure.py path went
+    stale onto the update-surviving marketplace clone path, then reload the agent.
+
+    Companion to the _keepwarm_measure_script_path stable-path preference (which
+    only helps FRESH plist writes). An agent installed by an older build carries a
+    version-pinned ``/plugins/cache/.../<VERSION>/measure.py`` path that dies on the
+    next plugin update; launchd then fires an old (or missing) script every ~5min,
+    so the dashboard's savings freeze at whatever the last good tick produced. This
+    lifts an existing plist onto the clone path once, at ensure-health, and
+    bootout+bootstraps so the corrected path takes effect immediately.
+
+    Acts only on plugin-cache installs whose OWN keep-warm plist exists and whose
+    embedded measure.py path differs from the resolved clone path. Editing the path
+    of a plist the user already has is a correctness fix, not a (re)install, so it
+    never resurrects a declined/uninstalled agent (#59). The plist only lives under
+    ~/Library/LaunchAgents on macOS, so on other platforms it simply won't exist
+    and this no-ops. Best effort: any failure leaves the plist untouched, False.
+    """
+    if not _is_running_from_plugin_cache():
+        return False
+    stable = _stable_marketplace_script_path("measure.py")
+    if not stable:
+        return False
+    plist_path = _keepwarm_scheduler_plist_path()
+    try:
+        if not plist_path.is_file():
+            return False
+    except OSError:
+        return False
+    import plistlib
+    try:
+        with open(plist_path, "rb") as f:
+            data = plistlib.load(f)
+    except Exception:
+        return False
+    args = data.get("ProgramArguments")
+    if not isinstance(args, list):
+        return False
+    # The script arg is the measure.py entry (not python3 or the subcommand).
+    idx = next((i for i, a in enumerate(args)
+                if isinstance(a, str) and a.endswith("measure.py")), None)
+    if idx is None or args[idx] == stable:
+        return False
+    new_args = list(args)
+    new_args[idx] = stable
+    new_data = dict(data)
+    new_data["ProgramArguments"] = new_args
+    # Atomic replace so a crash mid-write can't leave a truncated plist.
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".keepwarm-plist.", suffix=".tmp",
+                                   dir=str(plist_path.parent))
+        try:
+            with os.fdopen(fd, "wb") as f:
+                plistlib.dump(new_data, f)
+            os.replace(tmp, str(plist_path))
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+    except Exception:
+        return False
+    # Reload so launchd fires the corrected path (mirrors the installer's
+    # idempotent bootout-then-bootstrap). Best effort; the on-disk fix stands even
+    # if the reload can't run (non-macOS, no launchctl, unprivileged).
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None:
+        uid = getuid()
+        for argv in (["launchctl", "bootout", f"gui/{uid}", str(plist_path)],
+                     ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)]):
+            try:
+                subprocess.run(argv, capture_output=True, text=True,
+                               errors="replace", timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    return True
+
+
 # Known TO script names used to identify token-optimizer hooks.
 _TO_SCRIPT_NAMES = frozenset({
     "measure.py", "read_cache.py", "bash_hook.py",
@@ -34740,6 +34844,38 @@ def _savings_since_install():
         return None
 
 
+def _live_savings_payload(days=30):
+    """Recompute the dashboard's savings + cache-health blocks live.
+
+    Single source shared by the /api/savings serve endpoint and its tests, so a
+    browser refresh against the daemon shows current numbers without a full
+    dashboard regen. Mirrors the savings/cache_health wiring in
+    generate_standalone_dashboard exactly, so the live-patched tiles match what a
+    full regen would render. Fail-open: every sub-block is guarded so a slow or
+    failed eval degrades to a safe empty shape instead of raising.
+    """
+    try:
+        savings_data = _get_merged_savings(days=days)
+        savings_data["since_install"] = _savings_since_install()
+    except Exception:
+        savings_data = {"total_tokens": 0, "total_cost_usd": 0.0, "by_category": {}}
+    try:
+        cache_health = _cache_ttl_waste_cached(days=days)
+    except Exception:
+        cache_health = {"available": False, "tier": "opportunity"}
+    try:
+        if isinstance(cache_health, dict):
+            cache_health["keepwarm"] = keepwarm_cache_health_block(days=days)
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "savings": savings_data,
+        "cache_health": cache_health,
+        "generated_at": datetime.now().isoformat(),
+    }
+
+
 def savings_report(days=30, as_json=False):
     """Display cumulative savings from Token Optimizer actions.
 
@@ -35505,6 +35641,14 @@ def run_ensure_health():
                 print("  [Token Optimizer] Migrated statusLine to the update-surviving path")
         except Exception as _e:
             print(f"  [Token Optimizer] statusLine path migration failed: {_e}", file=sys.stderr)
+        # Same class for the keep-warm launchd agent: an existing plist pinned to a
+        # version-cache measure.py path dies on plugin update and freezes the
+        # dashboard's savings. Lift it onto the clone path (macOS-only in practice).
+        try:
+            if _heal_keepwarm_plist_path():
+                print("  [Token Optimizer] Healed keep-warm agent to the update-surviving path")
+        except Exception as _e:
+            print(f"  [Token Optimizer] keep-warm path heal failed: {_e}", file=sys.stderr)
     # Remove malformed hook commands (subshell patterns, double-$HOME paths).
     # Claude Code only: reads/writes ~/.claude/settings.json.
     if not _is_codex:
