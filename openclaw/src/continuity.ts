@@ -629,13 +629,12 @@ export function buildContinuityHint(
   // otherwise leak the OTHER project's Key Decisions / File Changes into this
   // hint. Filter FIRST (set-overlap rule, no float threshold), then apply the
   // existing [:4]/[:6] slices. Disclosure counts = filter drops ONLY. Kept
-  // items pass through byte-for-byte (no cascading drops). When promptText/cwd
-  // are absent (legacy callers), keep_tokens is empty -> everything has zero
-  // overlap, but items with < 3 distinctive tokens are still kept; structured
-  // sections with >= 3 tokens would all drop, so fall back to the raw excerpt
-  // to preserve the pre-filter behavior for callers that don't opt in.
+  // items pass through byte-for-byte (no cascading drops). Enable-gate is AND:
+  // filtering activates only when BOTH promptText AND cwd are present (full
+  // topic + project context). Either alone -> keepTokens is null -> no
+  // filtering, fall back to the raw excerpt (legacy callers).
   const sections = parseCheckpointSections(content);
-  const keepTokens = (promptText || cwd)
+  const keepTokens = (promptText && cwd)
     ? continuityKeepTokens(promptText, cwd, inProjectFilePaths(content, cwd))
     : null;
 
@@ -1190,9 +1189,10 @@ export function buildResumeLeanBlock(
 
   // GitHub #103: per-item relevance filter. Filter FIRST, then slice. Disclosure
   // counts = filter drops ONLY, never slice truncation. Kept items pass through
-  // byte-for-byte (no cascading drops). When promptText/cwd are absent, no
-  // filtering (legacy callers preserve byte-identical output).
-  const keepTokens = (promptText || cwd)
+  // byte-for-byte (no cascading drops). Enable-gate is AND: filtering activates
+  // only when BOTH promptText AND cwd are present (full topic + project context).
+  // Either alone -> no filtering (legacy callers preserve byte-identical output).
+  const keepTokens = (promptText && cwd)
     ? continuityKeepTokens(promptText, cwd, inProjectFilePaths(content, cwd))
     : null;
 

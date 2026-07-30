@@ -396,9 +396,10 @@ export function buildLeanResumeContext(
 
   // GitHub #103: per-item relevance filter. Filter FIRST, then slice. Disclosure
   // counts = filter drops ONLY, never slice truncation. Kept items pass through
-  // byte-for-byte (no cascading drops). When promptText/cwd are absent, no
-  // filtering (legacy callers preserve byte-identical output).
-  const keepTokens = (promptText || cwd)
+  // byte-for-byte (no cascading drops). Enable-gate is AND: filtering activates
+  // only when BOTH promptText AND cwd are present (full topic + project context).
+  // Either alone -> no filtering (legacy callers preserve byte-identical output).
+  const keepTokens = (promptText && cwd)
     ? continuityKeepTokens(promptText, cwd, inProjectPaths(activeFiles, cwd))
     : null;
 
