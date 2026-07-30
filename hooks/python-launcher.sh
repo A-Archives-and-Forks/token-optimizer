@@ -209,8 +209,11 @@ _maybe_swap_to_pythonw() {
     # /dev/null so the hook's real stdin is never consumed by the probe.
     # On any doubt, keep python.exe (return 0) -- this can only ever opt
     # INTO pythonw, never block an exec.
+    # C6: --kill-after=1s escalates to SIGKILL 1s after SIGTERM. pythonw is
+    # GUI-subsystem and can ignore SIGTERM (no console handler), leaving a
+    # hung twin holding the 2s budget past expiry and stalling the hook.
     if command -v timeout >/dev/null 2>&1; then
-        timeout 2s "$pythonw" -c "" </dev/null >/dev/null 2>&1 || return 0
+        timeout --kill-after=1s 2s "$pythonw" -c "" </dev/null >/dev/null 2>&1 || return 0
     else
         "$pythonw" -c "" </dev/null >/dev/null 2>&1 || return 0
     fi
@@ -331,8 +334,11 @@ find_interpreter() {
                     # WindowsApps may contain real Store-installed Python OR
                     # non-functional AppExecutionAlias stubs (non-zero-byte, pass -s).
                     # Probe with --version (2s timeout) to distinguish them.
+                    # C6: --kill-after=1s escalates to SIGKILL 1s after SIGTERM.
+                    # A Store stub can spawn a child that ignores SIGTERM, leaving
+                    # the probe hung past the 2s budget and stalling discovery.
                     if command -v timeout >/dev/null 2>&1; then
-                        timeout 2s "$binpath" --version >/dev/null 2>&1 || continue
+                        timeout --kill-after=1s 2s "$binpath" --version >/dev/null 2>&1 || continue
                     else
                         "$binpath" --version >/dev/null 2>&1 || continue
                     fi

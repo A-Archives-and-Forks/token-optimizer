@@ -463,3 +463,45 @@ def test_documents_py_launcher_only_installs_still_flash():
 def test_mirror_remains_byte_identical():
     assert LAUNCHER.read_bytes() == MIRROR.read_bytes()
     assert b"_maybe_swap_to_pythonw" in LAUNCHER.read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# GAUNTLET C6: both pythonw probe sites must use `timeout --kill-after=1s 2s`.
+# A bare `timeout 2s` sends SIGTERM at 2s but a GUI-subsystem pythonw (or a
+# Store AppExecutionAlias stub) can ignore SIGTERM and hold the budget past
+# expiry, stalling the hook. --kill-after=1s escalates to SIGKILL 1s after
+# SIGTERM so the probe always terminates within ~3s.
+# ---------------------------------------------------------------------------
+
+def test_pythonw_liveness_probe_uses_kill_after():
+    """C6: the _maybe_swap_to_pythonw liveness probe must use
+    --kill-after=1s so a SIGTERM-ignoring pythonw twin is SIGKILLed."""
+    source = LAUNCHER.read_text(encoding="utf-8")
+    # The probe is the line with `timeout ... "$pythonw" -c ""`.
+    assert 'timeout --kill-after=1s 2s "$pythonw" -c ""' in source, (
+        "the pythonw liveness probe must use `timeout --kill-after=1s 2s` "
+        "so a SIGTERM-ignoring twin is SIGKILLed within ~3s"
+    )
+
+
+def test_windowsapps_probe_uses_kill_after():
+    """C6: the find_interpreter WindowsApps --version probe must use
+    --kill-after=1s so a SIGTERM-ignoring Store stub is SIGKILLed."""
+    source = LAUNCHER.read_text(encoding="utf-8")
+    assert 'timeout --kill-after=1s 2s "$binpath" --version' in source, (
+        "the WindowsApps --version probe must use `timeout --kill-after=1s 2s` "
+        "so a SIGTERM-ignoring stub is SIGKILLed within ~3s"
+    )
+
+
+def test_kill_after_present_in_mirror():
+    """C6: the mirror must carry the same --kill-after=1s probes."""
+    source = MIRROR.read_bytes()
+    assert b"--kill-after=1s 2s" in source, (
+        "the mirror launcher must carry --kill-after=1s on both probe sites"
+    )
+    # Exactly two occurrences (one per probe site):
+    assert source.count(b"--kill-after=1s 2s") == 2, (
+        "expected exactly two --kill-after=1s probe sites in the mirror; "
+        f"got {source.count(b'--kill-after=1s 2s')}"
+    )
