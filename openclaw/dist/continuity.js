@@ -61,6 +61,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.RESUME_INTENT_RE = exports.RELEVANCE_THRESHOLD = void 0;
 exports.keepRecoveredItem = keepRecoveredItem;
+exports.crossProjectFileDrop = crossProjectFileDrop;
 exports.keywordRelevanceScore = keywordRelevanceScore;
 exports.listAllCheckpoints = listAllCheckpoints;
 exports.findBestContinuityCheckpoint = findBestContinuityCheckpoint;
@@ -213,19 +214,36 @@ function keepRecoveredItem(itemText, keepTokens) {
     }
     return false;
 }
+// Case-insensitive filesystems normalize away casing in path lookups, so a
+// case-mismatched prefix (macOS `/Home/U/Foo` vs cwd `/home/u/foo`) is the SAME
+// directory and must NOT be judged cross-project. Mirrors Python ``_norm``
+// (measure.py:26369) which casefolds on ``platform.system() in
+// ("Windows","Darwin")``. TS has no ``casefold``; ``toLowerCase`` is the
+// ASCII-path-equivalent (paths are byte-identical under casefold vs
+// toLowerCase for the realistic ASCII subset).
+const _CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform === "darwin";
+/** Normalize a path for prefix comparison (mirrors Python ``_norm``):
+ *  backslashes -> forward slashes, strip trailing separator, casefold on
+ *  case-insensitive filesystems. Applied to BOTH the candidate roots and the
+ *  probed path so the prefix check is separator- and case-stable. */
+function _normPath(p) {
+    const s = String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+    return _CASE_INSENSITIVE_FS ? s.toLowerCase() : s;
+}
 /** Normalized candidate roots for a cwd (resolved + raw, trailing slashes
- *  stripped). Shared by the in-project path filter. */
+ *  stripped, casefolded on case-insensitive filesystems). Shared by the
+ *  in-project path filter. */
 function cwdRoots(cwd) {
     const roots = new Set();
     if (!cwd)
         return roots;
     try {
-        const resolved = path.resolve(cwd).replace(/\/+$/, "");
+        const resolved = _normPath(path.resolve(cwd));
         if (resolved)
             roots.add(resolved);
     }
     catch { /* ignore resolve errors */ }
-    const raw = cwd.replace(/\/+$/, "");
+    const raw = _normPath(cwd);
     if (raw)
         roots.add(raw);
     return roots;
@@ -233,8 +251,9 @@ function cwdRoots(cwd) {
 function pathUnderRoots(p, roots) {
     if (!p || roots.size === 0)
         return false;
+    const np = _normPath(p);
     for (const root of roots) {
-        if (p === root || p.startsWith(root + "/") || p.startsWith(root + "\\")) {
+        if (np === root || np.startsWith(root + "/")) {
             return true;
         }
     }

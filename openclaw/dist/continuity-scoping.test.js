@@ -21,6 +21,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const bun_test_1 = require("bun:test");
 const continuity_js_1 = require("./continuity.js");
 const keep_recovered_parity_json_1 = __importDefault(require("../../tests/fixtures/keep_recovered_parity.json"));
+const cross_project_file_drop_parity_json_1 = __importDefault(require("../../tests/fixtures/cross_project_file_drop_parity.json"));
 // ---------------------------------------------------------------------------
 // Shared parity fixture — single source of truth.
 // Loaded from tests/fixtures/keep_recovered_parity.json, consumed by all 3
@@ -40,6 +41,22 @@ const PARITY_FIXTURE = keep_recovered_parity_json_1.default
 (0, bun_test_1.test)("keepRecoveredItem is purely set-overlap, no float threshold", () => {
     (0, bun_test_1.expect)((0, continuity_js_1.keepRecoveredItem)("alpha beta gamma delta epsilon zeta", new Set())).toBe(false);
     (0, bun_test_1.expect)((0, continuity_js_1.keepRecoveredItem)("alpha beta", new Set())).toBe(true);
+});
+// ---------------------------------------------------------------------------
+// crossProjectFileDrop parity — path normalization (GAUNTLET C2)
+// Loaded from tests/fixtures/cross_project_file_drop_parity.json, consumed by
+// all 3 suites. Covers backslash, UNC, trailing separator, mixed separators,
+// case mismatch (casefold on Darwin/Win32), relative, and cwd-absent.
+// ---------------------------------------------------------------------------
+const _CASEFOLD = process.platform === "win32" || process.platform === "darwin";
+(0, bun_test_1.test)("crossProjectFileDrop matches the shared path-normalization fixture exactly", () => {
+    for (const row of cross_project_file_drop_parity_json_1.default) {
+        const expected = _CASEFOLD && row.expected_drop_casefold !== undefined
+            ? row.expected_drop_casefold
+            : row.expected_drop;
+        const got = (0, continuity_js_1.crossProjectFileDrop)(row.path, row.cwd);
+        (0, bun_test_1.expect)(got).toBe(expected);
+    }
 });
 // ---------------------------------------------------------------------------
 // buildResumeLeanBlock — mixed A/B checkpoint queried from B
