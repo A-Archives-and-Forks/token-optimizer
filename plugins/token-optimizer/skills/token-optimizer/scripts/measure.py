@@ -81,6 +81,7 @@ import tempfile
 import textwrap
 import time
 import platform
+import shutil
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -20622,7 +20623,7 @@ def _write_uninstall_tombstone():
         )
 
 
-def _uninstall_launchd_daemon(this_install_only=False):
+def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
     """macOS: stop and remove the LaunchAgent + daemon script(s).
 
     Unified output (torture-room L7, 2026-04-14): track what is actually
@@ -20639,7 +20640,36 @@ def _uninstall_launchd_daemon(this_install_only=False):
     uninstall. Sweep every identity unless ``this_install_only`` opts out.
     Also bootout every runtime's LaunchAgent by name so a registration whose
     data dir already vanished still gets unregistered.
+
+    v5.11.68 (#106 / cleanup): ``dry_run=True`` makes the uninstaller
+    side-effect-free (no bootout, no file deletion, no tombstone write) so the
+    cleanup command's ``--dry-run`` is a true preview.
     """
+    if dry_run:
+        # Dry-run: report what WOULD be removed, touch nothing.
+        would_remove = []
+        for label in _ALL_LAUNCH_AGENT_LABELS:
+            plist = LAUNCH_AGENTS_DIR / f"{label}.plist"
+            if plist.exists():
+                would_remove.append(str(plist))
+        per_identity: list[tuple[Path, list[str]]] = []
+        for snap_dir in _daemon_identity_snapshot_dirs(this_install_only):
+            files = _daemon_per_identity_files(snap_dir)
+            identity_would = [str(files[k]) for k in ("daemon_script", "daemon_token", "daemon_host") if files[k].exists()]
+            if identity_would:
+                per_identity.append((snap_dir, identity_would))
+                would_remove.extend(identity_would)
+        if would_remove:
+            print("[Token Optimizer] Dashboard daemon would be removed.")
+            for path in would_remove:
+                print(f"  Would delete: {path}")
+            if per_identity and not this_install_only:
+                print("  Would sweep all token-optimizer-* identities:")
+                for snap_dir, items in per_identity:
+                    print(f"    {snap_dir}: {len(items)} file(s)")
+        else:
+            print("[Token Optimizer] No daemon artifacts found. Nothing to remove.")
+        return
     # adv-006: tombstone FIRST so any racing respawn exits cleanly.
     _write_uninstall_tombstone()
     removed = []
@@ -21045,7 +21075,7 @@ def _install_task_scheduler_daemon(dry_run=False, soft_fail=False, effective_hos
         return True
 
 
-def _uninstall_task_scheduler_daemon(this_install_only=False):
+def _uninstall_task_scheduler_daemon(this_install_only=False, dry_run=False):
     """Windows: stop and remove the dashboard daemon scheduled task.
 
     Cleans orphan XML files from any prior naming convention (torture
@@ -21060,7 +21090,36 @@ def _uninstall_task_scheduler_daemon(this_install_only=False):
     live in EACH identity's snapshot dir; a sibling's daemon script + 0600
     CSRF token would otherwise outlive the uninstall. Sweep every identity
     unless ``this_install_only`` opts out.
+
+    v5.11.68 (#106 / cleanup): ``dry_run=True`` makes the uninstaller
+    side-effect-free (no schtasks calls, no file deletion, no tombstone write)
+    so the cleanup command's ``--dry-run`` is a true preview.
     """
+    if dry_run:
+        would_remove = []
+        per_identity: list[tuple[Path, list[str]]] = []
+        for snap_dir in _daemon_identity_snapshot_dirs(this_install_only):
+            files = _daemon_per_identity_files(snap_dir)
+            identity_would = [str(files[k]) for k in ("daemon_script", "windows_launcher", "daemon_token", "daemon_host") if files[k].exists()]
+            try:
+                for xml_path in snap_dir.glob("*schtasks-daemon*.xml"):
+                    identity_would.append(str(xml_path))
+            except OSError:
+                pass
+            if identity_would:
+                per_identity.append((snap_dir, identity_would))
+                would_remove.extend(identity_would)
+        if would_remove:
+            print("[Token Optimizer] Dashboard daemon would be removed.")
+            for path in would_remove:
+                print(f"  Would delete: {path}")
+            if per_identity and not this_install_only:
+                print("  Would sweep all token-optimizer-* identities:")
+                for snap_dir, items in per_identity:
+                    print(f"    {snap_dir}: {len(items)} file(s)")
+        else:
+            print("[Token Optimizer] No daemon artifacts found. Nothing to remove.")
+        return
     # adv-006: tombstone FIRST so any racing respawn exits cleanly.
     _write_uninstall_tombstone()
     removed = []
@@ -21416,7 +21475,7 @@ def _install_systemd_user_daemon(dry_run=False, soft_fail=False, effective_host=
         return True
 
 
-def _uninstall_systemd_user_daemon(this_install_only=False):
+def _uninstall_systemd_user_daemon(this_install_only=False, dry_run=False):
     """Linux: stop and remove the systemd --user dashboard unit.
 
     v5.11.68 (#106 / F2): identity-sweeping by default. The systemd unit is
@@ -21428,7 +21487,35 @@ def _uninstall_systemd_user_daemon(this_install_only=False):
     identity's snapshot dir; a sibling's daemon script + 0600 CSRF token
     would otherwise outlive the uninstall. Sweep every identity unless
     ``this_install_only`` opts out.
+
+    v5.11.68 (#106 / cleanup): ``dry_run=True`` makes the uninstaller
+    side-effect-free (no systemctl calls, no file deletion, no tombstone write)
+    so the cleanup command's ``--dry-run`` is a true preview.
     """
+    if dry_run:
+        would_remove = []
+        per_identity: list[tuple[Path, list[str]]] = []
+        for unit_name in _ALL_SYSTEMD_UNIT_NAMES:
+            unit_path = _systemd_user_unit_path_for(unit_name)
+            if unit_path.exists():
+                would_remove.append(str(unit_path))
+        for snap_dir in _daemon_identity_snapshot_dirs(this_install_only):
+            files = _daemon_per_identity_files(snap_dir)
+            identity_would = [str(files[k]) for k in ("daemon_script", "linux_launcher", "daemon_token", "daemon_host") if files[k].exists()]
+            if identity_would:
+                per_identity.append((snap_dir, identity_would))
+                would_remove.extend(identity_would)
+        if would_remove:
+            print("[Token Optimizer] Dashboard daemon would be removed.")
+            for path in would_remove:
+                print(f"  Would delete: {path}")
+            if per_identity and not this_install_only:
+                print("  Would sweep all token-optimizer-* identities:")
+                for snap_dir, items in per_identity:
+                    print(f"    {snap_dir}: {len(items)} file(s)")
+        else:
+            print("[Token Optimizer] No daemon artifacts found. Nothing to remove.")
+        return
     # adv-006: tombstone FIRST so any racing respawn exits cleanly.
     _write_uninstall_tombstone()
     removed = []
@@ -21519,11 +21606,11 @@ def setup_daemon(dry_run=False, uninstall=False, this_install_only=False):
     system = _normalized_platform()
     if uninstall:
         if system == "Darwin":
-            _uninstall_launchd_daemon(this_install_only=this_install_only)
+            _uninstall_launchd_daemon(this_install_only=this_install_only, dry_run=dry_run)
         elif system == "Windows":
-            _uninstall_task_scheduler_daemon(this_install_only=this_install_only)
+            _uninstall_task_scheduler_daemon(this_install_only=this_install_only, dry_run=dry_run)
         elif system == "Linux":
-            _uninstall_systemd_user_daemon(this_install_only=this_install_only)
+            _uninstall_systemd_user_daemon(this_install_only=this_install_only, dry_run=dry_run)
         else:
             print(f"[Token Optimizer] Unsupported platform for daemon uninstall: {system}")
         # Sticky opt-out: persist the user's intent so the SessionStart ensure-
@@ -21564,6 +21651,198 @@ def setup_daemon(dry_run=False, uninstall=False, this_install_only=False):
         print(f"[Error] Dashboard daemon not supported on {system}.")
         print(f"  Open the dashboard file directly: {DASHBOARD_PATH.as_uri()}")
         sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Uninstall cleanup orchestrator (issue #106 / F3 + cleanup command)
+# ---------------------------------------------------------------------------
+
+# Paths that are intentionally PRESERVED across an uninstall. These hold
+# session data, checkpoints, and trends the user may want to keep or migrate.
+# Listed explicitly so the cleanup command's --dry-run doubles as retained-
+# paths DISCLOSURE: the user sees exactly what stays before agreeing to
+# remove anything.
+def _retained_paths() -> list[tuple[str, Path]]:
+    """User-data paths preserved by design across an uninstall (issue #106).
+
+    Session snapshots, compaction checkpoints, trend aggregates, and the
+    quality-bar cache are NOT removed by the cleanup command. They are
+    disclosed in --dry-run so the user knows what stays.
+    """
+    paths: list[tuple[str, Path]] = []
+    try:
+        for ident in _all_plugin_data_dirs():
+            paths.append((f"session data ({ident.name})", ident / "data"))
+            paths.append((f"checkpoints ({ident.name})", ident / "data" / "checkpoints"))
+            paths.append((f"trends ({ident.name})", ident / "data" / "trends"))
+    except Exception:  # noqa: BLE001
+        pass
+    # Always include the resolved snapshot dir even under a sandbox override.
+    paths.append(("session data (this install)", SNAPSHOT_DIR))
+    return paths
+
+
+def _backup_settings_file(dest_dir: Path) -> Path | None:
+    """Copy settings.json into ``dest_dir``. Returns the backup path or None."""
+    try:
+        if not SETTINGS_PATH.is_file():
+            return None
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / "settings.json"
+        i = 1
+        while dest.exists():
+            dest = dest_dir / f"settings.json-{i}"
+            i += 1
+        shutil.copy2(SETTINGS_PATH, dest)
+        return dest
+    except OSError:
+        return None
+
+
+def _remove_our_settings_entries(settings: dict) -> list[str]:
+    """Strip Token Optimizer's OWN entries from ``settings`` in place.
+
+    Removes only entries we own:
+    - ``statusLine`` when its command references our ``statusline.js`` +
+      ``token-optimizer`` (the same matcher _is_quality_bar_installed uses).
+    - ``UserPromptSubmit`` hook groups whose command references
+      ``quality-cache`` (our cache hook).
+    - ``SessionEnd`` hook entries that are ours (reuses
+      _remove_token_optimizer_session_end_hooks).
+
+    Foreign statusLines, foreign hooks, and every other settings key are left
+    byte-identical. Returns a list of human-readable descriptions of what was
+    removed. Never raises.
+    """
+    removed: list[str] = []
+    if not isinstance(settings, dict):
+        return removed
+    # statusLine
+    sl = settings.get("statusLine")
+    if isinstance(sl, dict):
+        cmd = sl.get("command", "")
+        if isinstance(cmd, str) and "statusline.js" in cmd and "token-optimizer" in cmd:
+            del settings["statusLine"]
+            removed.append("statusLine (token-optimizer)")
+    # UserPromptSubmit quality-cache hooks
+    hooks = settings.get("hooks")
+    if isinstance(hooks, dict):
+        ups = hooks.get("UserPromptSubmit")
+        if isinstance(ups, list):
+            new_groups = []
+            for group in ups:
+                if not isinstance(group, dict):
+                    new_groups.append(group)
+                    continue
+                kept = [
+                    h for h in group.get("hooks", [])
+                    if not (isinstance(h, dict) and "quality-cache" in (h.get("command") or ""))
+                ]
+                if kept:
+                    group["hooks"] = kept
+                    new_groups.append(group)
+                else:
+                    removed.append("UserPromptSubmit quality-cache hook")
+            if new_groups:
+                hooks["UserPromptSubmit"] = new_groups
+            else:
+                del hooks["UserPromptSubmit"]
+    # SessionEnd hooks (reuses the proven filter)
+    n_session_end = _remove_token_optimizer_session_end_hooks(settings)
+    if n_session_end:
+        removed.append(f"{n_session_end} SessionEnd hook(s)")
+    return removed
+
+
+def cleanup(dry_run=False, this_install_only=False):
+    """One-command uninstall cleanup for Token Optimizer (issue #106).
+
+    Orchestrates the three uninstall surfaces:
+    1. Daemon: stop + remove the dashboard daemon across all
+       ``token-optimizer-*`` identities (or just this install under
+       ``this_install_only``), via ``setup_daemon(uninstall=True, ...)``.
+    2. Host config (``settings.json``): back up first, then remove ONLY our
+       own entries (statusLine, quality-cache hook, SessionEnd hooks), leaving
+       every other key byte-identical.
+    3. Manifests (``installed_plugins.json`` / ``known_marketplaces.json``):
+       back up first, then remove our STALE entries via
+       ``install_reconcile.reconcile_uninstall(remove=True)``.
+
+    Session data, checkpoints, and trends are PRESERVED by design and
+    disclosed in the report.
+
+    ``--dry-run`` is side-effect-free and doubles as retained-paths
+    DISCLOSURE: it prints exactly what WOULD be removed and what stays, so
+    the user can review before agreeing to a real cleanup.
+    """
+    print("[Token Optimizer] Cleanup", "(dry run)" if dry_run else "")
+    print(f"  {'=' * 60}")
+    if this_install_only:
+        print("  Scope: this install only (--this-install-only)")
+    else:
+        print("  Scope: all token-optimizer-* identities")
+    print()
+
+    # 1. Daemon
+    print("  [1/3] Dashboard daemon")
+    setup_daemon(dry_run=dry_run, uninstall=True, this_install_only=this_install_only)
+    print()
+
+    # 2. settings.json
+    print("  [2/3] Host config (settings.json)")
+    settings, _ = _read_settings_json()
+    our_entries = _remove_our_settings_entries(settings)  # mutate a copy
+    if our_entries:
+        for entry in our_entries:
+            print(f"    Would remove: {entry}" if dry_run else f"    Removed: {entry}")
+        if not dry_run:
+            backup_root = CLAUDE_DIR / "_backups" / "token-optimizer"
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_dest = backup_root / stamp
+            backed = _backup_settings_file(backup_dest)
+            if backed is None:
+                print(f"    WARNING: could not back up settings.json; entries left in place.")
+            else:
+                # Re-read, re-remove, write atomically.
+                fresh, _ = _read_settings_json()
+                _remove_our_settings_entries(fresh)
+                _write_settings_atomic(fresh)
+                print(f"    Backup: {backed}")
+    else:
+        print("    No Token Optimizer entries found in settings.json.")
+    print()
+
+    # 3. Manifests
+    print("  [3/3] Plugin manifests (installed_plugins / known_marketplaces)")
+    import install_reconcile
+    reconcile = install_reconcile.reconcile_uninstall(
+        CLAUDE_DIR, dry_run=dry_run, remove=True,
+    )
+    for entry in reconcile.get("reported", []):
+        stale_tag = " (stale)" if entry.get("stale") else " (active, kept)"
+        print(f"    {entry['file']}::{entry['key']}{stale_tag}")
+    for warning in reconcile.get("warnings", []):
+        print(f"    {warning}")
+    if reconcile.get("backup"):
+        print(f"    Backup: {reconcile['backup']}")
+    for removed in reconcile.get("removed", []):
+        print(f"    {'Would remove' if dry_run else 'Removed'}: {removed}")
+    if not reconcile.get("reported"):
+        print("    No Token Optimizer manifest entries found.")
+    print()
+
+    # Retained-paths disclosure (always shown, dry-run or not).
+    print("  Retained by design (session data, checkpoints, trends):")
+    for label, path in _retained_paths():
+        exists = path.exists() if hasattr(path, "exists") else False
+        tag = " (present)" if exists else " (absent)"
+        print(f"    {label}: {path}{tag}")
+    print()
+    if dry_run:
+        print("  Dry run: nothing was modified. Re-run without --dry-run to apply.")
+    else:
+        print("  Cleanup complete. Re-enable later with: setup-quality-bar / setup-daemon")
+    print()
 
 
 def _daemon_service_installed(system=None):
@@ -35871,6 +36150,10 @@ if __name__ == "__main__":
         uninstall = "--uninstall" in args
         this_install_only = "--this-install-only" in args
         setup_daemon(dry_run=dry, uninstall=uninstall, this_install_only=this_install_only)
+    elif args[0] == "cleanup":
+        dry = "--dry-run" in args
+        this_install_only = "--this-install-only" in args
+        cleanup(dry_run=dry, this_install_only=this_install_only)
     elif args[0] in ("inject-routing", "inject-coach", "setup-coach-injection"):
         from injection import inject_managed_block, remove_managed_block
 
