@@ -308,3 +308,33 @@ def test_continuity_prompt_hint_single_project_no_disclosure(measure, monkeypatc
     # The non-basename decision is kept (single-project -> no filtering):
     assert "Switched from REST polling to websocket push" in hint
     assert "- Omitted" not in hint
+
+
+def test_continuity_prompt_hint_no_filter_when_cwd_absent(measure, monkeypatch):
+    """Legacy hint caller with cwd=None gets the UNFILTERED hint: A-only
+    decisions and file paths survive and NO disclosure line is emitted
+    (GitHub #103 #6). The hint surface previously computed keep_tokens
+    unconditionally, so cwd=None callers were token-filtered on prompt text
+    alone and got a fabricated "scoped to current project" disclosure."""
+    mod, cp_dir = measure
+    proj_b = "/home/u/beta"
+    proj_a = "/home/u/gamma"
+    _write_checkpoint(cp_dir, "abcdefgh1234", _ab_sidecar(proj_a, proj_b))
+    checkpoints = mod.list_checkpoints()
+    cp = checkpoints[0]
+    sidecar = mod._read_checkpoint_sidecar(cp["path"])
+    monkeypatch.setattr(mod, "_checkpoint_topic_score", lambda text, c, cwd=None: (0.9, sidecar))
+    monkeypatch.setattr(mod, "_checkpoint_in_project", lambda s, c: True)
+    monkeypatch.setattr(mod, "_external_memory_present", lambda: False)
+
+    hint = mod._continuity_prompt_hint(
+        prompt_text="beta feature",
+        session_id="zzzzzzzzzzzz",
+        cwd=None)
+
+    # A-only decision survives (no token filtering without cwd):
+    assert "gamma delta epsilon" in hint
+    # A-only file path survives (no path drop without cwd):
+    assert "gamma_engine" in hint
+    # No fabricated disclosure:
+    assert "- Omitted" not in hint
