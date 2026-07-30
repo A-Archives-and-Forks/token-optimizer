@@ -38,10 +38,17 @@ def _fake_interp(tmp_path: Path, name: str, marker: str) -> Path:
     """A stand-in interpreter 'binary' (an executable shell script) that
     reads stdin, prints a marker line, and exits with FAKE_PY_EXIT. Lets us
     prove which interpreter the launcher actually exec'd and that the
-    stdin->stdout round-trip survives, without needing a real Windows box."""
+    stdin->stdout round-trip survives, without needing a real Windows box.
+
+    A liveness probe (`-c ""` with an empty program, as the launcher uses to
+    test pythonw.exe) short-circuits to exit 0 so the twin looks healthy and
+    the swap proceeds; the real exec then runs the round-trip and uses
+    FAKE_PY_EXIT. Without this, a nonzero FAKE_PY_EXIT would make the probe
+    reject the twin as broken and no swap would ever happen."""
     path = tmp_path / name
     path.write_text(
         "#!/bin/sh\n"
+        'if [ "$1" = "-c" ] && [ "$2" = "" ]; then exit 0; fi\n'
         "input=$(cat)\n"
         f"printf '{marker} echo=%s\\n' \"$input\"\n"
         'exit "${FAKE_PY_EXIT:-0}"\n',
@@ -359,8 +366,92 @@ def test_non_windows_execs_python_exe_unchanged(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Broken-twin guard: a corrupt pythonw.exe that passes -f/-x/-s but exits
+# nonzero on a liveness probe must NOT be swapped to. The launcher keeps
+# python.exe so the hook still runs, instead of exec'ing a dead twin that
+# bricks every hook (exit 127) and makes the fallback ladder unreachable.
+# ---------------------------------------------------------------------------
+
+
+def _broken_pythonw(tmp_path: Path) -> Path:
+    """A pythonw.exe twin that is executable and non-empty (passes -f/-x/-s)
+    but exits nonzero when actually run -- a stand-in for a corrupt/garbage
+    install twin or a 0xC000-style Windows stub."""
+    path = tmp_path / "pythonw.exe"
+    path.write_text("#!/bin/sh\nexit 13\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_broken_pythonw_twin_not_selected(tmp_path):
+    py = _fake_interp(tmp_path, "python.exe", "PYTHON_SELECTED")
+    _broken_pythonw(tmp_path)
+    out, rc, _err = _run(_selection_driver(str(py), msys=True, safe=True), "", {})
+    assert rc == 0
+    assert out.strip() == str(py)
+
+
+def test_broken_pythonw_twin_keeps_python_exe_and_hook_runs(tmp_path):
+    py = _fake_interp(tmp_path, "python.exe", "PYTHON_SELECTED")
+    _broken_pythonw(tmp_path)
+    out, rc, err = _run(
+        _discovered_driver(py),
+        '{"session_id":"x"}',
+        {"FAKE_PY_EXIT": "0"},
+    )
+    assert "EXEC_DID_NOT_REPLACE" not in err
+    assert "EXEC_FAILED" not in err
+    assert "PYTHON_SELECTED" in out
+    assert "PYTHONW" not in out
+    assert '{"session_id":"x"}' in out  # the hook still ran, stdin survived
+    assert rc == 0
+
+
+def test_broken_pythonw_twin_keeps_python_exe_on_cache_hit(tmp_path):
+    py = _fake_interp(tmp_path, "python.exe", "PYTHON_SELECTED")
+    _broken_pythonw(tmp_path)
+    cache = tmp_path / "interpreter.cache"
+    out, rc, err = _run(
+        _cached_driver(py, cache),
+        '{"session_id":"x"}',
+        {"FAKE_PY_EXIT": "0"},
+    )
+    assert "EXEC_DID_NOT_REPLACE" not in err
+    assert "EXEC_FAILED" not in err
+    assert "PYTHON_SELECTED" in out
+    assert "PYTHONW" not in out
+    assert '{"session_id":"x"}' in out
+    assert rc == 0
+
+
+def test_cache_record_naming_pythonw_exe_is_rejected(tmp_path):
+    """A cache record that names /pythonw.exe is rejected outright: the
+    swap is exec-only, so such a record is poisoned or a stale broken-twin
+    artefact. Discovery re-runs instead of exec'ing a possibly-dead twin."""
+    _fake_interp(tmp_path, "python.exe", "PYTHON_SELECTED")
+    bad_pythonw = _broken_pythonw(tmp_path)
+    cache = tmp_path / "interpreter.cache"
+    # Poison the cache with a pythonw.exe path that passes -x/-s and is in a
+    # safe prefix (overrides make _is_safe_prefix always pass), so the ONLY
+    # thing rejecting it is the /pythonw.exe guard.
+    cache.write_text(f"INTERP\t{bad_pythonw}\n", encoding="utf-8")
+    out, rc, err = _run(
+        _cached_driver(bad_pythonw, cache),
+        '{"session_id":"x"}',
+        {"FAKE_PY_EXIT": "0"},
+    )
+    # _exec_cached_interpreter returns 1 -> driver prints EXEC_FAILED and
+    # exits 1. The dead twin is NOT exec'd (no PYTHONW output).
+    assert "EXEC_FAILED" in err
+    assert "PYTHONW" not in out
+    assert "PYTHON_SELECTED" not in out
+    assert rc != 0
+
+
+# ---------------------------------------------------------------------------
 # Documentation + mirror invariants.
 # ---------------------------------------------------------------------------
+
 
 
 def test_documents_py_launcher_only_installs_still_flash():
