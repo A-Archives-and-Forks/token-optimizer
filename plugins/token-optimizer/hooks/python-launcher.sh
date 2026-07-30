@@ -4,13 +4,14 @@
 #   - macOS / Linux (python3 on PATH)
 #   - Windows python.org installs at spaced paths like "C:\Program Files\Python313\"
 #   - Windows py-launcher-only installs (py -3)
-#   - Windows Store Python (real installs probed with --version; non-functional
-#     AppExecutionAlias stubs skipped automatically)
-# On Windows (Git Bash/MSYS), exec prefers pythonw.exe (GUI subsystem) over
-# python.exe to avoid the per-hook console-window flash and orphaned
-# conhost.exe. See _maybe_swap_to_pythonw for the constraints. py-launcher-only
-# installs (`py -3`) still flash: py.exe has no GUI twin in its own directory
-# and would need pyw.exe plus a new safe-prefix entry; documented, not fixed.
+#   - Windows Store Python (real installs proven alive via a flash-free
+#     GUI-twin proof-of-life probe, console --version probe as the fallback
+#     authority; non-functional AppExecutionAlias stubs skipped automatically)
+# On Windows (Git Bash/MSYS), exec prefers the GUI-subsystem twin over the
+# console binary to avoid the per-hook console-window flash and orphaned
+# conhost.exe: python.exe/python3.exe swap to pythonw.exe, and py.exe (the
+# py-launcher) swaps to pyw.exe beside it, so py-launcher-only installs no
+# longer flash (#107). See _maybe_swap_to_pythonw for the constraints.
 # Exits 127 with a diagnostic message if none found.
 
 set -eu
@@ -57,6 +58,7 @@ _is_safe_prefix() {
         # All-users `py` launcher lives in the (admin-only-writable) Windows dir.
         # Exact filename keeps the anti-hijack intent (no wildcard in that dir).
         /[a-zA-Z]/Windows/py.exe)                                      return 0 ;;
+        /[a-zA-Z]/Windows/pyw.exe)                                     return 0 ;;
     esac
     # C8: case-insensitive WindowsApps allow for Windows-style drive-letter
     # paths. On a case-insensitive FS the dir can be any casing; the drive-
@@ -203,10 +205,10 @@ _setup_interpreter_cache() {
 #     pythonw inherits intact.
 #   * Non-Windows is a strict no-op: the MSYS guard short-circuits before any
 #     filesystem probe, so POSIX behaviour is byte-for-byte unchanged.
-#   * py.exe (the `py -3` launcher) is NOT swapped: its GUI twin would be
-#     pyw.exe plus a new safe-prefix entry, and `py -3` resolves to python.exe
-#     anyway. py-launcher-only installs therefore still flash; documented,
-#     not fixed here.
+#   * py.exe (the `py -3` launcher) swaps to pyw.exe in the same directory
+#     (#107): pyw.exe is the GUI-subsystem launcher twin and `pyw -3` execs
+#     pythonw.exe. Every other guard (same-dir, safe prefix, WindowsApps
+#     skip, tty check, liveness probe) applies to pyw.exe unchanged.
 #
 # Sets _PYW_INTERP to the chosen interpreter (pythonw.exe when swapped, else
 # the input unchanged). Selection never fails -- on any doubt we keep the
@@ -214,10 +216,11 @@ _setup_interpreter_cache() {
 # an exec. Uses a variable (not stdout) so the [ -t 1 ] guard sees the
 # launcher's real fd 1, not a command-substitution pipe.
 _maybe_swap_to_pythonw() {
-    local interp="$1" dir pythonw
+    local interp="$1" dir twin pythonw
     _PYW_INTERP="$interp"
     case "$interp" in
-        */python.exe|*/python3.exe) ;;
+        */python.exe|*/python3.exe) twin="pythonw.exe" ;;
+        */py.exe) twin="pyw.exe" ;;
         *) return 0 ;;
     esac
     _is_msys_platform || return 0
@@ -225,7 +228,7 @@ _maybe_swap_to_pythonw() {
         return 0
     fi
     dir=${interp%/*}
-    pythonw="${dir}/pythonw.exe"
+    pythonw="${dir}/${twin}"
     [ -f "$pythonw" ] && [ -x "$pythonw" ] && [ -s "$pythonw" ] || return 0
     _is_safe_prefix "$pythonw" || return 0
     # C8: case-insensitive WindowsApps skip (any casing on case-insensitive FS).
@@ -279,13 +282,13 @@ _exec_cached_interpreter() {
         /*) ;;
         *) return 1 ;;
     esac
-    # A cache record must name the discovered interpreter (python.exe), never
-    # its pythonw.exe twin (the swap is exec-only, see _maybe_swap_to_pythonw).
-    # A record ending in /pythonw.exe is either poisoned or a stale artefact
-    # of a broken twin that should have been probed out -- reject and let
-    # discovery re-run, rather than exec'ing a possibly-dead twin directly.
+    # A cache record must name the discovered interpreter (python.exe/py.exe),
+    # never its GUI twin (the swap is exec-only, see _maybe_swap_to_pythonw).
+    # A record ending in /pythonw.exe or /pyw.exe is either poisoned or a stale
+    # artefact of a broken twin that should have been probed out -- reject and
+    # let discovery re-run, rather than exec'ing a possibly-dead twin directly.
     case "$interp" in
-        */pythonw.exe) return 1 ;;
+        */pythonw.exe|*/pyw.exe) return 1 ;;
     esac
     [ -x "$interp" ] && [ -s "$interp" ] || return 1
     # A cache entry never bypasses the anti-PATH-hijack policy.
@@ -347,6 +350,77 @@ _exec_discovered_interpreter() {
 _setup_interpreter_cache
 _exec_cached_interpreter "$@" || :
 
+# F2 (#107): decide whether a WindowsApps candidate is a real Store install
+# or a dead AppExecutionAlias stub -- WITHOUT flashing a console window on
+# the common path. The old probe ran the console-subsystem `python.exe
+# --version` on every cache miss, which is exactly the flash this launcher
+# exists to prevent.
+#
+# Design: a Store package registers its execution aliases (python.exe,
+# python3.exe, pythonw.exe) together, so the GUI-subsystem twin's liveness
+# proves the install is real, and a GUI binary allocates no console -- no
+# flash. A GUI binary's bare exit code is NOT trusted (a dead alias can exit
+# 0 silently outside an interactive token, see measure.py torture HIGH-1):
+# the twin must supply POSITIVE PROOF OF LIFE by writing a marker to a temp
+# file whose content we then require. A dead alias exits without writing.
+#
+# Fallback ladder: on ANY doubt (no GUI twin beside the candidate, twin
+# fails metadata checks, no temp file could be created, or the twin ran but
+# wrote no marker) the original console `--version` probe runs and remains
+# the correctness authority. So the acceptance set only ever narrows to
+# {twin proved alive} OR {old console probe passed} -- a dead interpreter is
+# never accepted, and the console flash survives only for broken or degraded
+# installs, never on the healthy-install cache-miss path. When no GUI twin
+# exists there is also nothing to flash-avoid at exec time (the exec-time
+# swap in _maybe_swap_to_pythonw needs the same twin), so the fallback costs
+# nothing extra there.
+#
+# The temp path is handed to the twin as a native Windows path via cygpath
+# when available, so the probe is immune to MSYS argv path-conversion
+# settings (MSYS_NO_PATHCONV). Probe stdin comes from /dev/null so the
+# hook's real stdin is never consumed. C6 timeout semantics (2s budget,
+# SIGKILL escalation 1s after SIGTERM) apply to the twin probe and fallback.
+# Strict POSIX no-op is preserved: this function is only reached for paths
+# matching _path_contains_windowsapps, exactly like the old inline probe.
+_probe_windowsapps_candidate() {
+    local binpath="$1" dir twin probe_tmp probe_arg out
+    dir=${binpath%/*}
+    twin=""
+    case "$binpath" in
+        */python.exe|*/python3.exe|*/python|*/python3) twin="${dir}/pythonw.exe" ;;
+        */py.exe|*/py)                                 twin="${dir}/pyw.exe" ;;
+    esac
+    if [ -n "$twin" ] && [ -f "$twin" ] && [ -x "$twin" ] && [ -s "$twin" ] \
+        && _is_safe_prefix "$twin"; then
+        probe_tmp=$(mktemp "${TMPDIR:-/tmp}/token-optimizer-pyprobe.XXXXXX" 2>/dev/null) || probe_tmp=""
+        if [ -n "$probe_tmp" ]; then
+            probe_arg=$(cygpath -w "$probe_tmp" 2>/dev/null) || probe_arg=""
+            [ -n "$probe_arg" ] || probe_arg="$probe_tmp"
+            if command -v timeout >/dev/null 2>&1; then
+                timeout --kill-after=1s 2s "$twin" -c \
+                    'import sys; open(sys.argv[1], "w").write("ok")' \
+                    "$probe_arg" </dev/null >/dev/null 2>&1 || :
+            else
+                "$twin" -c 'import sys; open(sys.argv[1], "w").write("ok")' \
+                    "$probe_arg" </dev/null >/dev/null 2>&1 || :
+            fi
+            out=$(cat "$probe_tmp" 2>/dev/null) || out=""
+            rm -f "$probe_tmp" 2>/dev/null || :
+            if [ "$out" = "ok" ]; then
+                return 0
+            fi
+        fi
+    fi
+    # Fallback: the original console-subsystem probe, unchanged semantics
+    # (2s budget, --kill-after escalation). Stdin from /dev/null so a stub
+    # that reads stdin can never consume the hook's real input.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --kill-after=1s 2s "$binpath" --version </dev/null >/dev/null 2>&1
+    else
+        "$binpath" --version </dev/null >/dev/null 2>&1
+    fi
+}
+
 find_interpreter() {
     local name="$1"
     local IFS=:
@@ -363,16 +437,11 @@ find_interpreter() {
             # C8: case-insensitive WindowsApps detection (any casing on
             # case-insensitive FS). WindowsApps may contain real Store-installed
             # Python OR non-functional AppExecutionAlias stubs (non-zero-byte,
-            # pass -s). Probe with --version (2s timeout) to distinguish them.
-            # C6: --kill-after=1s escalates to SIGKILL 1s after SIGTERM.
-            # A Store stub can spawn a child that ignores SIGTERM, leaving
-            # the probe hung past the 2s budget and stalling discovery.
+            # pass -s). F2 (#107): distinguish them flash-free via the GUI
+            # twin's proof-of-life probe, with the console --version probe as
+            # the fallback authority -- see _probe_windowsapps_candidate.
             if _path_contains_windowsapps "$binpath"; then
-                if command -v timeout >/dev/null 2>&1; then
-                    timeout --kill-after=1s 2s "$binpath" --version >/dev/null 2>&1 || continue
-                else
-                    "$binpath" --version >/dev/null 2>&1 || continue
-                fi
+                _probe_windowsapps_candidate "$binpath" || continue
             fi
             printf "%s\n" "$binpath"
             return 0

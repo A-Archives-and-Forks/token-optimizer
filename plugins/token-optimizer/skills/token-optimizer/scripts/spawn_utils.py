@@ -5,8 +5,13 @@ group. On Windows, ``start_new_session`` is silently ignored, so the child
 inherits the parent's console (causing a ~1s window flash on every prompt) and
 dies with the parent's job object. The Windows fix mirrors the daemon-revive
 spawn in measure.py (~line 21658, CXP-1): OR together DETACHED_PROCESS,
-CREATE_NEW_PROCESS_GROUP, and CREATE_BREAKAWAY_FROM_JOB via getattr so the
-flags degrade to 0 on builds where an attribute is missing.
+CREATE_NEW_PROCESS_GROUP, CREATE_BREAKAWAY_FROM_JOB, and CREATE_NO_WINDOW via
+getattr so the flags degrade to 0 on builds where an attribute is missing.
+
+CREATE_NO_WINDOW (#107) is belt-and-suspenders here: Windows ignores it when
+DETACHED_PROCESS is also set, so it changes nothing today, but it keeps the
+invariant "every spawn site carries the no-flash flag" uniform and survives a
+future refactor that drops DETACHED_PROCESS. It never makes CreateProcess fail.
 
 Use ``detach_spawn_kwargs()`` for the raw kwargs dict, or ``spawn_detached()``
 for fire-and-forget background spawns where the child must survive the parent
@@ -43,15 +48,18 @@ def detach_spawn_kwargs():
 
     POSIX:  ``{"start_new_session": True}``
     Windows: ``{"creationflags": DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-              | CREATE_BREAKAWAY_FROM_JOB}``
+              | CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW}``
 
     The Windows flag OR uses ``getattr(subprocess, name, 0)`` so a flag
     absent on an older Python build contributes 0 instead of raising.
+    ``CREATE_NO_WINDOW`` (#107) is ignored by Windows while
+    ``DETACHED_PROCESS`` is present; it is included so every consumer of this
+    helper inherits the no-console-flash intent unconditionally.
     """
     if os.name == "nt":
         flags = 0
         for _name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP",
-                      "CREATE_BREAKAWAY_FROM_JOB"):
+                      "CREATE_BREAKAWAY_FROM_JOB", "CREATE_NO_WINDOW"):
             flags |= getattr(subprocess, _name, 0)
         return {"creationflags": flags} if flags else {}
     return {"start_new_session": True}
@@ -65,7 +73,7 @@ def spawn_detached(argv, **popen_kwargs):
     (e.g. ``ACCESS_DENIED`` when ``CREATE_BREAKAWAY_FROM_JOB`` is not allowed
     inside a restrictive parent Job Object), retries ONCE with
     ``creationflags`` minus ``CREATE_BREAKAWAY_FROM_JOB`` (i.e.
-    ``DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`` only) and logs the
+    ``DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW``) and logs the
     fallback at warning level (no logging is configured in the runtime, so
     logger.debug would be dropped by lastResort at WARNING). Every caller
     already swallows ``OSError``, so without this retry the background worker

@@ -19,12 +19,21 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+# Windows console-flash guard (#107). A console-subsystem child spawned from a
+# console-less parent -- which is exactly what the Claude Desktop app is -- makes
+# Windows allocate a BRAND NEW console for it, i.e. the cmd window that flashes
+# on screen. CREATE_NO_WINDOW suppresses that allocation. The attribute only
+# exists on Windows builds of CPython, so getattr(..., 0) makes passing it a
+# no-op everywhere else (creationflags=0 is the documented default).
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # ---------------------------------------------------------------------------
 # Resolve shared.py: works from skill dir, plugin cache, or standalone
@@ -2064,8 +2073,25 @@ def cmd_dashboard(args: list[str]):
     dashboard_html = _generate_dashboard_html(daily_rows, waste_rows, system_stats, model_mix, top_projects)
 
     FLEET_DASHBOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(FLEET_DASHBOARD_PATH, "w", encoding="utf-8") as f:
-        f.write(dashboard_html)
+    # Atomic: write a sibling temp file and rename it onto the final path.
+    # The old truncate-in-place write meant a second invocation could hand the
+    # browser (still resolving the file association from the first one) a
+    # zero-byte or half-written page, and on Windows a reader holding the file
+    # without FILE_SHARE_WRITE made the truncate raise. os.replace is atomic on
+    # POSIX and MoveFileExW+REPLACE_EXISTING on Windows.
+    _tmp_dashboard = FLEET_DASHBOARD_PATH.with_name(
+        FLEET_DASHBOARD_PATH.name + f".tmp.{os.getpid()}"
+    )
+    try:
+        with open(_tmp_dashboard, "w", encoding="utf-8") as f:
+            f.write(dashboard_html)
+        os.replace(_tmp_dashboard, FLEET_DASHBOARD_PATH)
+    except BaseException:
+        try:
+            _tmp_dashboard.unlink()
+        except OSError:
+            pass
+        raise
 
     print(f"  Fleet dashboard generated: {FLEET_DASHBOARD_PATH}")
 
@@ -2890,16 +2916,58 @@ document.querySelectorAll('.nav-item[data-view]').forEach(function(lnk) {{
 
 
 def _open_in_browser(path: Path):
-    """Open a file in the default browser."""
-    import subprocess
+    """Open a file in the default browser.
+
+    Windows: ``os.startfile`` -- the same helper ``measure.py::_open_in_browser``
+    uses. Two earlier shapes were both wrong.
+
+    1. ``subprocess.run(["start", path], shell=True)`` (pre-#107): ``shell=True``
+       routes through ``cmd.exe /c``, a console-subsystem binary, so a
+       console-less host (the Claude Desktop app) gets a brand-new console
+       allocated -- the cmd window users saw flash (#107). ``start`` is also a
+       cmd BUILTIN, so without the shell there is no ``start.exe`` to exec.
+    2. ``subprocess.run(["cmd", "/c", "start", "", path], creationflags=...)``
+       (the first #107 fix): dropping ``shell=True`` removed PYTHON's shell, not
+       cmd.exe's PARSER. ``subprocess.list2cmdline`` quotes an argument only when
+       it contains a space, tab or quote -- never on ``&``, ``^``, ``|``, ``(``,
+       ``)``. ``&`` is a LEGAL Windows account-name character, so a real path
+       like ``C:\\Users\\R&D\\...\\fleet-dashboard.html`` reached cmd UNQUOTED,
+       cmd split it at the ``&`` and executed the tail as a second command
+       relative to the CWD. ``%VAR%`` expands even inside quotes, and the bare
+       image name ``cmd`` resolves CWD-FIRST under CreateProcessW, so an
+       untrusted working directory could supply the interpreter. The path is
+       derived from ``CLAUDE_CONFIG_DIR`` (deliberately unconfined) and
+       ``HOME``/``USERPROFILE``, so this was command injection, not just
+       breakage.
+
+    ``os.startfile`` calls ShellExecuteW with the path as a real ARGUMENT: no
+    command line is built, no parser sees the metacharacters, no console is
+    allocated (so #107 needs no creationflags on this branch at all), and the
+    browser it hands off to is a GUI app that stays visible.
+
+    ``open`` / ``xdg-open`` keep ``creationflags=_NO_WINDOW``; it is ``0`` off
+    Windows, where ``creationflags=0`` is the documented default, so POSIX
+    behaviour is unchanged.
+
+    Failures are reported (#107 stayed hidden for months behind ``check=False``
+    and a discarded returncode): any opener error prints the file:// URL to open
+    by hand, matching ``measure.py``.
+    """
     import platform as _platform
     system = _platform.system()
-    if system == "Darwin":
-        subprocess.run(["open", str(path)], check=False)
-    elif system == "Linux":
-        subprocess.run(["xdg-open", str(path)], check=False)
-    elif system == "Windows":
-        subprocess.run(["start", str(path)], shell=True, check=False)
+    filepath = str(path)
+    try:
+        if system == "Darwin":
+            subprocess.run(["open", filepath], check=True, timeout=10, creationflags=_NO_WINDOW)
+        elif system == "Linux":
+            subprocess.run(["xdg-open", filepath], check=True, timeout=10, creationflags=_NO_WINDOW)
+        elif system == "Windows":
+            os.startfile(filepath)  # noqa: S606 -- ShellExecuteW, no command line, no console
+        else:
+            raise OSError(f"Unsupported platform: {system}")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, FileNotFoundError):
+        print("\n  Could not auto-open browser. Open manually:")
+        print(f"  {Path(filepath).as_uri()}")
 
 
 def _serve_dashboard(host: str, port: int):

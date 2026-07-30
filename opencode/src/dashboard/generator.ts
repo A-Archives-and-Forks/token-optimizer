@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { TrendsStore } from "../storage/trends.js";
@@ -591,6 +591,25 @@ export function writeDashboard(opts: DashboardOptions): string {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
   const html = generateDashboard(opts);
-  writeFileSync(outputPath, html, "utf-8");
+  // Atomic: write a sibling temp file and rename it onto the final path.
+  // A truncate-in-place write let a second invocation hand the browser
+  // (still resolving the file association from the first one) a zero-byte
+  // or half-written page, and on Windows a reader holding the file without
+  // FILE_SHARE_WRITE made the truncating writeFileSync throw a sharing
+  // violation. renameSync is atomic on POSIX and MoveFileExW+REPLACE_EXISTING
+  // on Windows. The pid suffix keeps concurrent writers off each other's
+  // temp file.
+  const tmpPath = `${outputPath}.tmp.${process.pid}`;
+  try {
+    writeFileSync(tmpPath, html, "utf-8");
+    renameSync(tmpPath, outputPath);
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* temp file already gone */
+    }
+    throw err;
+  }
   return outputPath;
 }
