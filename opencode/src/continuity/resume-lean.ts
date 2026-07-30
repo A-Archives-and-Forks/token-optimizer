@@ -302,7 +302,7 @@ function safeScalar(v: unknown, maxLen: number): string {
  * A DB row from the checkpoints table, enriched with the session DB file path
  * and mtime (for recency ordering).
  */
-interface CheckpointRow {
+export interface CheckpointRow {
   session_id: string;
   trigger: string;
   mode: string;

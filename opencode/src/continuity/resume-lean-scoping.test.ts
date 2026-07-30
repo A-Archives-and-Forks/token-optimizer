@@ -13,10 +13,6 @@
  * asserted against the SAME token inputs.
  */
 import { test, expect } from "bun:test";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { mkdtempSync, mkdirSync, existsSync } from "node:fs";
-import { Database } from "bun:sqlite";
 import { buildLeanResumeContext, keepRecoveredItem, type CheckpointRow } from "./resume-lean.js";
 
 // ---------------------------------------------------------------------------
@@ -66,6 +62,7 @@ test("keepRecoveredItem is purely set-overlap, no float threshold", () => {
 function makeCheckpointRow(overrides: Partial<CheckpointRow> = {}): CheckpointRow {
   return {
     session_id: "abcdefgh1234",
+    trigger: "manual",
     dbPath: "/tmp/test.db",
     created_at: Math.floor(Date.now() / 1000),
     active_files: JSON.stringify([]),
