@@ -21244,7 +21244,8 @@ def _install_task_scheduler_daemon(dry_run=False, soft_fail=False, effective_hos
         print("  What it does:")
         print("    - Registers a per-user Scheduled Task (no UAC / admin rights needed)")
         print("    - Starts automatically when you log into Windows")
-        print("    - Runs with pythonw.exe so no console window appears")
+        print("    - Launched hidden by the Scheduled Task (via 'py -3', a stable")
+        print("      interpreter path across upgrades; falls back to pythonw.exe)")
         for line in _daemon_access_lines(effective_host):
             print(line)
         print("    - Uses ~2MB of memory\n")
