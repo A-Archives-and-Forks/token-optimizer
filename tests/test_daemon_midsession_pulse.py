@@ -78,12 +78,48 @@ def test_probe_throttle_makes_second_call_a_noop(m, monkeypatch):
 
 def test_revive_throttle_blocks_respawn_while_dead(m, monkeypatch):
     monkeypatch.setattr(m, "_verify_daemon_port", lambda **k: False)  # persistently dead
+    # Dead-but-INSTALLED (scheduler registration present): the ordinary case the
+    # 300s revive throttle bounds. (The plist-ABSENT case bypasses the throttle,
+    # covered by test_revive_bypasses_throttle_when_plist_absent.)
+    monkeypatch.setattr(m, "_daemon_service_installed", lambda system=None: True)
     spawns = _count_spawns(m, monkeypatch)
     assert m._daemon_midsession_pulse() == "revive-spawned"
     # Clear ONLY the probe throttle so we reach the revive-throttle check again.
     m._write_config_flag("last_daemon_midsession_probe", 0)
     assert m._daemon_midsession_pulse() == "revive-throttled"
     assert spawns["n"] == 1, "revive must not respawn within the 300s revive window"
+
+
+def test_revive_bypasses_throttle_when_plist_absent(m, monkeypatch):
+    """FIX-SPEC-DAEMON req 2: a dead daemon with NO scheduler registration (plist
+    absent -- 'something removed it') must self-revive promptly, BYPASSING the
+    300s revive throttle. The throttle is for the transient dead-but-installed
+    case; a missing plist is not that case."""
+    monkeypatch.setattr(m, "_verify_daemon_port", lambda **k: False)  # dead
+    monkeypatch.setattr(m, "_daemon_service_installed", lambda system=None: False)  # plist GONE
+    spawns = _count_spawns(m, monkeypatch)
+    assert m._daemon_midsession_pulse() == "revive-spawned"
+    # Clear the probe throttle so the next call reaches the revive decision again.
+    m._write_config_flag("last_daemon_midsession_probe", 0)
+    # Plist still absent -> bypass the 300s revive window and spawn again.
+    assert m._daemon_midsession_pulse() == "revive-spawned"
+    assert spawns["n"] == 2, "plist-absent case must bypass the 300s revive throttle"
+
+
+def test_plist_absent_probe_error_does_not_raise(m, monkeypatch):
+    """FIX-SPEC-DAEMON fail-open: an error in the new plist-absent protection
+    path degrades to the conservative throttle (never bypasses on uncertainty,
+    never raises into the UserPromptSubmit hot path)."""
+    monkeypatch.setattr(m, "_verify_daemon_port", lambda **k: False)  # dead
+    def _boom(system=None):
+        raise RuntimeError("service probe blew up")
+    monkeypatch.setattr(m, "_daemon_service_installed", _boom)
+    spawns = _count_spawns(m, monkeypatch)
+    # Arm the revive throttle so a bypass would have spawned; the error must
+    # instead degrade to "installed" -> throttle applies -> no spawn, no raise.
+    m._write_config_flag("last_daemon_midsession_revive", int(__import__("time").time()))
+    assert m._daemon_midsession_pulse() == "revive-throttled"
+    assert spawns["n"] == 0
 
 
 def test_disabled_daemon_is_never_revived(m, monkeypatch):

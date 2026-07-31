@@ -73,7 +73,11 @@ def test_report_only_does_not_modify(tmp_path):
     assert mkt.read_text(encoding="utf-8") == before_mkt
 
 
-def test_remove_drops_only_our_stale_entries_leaving_others_byte_identical(tmp_path):
+def test_remove_drops_only_our_stale_entries_leaving_others_byte_identical(tmp_path, monkeypatch):
+    # FIX-SPEC-DAEMON: a genuinely stale identity (installPath gone AND daemon
+    # dead) is still removed. Pin the liveness probe to False so the test is
+    # deterministic regardless of whether a real daemon is running on the host.
+    monkeypatch.setattr(ir, "_dashboard_daemon_alive", lambda: False)
     home = tmp_path / "home"
     plugins_dir = home / "plugins"
     cache = plugins_dir / "cache"
@@ -145,7 +149,10 @@ def test_remove_keeps_active_our_entries(tmp_path):
     assert mkt.read_text(encoding="utf-8") == before_mkt
 
 
-def test_dry_run_with_remove_discloses_but_touches_nothing(tmp_path):
+def test_dry_run_with_remove_discloses_but_touches_nothing(tmp_path, monkeypatch):
+    # FIX-SPEC-DAEMON: deterministic liveness (daemon dead) so the stale
+    # classification holds regardless of a real daemon on the host.
+    monkeypatch.setattr(ir, "_dashboard_daemon_alive", lambda: False)
     home = tmp_path / "home"
     plugins_dir = home / "plugins"
     cache = plugins_dir / "cache"

@@ -23000,6 +23000,11 @@ def _daemon_midsession_pulse():
       * Dead AND revive throttle (300s) open: spawn a DETACHED `daemon-revive`
         subprocess (fire-and-forget) so kickstart + landing-verification run OFF
         the hot path. The next probe (<=60s later) confirms it came back.
+        FIX-SPEC-DAEMON req 2: the 300s revive throttle is SKIPPED when the
+        scheduler registration (plist/unit/task) is ABSENT -- a missing plist is
+        the "something removed it" state, not the transient "port not up yet"
+        case the throttle bounds, so a swept daemon self-revives promptly. The
+        throttle still applies to the ordinary dead-but-INSTALLED case.
 
     Concurrency: the throttle timestamps live in the shared config.json (machine-
     wide, not per-session), so cadence is bounded across parallel sessions. A rare
@@ -23048,13 +23053,25 @@ def _daemon_midsession_pulse():
         # Cheap sleepless liveness probe (identity-checked inside _verify_daemon_port).
         if _verify_daemon_port(timeout_seconds=1, retries=1, retry_sleep=0):
             return "noop-healthy"
-        # Dead. Revive throttle bounds the costly path independently of the probe.
-        last_revive = _read_config_flag("last_daemon_midsession_revive", 0)
+        # Dead. A missing scheduler registration (launchd plist / systemd unit /
+        # scheduled task absent) is a clear "something removed it" state -- distinct
+        # from the transient "port not up yet" case the 300s revive throttle is meant
+        # to bound (FIX-SPEC-DAEMON req 2). Bypass the revive throttle for the
+        # plist-absent case so a swept daemon self-revives promptly mid-session; keep
+        # the throttle for the ordinary dead-but-installed case. Fail-open: a probe
+        # error degrades to "installed" so the conservative throttle still applies
+        # (never bypass on uncertainty, never raise into the hot path).
         try:
-            if now - float(last_revive or 0) < _daemon_pulse_revive_seconds():
-                return "revive-throttled"
-        except (TypeError, ValueError):
-            pass
+            _service_installed = _daemon_service_installed(_normalized_platform())
+        except Exception:  # noqa: BLE001 -- protection must never raise
+            _service_installed = True
+        if _service_installed:
+            last_revive = _read_config_flag("last_daemon_midsession_revive", 0)
+            try:
+                if now - float(last_revive or 0) < _daemon_pulse_revive_seconds():
+                    return "revive-throttled"
+            except (TypeError, ValueError):
+                pass
         _write_config_flag("last_daemon_midsession_revive", int(now))
         # Detached fire-and-forget revive (or first-time install) -- the user's turn
         # must NEVER block on kickstart + landing verification. POSIX detaches via
