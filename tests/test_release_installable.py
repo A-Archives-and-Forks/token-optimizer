@@ -20,6 +20,7 @@ broken -- and passes on a well-formed one.
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -62,8 +63,10 @@ def asset(url):
 
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("curl") is None or shutil.which("python3") is None,
-    reason="gate shells out to curl and python3",
+    sys.platform == "win32"
+    or shutil.which("curl") is None
+    or shutil.which("python3") is None,
+    reason="POSIX-only bash gate harness requiring curl and python3",
 )
 
 

@@ -11,8 +11,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 CHECKER = REPO / "scripts" / "check_docs_claims.py"
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="docs checker exclusions currently use POSIX path separators",
+)
 
 
 def test_docs_claims_match_code():

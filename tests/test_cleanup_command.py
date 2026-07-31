@@ -78,6 +78,7 @@ def _setup_env(tmp_path, monkeypatch):
     monkeypatch.setattr(measure, "DAEMON_LOG_DIR", snap_a / "logs")
     monkeypatch.setattr(measure, "CLAUDE_DIR", home)
     monkeypatch.setattr(measure, "SETTINGS_PATH", home / "settings.json")
+    monkeypatch.setattr(measure, "_SETTINGS_LOCK_PATH", home / ".settings.lock")
 
     # LaunchAgents -> temp
     launch_agents = tmp_path / "Library" / "LaunchAgents"
