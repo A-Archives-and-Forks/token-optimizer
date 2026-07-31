@@ -518,11 +518,10 @@ OPENAI_MODEL_PRICING = {
     "gpt-5.4-nano": {"input": 0.20, "cache_read": 0.02, "output": 1.25},
     "gpt-5.5": {"input": 5.0, "cache_read": 0.50, "output": 30.0},
     "gpt-5.5-pro": {"input": 30.0, "cache_read": 30.0, "output": 180.0},  # cache_read N/A per OpenAI; billed at full input rate
-    # GPT-5.6 three-tier Codex family (Sol flagship / Terra workhorse / Luna cheap).
-    # Verified 2026-07-23 from OpenAI GPT-5.6 preview pricing; cache_read = 10% of input (90% read discount).
-    "gpt-5.6-sol": {"input": 5.0, "cache_read": 0.50, "output": 30.0},
-    "gpt-5.6-terra": {"input": 2.5, "cache_read": 0.25, "output": 15.0},
-    "gpt-5.6-luna": {"input": 1.0, "cache_read": 0.10, "output": 6.0},
+    # GPT-5.6 family. Cache writes cost 1.25x the applicable input rate.
+    "gpt-5.6-sol": {"input": 5.0, "cache_read": 0.50, "cache_write": 6.25, "output": 30.0},
+    "gpt-5.6-terra": {"input": 2.0, "cache_read": 0.20, "cache_write": 2.50, "output": 12.0},
+    "gpt-5.6-luna": {"input": 0.20, "cache_read": 0.02, "cache_write": 0.25, "output": 1.20},
     # GPT-4.x family
     "gpt-4.1": {"input": 2.0, "cache_read": 0.50, "output": 8.0},
     "gpt-4.1-mini": {"input": 0.40, "cache_read": 0.10, "output": 1.60},
@@ -538,6 +537,9 @@ OPENAI_MODEL_PRICING = {
 OPENAI_LONG_CONTEXT_PRICING = {
     "gpt-5.4": {"input": 5.0, "cache_read": 0.50, "output": 22.5},
     "gpt-5.5": {"input": 10.0, "cache_read": 1.0, "output": 45.0},
+    "gpt-5.6-sol": {"input": 10.0, "cache_read": 1.0, "cache_write": 12.50, "output": 45.0},
+    "gpt-5.6-terra": {"input": 4.0, "cache_read": 0.40, "cache_write": 5.0, "output": 18.0},
+    "gpt-5.6-luna": {"input": 0.40, "cache_read": 0.04, "cache_write": 0.50, "output": 1.80},
 }
 OPENAI_LONG_CONTEXT_INPUT_THRESHOLD = 272_000
 
@@ -790,6 +792,7 @@ def _get_model_cost(model, input_tokens, output_tokens, cache_read=0, cache_crea
                 input_tokens * rates["input"] / 1e6
                 + output_tokens * rates["output"] / 1e6
                 + cache_read * rates["cache_read"] / 1e6
+                + cache_create * rates.get("cache_write", 0) / 1e6
             )
 
     normalized = _normalize_model_name(model) if model else None
@@ -841,7 +844,7 @@ def _normalize_openai_model_name(model):
     """Return a priced OpenAI model id, or None when we cannot price exactly."""
     if not model:
         return None
-    value = _strip_provider_prefixes(model)
+    value = re.sub(r"[\s_]+", "-", _strip_provider_prefixes(model))
     if not value or value in {"codex", "openai", "unknown"}:
         return None
     aliases = (
@@ -876,6 +879,8 @@ def _normalize_openai_model_name(model):
     for alias in aliases:
         if value == alias or value.startswith(alias + "-"):
             return alias
+    if value == "gpt-5.6" or value.startswith("gpt-5.6-"):
+        return "gpt-5.6-sol"
     return None
 
 

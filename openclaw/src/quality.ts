@@ -42,7 +42,11 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   opus: 1_000_000,
   sonnet: 1_000_000,
   haiku: 200_000,
-  // OpenAI GPT-5 family (only 5.4 has ~1.1M, rest are ~400K)
+  // OpenAI GPT-5 family
+  "gpt-5.6": 1_050_000,
+  "gpt-5.6-sol": 1_050_000,
+  "gpt-5.6-terra": 1_050_000,
+  "gpt-5.6-luna": 1_050_000,
   "gpt-5.4": 1_100_000,
   "gpt-5.2": 400_000,
   "gpt-5.1": 400_000,
