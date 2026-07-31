@@ -14,7 +14,7 @@
  */
 
 import { contextWindowForModel } from "../util/context-window.js";
-import { DEFAULT_PRICING } from "../pricing.js";
+import { DEFAULT_PRICING, normalizeModelName } from "../pricing.js";
 
 // ---------------------------------------------------------------------------
 // Per-model input rates ($/M tokens). Mirrors Python PRICING_TIERS["anthropic"]
@@ -28,6 +28,9 @@ const MODEL_INPUT_RATES: Record<string, number> = {
   opus: 5.0,
   haiku: 1.0,
   // GPT-5 family
+  "gpt-5.6-sol": 5.0,
+  "gpt-5.6-terra": 2.0,
+  "gpt-5.6-luna": 0.20,
   "gpt-5.5-pro": 30.0,
   "gpt-5.5": 5.0,
   "gpt-5.4": 2.5,
@@ -77,8 +80,9 @@ export function modelInputRatePer1M(model?: string): number {
   const sonnetRate = DEFAULT_PRICING.sonnet.input * 1e6;
   if (!model) return sonnetRate;
   const lower = model.toLowerCase();
+  const canonical = normalizeModelName(model);
 
-  const direct = MODEL_INPUT_RATES[lower];
+  const direct = MODEL_INPUT_RATES[canonical] ?? MODEL_INPUT_RATES[lower];
   if (direct !== undefined) return direct;
 
   // Substring scan (longest key wins via insertion order — most specific first

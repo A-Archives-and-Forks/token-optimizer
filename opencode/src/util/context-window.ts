@@ -10,6 +10,10 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "claude-haiku-4-5": 200_000,
 
   // OpenAI GPT-5 family
+  "gpt-5.6": 1_050_000,
+  "gpt-5.6-sol": 1_050_000,
+  "gpt-5.6-terra": 1_050_000,
+  "gpt-5.6-luna": 1_050_000,
   "gpt-5.5-pro": 1_000_000,
   "gpt-5.5": 1_000_000,
   "gpt-5.4": 1_000_000,

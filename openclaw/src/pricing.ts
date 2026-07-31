@@ -76,6 +76,9 @@ export const DEFAULT_PRICING: Record<string, ModelPricing> = {
   sonnet:          { input: 3.0 / 1e6,   output: 15.0 / 1e6,  cacheRead: 0.3 / 1e6,   cacheWrite: 3.75 / 1e6, cacheWrite1h: 6.0 / 1e6 },
   haiku:           { input: 1.0 / 1e6,   output: 5.0 / 1e6,   cacheRead: 0.1 / 1e6,   cacheWrite: 1.25 / 1e6, cacheWrite1h: 2.0 / 1e6 },
   // OpenAI GPT-5 family
+  "gpt-5.6-sol":   { input: 5.0 / 1e6,   output: 30.0 / 1e6,  cacheRead: 0.50 / 1e6,  cacheWrite: 6.25 / 1e6 },
+  "gpt-5.6-terra": { input: 2.0 / 1e6,   output: 12.0 / 1e6,  cacheRead: 0.20 / 1e6,  cacheWrite: 2.50 / 1e6 },
+  "gpt-5.6-luna":  { input: 0.20 / 1e6,  output: 1.20 / 1e6,  cacheRead: 0.02 / 1e6,  cacheWrite: 0.25 / 1e6 },
   "gpt-5.5-pro":   { input: 30.0 / 1e6,  output: 180.0 / 1e6, cacheRead: 30.0 / 1e6,  cacheWrite: 0 },  // cache N/A per OpenAI; billed at full input rate
   "gpt-5.5":       { input: 5.0 / 1e6,   output: 30.0 / 1e6,  cacheRead: 0.50 / 1e6,  cacheWrite: 0 },
   "gpt-5.4":       { input: 2.5 / 1e6,   output: 15.0 / 1e6,  cacheRead: 0.25 / 1e6,  cacheWrite: 0 },
@@ -138,6 +141,13 @@ export const DEFAULT_PRICING: Record<string, ModelPricing> = {
   "grok-4":        { input: 3.0 / 1e6,   output: 15.0 / 1e6,  cacheRead: 0,           cacheWrite: 0 },
   // Local models (Ollama, free but track tokens)
   "local":         { input: 0,           output: 0,            cacheRead: 0,           cacheWrite: 0 },
+};
+
+const OPENAI_LONG_CONTEXT_INPUT_THRESHOLD = 272_000;
+const OPENAI_LONG_CONTEXT_PRICING: Record<string, ModelPricing> = {
+  "gpt-5.6-sol": { input: 10.0 / 1e6, output: 45.0 / 1e6, cacheRead: 1.0 / 1e6, cacheWrite: 12.50 / 1e6 },
+  "gpt-5.6-terra": { input: 4.0 / 1e6, output: 18.0 / 1e6, cacheRead: 0.40 / 1e6, cacheWrite: 5.0 / 1e6 },
+  "gpt-5.6-luna": { input: 0.40 / 1e6, output: 1.80 / 1e6, cacheRead: 0.04 / 1e6, cacheWrite: 0.50 / 1e6 },
 };
 
 // Sonnet 5 introductory pricing ($2/$10; cacheRead 0.2, cacheWrite 2.5[5m]/4.0[1h]) is in
@@ -286,7 +296,7 @@ function computeNormalizedModelName(modelId: string): string | null {
 
   // Strip one or more provider prefixes:
   // openai/gpt-4o, openrouter/openai/gpt-4o, anthropic:claude-sonnet-4-6.
-  const m = stripProviderPrefixes(modelId);
+  const m = stripProviderPrefixes(modelId).replace(/[\s_]+/g, "-");
 
   // Anthropic
   if (m.includes("fable")) return "fable";
@@ -295,6 +305,11 @@ function computeNormalizedModelName(modelId: string): string | null {
   if (m.includes("haiku")) return "haiku";
 
   // OpenAI GPT-5 family (most-specific first to prevent prefix shadowing)
+  if (m.includes("gpt-5.6")) {
+    if (m.includes("terra")) return "gpt-5.6-terra";
+    if (m.includes("luna")) return "gpt-5.6-luna";
+    return "gpt-5.6-sol";
+  }
   if (m.includes("gpt-5.5-pro")) return "gpt-5.5-pro";
   if (m.includes("gpt-5.5")) return "gpt-5.5";
   if (m.includes("gpt-5.4") && m.includes("nano")) return "gpt-5.4-nano";
@@ -439,10 +454,15 @@ export function calculateCost(
 ): number {
   const pricing = getPricing(openclawDir);
   const pricingKey = pricing[model] ? model : (normalizeModelName(model) ?? model);
-  const rates = pricing[pricingKey];
+  const baseRates = pricing[pricingKey];
 
   // Unknown model with no user-configured pricing: return 0 (show tokens only)
-  if (!rates) return 0;
+  if (!baseRates) return 0;
+  const requestInputTokens = tokens.input + tokens.cacheRead + tokens.cacheWrite;
+  const rates = baseRates === DEFAULT_PRICING[pricingKey]
+    && requestInputTokens > OPENAI_LONG_CONTEXT_INPUT_THRESHOLD
+    ? (OPENAI_LONG_CONTEXT_PRICING[pricingKey] ?? baseRates)
+    : baseRates;
   const multiplier = tierMultiplier(loadPricingTier(openclawDir), pricingKey);
 
   let cacheWriteCost: number;
