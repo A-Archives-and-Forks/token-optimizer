@@ -33,6 +33,9 @@ export const DEFAULT_PRICING: Record<string, ModelPricing> = {
   sonnet:          { input: 3.0 / 1e6,   output: 15.0 / 1e6,  cacheRead: 0.3 / 1e6,   cacheWrite: 3.75 / 1e6, cacheWrite1h: 6.0 / 1e6 },
   haiku:           { input: 1.0 / 1e6,   output: 5.0 / 1e6,   cacheRead: 0.1 / 1e6,   cacheWrite: 1.25 / 1e6, cacheWrite1h: 2.0 / 1e6 },
   // OpenAI GPT-5 family
+  "gpt-5.6-sol":   { input: 5.0 / 1e6,   output: 30.0 / 1e6,  cacheRead: 0.50 / 1e6,  cacheWrite: 6.25 / 1e6 },
+  "gpt-5.6-terra": { input: 2.0 / 1e6,   output: 12.0 / 1e6,  cacheRead: 0.20 / 1e6,  cacheWrite: 2.50 / 1e6 },
+  "gpt-5.6-luna":  { input: 0.20 / 1e6,  output: 1.20 / 1e6,  cacheRead: 0.02 / 1e6,  cacheWrite: 0.25 / 1e6 },
   "gpt-5.5-pro":   { input: 30.0 / 1e6,  output: 180.0 / 1e6, cacheRead: 30.0 / 1e6,  cacheWrite: 0 },
   "gpt-5.5":       { input: 5.0 / 1e6,   output: 30.0 / 1e6,  cacheRead: 0.50 / 1e6,  cacheWrite: 0 },
   "gpt-5.4":       { input: 2.5 / 1e6,   output: 15.0 / 1e6,  cacheRead: 0.25 / 1e6,  cacheWrite: 0 },
@@ -154,13 +157,18 @@ function stripProviderPrefixes(modelId: string): string {
  */
 export function normalizeModelName(modelId: string): string {
   if (!modelId || modelId.startsWith("<")) return modelId || "unknown";
-  const m = stripProviderPrefixes(modelId);
+  const m = stripProviderPrefixes(modelId).replace(/[\s_]+/g, "-");
 
   if (m.includes("fable")) return "fable";
   if (m.includes("opus")) return "opus";
   if (m.includes("sonnet")) return "sonnet";
   if (m.includes("haiku")) return "haiku";
 
+  if (m.includes("gpt-5.6")) {
+    if (m.includes("terra")) return "gpt-5.6-terra";
+    if (m.includes("luna")) return "gpt-5.6-luna";
+    return "gpt-5.6-sol";
+  }
   if (m.includes("gpt-5.5-pro")) return "gpt-5.5-pro";
   if (m.includes("gpt-5.5")) return "gpt-5.5";
   if (m.includes("gpt-5.4") && m.includes("nano")) return "gpt-5.4-nano";

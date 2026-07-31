@@ -149,7 +149,7 @@ These features work identically on Claude Code and Codex:
 | Fleet Auditor | Cross-system scanning across Claude Code, Codex, and custom transcript setups. Use the OpenClaw dashboard for OpenClaw runs |
 | Token Coach | Conversational coaching adapted for AGENTS.md, Codex memories, intelligence levels, reasoning effort |
 | Waste detectors | 11 detectors: PDF ingestion, web search overhead, retry churn, tool cascade, looping, overpowered model, weak model, bad decomposition, wasteful thinking, output waste, cache instability |
-| Cost tracking | Per-turn costs with GPT-5.5/5.4/5.4-Mini/5.3-Codex/5.2 pricing |
+| Cost tracking | Per-turn API-equivalent costs with GPT-5.6 Sol/Terra/Luna, GPT-5.5/5.4/5.4-Mini/5.3-Codex/5.2 pricing |
 | Memory/config audit | AGENTS.md audit (vs CLAUDE.md), Codex memories audit, skills/plugin/MCP inventory |
 | Setup repair | `codex-doctor` with 20 readiness checks, guided hook install, compact prompt setup |
 | Zero dependencies | Pure Python stdlib. No pip install, no telemetry |
@@ -162,7 +162,7 @@ Codex and Claude Code have different hook surfaces, so some features work differ
 |---------|------------|-------|-----|
 | Config file | `CLAUDE.md` | `AGENTS.md` | Different platforms |
 | Memory system | `MEMORY.md` + project memory dirs | `~/.codex/memories/**/*.md` | Different storage |
-| Model routing advice | Opus/Sonnet/Haiku per-agent routing | Intelligence levels (Low/Medium/High/Extra High) + model selection (GPT-5.5, 5.4, 5.4-Mini, 5.3-Codex, 5.2) | Different model families |
+| Model routing advice | Opus/Sonnet/Haiku per-agent routing | Intelligence levels (Low/Medium/High/Extra High) + model selection (GPT-5.6 Sol/Terra/Luna, GPT-5.5, 5.4, 5.4-Mini, 5.3-Codex, 5.2) | Different model families |
 | Hook install | Auto via plugin, 8 hook events | `codex-install` command (global by default), 4 profiles, 3-5 hook events | Codex hooks are newer, fewer events |
 | Compact lifecycle | PreCompact + PostCompact hooks capture/restore | Compact prompt guidance + Stop checkpoints | Codex lacks PreCompact/PostCompact |
 | Tool result archive | PostToolUse archives immediately per tool call | Stop-time backfill from JSONL (balanced), or PostToolUse (telemetry profile) | Different timing |
@@ -189,13 +189,16 @@ Token Optimizer tracks costs for all Codex models:
 
 | Model | Input ($/1M) | Cached ($/1M) | Output ($/1M) |
 |-------|-------------|---------------|---------------|
+| GPT-5.6 Sol | $5.00 | $0.50 | $30.00 |
+| GPT-5.6 Terra | $2.00 | $0.20 | $12.00 |
+| GPT-5.6 Luna | $0.20 | $0.02 | $1.20 |
 | GPT-5.5 | $5.00 | $0.50 | $30.00 |
 | GPT-5.4 | $2.50 | $0.25 | $15.00 |
 | GPT-5.4-Mini | $0.75 | $0.075 | $4.50 |
 | GPT-5.3-Codex | $1.75 | $0.175 | $14.00 |
 | GPT-5.2 | $1.75 | $0.175 | $14.00 |
 
-Prices sourced from OpenAI API pricing. Dashboard shows per-turn costs using the model detected from session logs.
+Prices are API-equivalent estimates sourced from OpenAI API pricing; they do not represent ChatGPT subscription credits or plan limits. Dashboard shows per-turn costs using the model detected from session logs.
 
 ## Verify Setup
 
