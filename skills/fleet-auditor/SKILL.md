@@ -1,6 +1,6 @@
 ---
 name: fleet-auditor
-description: Audit token waste across agent systems (Claude Code, Codex, OpenClaw, Hermes, OpenCode). Detect idle burns, model misrouting, and config bloat with dollar savings.
+description: Cross-system agent token/cost audit (Claude Code, Codex, OpenClaw, Hermes, OpenCode): idle burns, model misrouting, config bloat, with dollar savings.
 ---
 
 # Fleet Auditor: Cross-Platform Agent Token Waste Auditor
