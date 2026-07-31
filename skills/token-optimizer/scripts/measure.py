@@ -93,7 +93,13 @@ except ImportError:  # pragma: no cover - Python < 3.11 fallback
     tomllib = None
 
 from hook_io import read_stdin_hook_input as _read_stdin_hook_input_shared
-from hook_runtime import HookDeadline, LeaseLock, current_deadline, lease_lock
+from hook_runtime import (
+    HookDeadline,
+    LeaseLock,
+    current_deadline,
+    lease_lock,
+    _sweep_stale_leases,
+)
 import plugin_env
 from plugin_env import (
     _all_plugin_data_dirs,
@@ -30116,6 +30122,49 @@ def _quality_cache_tick_due(
         return False
 
 
+# --- Stale-lease sweeper throttle (FIX B) ------------------------------------
+# The sweeper itself lives in hook_runtime._sweep_stale_leases (fail-open, never
+# raises). It is invoked here OPPORTUNISTICALLY + THROTTLED to at most once per
+# 24h via a one-stat marker, mirroring the quality-cache throttle pattern. It is
+# wired into ensure-health (SessionStart), NEVER the hot per-tool-call path, so
+# the scan cost never lands on PostToolUse. The marker is touched AFTER a run so
+# a sweeper crash/timeout retries next session rather than waiting a full day.
+_QLEASE_SWEEP_THROTTLE_SECONDS = 86400
+_QLEASE_SWEEP_MARKER = QUALITY_CACHE_DIR / ".qlease-sweep-throttle"
+
+
+def _qlease_sweep_due():
+    """One-stat gate: True when the last sweep is older than 24h (or never ran)."""
+    try:
+        age = time.time() - _QLEASE_SWEEP_MARKER.stat().st_mtime
+        return age >= _QLEASE_SWEEP_THROTTLE_SECONDS
+    except OSError:
+        return True
+
+
+def maybe_sweep_stale_leases(directory=None):
+    """Throttled, fail-open invocation of the stale-lease sweeper.
+
+    Runs at most once per 24h per install. Wrapped end-to-end in try/except so
+    it can NEVER raise into a hook or block a session. Returns the number of
+    files removed (0 on any error / throttle skip). Exposed for tests.
+    """
+    try:
+        if not _qlease_sweep_due():
+            return 0
+        target = Path(directory) if directory is not None else QUALITY_CACHE_DIR
+        removed = _sweep_stale_leases(target)
+        # Stamp AFTER a successful run so a mid-sweep crash retries next session.
+        try:
+            _QLEASE_SWEEP_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            _QLEASE_SWEEP_MARKER.touch()
+        except OSError:
+            pass
+        return removed
+    except Exception:
+        return 0
+
+
 def _write_checkpoint_atomic(checkpoint_path, content):
     """Atomically write a checkpoint markdown file. Returns True on success.
 
@@ -31071,243 +31120,243 @@ def quality_cache(throttle_seconds=120, warn_threshold=70, quiet=False, session_
                 pass
         return None
 
-    # Run quality analysis
-    quality_data = _parse_jsonl_for_quality(filepath)
-    if not quality_data:
-        # New/empty session - write a clean score to cache so stale score doesn't persist
-        result = {
-            "score": 100,
-            "grade": "S",
-            "signals": {},
-            "breakdown": {},
-            "total_messages": 0,
-            "decisions_found": 0,
-            "compactions": 0,
-            "turns": 0,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "session_file": Path(filepath).name,
-            "model_context_window": detect_context_window()[0],
-        }
-        _write_quality_cache(cache_path, result)
-        _release_quality_lock(_qlock)
-        return 100
-
-    # Carry forward nudge/loop state from previous cache (survives across
-    # UserPromptSubmit → PostCompact boundary for follow-through measurement)
-    prev_result = {}
-    if cache_path.exists():
-        try:
-            prev_result = _read_quality_cache(cache_path) or {}
-        except Exception:
-            prev_result = {}
-
-    _session_id = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
-    result = compute_quality_score(quality_data, session_id=_session_id)
-    for carry_key in _CARRY_KEYS:
-        if carry_key in prev_result and carry_key not in result:
-            result[carry_key] = prev_result[carry_key]
-    result["total_messages"] = len(quality_data["messages"])
-    result["decisions_found"] = len(quality_data["decisions"])
-    result["compactions"] = quality_data["compactions"]
-    result["turns"] = len([m for m in quality_data["messages"] if m[1] == "user"])
-    result["timestamp"] = datetime.now(timezone.utc).isoformat()
-    result["session_file"] = Path(filepath).name
-    result["model"] = quality_data.get("model")
-    result["topic"] = quality_data.get("topic")
-    # Add degradation band for status line
-    cfd = result.get("breakdown", {}).get("context_fill_degradation", {})
-    result["degradation_band"] = cfd.get("band", "")
-    result["fill_pct"] = cfd.get("fill_pct", 0)
-    # Surface the resolved context window at the TOP LEVEL of the cache. Consumers
-    # that compute fill from raw transcript tokens (the VS Code companion's
-    # cacheReader, the dashboard) read `model_context_window` here; without it they
-    # fall back to a 200k guess and inflate every 1M-context session ~5x.
-    result["model_context_window"] = cfd.get("model_context_window") or detect_context_window()[0]
-    # The window alone cannot be sanity-checked by a reader; the source can.
-    result["model_context_window_source"] = (
-        cfd.get("model_context_window_source") or detect_context_window()[1]
-    )
-    result["context_window_contradicted"] = bool(cfd.get("window_contradicted"))
-
-    # Dampen ResourceHealth swings within a session.
-    # Fill_pct fluctuates between measurements (context adds/removes, compaction).
-    # Allow recovery but dampen: drops are immediate, recovery moves 30% toward
-    # the new value per measurement to prevent wild upward swings.
-    prev_rh = prev_result.get("resource_health")
-    current_rh = result.get("resource_health")
-    if prev_rh is not None and current_rh is not None:
-        if current_rh >= prev_rh:
-            result["resource_health"] = round(prev_rh + (current_rh - prev_rh) * 0.3, 1)
-        result["score"] = result["resource_health"]
-        result["grade"] = score_to_grade(round(result["resource_health"]))
-        result["resource_health_grade"] = result["grade"]
-
-    # Session duration + active agents for statusline (v2.6)
-    result["session_start_ts"] = _extract_session_start_ts(filepath)
-    result["active_agents"] = _extract_active_agents(filepath)
-
-    # Cache hit rate for statusline (v5.4.27)
     try:
-        total_input_all = 0
-        total_cache_read = 0
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                try:
-                    rec = json.loads(line)
-                    usage = rec.get("message", {}).get("usage", {}) if rec.get("type") == "assistant" else {}
-                    if usage:
-                        total_input_all += usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0)
-                        total_cache_read += usage.get("cache_read_input_tokens", 0)
-                except (json.JSONDecodeError, AttributeError):
-                    continue
-        result["cache_hit_rate"] = round(total_cache_read / total_input_all, 3) if total_input_all > 0 else 0
-    except (OSError, ZeroDivisionError):
-        result["cache_hit_rate"] = 0
+        # Run quality analysis
+        quality_data = _parse_jsonl_for_quality(filepath)
+        if not quality_data:
+            # New/empty session - write a clean score to cache so stale score doesn't persist
+            result = {
+                "score": 100,
+                "grade": "S",
+                "signals": {},
+                "breakdown": {},
+                "total_messages": 0,
+                "decisions_found": 0,
+                "compactions": 0,
+                "turns": 0,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "session_file": Path(filepath).name,
+                "model_context_window": detect_context_window()[0],
+            }
+            _write_quality_cache(cache_path, result)
+            return 100
 
-    if not _write_quality_cache(cache_path, result):
-        _release_quality_lock(_qlock)
-        return None
+        # Carry forward nudge/loop state from previous cache (survives across
+        # UserPromptSubmit → PostCompact boundary for follow-through measurement)
+        prev_result = {}
+        if cache_path.exists():
+            try:
+                prev_result = _read_quality_cache(cache_path) or {}
+            except Exception:
+                prev_result = {}
 
-    # v5.0: Quality nudges + loop detection
-    # These always run regardless of --quiet, because they emit systemMessage JSON
-    # that Claude Code injects into context. Suppressing them defeats their purpose.
-    system_messages = []
+        _session_id = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
+        result = compute_quality_score(quality_data, session_id=_session_id)
+        for carry_key in _CARRY_KEYS:
+            if carry_key in prev_result and carry_key not in result:
+                result[carry_key] = prev_result[carry_key]
+        result["total_messages"] = len(quality_data["messages"])
+        result["decisions_found"] = len(quality_data["decisions"])
+        result["compactions"] = quality_data["compactions"]
+        result["turns"] = len([m for m in quality_data["messages"] if m[1] == "user"])
+        result["timestamp"] = datetime.now(timezone.utc).isoformat()
+        result["session_file"] = Path(filepath).name
+        result["model"] = quality_data.get("model")
+        result["topic"] = quality_data.get("topic")
+        # Add degradation band for status line
+        cfd = result.get("breakdown", {}).get("context_fill_degradation", {})
+        result["degradation_band"] = cfd.get("band", "")
+        result["fill_pct"] = cfd.get("fill_pct", 0)
+        # Surface the resolved context window at the TOP LEVEL of the cache. Consumers
+        # that compute fill from raw transcript tokens (the VS Code companion's
+        # cacheReader, the dashboard) read `model_context_window` here; without it they
+        # fall back to a 200k guess and inflate every 1M-context session ~5x.
+        result["model_context_window"] = cfd.get("model_context_window") or detect_context_window()[0]
+        # The window alone cannot be sanity-checked by a reader; the source can.
+        result["model_context_window_source"] = (
+            cfd.get("model_context_window_source") or detect_context_window()[1]
+        )
+        result["context_window_contradicted"] = bool(cfd.get("window_contradicted"))
 
-    # Fill warnings fire independently of composite score (Tier 1 monotonicity fix).
-    # These cannot be masked by improving ratio signals. Deduplicated per level
-    # so the same threshold doesn't fire every prompt.
-    fill_warning = result.get("fill_warning")
-    if fill_warning and fill_warning["level"] in ("WARNING", "CRITICAL"):
-        prev_fill_warn_level = prev_result.get("_last_fill_warn_level")
-        if fill_warning["level"] != prev_fill_warn_level:
-            result["_last_fill_warn_level"] = fill_warning["level"]
-            system_messages.append(
-                f"[Token Optimizer] {fill_warning['level']}: {fill_warning['message']}"
+        # Dampen ResourceHealth swings within a session.
+        # Fill_pct fluctuates between measurements (context adds/removes, compaction).
+        # Allow recovery but dampen: drops are immediate, recovery moves 30% toward
+        # the new value per measurement to prevent wild upward swings.
+        prev_rh = prev_result.get("resource_health")
+        current_rh = result.get("resource_health")
+        if prev_rh is not None and current_rh is not None:
+            if current_rh >= prev_rh:
+                result["resource_health"] = round(prev_rh + (current_rh - prev_rh) * 0.3, 1)
+            result["score"] = result["resource_health"]
+            result["grade"] = score_to_grade(round(result["resource_health"]))
+            result["resource_health_grade"] = result["grade"]
+
+        # Session duration + active agents for statusline (v2.6)
+        result["session_start_ts"] = _extract_session_start_ts(filepath)
+        result["active_agents"] = _extract_active_agents(filepath)
+
+        # Cache hit rate for statusline (v5.4.27)
+        try:
+            total_input_all = 0
+            total_cache_read = 0
+            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                        usage = rec.get("message", {}).get("usage", {}) if rec.get("type") == "assistant" else {}
+                        if usage:
+                            total_input_all += usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0)
+                            total_cache_read += usage.get("cache_read_input_tokens", 0)
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
+            result["cache_hit_rate"] = round(total_cache_read / total_input_all, 3) if total_input_all > 0 else 0
+        except (OSError, ZeroDivisionError):
+            result["cache_hit_rate"] = 0
+
+        if not _write_quality_cache(cache_path, result):
+            return None
+
+        # v5.0: Quality nudges + loop detection
+        # These always run regardless of --quiet, because they emit systemMessage JSON
+        # that Claude Code injects into context. Suppressing them defeats their purpose.
+        system_messages = []
+
+        # Fill warnings fire independently of composite score (Tier 1 monotonicity fix).
+        # These cannot be masked by improving ratio signals. Deduplicated per level
+        # so the same threshold doesn't fire every prompt.
+        fill_warning = result.get("fill_warning")
+        if fill_warning and fill_warning["level"] in ("WARNING", "CRITICAL"):
+            prev_fill_warn_level = prev_result.get("_last_fill_warn_level")
+            if fill_warning["level"] != prev_fill_warn_level:
+                result["_last_fill_warn_level"] = fill_warning["level"]
+                system_messages.append(
+                    f"[Token Optimizer] {fill_warning['level']}: {fill_warning['message']}"
+                )
+
+        # Tool call fatigue warnings (independent of composite score)
+        tool_call_warning = result.get("tool_call_warning")
+        if tool_call_warning and tool_call_warning["level"] in ("WARNING", "CRITICAL"):
+            prev_tc_level = prev_result.get("_last_tool_call_warn_level")
+            if tool_call_warning["level"] != prev_tc_level:
+                result["_last_tool_call_warn_level"] = tool_call_warning["level"]
+                system_messages.append(
+                    f"[Token Optimizer] {tool_call_warning['level']}: {tool_call_warning['message']}"
+                )
+
+        # Fresh-session nudge takes precedence: when a session is long AND degraded,
+        # "start fresh (context is preserved)" is the stronger remedy than /compact, and
+        # firing both would be noise. Only fall back to the /compact nudge if it didn't fire.
+        fresh_msg = _maybe_fresh_session_nudge(result, cache_path, quality_data)
+        if not fresh_msg:
+            nudge_msg = _maybe_nudge(result, cache_path, quality_data)
+            if nudge_msg:
+                system_messages.append(nudge_msg)
+        loop_msg = _maybe_loop_warning(result, cache_path, quality_data)
+        if loop_msg:
+            system_messages.append(loop_msg)
+        # Persist nudge/loop/fresh state (the once-per-session _fresh_nudge_fired flag
+        # must survive even if only the fresh nudge fired this turn).
+        if system_messages or fresh_msg:
+            _write_quality_cache(cache_path, result)
+        if system_messages:
+            # Gate the routine informational batch (quality/loop/fill warnings) under
+            # context pressure.
+            _emit_msgs = True
+            try:
+                from context_pressure import should_inject, get_pressure_level, log_suppression
+                _sf = str(filepath) if filepath else None
+                _sid = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
+                if not should_inject(_sf, session_id=_sid, priority="informational"):
+                    log_suppression("quality_system_messages", get_pressure_level(_sf, session_id=_sid))
+                    _emit_msgs = False
+            except Exception:
+                pass
+            if _emit_msgs:
+                for msg in system_messages:
+                    try:
+                        print(json.dumps({"systemMessage": msg}))
+                    except Exception:
+                        pass
+        # The fresh-session nudge BYPASSES pressure suppression on purpose: it fires at
+        # most once per session and is most relevant precisely when the session is
+        # degraded (i.e. under pressure). Suppressing it would defeat its purpose and
+        # silently burn the one-shot -- the exact bug where users never saw it.
+        if fresh_msg:
+            try:
+                print(json.dumps({"systemMessage": fresh_msg}))
+            except Exception:
+                pass
+
+        # Nudge follow-through: if PostCompact triggered this run (force=True)
+        # and a nudge preceded the compact, measure the actual fill_pct recovery.
+        if force and result.get("fill_pct", 0) > 0:
+            # A6: the nudge fires during a prior UserPromptSubmit process; this
+            # follow-through runs in a SEPARATE PostCompact process. Fire-state reaches
+            # us via the atomic per-session quality cache (carried forward at the top of
+            # this function). Fall back to prev_result directly in case the carry did not
+            # run, so a heeded session is never misclassified as ignored. Wrapped so a
+            # corrupt cache value can never crash the host hook — it degrades to "no
+            # credit", not a traceback.
+            try:
+                nudge_fill = result.get("_nudge_fill_pct_at_fire") or prev_result.get("_nudge_fill_pct_at_fire", 0)
+                if nudge_fill > 0:
+                    current_fill = result["fill_pct"]
+                    fill_delta = nudge_fill - current_fill
+                    ft_sid = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
+                    # A2 temporal gate: only credit a compaction that followed the nudge
+                    # within the window. A compaction long after the nudge was not its
+                    # follow-through, so it must not borrow the nudge's credit.
+                    fire_epoch = result.get("_nudge_fire_epoch") or prev_result.get("_nudge_fire_epoch", 0)
+                    within_window = fire_epoch and (time.time() - fire_epoch) <= _NUDGE_FOLLOWTHROUGH_WINDOW_SECONDS
+                    # A2 dedup: if a checkpoint_restore already credited this session's
+                    # recovery for this compaction (same SessionStart cycle), the nudge
+                    # must not double-credit the same tokens.
+                    already_credited = _checkpoint_restore_credited_recently(ft_sid)
+                    should_credit = fill_delta > 5 and within_window and not already_credited
+                    # Consume the fire-state FIRST, then credit only if the consume was
+                    # actually persisted. The fire-state lives in exactly one place (this
+                    # per-session cache), so once it is cleared from disk no later
+                    # PostCompact can re-enter this block for the same nudge — that makes
+                    # the credit idempotent without a second DB query. If the process
+                    # dies between here and the credit, or the clear-write fails, we skip
+                    # the credit (a conservative under-count) rather than risk a
+                    # double-count that would inflate the savings number.
+                    result.pop("_nudge_fill_pct_at_fire", None)
+                    result.pop("_nudge_fire_epoch", None)
+                    consumed = _write_quality_cache(cache_path, result)
+                    if should_credit and consumed:
+                        context_size = detect_context_window()[0]
+                        measured_tokens_recovered = int(context_size * fill_delta / 100)
+                        _log_compression_event(
+                            feature="quality_nudge",
+                            original_text=" " * (measured_tokens_recovered * 4),
+                            compressed_text=f"nudge_followthrough:fill={nudge_fill}->{current_fill}",
+                            session_id=ft_sid,
+                            detail=f"measured_recovery: fill {nudge_fill}%->{current_fill}% = {measured_tokens_recovered} tokens on {context_size} context",
+                            verified=True,
+                        )
+            except Exception:
+                pass
+
+        # Progressive checkpoints (v3.0)
+        if _PROGRESSIVE_ENABLED and result.get("fill_pct", 0) > 0:
+            _maybe_progressive_checkpoint(
+                fill_pct=result["fill_pct"],
+                cache_path=cache_path,
+                result=result,
+                filepath=filepath,
             )
 
-    # Tool call fatigue warnings (independent of composite score)
-    tool_call_warning = result.get("tool_call_warning")
-    if tool_call_warning and tool_call_warning["level"] in ("WARNING", "CRITICAL"):
-        prev_tc_level = prev_result.get("_last_tool_call_warn_level")
-        if tool_call_warning["level"] != prev_tc_level:
-            result["_last_tool_call_warn_level"] = tool_call_warning["level"]
-            system_messages.append(
-                f"[Token Optimizer] {tool_call_warning['level']}: {tool_call_warning['message']}"
-            )
-
-    # Fresh-session nudge takes precedence: when a session is long AND degraded,
-    # "start fresh (context is preserved)" is the stronger remedy than /compact, and
-    # firing both would be noise. Only fall back to the /compact nudge if it didn't fire.
-    fresh_msg = _maybe_fresh_session_nudge(result, cache_path, quality_data)
-    if not fresh_msg:
-        nudge_msg = _maybe_nudge(result, cache_path, quality_data)
-        if nudge_msg:
-            system_messages.append(nudge_msg)
-    loop_msg = _maybe_loop_warning(result, cache_path, quality_data)
-    if loop_msg:
-        system_messages.append(loop_msg)
-    # Persist nudge/loop/fresh state (the once-per-session _fresh_nudge_fired flag
-    # must survive even if only the fresh nudge fired this turn).
-    if system_messages or fresh_msg:
-        _write_quality_cache(cache_path, result)
-    if system_messages:
-        # Gate the routine informational batch (quality/loop/fill warnings) under
-        # context pressure.
-        _emit_msgs = True
-        try:
-            from context_pressure import should_inject, get_pressure_level, log_suppression
-            _sf = str(filepath) if filepath else None
-            _sid = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
-            if not should_inject(_sf, session_id=_sid, priority="informational"):
-                log_suppression("quality_system_messages", get_pressure_level(_sf, session_id=_sid))
-                _emit_msgs = False
-        except Exception:
-            pass
-        if _emit_msgs:
-            for msg in system_messages:
-                try:
-                    print(json.dumps({"systemMessage": msg}))
-                except Exception:
-                    pass
-    # The fresh-session nudge BYPASSES pressure suppression on purpose: it fires at
-    # most once per session and is most relevant precisely when the session is
-    # degraded (i.e. under pressure). Suppressing it would defeat its purpose and
-    # silently burn the one-shot -- the exact bug where users never saw it.
-    if fresh_msg:
-        try:
-            print(json.dumps({"systemMessage": fresh_msg}))
-        except Exception:
-            pass
-
-    # Nudge follow-through: if PostCompact triggered this run (force=True)
-    # and a nudge preceded the compact, measure the actual fill_pct recovery.
-    if force and result.get("fill_pct", 0) > 0:
-        # A6: the nudge fires during a prior UserPromptSubmit process; this
-        # follow-through runs in a SEPARATE PostCompact process. Fire-state reaches
-        # us via the atomic per-session quality cache (carried forward at the top of
-        # this function). Fall back to prev_result directly in case the carry did not
-        # run, so a heeded session is never misclassified as ignored. Wrapped so a
-        # corrupt cache value can never crash the host hook — it degrades to "no
-        # credit", not a traceback.
-        try:
-            nudge_fill = result.get("_nudge_fill_pct_at_fire") or prev_result.get("_nudge_fill_pct_at_fire", 0)
-            if nudge_fill > 0:
-                current_fill = result["fill_pct"]
-                fill_delta = nudge_fill - current_fill
-                ft_sid = Path(cache_path).stem.replace("quality-cache-", "", 1) if cache_path else None
-                # A2 temporal gate: only credit a compaction that followed the nudge
-                # within the window. A compaction long after the nudge was not its
-                # follow-through, so it must not borrow the nudge's credit.
-                fire_epoch = result.get("_nudge_fire_epoch") or prev_result.get("_nudge_fire_epoch", 0)
-                within_window = fire_epoch and (time.time() - fire_epoch) <= _NUDGE_FOLLOWTHROUGH_WINDOW_SECONDS
-                # A2 dedup: if a checkpoint_restore already credited this session's
-                # recovery for this compaction (same SessionStart cycle), the nudge
-                # must not double-credit the same tokens.
-                already_credited = _checkpoint_restore_credited_recently(ft_sid)
-                should_credit = fill_delta > 5 and within_window and not already_credited
-                # Consume the fire-state FIRST, then credit only if the consume was
-                # actually persisted. The fire-state lives in exactly one place (this
-                # per-session cache), so once it is cleared from disk no later
-                # PostCompact can re-enter this block for the same nudge — that makes
-                # the credit idempotent without a second DB query. If the process
-                # dies between here and the credit, or the clear-write fails, we skip
-                # the credit (a conservative under-count) rather than risk a
-                # double-count that would inflate the savings number.
-                result.pop("_nudge_fill_pct_at_fire", None)
-                result.pop("_nudge_fire_epoch", None)
-                consumed = _write_quality_cache(cache_path, result)
-                if should_credit and consumed:
-                    context_size = detect_context_window()[0]
-                    measured_tokens_recovered = int(context_size * fill_delta / 100)
-                    _log_compression_event(
-                        feature="quality_nudge",
-                        original_text=" " * (measured_tokens_recovered * 4),
-                        compressed_text=f"nudge_followthrough:fill={nudge_fill}->{current_fill}",
-                        session_id=ft_sid,
-                        detail=f"measured_recovery: fill {nudge_fill}%->{current_fill}% = {measured_tokens_recovered} tokens on {context_size} context",
-                        verified=True,
-                    )
-        except Exception:
-            pass
-
-    # Progressive checkpoints (v3.0)
-    if _PROGRESSIVE_ENABLED and result.get("fill_pct", 0) > 0:
-        _maybe_progressive_checkpoint(
-            fill_pct=result["fill_pct"],
+        _maybe_checkpoint_on_quality_or_milestone(
+            quality_data=quality_data,
             cache_path=cache_path,
             result=result,
             filepath=filepath,
         )
 
-    _maybe_checkpoint_on_quality_or_milestone(
-        quality_data=quality_data,
-        cache_path=cache_path,
-        result=result,
-        filepath=filepath,
-    )
-
-    _release_quality_lock(_qlock)
-    return result.get("score")
+        return result.get("score")
+    finally:
+        _release_quality_lock(_qlock)
 
 
 def _stable_marketplace_script_path(script_name):
@@ -36498,6 +36547,18 @@ def run_ensure_health():
     except Exception as _e:
         print(f"  [Token Optimizer] dashboard daemon self-heal failed: {_e}", file=sys.stderr)
 
+    # FIX B: bounded stale-lease sweeper. Self-heals the unbounded ``.qlease``
+    # tombstone / orphan candidate / legacy ``.qlock`` litter that release()
+    # intentionally leaves for the next contender (most sessions get none, so
+    # they leak forever). Throttled to once per 24h via a one-stat marker, capped
+    # at max_files per run, and fail-open -- it NEVER raises into the hook and
+    # runs AFTER the daemon revive so it can never starve it. Not on the hot
+    # per-tool-call path (this is the SessionStart ensure-health path only).
+    try:
+        maybe_sweep_stale_leases()
+    except Exception:
+        pass
+
     # VS Code-family status-bar extension auto-install. Only meaningful for the
     # Claude runtime running inside a VS Code/Cursor/Windsurf editor; the detector
     # no-ops everywhere else (plain terminal, foreign runtimes). Default-on with a
@@ -36833,6 +36894,51 @@ def run_ensure_health():
             _write_config_flag("autoupdate_nudge_shown", True)
     except Exception:
         pass
+
+
+# FIX C: the dashboard-daemon ensure/revive must run BEFORE the rest of the
+# health work and under its own short independent wall-clock guard, so a slow
+# health scan that later trips the 8s SessionStart budget can never skip
+# reinstalling a missing launchd plist / dead daemon. ``_ensure_dashboard_daemon``
+# is idempotent + internally throttled (cheap-gate-first), so the second call
+# inside ``run_ensure_health`` below is a cheap no-op (the attempt timestamp is
+# already stamped). launchd KeepAlive+RunAtLoad persists a once-installed daemon;
+# the requirement here is only that a MISSING plist is reliably reinstalled even
+# under time pressure. Fail-open: never raises into the hook.
+_ENSURE_HEALTH_DAEMON_REVIVE_BUDGET = 6
+
+
+def _ensure_health_daemon_revive_first():
+    """Run the dashboard-daemon ensure/revive FIRST, under its own short guard.
+
+    Distinct from the daemon AUTO-UPDATE block inside run_ensure_health: that
+    block refreshes a stale script for an already-installed daemon and runs
+    AFTER the cheap writes; this runs FIRST so a missing/dead daemon is restored
+    before any health work can exhaust the budget. Idempotent + fail-open.
+    """
+    _daemon_deadline = _install_hook_budget(_ENSURE_HEALTH_DAEMON_REVIVE_BUDGET)
+    try:
+        _status = _ensure_dashboard_daemon()
+        if _status == "installed":
+            print("  [Token Optimizer] Installed the dashboard daemon. "
+                  f"Bookmark this exact URL: http://localhost:{DAEMON_PORT}/token-optimizer "
+                  "(the /token-optimizer path is required -- the bare host:port won't load it). "
+                  "Opt out anytime: measure.py setup-daemon --uninstall")
+        elif _status == "restarted":
+            print("  [Token Optimizer] Restarted the dashboard daemon.")
+        elif _status == "restart-stale":
+            print("  [Token Optimizer] dashboard daemon restarted but still "
+                  "serving a stale version; run: measure.py setup-daemon",
+                  file=sys.stderr)
+    except _HookTimeout:
+        # Test-injected timeout sentinel (production watchdog hard-exits). Swallow
+        # so the remaining health work still runs under its own 8s guard.
+        pass
+    except Exception:
+        # Fail-open: a daemon-revive error must never break SessionStart.
+        pass
+    finally:
+        _clear_hook_budget(_daemon_deadline)
 
 
 # The provenance label is untrusted input rendered into the model's context.
@@ -38996,6 +39102,14 @@ if __name__ == "__main__":
         # new session indefinitely. Handler exits 0 gracefully on timeout;
         # the 24h throttle on internal self-heal paths means the next
         # SessionStart is typically a no-op anyway.
+        #
+        # FIX C: the dashboard-daemon ensure/revive runs FIRST, under its own
+        # short independent guard, BEFORE the 8s health budget is armed. A slow
+        # health scan that later trips the 8s watchdog can therefore never skip
+        # reinstalling a missing launchd plist / dead daemon. The daemon ensure
+        # is idempotent + internally throttled, so the second call inside
+        # run_ensure_health is a cheap no-op. Fail-open: never raises.
+        _ensure_health_daemon_revive_first()
         _tok_hook_old_sig = _install_hook_budget(8)
         try:
             run_ensure_health()
