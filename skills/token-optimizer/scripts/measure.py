@@ -6347,6 +6347,36 @@ def _generate_codex_auto_recommendations(components, trends=None, days=30):
     return plan_md, total_count
 
 
+# Token Optimizer's OWN skills. The tool must NEVER recommend archiving, trimming,
+# or cutting the very features that do the measuring — suggesting a user delete
+# token-coach/fleet-auditor to "save ~200 tokens" is self-cannibalizing and reads
+# as the plugin undermining itself (issue #111). These are always excluded from
+# unused-skill / archive recommendations regardless of invocation history: an
+# audit tool you never explicitly "invoke" is not the same as an unused skill.
+_OWN_TOOL_SKILLS = frozenset({
+    "token-optimizer", "token-coach", "token-dashboard", "fleet-auditor",
+    "token-optimizer:token-optimizer", "token-optimizer:token-coach",
+    "token-optimizer:token-dashboard", "token-optimizer:fleet-auditor",
+    "token-optimizer:health", "token-optimizer:quick",
+})
+
+
+def _is_own_tool_skill(name) -> bool:
+    """True if `name` is one of Token Optimizer's own skills (never recommend cutting it)."""
+    if not name:
+        return False
+    n = str(name).strip().lower()
+    base = n.rsplit(":", 1)[-1].rsplit("/", 1)[-1]
+    return (
+        n in _OWN_TOOL_SKILLS
+        or base in _OWN_TOOL_SKILLS
+        or base.startswith("token-optimizer")
+        or base.startswith("token-coach")
+        or base.startswith("token-dashboard")
+        or base.startswith("fleet-auditor")
+    )
+
+
 def generate_auto_recommendations(components, trends=None, days=30):
     """Generate rule-based optimization recommendations without any LLM.
 
@@ -6447,7 +6477,11 @@ def generate_auto_recommendations(components, trends=None, days=30):
     _si = components.get("skills", {})
     _actual_avg = _si.get("tokens", 0) // max(_si.get("count", 1), 1) if _si.get("count", 0) > 0 else TOKENS_PER_SKILL_APPROX
     if trends:
-        never_used = trends.get("skills", {}).get("never_used", [])
+        # Never recommend cutting our own measurement skills (issue #111).
+        never_used = [
+            s for s in trends.get("skills", {}).get("never_used", [])
+            if not _is_own_tool_skill(s)
+        ]
         installed_count = trends.get("skills", {}).get("installed_count", 0)
         if len(never_used) >= 5:
             overhead = len(never_used) * _actual_avg
