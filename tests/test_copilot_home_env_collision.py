@@ -30,6 +30,8 @@ import tempfile
 from contextlib import redirect_stderr
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "token-optimizer" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -104,6 +106,7 @@ def test_to_var_takes_precedence_over_copilot_home():
 
 # --- Part 4: /mnt COPILOT_HOME guardrail + dedup ---------------------------
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only WSL /mnt path semantics")
 def test_mnt_copilot_home_guardrail_fires_once():
     # The guardrail keys off the literal "/mnt/" prefix of the raw value (real
     # production path), independent of any mnt_root injection.

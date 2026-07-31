@@ -142,6 +142,7 @@ def test_windows_uses_creationflags_to_detach(m, monkeypatch):
     monkeypatch.setattr(m.subprocess, "DETACHED_PROCESS", 0x8, raising=False)
     monkeypatch.setattr(m.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
     monkeypatch.setattr(m.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x1000000, raising=False)
+    monkeypatch.setattr(m.subprocess, "CREATE_NO_WINDOW", 0x8000000, raising=False)
     captured = {}
     def fake_popen(argv, *a, **k):
         captured.update(k)
@@ -150,7 +151,7 @@ def test_windows_uses_creationflags_to_detach(m, monkeypatch):
     monkeypatch.setattr(m.subprocess, "Popen", fake_popen)
     assert m._daemon_midsession_pulse() == "revive-spawned"
     assert "creationflags" in captured, "Windows spawn must pass creationflags"
-    assert captured["creationflags"] == (0x8 | 0x200 | 0x1000000)
+    assert captured["creationflags"] == (0x8 | 0x200 | 0x1000000 | 0x8000000)
     assert "start_new_session" not in captured
 
 
