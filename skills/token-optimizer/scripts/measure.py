@@ -551,6 +551,7 @@ OPENAI_LONG_CONTEXT_INPUT_THRESHOLD = 272_000
 
 GEMINI_MODEL_PRICING = {
     # Prices per 1M tokens from ai.google.dev/gemini-api/docs/pricing (May 2026).
+    "gemini-3.6-flash": {"input": 1.50, "cache_read": 0.15, "output": 7.50},  # released 2026-07-21; 17% output cut vs 3.5-flash
     "gemini-3.5-flash": {"input": 1.50, "cache_read": 0.15, "output": 9.0},
     "gemini-3.1-pro-preview": {"input": 2.0, "cache_read": 0.20, "output": 12.0},
     "gemini-3.1-flash-lite": {"input": 0.25, "cache_read": 0.025, "output": 1.50},
