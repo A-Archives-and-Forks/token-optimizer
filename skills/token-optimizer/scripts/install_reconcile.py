@@ -659,6 +659,51 @@ def _entry_is_stale(install_path: str) -> bool:
         return True
 
 
+# Default dashboard daemon port (mirrors measure.DAEMON_PORT). Read from the
+# env so tests can point the probe at a closed port without importing measure.
+_DEFAULT_DAEMON_PORT = 24842
+
+
+def _daemon_port() -> int:
+    """The dashboard daemon port, overridable via TOKEN_OPTIMIZER_DAEMON_PORT."""
+    try:
+        return int(os.environ.get("TOKEN_OPTIMIZER_DAEMON_PORT", _DEFAULT_DAEMON_PORT))
+    except (TypeError, ValueError):
+        return _DEFAULT_DAEMON_PORT
+
+
+def _dashboard_daemon_alive(port: int | None = None, timeout: float = 1.0) -> bool:
+    """True iff OUR dashboard daemon is currently serving on the loopback port.
+
+    Self-contained liveness probe (no ``measure`` import -- that would be
+    circular: measure imports this module). Used by ``reconcile_uninstall`` to
+    protect a LIVE daemon's manifest entry from a stale-path misclassification
+    during a routine plugin update: when the marketplace cache path moves on
+    update, the active identity's ``installPath`` is momentarily gone, so the
+    bare "installPath missing -> stale" rule would drop the running daemon's
+    manifest entry and orphan it (a later sweep then tears down the plist). A
+    live daemon on the port disproves "stale", so the entry is kept.
+
+    Identity-checked: only trusts the response when ``server ==
+    "token-optimizer-daemon"`` (mirrors ``measure._verify_daemon_port``), so a
+    foreign listener on the port never fakes liveness. Fail-open: any error ->
+    False, so a probe failure falls back to the existing installPath rule and
+    can never block a legitimate stale removal -- and never raises.
+    """
+    if port is None:
+        port = _daemon_port()
+    try:
+        import urllib.request
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/health", timeout=timeout
+        ) as resp:
+            body = resp.read(2048).decode("utf-8", "replace")
+        data = json.loads(body)
+        return isinstance(data, dict) and data.get("server") == "token-optimizer-daemon"
+    except Exception:  # noqa: BLE001 -- probe must never raise
+        return False
+
+
 def _atomic_write_json(path: Path, data) -> bool:
     """Write JSON to ``path`` via a temp file + os.replace. Returns success."""
     import tempfile
@@ -735,23 +780,47 @@ def reconcile_uninstall(
 
     registry = _load_installed_plugins(home)
     our_keys = _our_plugin_keys(registry)
+    # FIX-SPEC-DAEMON req 1: a LIVE dashboard daemon disproves "stale". During a
+    # routine plugin update the marketplace cache path can move, so the active
+    # identity's installPath is momentarily gone and the bare "installPath
+    # missing -> stale" rule would drop the running daemon's manifest entry
+    # (orphaning it -- a later sweep then tears down the plist). Probe the daemon
+    # once; if it is alive, no our-entry is classified stale, so a routine update
+    # never removes the active daemon's manifest entry. Fail-open: a probe error
+    # -> not alive (the installPath rule still removes genuinely-stale entries),
+    # and the call site below also guards so the protection can never raise.
+    daemon_alive = False
+    if our_keys:
+        try:
+            daemon_alive = _dashboard_daemon_alive()
+        except Exception:  # noqa: BLE001 -- protection must never raise
+            daemon_alive = False
     stale_keys: list[str] = []
     for key in our_keys:
         installs = registry.get("plugins", {}).get(key, [])
         if not isinstance(installs, list) or not installs:
-            stale_keys.append(key)
+            # No install records -- stale unless a live daemon protects it.
+            if not daemon_alive:
+                stale_keys.append(key)
             continue
         # An entry is stale if ALL its install records point at gone paths.
         all_gone = all(
             _entry_is_stale(str(inst.get("installPath", "")))
             for inst in installs if isinstance(inst, dict)
         ) or not any(isinstance(inst, dict) for inst in installs)
+        # FIX-SPEC-DAEMON req 1: a live daemon protects the active identity
+        # from a stale-path misclassification during a plugin update (the
+        # marketplace cache path moved, so installPath is gone but the daemon
+        # is still serving). Classified active/kept, never removed by reconcile.
+        if all_gone and daemon_alive:
+            all_gone = False
         if all_gone:
             stale_keys.append(key)
         result["reported"].append({
             "file": str(installed_path),
             "key": key,
             "stale": all_gone,
+            "daemon_alive": daemon_alive,
             "install_path": installs[0].get("installPath", "") if isinstance(installs[0], dict) else "",
         })
 
