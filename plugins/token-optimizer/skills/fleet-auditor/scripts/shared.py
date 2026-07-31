@@ -38,7 +38,7 @@ def normalize_model_name(model_id: str) -> str | None:
     """
     if not model_id or model_id.startswith("<"):
         return None
-    m = _strip_provider_prefixes(model_id)
+    m = re.sub(r"[\s_]+", "-", _strip_provider_prefixes(model_id))
     # Match OpenClaw behavior: provider-qualified IDs like openai/gpt-4o,
     # openrouter/openai/gpt-4o, or anthropic:claude-sonnet-4-6 should price as
     # their underlying model.
@@ -52,6 +52,9 @@ def normalize_model_name(model_id: str) -> str | None:
         return "haiku"
     # OpenAI GPT-5 family (most-specific first to prevent prefix shadowing)
     for alias in (
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
         "gpt-5.5-pro",
         "gpt-5.4-mini",
         "gpt-5.4-nano",
@@ -79,6 +82,8 @@ def normalize_model_name(model_id: str) -> str | None:
     ):
         if m == alias or m.startswith(alias + "-"):
             return alias
+    if m == "gpt-5.6" or m.startswith("gpt-5.6-"):
+        return "gpt-5.6-sol"
     for alias in (
         "gemini-3.1-pro-preview",
         "gemini-3.1-flash-lite",
