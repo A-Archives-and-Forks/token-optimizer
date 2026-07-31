@@ -326,6 +326,7 @@ def test_daemon_revive_nt_uses_creationflags(m, monkeypatch):
     assert "start_new_session" not in cap
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="asserts POSIX spawn behavior (start_new_session, no creationflags); the NT variant covers Windows")
 def test_daemon_revive_posix_uses_start_new_session(m, monkeypatch):
     monkeypatch.setattr(m, "_verify_daemon_port", lambda **k: False)
     _set_posix_spawn_utils(monkeypatch)

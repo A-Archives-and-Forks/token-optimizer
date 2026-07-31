@@ -143,6 +143,7 @@ def test_report_only_with_live_daemon_tags_active_kept(tmp_path, monkeypatch):
     assert mkt.read_text(encoding="utf-8") == before_mkt
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="launchd plist / os.getuid is POSIX/macOS-only; Windows uninstall uses Task Scheduler")
 def test_setup_daemon_uninstall_still_removes_plist(tmp_path, monkeypatch):
     """Non-negotiable: an explicit ``setup_daemon --uninstall`` still fully
     removes the daemon plist + per-identity files. The req-1 protection lives
