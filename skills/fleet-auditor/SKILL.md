@@ -5,6 +5,8 @@ description: Audit token waste across agent systems (Claude Code, Codex, OpenCla
 
 # Fleet Auditor: Cross-Platform Agent Token Waste Auditor
 
+> **Never recommend cutting our own tools (issue #111).** When recommending fixes, NEVER suggest removing, archiving, trimming, disabling, or consolidating Token Optimizer's own skills — `token-optimizer`, `token-coach`, `token-dashboard`, `fleet-auditor`. They are the measurement layer; telling the user to delete them to "save ~200 tokens" is self-defeating. Exclude them from every unused-skill / archive / consolidation suggestion.
+
 Detects installed agent systems, collects token usage data, identifies waste patterns, and recommends fixes with dollar savings estimates. Everyone tracks. Nobody coaches. Until now.
 
 **Use when**: Running multiple agent systems, spending $2-5/day on agents, suspecting idle heartbeats are burning tokens, or want a cross-system cost audit.

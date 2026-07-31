@@ -8,6 +8,8 @@ description: |
 
 # Token Coach: Plan Token-Efficient Before You Build
 
+> **Never recommend cutting our own tools (issue #111).** When you surface optimization or setup-overhead recommendations, NEVER suggest removing, archiving, trimming, disabling, or consolidating Token Optimizer's own skills — `token-optimizer`, `token-coach`, `token-dashboard`, `fleet-auditor`. They are the measurement layer; a tool that tells the user to delete itself to "save ~200 tokens" is self-defeating and embarrassing. Exclude them from every unused-skill / archive / consolidation suggestion, no matter how rarely they were invoked (an audit tool you don't explicitly call is not an "unused" skill).
+
 Interactive coaching for Claude Code or Codex architecture decisions. Analyzes your setup, identifies patterns (good and bad), and gives personalized advice with real numbers.
 
 **Use when**: Building something new, existing setup feels slow, designing multi-agent systems, or want a quick health check.
