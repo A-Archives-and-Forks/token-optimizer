@@ -4314,10 +4314,21 @@ def _codex_state_summary():
     """
     if detect_runtime() != "codex":
         return None
+    # Resolve the active thread id ONCE from the state DB and scope every
+    # Codex-state metric to its goal subtree. Without this, subagent_costs and
+    # goal_budgets aggregate EVERY spawn edge/goal in the DB (including closed
+    # historical ones from unrelated prior work), inflating totals and letting
+    # `quality current` pick a stale session (issue #108). Fail-open: a None
+    # resolution falls back to the legacy whole-DB aggregation.
+    try:
+        current_tid = codex_state.current_thread_id()
+    except Exception:
+        current_tid = None
     summary = {
-        "subagents": codex_state.subagent_costs(),
+        "subagents": codex_state.subagent_costs(root_thread_id=current_tid),
         "memory": codex_state.memory_overhead(),
-        "goals": codex_state.goal_budgets(),
+        "goals": codex_state.goal_budgets(root_thread_id=current_tid),
+        "selected_thread_id": current_tid,
         "rate_limits": None,
         "effort": None,
         "compaction": None,
@@ -24653,6 +24664,20 @@ def _find_current_session_jsonl():
     recently modified JSONL is almost always the currently active session.
     """
     if _use_codex_session_adapter():
+        # Deterministic resolution (issue #108): prefer the state-DB-resolved
+        # active thread id over the mtime guess. `find_current_session_jsonl`
+        # picks the globally most-recently-modified JSONL, which can select an
+        # older session when several are open. Keying off the resolved current
+        # thread id makes `quality current` pick the live session. Fail-open:
+        # any error or miss falls back to the legacy mtime resolver.
+        try:
+            current_tid = codex_state.current_thread_id()
+        except Exception:
+            current_tid = None
+        if current_tid:
+            resolved = codex_session.find_session_jsonl_by_id(current_tid)
+            if resolved:
+                return resolved
         return codex_session.find_current_session_jsonl()
 
     # Hermes: no ~/.claude/projects JSONL to scan (sessions live in state.db).
