@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -48,7 +49,7 @@ def _base_env(snapshot_dir: Path | None = None) -> dict:
     if snapshot_dir is not None:
         env["TOKEN_OPTIMIZER_SNAPSHOT_DIR"] = str(snapshot_dir)
     # Force a deterministic HOME so any incidental config lookups stay isolated.
-    env.setdefault("HOME", str(snapshot_dir or Path("/tmp")))
+    env.setdefault("HOME", str(snapshot_dir or Path(tempfile.gettempdir())))
     return env
 
 

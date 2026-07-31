@@ -38,6 +38,13 @@ import tempfile
 from contextlib import redirect_stderr
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only WSL /mnt path and symlink semantics",
+)
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "token-optimizer" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -224,8 +231,10 @@ def test_wsl_etc_rejected():
 
 # --- accepted: normal under-$HOME still works (strict path unchanged) ------
 
-def test_under_home_copilot_home_accepted():
-    home = Path.home()
+def test_under_home_copilot_home_accepted(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     target = home / ".copilot-test-under-home"
     target.mkdir(parents=True, exist_ok=True)
     try:

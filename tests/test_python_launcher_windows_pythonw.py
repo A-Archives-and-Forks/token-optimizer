@@ -21,6 +21,11 @@ import sys
 import time
 from pathlib import Path
 
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only bash launcher harness; native Windows has no /bin/bash",
+)
+
 try:
     import pty  # POSIX-only; imports termios, absent on Windows.
 except ImportError:  # pragma: no cover - exercised only on Windows CI.

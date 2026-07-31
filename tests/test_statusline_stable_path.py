@@ -31,6 +31,11 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="statusline cache detection and migration currently parse POSIX separators",
+)
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "token-optimizer" / "scripts"
 
@@ -160,6 +165,9 @@ def _write_settings(measure_mod, tmp_path, monkeypatch, statusline_cmd):
         encoding="utf-8",
     )
     monkeypatch.setattr(measure_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(
+        measure_mod, "_SETTINGS_LOCK_PATH", settings_path.parent / ".settings.lock"
+    )
     return settings_path
 
 

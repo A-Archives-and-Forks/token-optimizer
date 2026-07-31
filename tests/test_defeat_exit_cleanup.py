@@ -202,6 +202,10 @@ def _run_rollup_subprocess(subcommand, collect_name, tmp_path, *, block, budget)
     ("copilot-rollup", "_collect_copilot_sessions"),
     ("hermes-rollup", "_collect_hermes_sessions"),
 ])
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="wall-clock assertion includes POSIX-fast interpreter startup",
+)
 def test_defeat_bug_a_deadline_fires_emits_diagnostic(subcommand, collect_name, tmp_path):
     """ADVERSARIAL: prove the deadline actually *fires* (the os._exit(0) path
     runs), not merely that the subprocess bounded-exits for some other reason.
