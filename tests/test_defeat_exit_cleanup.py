@@ -539,6 +539,7 @@ def test_defeat_bug_c_serialization_repeated_5_iterations(tmp_path):
         )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="exercises POSIX os.getuid lease-generation path; not applicable on Windows")
 def test_defeat_bug_c_cross_generation_no_interference(tmp_path):
     """ADVERSARIAL: 8 DIFFERENT generations (distinct sids / owner nonces) x 8
     threads each, all concurrent.  Each generation must produce exactly one
