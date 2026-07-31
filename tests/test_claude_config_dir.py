@@ -16,6 +16,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "token-optimizer" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -45,24 +47,32 @@ def test_unset_falls_back_to_default():
     assert _claude_home_with(None) == Path.home() / ".claude"
 
 
-def test_honors_valid_out_of_home_dir():
+def test_honors_valid_out_of_home_dir(tmp_path, monkeypatch):
     # A real absolute dir that is NOT under $HOME (the case the old under-$HOME
-    # confinement broke). Use the system temp root, which on macOS/Linux is
-    # outside the user home.
-    with tempfile.TemporaryDirectory(dir="/tmp") as d:
-        resolved = _claude_home_with(d)
-        assert resolved == Path(d).resolve(), f"expected {d}, got {resolved}"
-        # And it must NOT have silently fallen back to ~/.claude.
-        assert resolved != Path.home() / ".claude"
+    # confinement broke). Fake HOME so the relationship remains deterministic
+    # even on Windows, where the system temp directory is usually under HOME.
+    fake_home = tmp_path / "home"
+    override = tmp_path / "outside-home"
+    fake_home.mkdir()
+    override.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    resolved = _claude_home_with(str(override))
+    assert resolved == override.resolve(), f"expected {override}, got {resolved}"
+    # And it must NOT have silently fallen back to ~/.claude.
+    assert resolved != Path.home() / ".claude"
 
 
-def test_honors_valid_in_home_dir():
-    with tempfile.TemporaryDirectory(dir=str(Path.home())) as d:
-        assert _claude_home_with(d) == Path(d).resolve()
+def test_honors_valid_in_home_dir(tmp_path, monkeypatch):
+    fake_home = tmp_path / "home"
+    config_dir = fake_home / "relocated-claude"
+    config_dir.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    assert _claude_home_with(str(config_dir)) == config_dir.resolve()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only symlink semantics")
 def test_rejects_symlink():
-    with tempfile.TemporaryDirectory(dir="/tmp") as d:
+    with tempfile.TemporaryDirectory() as d:
         real = Path(d) / "real"
         real.mkdir()
         link = Path(d) / "link"
@@ -76,7 +86,8 @@ def test_rejects_relative_path():
 
 
 def test_rejects_nonexistent_dir():
-    assert _claude_home_with("/tmp/does-not-exist-token-optimizer-xyz") == Path.home() / ".claude"
+    missing = Path(tempfile.gettempdir()) / "does-not-exist-token-optimizer-xyz"
+    assert _claude_home_with(str(missing)) == Path.home() / ".claude"
 
 
 def test_empty_string_falls_back():

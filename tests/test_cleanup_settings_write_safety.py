@@ -58,6 +58,7 @@ def measure(tmp_path, monkeypatch):
     settings = home / "settings.json"
     settings.write_text(json.dumps(USER_SETTINGS, indent=2), encoding="utf-8")
     monkeypatch.setattr(mod, "SETTINGS_PATH", settings)
+    monkeypatch.setattr(mod, "_SETTINGS_LOCK_PATH", home / ".settings.lock")
     monkeypatch.setattr(mod, "CLAUDE_DIR", home)
     # Daemon + manifest stages are out of scope here.
     monkeypatch.setattr(mod, "setup_daemon", lambda **kw: None)

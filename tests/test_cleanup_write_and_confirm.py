@@ -36,6 +36,7 @@ def measure(tmp_path, monkeypatch):
     mod = importlib.util.module_from_spec(spec)
     sys.modules["measure"] = mod
     spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "_SETTINGS_LOCK_PATH", tmp_path / ".settings.lock")
     yield mod
     sys.modules.pop("measure", None)
 

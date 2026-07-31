@@ -17,8 +17,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "token-optimizer" / "scripts"
+
+requires_posix_version_resolver = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only runtime version resolver and bash command execution",
+)
 
 
 def _gen_command(repo_root: Path, script="skills/token-optimizer/scripts/codex_hook_bridge.py", arg="session-start"):
@@ -49,6 +56,7 @@ def test_nonversioned_root_keeps_direct_path():
         assert "TOKEN_OPTIMIZER_RUNTIME=codex" in cmd
 
 
+@requires_posix_version_resolver
 def test_versioned_root_does_not_bake_version():
     """A versioned (marketplace) root must NOT bake the version into the command."""
     with tempfile.TemporaryDirectory() as td:
@@ -61,6 +69,7 @@ def test_versioned_root_does_not_bake_version():
             f"expected runtime version resolution: {cmd}"
 
 
+@requires_posix_version_resolver
 def test_baked_old_version_resolves_to_newest_at_runtime():
     """The decisive test: bake an OLD version dir, but executing the command must
     resolve to the NEWEST installed version dir."""
@@ -88,6 +97,7 @@ def test_baked_old_version_resolves_to_newest_at_runtime():
             f"command should resolve newest version (5.11.20), got: {r.stdout!r}\nCMD: {cmd}"
 
 
+@requires_posix_version_resolver
 def test_nonsemver_siblings_are_ignored():
     """Stray non-semver dirs (latest/, node_modules/, backup/) must NOT be picked
     over the real version, even though sort -V orders them last."""
@@ -108,6 +118,7 @@ def test_nonsemver_siblings_are_ignored():
             f"must pick the semver dir, not a stray sibling: {r.stdout!r}\nCMD: {cmd}"
 
 
+@requires_posix_version_resolver
 def test_falls_back_to_baked_path_when_glob_empty():
     """If the parent has no version subdirs at runtime, fall back to the baked dir."""
     with tempfile.TemporaryDirectory() as td:

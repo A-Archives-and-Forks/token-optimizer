@@ -17,6 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "plugins" / "token-optimizer" / "skills" / "token-optimizer" / "scripts"
 RUN_PY = REPO / "plugins" / "token-optimizer" / "hooks" / "run.py"
@@ -128,6 +130,10 @@ def test_reexec_flips_non_utf8_locale_to_utf8_mode():
         probe.unlink(missing_ok=True)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="LC_ALL locale selection is POSIX-only and ignored by native Windows Python",
+)
 def test_reexec_noop_under_utf8_locale_does_not_loop():
     probe = Path(__file__).resolve().parent / "_reexec_noloop_tmp.py"
     probe.write_text(

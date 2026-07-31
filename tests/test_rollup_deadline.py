@@ -111,6 +111,10 @@ def _run_rollup_subprocess(subcommand, collect_name, tmp_path, *, block, budget)
     ("copilot-rollup", "_collect_copilot_sessions"),
     ("hermes-rollup", "_collect_hermes_sessions"),
 ])
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="wall-clock assertion includes POSIX-fast interpreter startup",
+)
 def test_rollup_bounded_on_blocking_collect(subcommand, collect_name, tmp_path):
     """A blocking collect is terminated by the armed deadline, not allowed to
     hang.  On unfixed code no deadline is armed so the subprocess sleeps the
