@@ -1,22 +1,25 @@
-"""FIX C: the dashboard-daemon ensure/revive must run FIRST, under its own
-short independent guard, BEFORE the 8s SessionStart health budget is armed.
+"""FIX C (decoupled): the dashboard-daemon ensure/revive must NOT do any work on
+the SessionStart critical path -- zero chance of slowing a user's session start.
 
-Before the fix, ``run_ensure_health`` ran under ``_install_hook_budget(8)`` and
-the daemon self-heal lived partway down the function. A health scan that
-exceeded 8s raised ``_HookTimeout`` (or tripped the watchdog) BEFORE the daemon
-revive, so a missing launchd plist / dead daemon on port 24842 was never
-restored. The fix extracts ``_ensure_health_daemon_revive_first()`` and calls
-it BEFORE the 8s budget in the ensure-health dispatch, so a missing plist is
-reliably reinstalled even when the later health scan times out.
+Before: ``run_ensure_health`` ran the daemon self-heal inline, so a missing plist
+was only reinstalled if the health scan finished under the 8s budget. GLM's first
+pass moved the revive first but still ran it inline under a 6s guard -- still work
+on the session-start path. This decoupled version dispatches the revive as a
+DETACHED, fire-and-forget ``daemon-revive`` child (start_new_session / detach
+flags via ``spawn_detached``, stdio -> DEVNULL) and returns immediately. The child
+reinstalls a missing plist / revives a dead daemon fully off the hot path; launchd
+persists a once-installed daemon and the mid-session pulse is a second recovery
+path.
 
 These tests prove:
-  * ``_ensure_health_daemon_revive_first`` runs ``_ensure_dashboard_daemon`` and
-    reports an install/restart, never raising (fail-open).
-  * The daemon revive completes BEFORE the health scan that later times out --
-    i.e. a missing plist is reinstalled even when ``run_ensure_health`` raises
-    ``_HookTimeout``.
-  * The ensure-health dispatch source calls ``_ensure_health_daemon_revive_first``
-    BEFORE ``_install_hook_budget(8)`` / ``run_ensure_health`` (reorder guard).
+  * ``_ensure_health_daemon_revive_first`` dispatches a DETACHED ``daemon-revive``
+    child and returns, WITHOUT running ``_ensure_dashboard_daemon`` inline and
+    WITHOUT arming any wall-clock budget (no session-start latency).
+  * It is fail-open: a spawn that raises, or returns None (spawn failed), never
+    raises into the hook.
+  * The ensure-health dispatch still calls the revive dispatcher BEFORE the 8s
+    budget / ``run_ensure_health`` (reorder guard, so a future edit can't put the
+    daemon recovery behind the health budget again).
 
 Run: python3 -m pytest tests/test_ensure_health_daemon_revive_first.py -v
 """
@@ -46,97 +49,67 @@ def m(monkeypatch):
     monkeypatch.setattr(mod, "_is_foreign_runtime", lambda: False)
     monkeypatch.setattr(mod, "detect_runtime", lambda: "claude")
     monkeypatch.setattr(mod, "_normalized_platform", lambda: "Darwin")
-    # No real watchdog threads: stub the budget primitives.
-    monkeypatch.setattr(mod, "_install_hook_budget", lambda s: object())
-    monkeypatch.setattr(mod, "_clear_hook_budget", lambda d: None)
     yield mod
     if "measure" in sys.modules:
         del sys.modules["measure"]
 
 
-def test_revive_first_installs_missing_daemon(m, monkeypatch, capsys):
-    """A missing daemon (-> 'installed') is reinstalled by the first-step helper."""
-    monkeypatch.setattr(m, "_ensure_dashboard_daemon", lambda *a, **k: "installed")
+def test_revive_dispatches_detached_daemon_revive_child(m, monkeypatch):
+    """The revive is a DETACHED ``daemon-revive`` child, not inline work."""
+    calls = {}
+    monkeypatch.setattr(m, "spawn_detached", lambda cmd, **kw: calls.setdefault("cmd", cmd) or object())
+    # If the daemon self-heal were run inline, this would fire -- it must NOT.
+    monkeypatch.setattr(
+        m, "_ensure_dashboard_daemon",
+        lambda *a, **k: calls.setdefault("inline", True),
+    )
     m._ensure_health_daemon_revive_first()
-    out = capsys.readouterr().out
-    assert "Installed the dashboard daemon" in out
-    assert "localhost:" in out
+    assert "cmd" in calls, "revive did not spawn a detached child"
+    assert calls["cmd"][-1] == "daemon-revive", f"child is not daemon-revive: {calls['cmd']}"
+    assert "inline" not in calls, "daemon self-heal ran INLINE on the session-start path"
 
 
-def test_revive_first_restarts_dead_daemon(m, monkeypatch, capsys):
-    monkeypatch.setattr(m, "_ensure_dashboard_daemon", lambda *a, **k: "restarted")
+def test_revive_adds_no_wall_clock_budget(m, monkeypatch):
+    """No ``_install_hook_budget`` on the session-start revive path (zero latency)."""
+    monkeypatch.setattr(m, "spawn_detached", lambda cmd, **kw: object())
+    budgets = []
+    monkeypatch.setattr(m, "_install_hook_budget", lambda s: budgets.append(s) or object())
     m._ensure_health_daemon_revive_first()
-    assert "Restarted the dashboard daemon" in capsys.readouterr().out
+    assert budgets == [], f"revive armed a wall-clock budget on the session path: {budgets}"
 
 
-def test_revive_first_never_raises_on_inner_error(m, monkeypatch):
-    """Fail-open: an exception inside _ensure_dashboard_daemon must not escape."""
+def test_revive_fail_open_on_spawn_exception(m, monkeypatch):
+    """A spawn that raises must be swallowed (never break SessionStart)."""
 
     def boom(*a, **k):
-        raise RuntimeError("daemon explode")
+        raise RuntimeError("spawn explode")
 
-    monkeypatch.setattr(m, "_ensure_dashboard_daemon", boom)
-    # Must not raise into the hook.
-    m._ensure_health_daemon_revive_first()
-
-
-def test_revive_first_swallows_injected_hook_timeout(m, monkeypatch):
-    """A test-injected _HookTimeout inside the revive is swallowed so the rest
-    of ensure-health still gets its own 8s guard."""
-
-    def boom(*a, **k):
-        raise m._HookTimeout()
-
-    monkeypatch.setattr(m, "_ensure_dashboard_daemon", boom)
+    monkeypatch.setattr(m, "spawn_detached", boom)
     m._ensure_health_daemon_revive_first()  # must not raise
 
 
-def test_daemon_revive_runs_before_health_budget_timeout(m, monkeypatch):
-    """THE FIX C contract: the daemon revive completes (installs the missing
-    plist) BEFORE the health scan that later trips the 8s budget. Reproduces the
-    ensure-health dispatch ordering: revive-first, then run_ensure_health under
-    its 8s guard. A timeout in the health scan must not skip the revive."""
-    log: list[str] = []
-
-    monkeypatch.setattr(
-        m, "_ensure_dashboard_daemon", lambda *a, **k: log.append("daemon") or "installed"
-    )
-
-    def slow_health():
-        log.append("health")
-        raise m._HookTimeout()
-
-    monkeypatch.setattr(m, "run_ensure_health", slow_health)
-
-    # Mirror the ensure-health dispatch exactly (FIX C ordering):
-    #   _ensure_health_daemon_revive_first()
-    #   _install_hook_budget(8); try: run_ensure_health() except _HookTimeout: ...
-    m._ensure_health_daemon_revive_first()
-    try:
-        m.run_ensure_health()
-    except m._HookTimeout:
-        pass
-
-    # Daemon revive ran first and completed; the health scan timed out AFTER.
-    assert log == ["daemon", "health"], (
-        f"daemon revive must precede the (timing-out) health scan; got {log}"
-    )
+def test_revive_fail_open_on_spawn_none(m, monkeypatch):
+    """spawn_detached returning None (spawn failed) is logged, never raised."""
+    logged = []
+    monkeypatch.setattr(m, "spawn_detached", lambda cmd, **kw: None)
+    monkeypatch.setattr(m, "_log_spawn_failure", lambda msg: logged.append(msg))
+    m._ensure_health_daemon_revive_first()  # must not raise
+    assert logged, "a failed spawn (None) was not logged"
 
 
 def test_dispatch_source_calls_revive_first_before_budget():
     """Reorder guard: in the ensure-health dispatch block, the call to
     ``_ensure_health_daemon_revive_first()`` must appear BEFORE
     ``_install_hook_budget(8)`` and ``run_ensure_health()`` so a future edit
-    cannot silently revert FIX C."""
+    cannot put the (now detached) daemon recovery behind the health budget."""
     src = (SCRIPTS / "measure.py").read_text(encoding="utf-8")
-    # Isolate the ensure-health dispatch arm.
-    m = re.search(
+    mm = re.search(
         r'elif args\[0\] == "ensure-health":(?P<body>.*?)(?=\n    elif args\[0\] ==)',
         src,
         re.S,
     )
-    assert m, "could not locate the ensure-health dispatch block"
-    body = m.group("body")
+    assert mm, "could not locate the ensure-health dispatch block"
+    body = mm.group("body")
     i_revive = body.find("_ensure_health_daemon_revive_first()")
     i_budget = body.find("_install_hook_budget(8)")
     i_health = body.find("run_ensure_health()")
@@ -144,6 +117,6 @@ def test_dispatch_source_calls_revive_first_before_budget():
     assert i_budget != -1, "dispatch no longer arms the 8s budget"
     assert i_health != -1, "dispatch no longer calls run_ensure_health"
     assert i_revive < i_budget < i_health, (
-        "FIX C ordering broken: revive-first must precede the 8s budget and "
-        "run_ensure_health"
+        "ordering broken: the detached revive dispatch must precede the 8s budget "
+        "and run_ensure_health"
     )

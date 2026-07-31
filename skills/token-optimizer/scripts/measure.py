@@ -36896,49 +36896,40 @@ def run_ensure_health():
         pass
 
 
-# FIX C: the dashboard-daemon ensure/revive must run BEFORE the rest of the
-# health work and under its own short independent wall-clock guard, so a slow
-# health scan that later trips the 8s SessionStart budget can never skip
-# reinstalling a missing launchd plist / dead daemon. ``_ensure_dashboard_daemon``
-# is idempotent + internally throttled (cheap-gate-first), so the second call
-# inside ``run_ensure_health`` below is a cheap no-op (the attempt timestamp is
-# already stamped). launchd KeepAlive+RunAtLoad persists a once-installed daemon;
-# the requirement here is only that a MISSING plist is reliably reinstalled even
-# under time pressure. Fail-open: never raises into the hook.
-_ENSURE_HEALTH_DAEMON_REVIVE_BUDGET = 6
+# FIX C: the dashboard-daemon ensure/revive is DECOUPLED from the SessionStart
+# critical path entirely. It is dispatched as a DETACHED, fire-and-forget child
+# (never run inline, never under a wall-clock guard), so a new session spends ZERO
+# measurable time on install / kickstart / landing verification -- there is no
+# chance it can slow a user's session start. The child runs ``daemon-revive``
+# (-> _ensure_dashboard_daemon(force=True)) fully off the hot path, exactly like
+# the mid-session pulse's revive. launchd KeepAlive+RunAtLoad persists a
+# once-installed daemon; the detached child only needs to reinstall a MISSING
+# plist / revive a dead daemon, which it does without the session ever waiting on
+# it. Fail-open: a spawn failure must never break SessionStart.
 
 
 def _ensure_health_daemon_revive_first():
-    """Run the dashboard-daemon ensure/revive FIRST, under its own short guard.
+    """Dispatch the dashboard-daemon ensure/revive as a DETACHED child.
 
-    Distinct from the daemon AUTO-UPDATE block inside run_ensure_health: that
-    block refreshes a stale script for an already-installed daemon and runs
-    AFTER the cheap writes; this runs FIRST so a missing/dead daemon is restored
-    before any health work can exhaust the budget. Idempotent + fail-open.
+    The SessionStart path must add no measurable latency, so this NEVER performs
+    the install/kickstart/verify work inline. It fires a fire-and-forget
+    ``daemon-revive`` child (detached via spawn_detached: start_new_session on
+    POSIX / DETACHED_PROCESS+breakaway on Windows, stdio -> DEVNULL) and returns
+    immediately. The child reinstalls a missing plist / revives a dead daemon off
+    the hot path; launchd then persists a once-installed daemon. The mid-session
+    pulse provides a second, session-independent recovery path. Idempotent +
+    fail-open: a spawn failure is swallowed, never raised into the hook.
     """
-    _daemon_deadline = _install_hook_budget(_ENSURE_HEALTH_DAEMON_REVIVE_BUDGET)
     try:
-        _status = _ensure_dashboard_daemon()
-        if _status == "installed":
-            print("  [Token Optimizer] Installed the dashboard daemon. "
-                  f"Bookmark this exact URL: http://localhost:{DAEMON_PORT}/token-optimizer "
-                  "(the /token-optimizer path is required -- the bare host:port won't load it). "
-                  "Opt out anytime: measure.py setup-daemon --uninstall")
-        elif _status == "restarted":
-            print("  [Token Optimizer] Restarted the dashboard daemon.")
-        elif _status == "restart-stale":
-            print("  [Token Optimizer] dashboard daemon restarted but still "
-                  "serving a stale version; run: measure.py setup-daemon",
-                  file=sys.stderr)
-    except _HookTimeout:
-        # Test-injected timeout sentinel (production watchdog hard-exits). Swallow
-        # so the remaining health work still runs under its own 8s guard.
-        pass
+        _proc = spawn_detached(
+            [_detached_python_exe(), str(MEASURE_PY_PATH), "daemon-revive"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL)
+        if _proc is None:
+            _log_spawn_failure("SessionStart daemon-revive spawn failed")
     except Exception:
-        # Fail-open: a daemon-revive error must never break SessionStart.
+        # Fail-open: a daemon-revive spawn failure must never break SessionStart.
         pass
-    finally:
-        _clear_hook_budget(_daemon_deadline)
 
 
 # The provenance label is untrusted input rendered into the model's context.
