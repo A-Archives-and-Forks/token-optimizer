@@ -1,9 +1,6 @@
 ---
 name: token-coach
-description: |
-  Context window coach analyzing setup overhead, historical usage trends, and session habits.
-  Use when building something new and wanting token efficiency from the start, existing sessions feel sluggish or context fills too fast, designing multi-agent systems, or wanting a quick health check with real numbers.
-  Do NOT use for running the full audit and applying fixes (use /token-optimizer instead).
+description: Plan a token-efficient Claude Code or Codex setup, or get a quick health check. Coaching, not the full audit (use token-optimizer for that).
 ---
 
 # Token Coach: Plan Token-Efficient Before You Build

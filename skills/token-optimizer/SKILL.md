@@ -1,6 +1,6 @@
 ---
 name: token-optimizer
-description: Find the ghost tokens. Audit Claude Code or Codex setup, see where context goes, fix it. Use when context feels tight.
+description: Audit a Claude Code or Codex setup for context-window waste, then fix it and measure the savings. Use when context feels tight.
 effort: high
 ---
 
