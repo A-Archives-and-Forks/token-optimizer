@@ -29,13 +29,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
-
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="statusline cache detection and migration currently parse POSIX separators",
-)
-
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "token-optimizer" / "scripts"
 
@@ -234,3 +227,106 @@ def test_uninstall_matcher_still_matches_the_written_command(tmp_path, monkeypat
     settings = {"statusLine": {"type": "command", "command": cmd}}
     assert m._remove_our_settings_entries(settings), "matcher no longer claims our statusLine"
     assert "statusLine" not in settings
+
+
+def test_windows_cache_detection_and_migration_use_backslash_paths(tmp_path, monkeypatch):
+    """Exercise Windows separators on POSIX CI, including the migration write."""
+    cache_scripts, _clone_scripts = _build_install(tmp_path, "5.11.67")
+    m = _load_measure(monkeypatch, tmp_path, cache_scripts / "measure.py")
+    old_path = r"C:\Users\TestUser\.claude\plugins\cache\market\token-optimizer\5.11.67\skills\token-optimizer\scripts\statusline.js"
+    stable_path = r"C:\Users\TestUser\.claude\plugins\marketplaces\market\skills\token-optimizer\scripts\statusline.js"
+    settings_path = _write_settings(m, tmp_path, monkeypatch, f'node "{old_path}"')
+
+    class _WindowsPath:
+        def __init__(self, _value):
+            pass
+
+        def resolve(self):
+            return self
+
+        def __str__(self):
+            return old_path.replace("statusline.js", "measure.py")
+
+    class _WindowsOS:
+        name = "nt"
+
+        def __getattr__(self, name):
+            import os
+            return getattr(os, name)
+
+    monkeypatch.setattr(m, "Path", _WindowsPath)
+    monkeypatch.setattr(m, "os", _WindowsOS())
+    assert m._is_running_from_plugin_cache() is True
+
+    monkeypatch.setattr(m, "_is_running_from_plugin_cache", lambda: True)
+    monkeypatch.setattr(m, "_stable_marketplace_script_path", lambda _name: stable_path)
+    assert m._migrate_statusline_to_stable_path() is True
+    assert _current_statusline_cmd(settings_path) == f'node "{stable_path}"'
+
+
+def test_windows_stale_path_repair_rewrites_escaped_json_paths(tmp_path, monkeypatch):
+    """Windows settings JSON escapes backslashes, but stale roots still heal."""
+    cache_scripts, _clone_scripts = _build_install(tmp_path, "5.11.68")
+    m = _load_measure(monkeypatch, tmp_path, cache_scripts / "measure.py")
+    old_root = r"C:\Users\TestUser\.claude\plugins\cache\market\token-optimizer\5.11.67"
+    current_root = r"C:\Users\TestUser\.claude\plugins\cache\market\token-optimizer\5.11.68"
+    settings_path = _write_settings(
+        m,
+        tmp_path,
+        monkeypatch,
+        f'node "{old_root}\\skills\\token-optimizer\\scripts\\statusline.js"',
+    )
+
+    class _WindowsOS:
+        name = "nt"
+
+        def __getattr__(self, name):
+            import os
+            return getattr(os, name)
+
+    class _WindowsMeasurePath:
+        def __init__(self, depth=0):
+            self.depth = depth
+
+        def resolve(self):
+            return self
+
+        @property
+        def parent(self):
+            return _WindowsMeasurePath(self.depth + 1)
+
+        def __str__(self):
+            parts = (
+                r"C:\Users\TestUser\.claude\plugins\cache\market\token-optimizer"
+                r"\5.11.68\skills\token-optimizer\scripts\measure.py"
+            ).split("\\")
+            return "\\".join(parts[:-self.depth] if self.depth else parts)
+
+    monkeypatch.setattr(m, "os", _WindowsOS())
+    monkeypatch.setattr(m, "Path", lambda _value: _WindowsMeasurePath())
+    monkeypatch.setattr(m, "_is_running_from_plugin_cache", lambda: True)
+
+    assert m._fix_stale_settings_paths() == 1
+    command = _current_statusline_cmd(settings_path)
+    assert old_root not in command
+    assert current_root in command
+
+
+def test_plugin_cache_detection_preserves_posix_backslash_filenames(tmp_path, monkeypatch):
+    m = _load_measure(monkeypatch, tmp_path, tmp_path / "unused" / "measure.py")
+    # Exercise the POSIX branch regardless of the host OS: on a real Windows
+    # runner os.name would otherwise normalize the backslash and falsely match.
+    monkeypatch.setattr(m.os, "name", "posix")
+
+    class _BackslashFilename:
+        def __init__(self, _value):
+            pass
+
+        def resolve(self):
+            return self
+
+        def __str__(self):
+            return r"/work/plugins\cache/not-a-plugin/measure.py"
+
+    monkeypatch.setattr(m, "Path", _BackslashFilename)
+    assert m._is_running_from_plugin_cache() is False

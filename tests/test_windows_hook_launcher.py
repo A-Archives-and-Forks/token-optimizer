@@ -6,7 +6,7 @@ import re
 import shlex
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -55,6 +55,54 @@ def test_windows_hook_command_invokes_python_directly(monkeypatch):
     assert "for b in bash" not in command
 
 
+def test_windows_versioned_marketplace_hook_resolves_newest_install(monkeypatch, tmp_path):
+    """The native-CMD launcher must not retain a pruned version directory."""
+    module = _load_codex_install(monkeypatch, "win32")
+    versioned_root = tmp_path / "cache" / "market" / "token-optimizer" / "5.11.75"
+    monkeypatch.setattr(module, "_repo_root", lambda: versioned_root)
+
+    command = module._hook_command("skills/token-optimizer/scripts/read_cache.py", "--quiet")
+
+    assert "TOKEN_OPTIMIZER_RUNTIME_ROOT" in command
+    assert "powershell" in command.lower()
+    assert str(versioned_root.parent) in command
+    assert "hooks" in command and "run.py" in command
+
+
+def _execute_cmd_runner(command: str, newest: str) -> str:
+    """Execute CMD's relevant expansion stages for the generated hook command."""
+    parsed = re.sub(r"%TOKEN_OPTIMIZER_RUNTIME_ROOT%", "", command)
+    fallback = re.search(
+        r'set "TOKEN_OPTIMIZER_RUNTIME_ROOT=([^"]+)"', command
+    ).group(1)
+    selected = fallback
+    if "setlocal enabledelayedexpansion" in command.lower():
+        selected = re.search(
+            r'do @set "TOKEN_OPTIMIZER_RUNTIME_ROOT=([^"]+)\\%R"', command
+        ).group(1) + "\\" + newest
+        parsed = parsed.replace("!TOKEN_OPTIMIZER_RUNTIME_ROOT!", selected)
+    runner = re.search(r'"([^"]*\\hooks\\run\.py)"', parsed)
+    assert runner, f"runner path was not quoted and executable: {parsed}"
+    return runner.group(1)
+
+
+def test_windows_versioned_hook_executes_live_delayed_path_with_spaces(monkeypatch):
+    """CMD expands %VAR% before a compound line executes; !VAR! is live."""
+    module = _load_codex_install(monkeypatch, "win32")
+    root = PureWindowsPath(
+        r"C:\Users\Test User\.codex\plugins\market\token-optimizer\5.11.75"
+    )
+    monkeypatch.setattr(module, "_repo_root", lambda: root)
+
+    command = module._hook_command("skills/token-optimizer/scripts/read_cache.py")
+    runner = _execute_cmd_runner(command, "5.11.76")
+
+    assert runner == (
+        r"C:\Users\Test User\.codex\plugins\market\token-optimizer"
+        r"\5.11.76\hooks\run.py"
+    )
+
+
 def test_posix_hook_command_keeps_bash_resolver(monkeypatch):
     module = _load_codex_install(monkeypatch, "linux")
 
@@ -73,7 +121,7 @@ def test_claude_windows_hook_command_invokes_python_directly():
         '"${CLAUDE_PLUGIN_ROOT}/hooks/run.py" '
         'skills/token-optimizer/scripts/measure.py ensure-health --quiet; done; exit 0'
     )
-    root = Path(r"C:\Users\Alex Green\.claude\token-optimizer")
+    root = Path(r"C:\Users\Test User\.claude\token-optimizer")
 
     command = module["_resolve_hook_command"](template, root)
 

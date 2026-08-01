@@ -658,6 +658,12 @@ def test_run_py_spawn_nt_uses_create_no_window(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(root / "_data"))
     monkeypatch.setattr(mod, "_check_consent", lambda: True)
+    class _PipeStream:
+        def fileno(self):
+            return 1
+    inherited = {name: _PipeStream() for name in ("stdin", "stdout", "stderr")}
+    for name, stream in inherited.items():
+        monkeypatch.setattr(mod.sys, name, stream)
     cap = {}
     def fake_popen(cmd, **k):
         cap.update(k)
@@ -676,10 +682,11 @@ def test_run_py_spawn_nt_uses_create_no_window(monkeypatch, tmp_path):
     assert "creationflags" in cap, "nt spawn must pass creationflags"
     assert cap["creationflags"] == _CREATE_NO_WINDOW
     assert "start_new_session" not in cap
-    # CRITICAL: no DEVNULL on stdio -- the child inherits run.py's pipes.
-    assert cap.get("stdin") != subprocess.DEVNULL
-    assert cap.get("stdout") != subprocess.DEVNULL
-    assert cap.get("stderr") != subprocess.DEVNULL
+    # Explicit handles retain a host pipe under CREATE_NO_WINDOW. Leaving these
+    # unset lets Windows attach the child to the hidden console instead.
+    assert cap["stdin"] is inherited["stdin"]
+    assert cap["stdout"] is inherited["stdout"]
+    assert cap["stderr"] is inherited["stderr"]
 
 
 def test_run_py_spawn_posix_uses_start_new_session(monkeypatch, tmp_path):

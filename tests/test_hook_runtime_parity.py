@@ -593,34 +593,68 @@ def test_quality_cache_throttle_markers_are_session_specific(
     assert module._quality_cache_tick_due(120, session_b)
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="quality-cache throttle-only currently blocks on an open Windows stdin pipe",
-)
-def test_throttle_only_cli_exits_before_reading_open_stdin(tmp_path):
-    env = os.environ.copy()
-    env["HOME"] = str(tmp_path)
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            str(MEASURE),
-            "quality-cache",
-            "--throttle-only",
-            "--quiet",
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-        text=True,
+def test_throttle_only_windows_does_not_read_an_open_stdin_pipe(
+    measure_module, monkeypatch
+):
+    """Exercise the native-Windows fast path without needing a Windows runner."""
+    module = measure_module
+
+    class _WindowsOS:
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+    monkeypatch.setattr(module, "os", _WindowsOS())
+    monkeypatch.setattr(
+        module,
+        "_read_stdin_hook_input",
+        lambda *_args, **_kwargs: pytest.fail("throttle-only read an open Windows stdin pipe"),
     )
-    try:
-        returncode = process.wait(timeout=1.5)
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-    assert returncode == 0
+
+    assert module._read_throttle_only_hook_input() == {}
+
+
+def test_throttle_only_windows_preserves_available_session_identity(
+    measure_module, monkeypatch, tmp_path
+):
+    """The Windows fast path must be prompt and still choose its session marker."""
+    module = measure_module
+
+    class _WindowsOS:
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+    session = tmp_path / "session.jsonl"
+    monkeypatch.setattr(module, "os", _WindowsOS())
+    # Build the fake stdin payload with json.dumps so a Windows session path
+    # (with backslashes) is escaped into valid JSON, not raw-concatenated.
+    stdin_bytes = json.dumps(
+        {"session_id": "windows-session", "transcript_path": str(session)}
+    ).encode("utf-8")
+    monkeypatch.setattr(
+        module,
+        "_read_windows_stdin_bytes",
+        lambda _max_bytes: stdin_bytes,
+    )
+    seen = {}
+    monkeypatch.setattr(
+        module,
+        "_quality_cache_tick_due",
+        lambda _throttle, path, session_id: seen.update(
+            path=path, session_id=session_id
+        ) or True,
+    )
+
+    payload, due = module._quality_cache_throttle_only_state(120, force=False)
+    assert payload["session_id"] == "windows-session"
+    assert due is True
+    assert seen == {
+        "path": str(session),
+        "session_id": "windows-session",
+    }
 
 
 def test_all_three_user_prompt_handlers_install_and_clear_budgets():
