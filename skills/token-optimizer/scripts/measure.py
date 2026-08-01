@@ -23946,6 +23946,49 @@ def _read_stdin_hook_input(max_bytes=65536):
     return _read_stdin_hook_input_shared(max_bytes)
 
 
+def _read_windows_stdin_bytes(max_bytes):
+    """Return bytes already buffered in a Windows stdin pipe, never waiting."""
+    try:
+        import ctypes
+        import msvcrt
+
+        stream = getattr(sys.stdin, "buffer", sys.stdin)
+        fd = stream.fileno()
+        available = ctypes.c_ulong()
+        handle = msvcrt.get_osfhandle(fd)
+        ok = ctypes.windll.kernel32.PeekNamedPipe(
+            handle, None, 0, None, ctypes.byref(available), None
+        )
+        if not ok or not available.value:
+            return b""
+        return os.read(fd, min(max_bytes, available.value))
+    except (AttributeError, ImportError, OSError, ValueError):
+        return b""
+
+
+def _read_throttle_only_hook_input():
+    """Read throttle metadata without risking a Windows open-pipe wait."""
+    if os.name == "nt":
+        try:
+            raw = _read_windows_stdin_bytes(1_000_000)
+            return json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, json.JSONDecodeError, OSError):
+            return {}
+    return _read_stdin_hook_input(max_bytes=1_000_000)
+
+
+def _quality_cache_throttle_only_state(throttle, force):
+    """Return hook metadata and whether the throttle-only CLI tick is due."""
+    payload = _read_throttle_only_hook_input()
+    if force:
+        return payload, True
+    return payload, _quality_cache_tick_due(
+        throttle,
+        payload.get("transcript_path"),
+        payload.get("session_id"),
+    )
+
+
 def _parse_jsonl_for_quality(filepath):
     """Parse a JSONL session file and extract quality-relevant data.
 
@@ -29889,6 +29932,8 @@ def _safe_checkpoint_file(cp_path):
 def _is_running_from_plugin_cache():
     """Check if this script is running from a Claude Code plugin cache directory."""
     resolved = str(Path(__file__).resolve())
+    if os.name == "nt":
+        resolved = resolved.replace("\\", "/")
     return "/plugins/cache/" in resolved
 
 
@@ -31532,18 +31577,37 @@ def _fix_stale_settings_paths():
         return 0
 
     settings_text = json.dumps(settings)
-    if "/plugins/cache/" not in settings_text or "token-optimizer" not in settings_text:
-        return 0
 
-    # Our current plugin root (e.g., /home/user/.claude/plugins/cache/org/token-optimizer/3.1.0)
-    current_root = str(Path(__file__).resolve().parent.parent.parent.parent)
+    if os.name == "nt":
+        # Our current plugin root (e.g., C:\Users\...\plugins\cache\org\token-optimizer\3.1.0)
+        current_root = str(Path(__file__).resolve().parent.parent.parent.parent)
+        normalized_text = settings_text.replace("\\\\", "/")
+        if "/plugins/cache/" not in normalized_text or "token-optimizer" not in normalized_text:
+            return 0
+        pattern = r'((?:[A-Za-z]:)?/[^"\'\\]+/plugins/cache/[^/]+/token-optimizer/[^/]+)'
+        stale_roots = {
+            m.group(1) for m in re.finditer(pattern, normalized_text)
+            if m.group(1) != current_root.replace("\\", "/")
+        }
+        new_text = settings_text
+        replacement = current_root.replace("\\", "\\\\")
+        for stale_root in stale_roots:
+            new_text = new_text.replace(stale_root.replace("/", "\\\\"), replacement)
+    else:
+        if "/plugins/cache/" not in settings_text or "token-optimizer" not in settings_text:
+            return 0
 
-    # Find all versioned token-optimizer plugin cache paths that differ from ours
-    stale_roots = set()
-    for m in re.finditer(r'(/[^"\'\\]+/plugins/cache/[^/]+/token-optimizer/[^/]+)', settings_text):
-        found_root = m.group(1)
-        if found_root != current_root:
-            stale_roots.add(found_root)
+        # Our current plugin root (e.g., /home/user/.claude/plugins/cache/org/token-optimizer/3.1.0)
+        current_root = str(Path(__file__).resolve().parent.parent.parent.parent)
+        # Find all versioned token-optimizer plugin cache paths that differ from ours
+        stale_roots = set()
+        for m in re.finditer(r'(/[^"\'\\]+/plugins/cache/[^/]+/token-optimizer/[^/]+)', settings_text):
+            found_root = m.group(1)
+            if found_root != current_root:
+                stale_roots.add(found_root)
+        new_text = settings_text
+        for stale_root in stale_roots:
+            new_text = new_text.replace(stale_root, current_root)
 
     if not stale_roots:
         return 0
@@ -31551,10 +31615,6 @@ def _fix_stale_settings_paths():
     # Replace stale roots directly in the serialized JSON, then parse back.
     # This avoids mutating the original dict (no partial-state on write failure)
     # and covers all keys without key-specific iteration.
-    new_text = settings_text
-    for stale_root in stale_roots:
-        new_text = new_text.replace(stale_root, current_root)
-
     if new_text == settings_text:
         return 0
 
@@ -31605,13 +31665,19 @@ def _migrate_statusline_to_stable_path():
     cmd = sl.get("command", "")
     if not cmd or "statusline.js" not in cmd or "token-optimizer" not in cmd:
         return False
-    m = re.search(r'/[^"\'\\]+/plugins/cache/[^/]+/token-optimizer/[^"\'\\]*statusline\.js', cmd)
+    # Only normalize separators on Windows; backslash is a legal POSIX
+    # filename char, so an unconditional replace would change POSIX behavior.
+    normalized_cmd = cmd.replace("\\", "/") if os.name == "nt" else cmd
+    m = re.search(r'(?:[A-Za-z]:)?/[^"\'\\]+/plugins/cache/[^/]+/token-optimizer/[^"\'\\]*statusline\.js', normalized_cmd)
     if not m:
         return False
-    old_path = m.group(0)
+    old_path = cmd[m.start():m.end()]
     if old_path == stable:
         return False
-    new_cmd = cmd.replace(old_path, stable)
+    if "\\" in cmd:
+        new_cmd = cmd[:m.start()] + stable + cmd[m.end():]
+    else:
+        new_cmd = cmd.replace(old_path, stable)
     if new_cmd == cmd:
         return False
     new_settings = dict(settings)
@@ -38754,12 +38820,8 @@ if __name__ == "__main__":
         _tok_hook_deadline = _install_hook_budget(8)
         payload = {}
         if throttle_only:
-            payload = _read_stdin_hook_input(max_bytes=1_000_000)
-            if not force and not _quality_cache_tick_due(
-                throttle,
-                payload.get("transcript_path"),
-                payload.get("session_id"),
-            ):
+            payload, due = _quality_cache_throttle_only_state(throttle, force)
+            if not due:
                 _clear_hook_budget(_tok_hook_deadline)
                 sys.exit(0)
         # Mid-session dashboard-daemon liveness pulse. quality-cache is the

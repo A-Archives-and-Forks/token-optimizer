@@ -184,6 +184,21 @@ def _check_consent() -> bool:
         return True  # Fail-open: never block on errors
 
 
+def _windows_stdio_kwargs():
+    """Return usable inherited standard handles for a no-window child."""
+    kwargs = {}
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        try:
+            stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            continue
+        kwargs[name] = stream
+    return kwargs
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         return 0
@@ -266,6 +281,7 @@ def main() -> int:
             _flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             if _flags:
                 _popen_kwargs["creationflags"] = _flags
+            _popen_kwargs.update(_windows_stdio_kwargs())
         else:
             _popen_kwargs["start_new_session"] = True
         proc = subprocess.Popen(cmd, **_popen_kwargs)

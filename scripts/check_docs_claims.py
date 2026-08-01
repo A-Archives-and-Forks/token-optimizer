@@ -33,6 +33,7 @@ Exit 0 clean, 1 with findings printed.
 from __future__ import annotations
 
 import ast
+import os
 import re
 import sys
 from pathlib import Path
@@ -275,6 +276,15 @@ def _is_scratch(p: Path) -> bool:
     )
 
 
+def _path_matches_prefix(path: Path | str, prefixes: tuple[str, ...]) -> bool:
+    """Match repository-relative paths regardless of the host separator."""
+    candidate = str(path)
+    if os.name == "nt":
+        candidate = candidate.replace("\\", "/")
+        prefixes = tuple(prefix.replace("\\", "/") for prefix in prefixes)
+    return any(candidate.startswith(prefix) for prefix in prefixes)
+
+
 def check() -> tuple[list[str], dict[str, int]]:
     findings: list[str] = []
     stats = {"count_claims": 0, "threshold_claims": 0, "files": 0}
@@ -293,7 +303,7 @@ def check() -> tuple[list[str], dict[str, int]]:
             except (OSError, UnicodeDecodeError):
                 continue
             rel = path.relative_to(REPO)
-            if any(str(rel).startswith(prefix) for prefix in skip):
+            if _path_matches_prefix(rel, skip):
                 continue
 
             for pat in patterns:
@@ -340,9 +350,9 @@ def check() -> tuple[list[str], dict[str, int]]:
             except (OSError, UnicodeDecodeError):
                 continue
             rel = path.relative_to(REPO)
-            if any(str(rel).startswith(prefix) for prefix in skip):
+            if _path_matches_prefix(rel, skip):
                 continue
-            if only and not any(str(rel).startswith(prefix) for prefix in only):
+            if only and not _path_matches_prefix(rel, only):
                 continue
 
             for pat in patterns:
