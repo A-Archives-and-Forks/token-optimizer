@@ -9,7 +9,6 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { StringDecoder } from "string_decoder";
 import {
   findOpenClawDir,
   scanAllSessions,
@@ -67,8 +66,6 @@ import { runAllDetectors, detectUnusedSkills } from "./waste-detectors";
 import {
   findBestContinuityCheckpoint,
   buildContinuityHint,
-  storePendingContinuityHint,
-  consumePendingContinuityHint,
   extractHintedPaths,
   RELEVANCE_THRESHOLD as _CONTINUITY_THRESHOLD,
   tryBuildResumeLeanHint,
@@ -106,13 +103,40 @@ export {
 // ---------------------------------------------------------------------------
 
 interface OpenClawApi {
-  registerService(name: string, service: Record<string, unknown>): void;
-  on(event: string, handler: (...args: unknown[]) => void): void;
+  registerService(service: {
+    id: string;
+    start: (context: OpenClawServiceContext) => void | Promise<void>;
+    stop?: (context: OpenClawServiceContext) => void | Promise<void>;
+  }): void;
+  on(event: string, handler: (...args: unknown[]) => unknown | Promise<unknown>): void;
+  session: {
+    workflow: {
+      enqueueNextTurnInjection(input: {
+        sessionKey: string;
+        text: string;
+        idempotencyKey?: string;
+        placement?: "prepend_context" | "append_context";
+      }): Promise<{ enqueued: boolean }>;
+    };
+  };
   logger: {
     info(msg: string, ...args: unknown[]): void;
     warn(msg: string, ...args: unknown[]): void;
     error(msg: string, ...args: unknown[]): void;
+    debug?(msg: string, ...args: unknown[]): void;
   };
+}
+
+interface OpenClawServiceContext {
+  logger: OpenClawApi["logger"];
+}
+
+interface OpenClawHookContext {
+  agentId?: string;
+  sessionId?: string;
+  sessionKey?: string;
+  trigger?: string;
+  jobId?: string;
 }
 
 interface PluginEntryOptions {
@@ -132,7 +156,7 @@ function definePluginEntry(options: PluginEntryOptions): PluginEntryOptions {
 
 /**
  * Upper bound on the number of sessions held in the in-memory continuity and
- * fresh-nudge collections. These are normally pruned on session:end, but a
+ * fresh-nudge collections. These are normally pruned on session_end, but a
  * session that ends uncleanly (process killed, network disconnect) never fires
  * that event, so without a cap the collections would grow for the gateway's
  * entire lifetime. The bound evicts the oldest tracked session once exceeded.
@@ -161,7 +185,7 @@ function boundedSetAdd(set: Set<string>, key: string): void {
 /**
  * set() on a Map with oldest-first eviction past MAX_TRACKED_SESSIONS. Unlike
  * the Set helper, this refreshes recency on update (delete + re-set) because
- * _freshNudgePriorScores is re-set on every session:patch, so refreshing keeps
+ * _freshNudgePriorScores is re-set on every agent turn, so refreshing keeps
  * an actively-scored session from being evicted while still in use.
  */
 function boundedMapSet<V>(map: Map<string, V>, key: string, value: V): void {
@@ -173,6 +197,33 @@ function boundedMapSet<V>(map: Map<string, V>, key: string, value: V): void {
     map.delete(oldest);
   }
 }
+
+/**
+ * Per-session monotonic compaction counter. Used as a fallback discriminator
+ * in the after_compaction idempotencyKey when the host omits messageCount
+ * (and compactedCount). Without this, every compaction on a session where
+ * sessionKey === sessionId and both host fields are absent produces the
+ * identical key `checkpoint-restore:SID:SID:0`, so the 2nd+ compaction gets
+ * enqueued:false and its checkpoint restore is silently dropped.
+ *
+ * The counter is incremented once per after_compaction event for a given
+ * sessionKey, so retries of the SAME compaction (same event, same messageCount)
+ * produce the same key, but successive compactions produce distinct keys.
+ */
+const _compactionCounter = new Map<string, number>();
+
+function nextCompactionSeq(sessionKey: string): number {
+  const seq = (_compactionCounter.get(sessionKey) ?? 0) + 1;
+  boundedMapSet(_compactionCounter, sessionKey, seq);
+  return seq;
+}
+
+/**
+ * Module-level logger reference, set during register(). Lets standalone
+ * helper functions (buildRuntimeEventContext) emit debug logs without
+ * threading api through every call.
+ */
+let _logger: OpenClawApi["logger"] | null = null;
 
 // ---------------------------------------------------------------------------
 // Core audit logic (used by both plugin and CLI)
@@ -373,12 +424,17 @@ export { detectUnusedSkills } from "./waste-detectors";
 // Safe event handler wrapper (prevents unhandled throws from crashing gateway)
 // ---------------------------------------------------------------------------
 
-function safeOn(api: OpenClawApi, event: string, handler: (...args: unknown[]) => void): void {
-  api.on(event, (...args: unknown[]) => {
+function safeOn(
+  api: OpenClawApi,
+  event: string,
+  handler: (...args: unknown[]) => unknown | Promise<unknown>
+): void {
+  api.on(event, async (...args: unknown[]) => {
     try {
-      handler(...args);
+      return await handler(...args);
     } catch (err) {
       api.logger.error(`[token-optimizer] ${event} handler error: ${err}`);
+      return undefined;
     }
   });
 }
@@ -393,6 +449,7 @@ export default definePluginEntry({
   description: "Token waste auditor for OpenClaw. Detects idle burns, model misrouting, and context bloat.",
   register(api: OpenClawApi) {
     api.logger.info("[token-optimizer] Plugin activated");
+    _logger = api.logger;
     const openclawDir = findOpenClawDir();
 
     // Lazy-refresh context audit (TTL-based) so long-running gateways stay current
@@ -413,16 +470,11 @@ export default definePluginEntry({
     }
 
     // Cross-session continuity: tracks sessions that have already received
-    // a topic-matched injection so we fire at most once per new session.
-    // NOTE: session:start is "future/planned" in the OpenClaw plugin spec
-    // (openclaw/docs/openclaw-plugin-spec.md line 242).  Until it lands we
-    // trigger off the FIRST session:patch event that arrives with an
-    // inject callback, guarded by this Set.  When session:start is added,
-    // replace the session:patch guard with a session:start handler here.
+    // a topic-matched prompt contribution so we fire at most once per session.
     const _continuityInjectedSessions = new Set<string>();
 
     // Fresh-session nudge: per-session state.
-    // _freshNudgeFiredSessions: once-per-session dedup; cleared on session:end.
+    // _freshNudgeFiredSessions: once-per-session dedup; cleared on session_end.
     // _freshNudgePriorScores: last known quality score for each session; used to
     //   detect the "prior score established" condition that mirrors Python's
     //   _nudge_previous_score check (suppresses firing on the very first scored
@@ -430,21 +482,15 @@ export default definePluginEntry({
     const _freshNudgeFiredSessions = new Set<string>();
     const _freshNudgePriorScores = new Map<string, number>();
 
-    // Register service so other plugins/skills can call our methods
-    api.registerService("token-optimizer", {
-      audit,
-      scan,
-      generateDashboard,
-      doctor,
-      // v5 Active Compression surface
-      listV5Features,
-      isV5Enabled,
-      setV5,
-      getCompressionSummary,
+    api.registerService({
+      id: "token-optimizer",
+      start: (context) => {
+        context.logger.info("[token-optimizer] Service started");
+      },
     });
 
     // Log on gateway startup
-    safeOn(api,"gateway:startup", () => {
+    safeOn(api, "gateway_start", () => {
       api.logger.info("[token-optimizer] Gateway started, ready to audit");
 
       // Clean up old checkpoints on startup
@@ -470,29 +516,28 @@ export default definePluginEntry({
     });
 
     // Log on agent bootstrap
-    safeOn(api,"agent:bootstrap", (...args: unknown[]) => {
-      const agentId =
-        typeof args[0] === "object" && args[0] !== null
-          ? (args[0] as Record<string, unknown>).agentId
-          : undefined;
+    safeOn(api, "before_agent_start", (...args: unknown[]) => {
+      const context = args[1] as OpenClawHookContext | undefined;
       api.logger.info(
-        `[token-optimizer] Agent bootstrapped: ${agentId ?? "unknown"}`
+        `[token-optimizer] Agent bootstrapped: ${context?.agentId ?? "unknown"}`
       );
     });
 
     // Smart Compaction v2: capture before compaction (intelligent extraction)
-    safeOn(api,"session:compact:before", (...args: unknown[]) => {
-      const session = args[0] as {
-        sessionId: string;
+    safeOn(api, "before_compaction", (...args: unknown[]) => {
+      const event = args[0] as {
         messages?: Array<{ role: string; content: string; timestamp?: string }>;
       } | undefined;
+      const context = args[1] as OpenClawHookContext | undefined;
+      const sessionId = context?.sessionId ?? context?.sessionKey;
 
-      if (!session?.sessionId) {
+      if (!sessionId) {
         api.logger.warn(
-          "[token-optimizer] compact:before fired without session data"
+          "[token-optimizer] before_compaction fired without a session identity"
         );
         return;
       }
+      const session = { sessionId, messages: event?.messages };
 
       // Try v2 (intelligent extraction), fall back to v1
       let filepath: string | null = null;
@@ -517,23 +562,65 @@ export default definePluginEntry({
       }
 
       // Clear read-cache on compaction (context is reset, cache entries are stale)
-      clearCache("default", session.sessionId);
+      clearCache(context?.agentId ?? "default", session.sessionId);
     });
 
     // Smart Compaction: restore after compaction
-    safeOn(api,"session:compact:after", (...args: unknown[]) => {
-      const session = args[0] as {
-        sessionId: string;
-        inject?: (content: string) => void;
+    safeOn(api, "after_compaction", async (...args: unknown[]) => {
+      const event = args[0] as {
+        compactedCount?: number;
+        previousSessionId?: string;
+        messageCount?: number;
+        tokenCount?: number;
       } | undefined;
+      const context = args[1] as OpenClawHookContext | undefined;
+      const sessionId = context?.sessionId ?? context?.sessionKey;
 
-      if (!session?.sessionId) return;
+      if (!sessionId || !context?.sessionKey) {
+        api.logger.warn(
+          "[token-optimizer] after_compaction fired without sessionId/sessionKey; skipping restore"
+        );
+        return;
+      }
 
-      const checkpoint = restoreCheckpoint(session.sessionId);
-      if (checkpoint && session.inject) {
-        session.inject(checkpoint);
+      const checkpoint = restoreCheckpoint(sessionId);
+      if (checkpoint) {
+        // Build a unique-per-compaction idempotency key that is still stable
+        // for retries of the SAME compaction.
+        //
+        // Primary discriminator: messageCount (changes per compaction, stable
+        // within one). When the host omits messageCount, fall back to a
+        // per-session monotonic compaction counter so successive compactions
+        // still get distinct keys. Without this, when sessionKey === sessionId
+        // and both previousSessionId and compactedCount are absent, every
+        // compaction yields the identical key
+        // `checkpoint-restore:SID:SID:0`, so the 2nd+ compaction gets
+        // enqueued:false and its checkpoint restore is silently dropped.
+        const prevId = event?.previousSessionId ?? sessionId;
+        const compactedCount = event?.compactedCount ?? 0;
+        const messageCount = event?.messageCount;
+        const discriminator =
+          typeof messageCount === "number"
+            ? `msg:${messageCount}`
+            : `seq:${nextCompactionSeq(context.sessionKey)}`;
+        const idempotencyKey =
+          `checkpoint-restore:${context.sessionKey}:` +
+          `${prevId}:${compactedCount}:${discriminator}`;
+
+        const result = await api.session.workflow.enqueueNextTurnInjection({
+          sessionKey: context.sessionKey,
+          text: checkpoint,
+          placement: "prepend_context",
+          idempotencyKey,
+        });
+        if (!result.enqueued) {
+          api.logger.info(
+            `[token-optimizer] Checkpoint restore already queued for session ${sessionId}`
+          );
+          return;
+        }
         api.logger.info(
-          `[token-optimizer] Checkpoint restored for session ${session.sessionId}`
+          `[token-optimizer] Checkpoint restore queued for session ${sessionId}`
         );
 
         // Credit the avoided reconstruction.
@@ -542,258 +629,143 @@ export default definePluginEntry({
         // credited = min(200 000, max(floor, active)).
         try {
           const floorTokens = estimateTokensFromBytes(Buffer.byteLength(checkpoint, "utf-8"));
-          const activeTokens = getActiveReadTokens("default", session.sessionId);
+          const activeTokens = getActiveReadTokens(context.agentId ?? "default", sessionId);
           const credited = Math.min(200_000, Math.max(floorTokens, activeTokens));
           if (credited > 0) {
-            logSavingsEvent("checkpoint_restore", credited, session.sessionId, "restored from compact");
+            logSavingsEvent("checkpoint_restore", credited, sessionId, "queued after compact");
           }
-        } catch { /* best-effort: never break inject */ }
-      }
-
-      // Fallback continuity injection: if a cross-session hint was matched on
-      // first session:patch but couldn't be injected then (no inject callback),
-      // consume and inject it now.  This fires at most once per session because
-      // consumePendingContinuityHint() deletes the sidecar after reading.
-      // TODO(continuity): remove this fallback once session:start exposes inject.
-      if (session.inject) {
-        const pendingHint = consumePendingContinuityHint(session.sessionId);
-        if (pendingHint) {
-          session.inject(pendingHint);
-          api.logger.info(
-            `[token-optimizer] Cross-session continuity hint injected via compact:after fallback ` +
-            `for session ${session.sessionId}`
-          );
-        }
+        } catch { /* best-effort: never break restore */ }
       }
     });
 
-    safeOn(api,"session:patch", (...args: unknown[]) => {
-      const event = args[0] as {
-        sessionId?: string;
-        agentId?: string;
-        // inject() is not documented for session:patch in the spec today but
-        // some gateway versions forward it.  We accept it opportunistically.
-        inject?: (content: string) => void;
-        // firstMessage carries the user's first prompt when the patch is the
-        // "session initialized" patch (gateway-version-dependent).
-        firstMessage?: string;
-      } | undefined;
-      if (!event?.sessionId || !openclawDir) return;
+    safeOn(api, "agent_turn_prepare", (...args: unknown[]) => {
+      const event = args[0] as { prompt?: string } | undefined;
+      const context = args[1] as OpenClawHookContext | undefined;
+      const sessionId = context?.sessionId ?? context?.sessionKey;
+      const promptText = event?.prompt?.trim();
+      const isUserTurn = context?.trigger === "user" && !context.jobId;
+      const contributions: string[] = [];
 
-      // ── Cross-session continuity injection (new-session only) ──────────────
-      // Trigger: first session:patch for this sessionId.
-      // We chose session:patch because session:start is "future/planned" per
-      // openclaw-plugin-spec.md line 242.  session:patch is the earliest
-      // session-scoped event available.  The _continuityInjectedSessions guard
-      // ensures we attempt injection at most once per session.
-      if (!_continuityInjectedSessions.has(event.sessionId)) {
+      if (!sessionId || !promptText || !openclawDir) {
+        if (!sessionId) {
+          api.logger.warn("[token-optimizer] agent_turn_prepare without sessionId/sessionKey; skipping prompt contributions");
+        }
+        return;
+      }
+      if (!isUserTurn) {
+        // This fires on every internal (non-user) turn. Lowered from info to
+        // debug so it does not spam INFO on gateways with many subagent turns.
+        api.logger.debug?.(`[token-optimizer] Skipping non-user agent turn for session ${sessionId}`);
+        return;
+      }
+
+      // Continuity is first-user-turn-only. Its guard is independent from the
+      // nudge guard, which must be evaluated on later turns as fill increases.
+      if (!_continuityInjectedSessions.has(sessionId)) {
         try {
-          // Resolve the first user prompt. Prefer the gateway-forwarded
-          // firstMessage, but fall back to reading the session transcript on
-          // disk so injection does NOT depend on an undocumented, gateway-
-          // version-specific field. Without this, sessions whose first
-          // session:patch carries no firstMessage never matched at all.
-          let promptText = (event.firstMessage ?? "").trim();
-          if (!promptText) {
-            promptText = firstUserPromptFromSession(openclawDir, event.agentId, event.sessionId);
-          }
-
-          if (promptText) {
-            // We finally have a prompt to score against — consume the one-shot
-            // guard ONLY now. A bare init session:patch (no prompt yet) leaves
-            // the guard unset so a later patch with the real prompt still runs.
-            boundedSetAdd(_continuityInjectedSessions, event.sessionId);
-
-            // ── Cold-resume-lean path (upgrade from lightweight hint) ────────
-            // When the user signals resume intent ("continue our work / last
-            // session"), inject a FULL lean reconstruction of the right same-
-            // project prior checkpoint. Falls through to the lightweight hint
-            // when intent not detected or no same-project match found.
-            const resumeLeanBlock = tryBuildResumeLeanHint(
-              promptText,
-              event.sessionId,
-              process.cwd(),
-              logSavingsEvent
-            );
-            if (resumeLeanBlock) {
-              // Cold-resume-lean matched: inject the full reconstruction block
-              // and skip the lightweight hint (lean block is the full replacement).
-              if (typeof event.inject === "function") {
-                event.inject(resumeLeanBlock);
-                api.logger.info(
-                  `[token-optimizer] Cold-resume-lean injected for session ${event.sessionId}`
-                );
-              } else {
-                storePendingContinuityHint(event.sessionId, resumeLeanBlock);
-                api.logger.info(
-                  `[token-optimizer] Cold-resume-lean matched for session ${event.sessionId}; queued for next inject point.`
-                );
-              }
-            } else {
-              // ── End cold-resume-lean path — fall through to lightweight hint ─
-              // CHANGE 2 parity: when resume intent fired AND cwd is known but no
-              // same-project match was found, do NOT fall through to the lightweight
-              // cross-session hint (it is un-gated and could surface a DIFFERENT
-              // project's checkpoint). Mirrors Python _continuity_prompt_hint:
-              //   if cwd: return ""  # no cross-project fallthrough on explicit resume
-              const _cwd = process.cwd();
-              if (isResumeIntent(promptText) && _cwd) {
-                api.logger.info(
-                  `[token-optimizer] Resume intent detected but no same-project checkpoint for session ${event.sessionId}; suppressing cross-project fallthrough.`
-                );
-                // Skip the lightweight hint entirely — do NOT surface another project's context.
-              } else {
-                const candidate = findBestContinuityCheckpoint(promptText, event.sessionId, _cwd);
-                if (candidate) {
-                  const hint = buildContinuityHint(candidate, promptText, _cwd);
-                  // Serve side: record which files this hint surfaced so a
-                  // later Read of one can claim the avoided-search credit. Best-effort:
-                  // never let this bookkeeping break the hint itself.
-                  try {
-                    const hintedPaths = extractHintedPaths(candidate.content);
-                    if (hintedPaths.length > 0) {
-                      recordHintServe(event.sessionId, hintedPaths);
-                    }
-                  } catch { /* best-effort */ }
-                  if (typeof event.inject === "function") {
-                    // Best case: gateway forwards an inject callback on session:patch.
-                    event.inject(hint);
-                    api.logger.info(
-                      `[token-optimizer] Cross-session continuity injected for session ${event.sessionId} ` +
-                      `(score=${candidate.score.toFixed(2)}, source=${candidate.entry.sessionDirName})`
-                    );
-                  } else {
-                    // No inject path here. Persist the hint so the next
-                    // session:compact:after — the spec-documented inject point —
-                    // delivers it. Always store on a match so it lands at the
-                    // earliest opportunity.
-                    storePendingContinuityHint(event.sessionId, hint);
-                    api.logger.info(
-                      `[token-optimizer] Cross-session match for session ${event.sessionId} ` +
-                      `(score=${candidate.score.toFixed(2)}, source=${candidate.entry.sessionDirName}); ` +
-                      `queued for the next inject point.`
-                    );
-                  }
-                } else {
-                  api.logger.info(
-                    `[token-optimizer] No matching prior checkpoint for session ${event.sessionId} ` +
-                    `(threshold=${_CONTINUITY_THRESHOLD})`
-                  );
-                }
-              }
-            }
+          boundedSetAdd(_continuityInjectedSessions, sessionId);
+          const cwd = process.cwd();
+          const resumeLeanBlock = tryBuildResumeLeanHint(promptText, sessionId, cwd, logSavingsEvent);
+          if (resumeLeanBlock) {
+            contributions.push(resumeLeanBlock);
+            api.logger.info(`[token-optimizer] Cold-resume-lean added for session ${sessionId}`);
+          } else if (isResumeIntent(promptText) && cwd) {
+            api.logger.info(`[token-optimizer] Resume intent without same-project checkpoint for session ${sessionId}; suppressing cross-project fallthrough.`);
           } else {
-            // Bare init patch before the first user message. Do NOT consume the
-            // guard — a later session:patch (or the on-disk transcript) will
-            // carry the prompt and we retry then.
-            api.logger.info(
-              `[token-optimizer] session:patch for new session ${event.sessionId}: ` +
-              `no user prompt yet; will retry continuity on the next patch.`
-            );
+            const candidate = findBestContinuityCheckpoint(promptText, sessionId, cwd);
+            if (candidate) {
+              contributions.push(buildContinuityHint(candidate, promptText, cwd));
+              try {
+                const hintedPaths = extractHintedPaths(candidate.content);
+                if (hintedPaths.length > 0) recordHintServe(sessionId, hintedPaths);
+              } catch { /* best-effort */ }
+              api.logger.info(`[token-optimizer] Cross-session continuity added for session ${sessionId} (score=${candidate.score.toFixed(2)}, source=${candidate.entry.sessionDirName})`);
+            } else {
+              api.logger.info(`[token-optimizer] No matching prior checkpoint for session ${sessionId} (threshold=${_CONTINUITY_THRESHOLD})`);
+            }
           }
         } catch (err) {
           api.logger.warn(`[token-optimizer] Cross-session continuity error: ${err}`);
         }
       }
-      // ── End continuity injection ──────────────────────────────────────────
 
-      // ── Fresh-session nudge ───────────────────────────────────────────────
-      // Fires once per session when quality score < 70 AND context fill >= 50%.
-      // Suppressed until a prior score is established (mirrors Python's
-      // _nudge_previous_score guard against firing right after a compaction).
-      // Delivery: inject() when available (session:patch), otherwise stored as
-      // a pending hint for the next session:compact:after inject point.
-      // Takes precedence over the /compact quality nudge (no double message).
-      if (event.sessionId && !_freshNudgeFiredSessions.has(event.sessionId)) {
+      // Fresh-session nudge is evaluated on every eligible turn, independently
+      // of continuity, so its prior-score baseline survives early low-fill turns.
+      if (!_freshNudgeFiredSessions.has(sessionId)) {
         try {
           const nudgeSnapshot = buildRuntimeEventContext(
-            openclawDir, freshContextAudit(), event.agentId, event.sessionId, "session-patch"
+            openclawDir, freshContextAudit(), context?.agentId, sessionId, "agent-turn-prepare"
           );
           if (nudgeSnapshot) {
-            const hasPriorScore = _freshNudgePriorScores.has(event.sessionId);
+            const hasPriorScore = _freshNudgePriorScores.has(sessionId);
             const nudgeMsg = buildFreshSessionNudgeMessage(
-              nudgeSnapshot.qualityScore,
-              nudgeSnapshot.fillPct,
-              hasPriorScore,
-              nudgeSnapshot.model,
-              nudgeSnapshot.contextWindow  // thread the exact window fillPct was measured against
+              nudgeSnapshot.qualityScore, nudgeSnapshot.fillPct, hasPriorScore,
+              nudgeSnapshot.model, nudgeSnapshot.contextWindow
             );
-            // Always update the prior-score baseline (whether or not the nudge fired).
-            boundedMapSet(_freshNudgePriorScores, event.sessionId, nudgeSnapshot.qualityScore);
-
+            boundedMapSet(_freshNudgePriorScores, sessionId, nudgeSnapshot.qualityScore);
             if (nudgeMsg) {
-              boundedSetAdd(_freshNudgeFiredSessions, event.sessionId);
+              boundedSetAdd(_freshNudgeFiredSessions, sessionId);
               const { savedTokens } = freshSessionSavingsEstimate(nudgeSnapshot.fillPct, nudgeSnapshot.model, nudgeSnapshot.contextWindow);
-              logSavingsEvent("fresh_session_nudge", savedTokens, event.sessionId,
+              logSavingsEvent("fresh_session_nudge", savedTokens, sessionId,
                 `score=${nudgeSnapshot.qualityScore} fill_pct=${nudgeSnapshot.fillPct.toFixed(1)}`);
               logCompressionEvent({
-                feature: "fresh_session_nudge",
-                sessionId: event.sessionId,
+                feature: "fresh_session_nudge", sessionId,
                 detail: `score=${nudgeSnapshot.qualityScore} fill_pct=${nudgeSnapshot.fillPct.toFixed(1)} est_saved=${savedTokens}`,
                 verified: false,
               });
-              if (typeof event.inject === "function") {
-                event.inject(nudgeMsg);
-                api.logger.info(
-                  `[token-optimizer] Fresh-session nudge injected for session ${event.sessionId} ` +
-                  `(score=${nudgeSnapshot.qualityScore}, fill=${nudgeSnapshot.fillPct.toFixed(1)}%)`
-                );
-              } else {
-                storePendingContinuityHint(event.sessionId, nudgeMsg);
-                api.logger.info(
-                  `[token-optimizer] Fresh-session nudge queued for session ${event.sessionId} ` +
-                  `(score=${nudgeSnapshot.qualityScore}, fill=${nudgeSnapshot.fillPct.toFixed(1)}%); ` +
-                  `will deliver at next inject point.`
-                );
-              }
+              contributions.push(nudgeMsg);
+              api.logger.info(`[token-optimizer] Fresh-session nudge added for session ${sessionId} (score=${nudgeSnapshot.qualityScore}, fill=${nudgeSnapshot.fillPct.toFixed(1)}%)`);
             }
           }
         } catch (err) {
           api.logger.warn(`[token-optimizer] Fresh-session nudge error: ${err}`);
         }
       }
-      // ── End fresh-session nudge ───────────────────────────────────────────
 
-      maybeCheckpointFromRuntimeSnapshot(openclawDir, freshContextAudit(), event.agentId, event.sessionId, api, "session-patch");
+      maybeCheckpointFromRuntimeSnapshot(
+        openclawDir, freshContextAudit(), context?.agentId, sessionId, api, "agent-turn-prepare"
+      );
+      return contributions.length > 0
+        ? { prependContext: contributions.join("\n\n") }
+        : undefined;
     });
 
     // Read Cache: intercept redundant reads (PreToolUse equivalent)
-    safeOn(api,"agent:tool:before", (...args: unknown[]) => {
+    safeOn(api, "before_tool_call", (...args: unknown[]) => {
       const event = args[0] as {
         toolName?: string;
-        toolInput?: Record<string, unknown>;
-        agentId?: string;
-        sessionId?: string;
-        block?: (message: string) => void;
+        params?: Record<string, unknown>;
       } | undefined;
+      const context = args[1] as OpenClawHookContext | undefined;
+      const sessionId = context?.sessionId ?? context?.sessionKey;
 
       if (!event?.toolName) return;
 
       if (event.toolName === "Read") {
         const result = handleReadBefore({
           toolName: event.toolName,
-          toolInput: (event.toolInput ?? {}) as { file_path?: string; offset?: number; limit?: number },
-          agentId: event.agentId ?? "unknown",
-          sessionId: event.sessionId ?? "unknown",
+          toolInput: (event.params ?? {}) as { file_path?: string; offset?: number; limit?: number },
+          agentId: context?.agentId ?? "unknown",
+          sessionId: sessionId ?? "unknown",
         });
 
-        if (result?.block && event.block) {
-          event.block(result.message);
+        if (result?.block) {
+          return { block: true, blockReason: result.message };
         }
       }
 
       if (
         openclawDir &&
-        event.sessionId &&
+        sessionId &&
         (event.toolName === "Agent" || event.toolName === "Task")
       ) {
-        const decision = maybeDecidePreFanoutCheckpoint(event.sessionId);
+        const decision = maybeDecidePreFanoutCheckpoint(sessionId);
         const snapshot = decision
           ? buildRuntimeEventContext(
               openclawDir,
               freshContextAudit(),
-              event.agentId,
-              event.sessionId,
+              context?.agentId,
+              sessionId,
               "tool-before",
               event.toolName
             )
@@ -803,39 +775,39 @@ export default definePluginEntry({
     });
 
     // Read Cache: invalidate on file writes (PostToolUse equivalent)
-    safeOn(api,"agent:tool:after", (...args: unknown[]) => {
+    safeOn(api, "after_tool_call", (...args: unknown[]) => {
       const event = args[0] as {
         toolName?: string;
-        toolInput?: Record<string, unknown>;
-        agentId?: string;
-        sessionId?: string;
+        params?: Record<string, unknown>;
       } | undefined;
+      const context = args[1] as OpenClawHookContext | undefined;
+      const sessionId = context?.sessionId ?? context?.sessionKey;
 
       if (!event?.toolName) return;
 
       handleWriteAfter({
         toolName: event.toolName,
-        toolInput: (event.toolInput ?? {}) as { file_path?: string; offset?: number; limit?: number },
-        agentId: event.agentId ?? "unknown",
-        sessionId: event.sessionId ?? "unknown",
+        toolInput: (event.params ?? {}) as { file_path?: string; offset?: number; limit?: number },
+        agentId: context?.agentId ?? "unknown",
+        sessionId: sessionId ?? "unknown",
       });
 
-      if (!openclawDir || !event.sessionId) return;
+      if (!openclawDir || !sessionId) return;
 
       const filePath =
-        typeof event.toolInput?.file_path === "string"
-          ? event.toolInput.file_path
+        typeof event.params?.file_path === "string"
+          ? event.params.file_path
           : undefined;
       let milestoneSnapshot: RuntimeEventContext | null = null;
       if (isWriteTool(event.toolName)) {
-        registerWriteEvent(event.sessionId, filePath);
-        const decision = maybeDecideEditBatchCheckpoint(event.sessionId);
+        registerWriteEvent(sessionId, filePath);
+        const decision = maybeDecideEditBatchCheckpoint(sessionId);
         if (decision) {
           milestoneSnapshot = buildRuntimeEventContext(
             openclawDir,
             freshContextAudit(),
-            event.agentId,
-            event.sessionId,
+            context?.agentId,
+            sessionId,
             "tool-after",
             event.toolName
           );
@@ -846,8 +818,8 @@ export default definePluginEntry({
       maybeCheckpointFromRuntimeSnapshot(
         openclawDir,
         freshContextAudit(),
-        event.agentId,
-        event.sessionId,
+        context?.agentId,
+        sessionId,
         api,
         "tool-after",
         milestoneSnapshot
@@ -855,15 +827,13 @@ export default definePluginEntry({
     });
 
     // Generate dashboard silently on session end
-    safeOn(api, "session:end", (...args: unknown[]) => {
-      const event = args[0] as {
-        sessionId?: string;
-        agentId?: string;
-      } | undefined;
+    safeOn(api, "session_end", (...args: unknown[]) => {
+      const context = args[1] as OpenClawHookContext | undefined;
+      const sessionId = context?.sessionId ?? context?.sessionKey;
 
       try {
-        if (openclawDir && event?.sessionId) {
-          maybeCheckpointFromRuntimeSnapshot(openclawDir, freshContextAudit(), event.agentId, event.sessionId, api, "session-end");
+        if (openclawDir && sessionId) {
+          maybeCheckpointFromRuntimeSnapshot(openclawDir, freshContextAudit(), context?.agentId, sessionId, api, "session-end");
         }
       } catch { /* checkpoint failure should not block dashboard */ }
       try {
@@ -871,14 +841,17 @@ export default definePluginEntry({
         api.logger.info("[token-optimizer] Dashboard regenerated on session end");
       } finally {
         // Always clean up session state, even if checkpoint or dashboard fails
-        if (event?.sessionId) {
-          clearCheckpointState(event.sessionId);
+        if (sessionId) {
+          clearCheckpointState(sessionId);
           // Release the per-session continuity one-shot guard so the Set does
           // not grow unbounded over a long-running gateway.
-          _continuityInjectedSessions.delete(event.sessionId);
+          _continuityInjectedSessions.delete(sessionId);
           // Release fresh-session nudge state for this session.
-          _freshNudgeFiredSessions.delete(event.sessionId);
-          _freshNudgePriorScores.delete(event.sessionId);
+          _freshNudgeFiredSessions.delete(sessionId);
+          _freshNudgePriorScores.delete(sessionId);
+          // Release the per-session compaction counter.
+          const sessionKey = context?.sessionKey ?? sessionId;
+          _compactionCounter.delete(sessionKey);
         }
         // Prune checkpoints older than the retention window here too: an
         // always-on gateway may never restart, so the gateway:startup cleanup
@@ -889,7 +862,7 @@ export default definePluginEntry({
   },
 });
 
-type RuntimeEventKind = "session-patch" | "tool-before" | "tool-after" | "session-end";
+type RuntimeEventKind = "agent-turn-prepare" | "tool-before" | "tool-after" | "session-end";
 
 interface RuntimeEventContext {
   sessionId: string;
@@ -902,110 +875,6 @@ interface RuntimeEventContext {
   toolName?: string;
   eventKind: RuntimeEventKind;
   model: string;
-}
-
-/**
- * Read the first non-empty USER message from a session's on-disk transcript.
- * Used by continuity injection so the match no longer depends on the gateway
- * forwarding an (undocumented) firstMessage field on session:patch. Returns ""
- * when the transcript is missing or has no user text yet. Never throws.
- */
-function firstUserPromptFromSession(
-  openclawDir: string,
-  agentId: string | undefined,
-  sessionId: string
-): string {
-  try {
-    const sessionFile = resolveSessionFile(openclawDir, agentId, sessionId);
-    if (!sessionFile) return "";
-    return firstUserPromptFromSessionFile(sessionFile);
-  } catch {
-    return "";
-  }
-}
-
-/**
- * Stream a session transcript and return the first non-empty USER message text
- * (trimmed, capped at 2000 chars), stopping as soon as it is found.
- *
- * The previous implementation went through loadMessagesFromSessionFile(), which
- * reads AND JSON-parses the entire transcript. firstUserPromptFromSession only
- * needs the first user message, which sits near the top of the file, yet this
- * runs on the continuity-injection path that may fire on several early
- * session:patch events before the first user prompt has landed on disk. Reading
- * in chunks and breaking at the first match avoids parsing an ever-growing
- * transcript on each of those calls. Returns "" when no user text exists yet.
- */
-function firstUserPromptFromSessionFile(sessionFile: string): string {
-  let fd: number | null = null;
-  try {
-    fd = fs.openSync(sessionFile, "r");
-    const CHUNK = 64 * 1024;
-    const buf = Buffer.alloc(CHUNK);
-    // StringDecoder buffers any partial multi-byte UTF-8 sequence that lands on
-    // a chunk boundary, so line text is never corrupted mid-character.
-    const decoder = new StringDecoder("utf8");
-    let carry = "";
-    let bytes: number;
-    while ((bytes = fs.readSync(fd, buf, 0, CHUNK, null)) > 0) {
-      carry += decoder.write(buf.subarray(0, bytes));
-      let nl: number;
-      while ((nl = carry.indexOf("\n")) !== -1) {
-        const text = userTextFromJsonlLine(carry.slice(0, nl));
-        if (text) return text;
-        carry = carry.slice(nl + 1);
-      }
-    }
-    // Flush any decoder remainder, then check the final (unterminated) line.
-    carry += decoder.end();
-    return userTextFromJsonlLine(carry);
-  } catch {
-    return "";
-  } finally {
-    if (fd !== null) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        /* best-effort close */
-      }
-    }
-  }
-}
-
-/**
- * Parse one transcript JSONL line and return its trimmed user text (capped at
- * 2000 chars), or "" when the line is not a non-empty user message. Mirrors the
- * content handling in loadMessagesFromSessionFile (a plain string, or an array
- * of text blocks).
- */
-function userTextFromJsonlLine(line: string): string {
-  const trimmed = line.trim();
-  if (!trimmed) return "";
-  let record: Record<string, unknown>;
-  try {
-    record = JSON.parse(trimmed) as Record<string, unknown>;
-  } catch {
-    return "";
-  }
-  if (record.type !== "user") return "";
-  const message = record.message as Record<string, unknown> | undefined;
-  const rawContent = message?.content;
-  let content = "";
-  if (typeof rawContent === "string") {
-    content = rawContent;
-  } else if (Array.isArray(rawContent)) {
-    content = rawContent
-      .map((block) => {
-        if (!block || typeof block !== "object") return "";
-        const entry = block as Record<string, unknown>;
-        if (entry.type === "text" && typeof entry.text === "string") return entry.text;
-        return "";
-      })
-      .filter(Boolean)
-      .join("\n");
-  }
-  const text = content.trim();
-  return text ? text.slice(0, 2000) : "";
 }
 
 function resolveSessionFile(openclawDir: string, agentId: string | undefined, sessionId: string): string | null {
@@ -1047,6 +916,16 @@ function buildRuntimeEventContext(
   const agentName = agentId ?? path.basename(path.dirname(path.dirname(sessionFile)));
   const run = parseSession(sessionFile, agentName, openclawDir);
   if (!run) return null;
+
+  // Cache-drift visibility: when the session has no input tokens (missing or
+  // stale session data), scoreSessionQuality defaults fillScore to 100, which
+  // masks real degradation. Emit a one-line debug log so the fallback is
+  // visible without spamming INFO.
+  if (run.tokens.input === 0) {
+    _logger?.debug?.(
+      `[token-optimizer] session ${sessionId} has 0 input tokens; quality score defaulting to 100-fill fallback (cache drift?)`
+    );
+  }
 
   const snapshot = buildRuntimeSnapshot(run, contextAudit);
   return {
