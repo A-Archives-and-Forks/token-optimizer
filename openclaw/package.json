@@ -34,9 +34,6 @@
   "openclaw": {
     "extensions": [
       "./dist/index.js"
-    ],
-    "hooks": [
-      "./hooks/smart-compact"
     ]
   },
   "engines": {

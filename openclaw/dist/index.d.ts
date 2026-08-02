@@ -15,13 +15,33 @@ import { type CheckpointTelemetrySummary } from "./checkpoint-policy";
 export { V5_FEATURES, isV5Enabled, setV5, listV5Features, type V5FeatureId, } from "./v5-features";
 export { logCompressionEvent, getCompressionSummary, pruneOldEvents, type CompressionSummary, type CompressionEvent, } from "./telemetry";
 interface OpenClawApi {
-    registerService(name: string, service: Record<string, unknown>): void;
-    on(event: string, handler: (...args: unknown[]) => void): void;
+    registerService(service: {
+        id: string;
+        start: (context: OpenClawServiceContext) => void | Promise<void>;
+        stop?: (context: OpenClawServiceContext) => void | Promise<void>;
+    }): void;
+    on(event: string, handler: (...args: unknown[]) => unknown | Promise<unknown>): void;
+    session: {
+        workflow: {
+            enqueueNextTurnInjection(input: {
+                sessionKey: string;
+                text: string;
+                idempotencyKey?: string;
+                placement?: "prepend_context" | "append_context";
+            }): Promise<{
+                enqueued: boolean;
+            }>;
+        };
+    };
     logger: {
         info(msg: string, ...args: unknown[]): void;
         warn(msg: string, ...args: unknown[]): void;
         error(msg: string, ...args: unknown[]): void;
+        debug?(msg: string, ...args: unknown[]): void;
     };
+}
+interface OpenClawServiceContext {
+    logger: OpenClawApi["logger"];
 }
 interface PluginEntryOptions {
     id: string;
