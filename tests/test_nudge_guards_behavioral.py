@@ -29,9 +29,11 @@ SCRIPTS = REPO / "skills" / "token-optimizer" / "scripts"
 LIVE_SID = "0e37aafe-6625-457c-9d94-68e7ea73e45c"
 OTHER_SID = "768b1b27-7a17-45b0-859a-58d4ee8620c6"
 
-# fill/score chosen to satisfy the gentle tier (fill >= 25 and score < 75), so a
-# silent result can only come from a guard and never from the tier thresholds.
-FIRING_CACHE = "{'fill_pct': 47, 'score': 73, 'nudge_count': 0, 'last_nudge_time': 0}"
+# Fill and SessionEfficiency satisfy the gentle tier, so a silent result can
+# only come from a guard and never from the tier thresholds. ResourceHealth is
+# present independently because issue #112 split the displayed/gating metrics.
+FIRING_CACHE = ("{'fill_pct': 47, 'score': 73, 'session_efficiency': 60, "
+                "'nudge_count': 0, 'last_nudge_time': 0}")
 
 PRELUDE = f"""
 import sys, pathlib

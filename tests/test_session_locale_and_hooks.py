@@ -7,8 +7,8 @@
 2. Codex async-hook bug — `measure.py setup-hook` writes a Claude Code hook
    with {"async": true} into settings.json. Codex skips async hooks, so
    setup-hook must no-op under any non-Claude runtime.
-3. Lean-output nudge — the gentle verbosity-steer tier must start at 25% fill
-   (was 55%).
+3. Lean-output nudge — issue #112: the gentle verbosity-steer tier must use
+   SessionEfficiency for its degradation gate and displayed metric.
 
 Run directly:  python3 tests/test_session_locale_and_hooks.py
 Exits non-zero on first failure.
@@ -124,9 +124,14 @@ class _P:
         return True
 measure._find_current_session_jsonl = lambda: pathlib.Path(measure.__file__)
 measure._quality_cache_path_for = lambda fp=None: _P()
-def _probe(fill, **kw):
+def _probe(fill, score=66, session_efficiency=60, **kw):
     measure._read_quality_cache = lambda cp: {
-        'fill_pct': fill, 'score': 50, 'nudge_count': 0, 'last_nudge_time': 0,
+        'fill_pct': fill,
+        'score': score,
+        'session_efficiency': session_efficiency,
+        'model_context_window': 1_000_000,
+        'nudge_count': 0,
+        'last_nudge_time': 0,
     }
     return measure.run_verbosity_steer(quiet=True, **kw)
 # A known transcript, as every real caller supplies. Without one the session
@@ -137,20 +142,24 @@ print('AT30:' + ('1' if _probe(30, transcript_path=_TP) else '0'))
 print('AT25:' + ('1' if _probe(25, transcript_path=_TP) else '0'))
 print('AT24:' + ('1' if _probe(24, transcript_path=_TP) else '0'))
 print('AT19:' + ('1' if _probe(19, transcript_path=_TP) else '0'))
-# Fill ALONE fires it. A pristine session at 30% fill still pays for verbose
-# output, and the old quality<75 second condition meant the gentle tier only
-# ever reached sessions that had already degraded -- i.e. very long ones --
-# so most users never saw it.
-measure._read_quality_cache = lambda cp: {
-    'fill_pct': 30, 'score': 100, 'nudge_count': 0, 'last_nudge_time': 0,
-}
-print('HEALTHY30:' + ('1' if measure.run_verbosity_steer(quiet=True, transcript_path=_TP) else '0'))
-# ...but a healthy session BELOW the floor still stays quiet, so "fill alone"
-# did not become "always".
-measure._read_quality_cache = lambda cp: {
-    'fill_pct': 15, 'score': 100, 'nudge_count': 0, 'last_nudge_time': 0,
-}
-print('HEALTHY15:' + ('1' if measure.run_verbosity_steer(quiet=True, transcript_path=_TP) else '0'))
+# Reporter-validated issue #112 scenarios. ResourceHealth 66 at 63% fill does
+# not mean a flawless session is behaviorally degraded, so the gentle tier must
+# stay silent when SessionEfficiency is 100.
+flawless = _probe(63, score=66, session_efficiency=100, transcript_path=_TP)
+print('FLAWLESS63:' + ('1' if flawless else '0'))
+# A behaviorally degraded session at the same fill must still receive the
+# gentle nudge, and the message must name the metric it actually displays.
+degraded = _probe(63, score=66, session_efficiency=60, transcript_path=_TP)
+print('DEGRADED63:' + ('1' if degraded else '0'))
+print('DEGRADED63_PAYLOAD:' + (degraded or ''))
+# The degradation gate is strict: exactly 75 is not below the threshold.
+efficiency_boundary = _probe(63, score=66, session_efficiency=75, transcript_path=_TP)
+print('EFFICIENCY75:' + ('1' if efficiency_boundary else '0'))
+# The strong tier remains fill-driven at 75%, even with perfect behavior, but
+# its displayed ResourceHealth score must no longer be called quality.
+strong = _probe(75, score=50, session_efficiency=100, transcript_path=_TP)
+print('STRONG75:' + ('1' if strong else '0'))
+print('STRONG75_PAYLOAD:' + (strong or ''))
 # Guard: no transcript_path and no session_id means the transcript was inferred
 # and cannot be verified. A brand-new session must not inherit these numbers.
 print('NOIDENT:' + ('1' if _probe(30) else '0'))
@@ -158,10 +167,7 @@ print('NOIDENT:' + ('1' if _probe(30) else '0'))
 
 
 def test_lean_nudge_boundary_is_25pct():
-    """The gentle tier's floor is _VERBOSITY_NUDGE_MIN_FILL, back to 25, and
-    fill is now the ONLY condition. The boundary is pinned on both sides so a
-    future edit cannot quietly widen or narrow it; HEALTHY30 pins the removal
-    of the quality gate, and HEALTHY15 pins that the floor still holds."""
+    """Pin the gentle floor, SessionEfficiency gate, and honest tier labels."""
     r = _run(_LEAN_PROBE)
     assert r.returncode == 0, f"lean probe crashed: {r.stderr}"
     out = r.stdout
@@ -169,8 +175,23 @@ def test_lean_nudge_boundary_is_25pct():
     assert "AT25:1" in out, f"gentle nudge should fire at exactly 25% fill: {out!r}"
     assert "AT24:0" in out, f"gentle nudge should NOT fire at 24% fill: {out!r}"
     assert "AT19:0" in out, f"gentle nudge should NOT fire at 19% fill: {out!r}"
-    assert "HEALTHY30:1" in out, f"fill alone must fire the nudge at 30%: {out!r}"
-    assert "HEALTHY15:0" in out, f"below the floor must stay quiet: {out!r}"
+    assert "FLAWLESS63:0" in out, (
+        f"flawless 63%-fill session must stay quiet despite ResourceHealth 66: {out!r}"
+    )
+    assert "DEGRADED63:1" in out, f"SessionEfficiency 60 must still nudge: {out!r}"
+    assert "session efficiency 60/100" in out, (
+        f"gentle nudge must report SessionEfficiency: {out!r}"
+    )
+    assert "EFFICIENCY75:0" in out, (
+        f"SessionEfficiency exactly 75 must not cross the degradation gate: {out!r}"
+    )
+    assert "STRONG75:1" in out, f"strong tier must still fire at 75% fill: {out!r}"
+    assert "resource health 50/100" in out, (
+        f"strong nudge must label ResourceHealth honestly: {out!r}"
+    )
+    assert "quality 66/100" not in out and "quality 50/100" not in out, (
+        f"verbosity-steer payloads must not call ResourceHealth quality: {out!r}"
+    )
     # Session identity guard: an inferred transcript with no session_id to verify
     # it against must stay silent, even at a fill that would otherwise nudge.
     # This is the observed bug -- a nudge fired on the first prompt of an empty
