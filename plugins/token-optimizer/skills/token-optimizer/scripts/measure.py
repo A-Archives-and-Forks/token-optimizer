@@ -30770,15 +30770,10 @@ def _maybe_progressive_checkpoint(fill_pct, cache_path, result, filepath):
 
 _NUDGE_COOLDOWN_SECONDS = 300  # 5 minutes between nudges
 
-# Fill % at which the gentle lean-output nudge fires. Fill ALONE is the
-# trigger: the old second condition (quality score < 75) meant the gentle tier
-# only reached people whose sessions had already degraded, i.e. very long ones,
-# so ordinary sessions never saw it at all. Cost scales with fill regardless of
-# how clean the context is -- a healthy session a quarter full is still paying
-# for verbose output -- and the 3-nudge cap plus the 5-minute cooldown are what
-# keep it from becoming background noise. Named + env-tunable rather than
-# inline, because the previous magic 25 was documented as three different
-# numbers across the docs.
+# Fill % at which the gentle lean-output nudge becomes eligible. The behavioral
+# SessionEfficiency gate below keeps healthy sessions quiet even when fill is
+# moderate. Named + env-tunable rather than inline, because the previous magic
+# 25 was documented as three different numbers across the docs.
 def _verbosity_nudge_min_fill() -> int:
     """Resolve the gentle-tier floor, clamped to the range where it means
     anything.
@@ -30802,6 +30797,7 @@ def _verbosity_nudge_min_fill() -> int:
 
 
 _VERBOSITY_NUDGE_MIN_FILL = _verbosity_nudge_min_fill()
+_VERBOSITY_NUDGE_EFFICIENCY_THRESHOLD = 75
 _NUDGE_SESSION_CAP = 3
 # Fresh-session nudge: when a session is BOTH long (high fill) and degraded
 # (quality < threshold), suggest starting a fresh session -- cold-resume-lean
@@ -37145,9 +37141,9 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
     Returns the JSON string if a nudge was emitted, empty string otherwise.
 
     Tiered messaging:
-      25-74% fill                     → gentle nudge (floor is
-                                        _VERBOSITY_NUDGE_MIN_FILL; fill alone,
-                                        quality does not gate it)
+      25-74% fill + degraded session  → gentle nudge (floor is
+                                        _VERBOSITY_NUDGE_MIN_FILL;
+                                        SessionEfficiency gates it)
       75-89% fill                     → strong nudge with specific directives
       90%+ fill                        → suppressed (adding tokens makes it worse)
 
@@ -37172,6 +37168,9 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
             return ""
         fill_pct = cached.get("fill_pct", 0) or 0
         score = cached.get("score", 100) or 100
+        session_efficiency = cached.get("session_efficiency", 100)
+        if session_efficiency is None:
+            session_efficiency = 100
         # Session identity guard.
         #
         # This path reported another session's fill and quality as the user's own:
@@ -37286,14 +37285,16 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
         #     the Sonnet figure as the product number.
         if fill_pct >= 75:
             nudge = (
-                f"[Token Optimizer] Context {fill_pct:.0f}%{window_note}, quality {score:.0f}/100. "
+                f"[Token Optimizer] Context {fill_pct:.0f}%{window_note}, resource health {score:.0f}/100. "
                 "Answer in a focused and spartan way, as if the user has ADHD. Cut everything "
                 "that is not the answer itself. Think as long as you need, and size code, "
                 "diffs and file contents to the task."
             )
-        elif fill_pct >= _VERBOSITY_NUDGE_MIN_FILL:
+        elif (fill_pct >= _VERBOSITY_NUDGE_MIN_FILL
+              and session_efficiency < _VERBOSITY_NUDGE_EFFICIENCY_THRESHOLD):
             nudge = (
-                f"[Token Optimizer] Context {fill_pct:.0f}%{window_note}, quality {score:.0f}/100. "
+                f"[Token Optimizer] Context {fill_pct:.0f}%{window_note}, "
+                f"session efficiency {session_efficiency:.0f}/100. "
                 "Answer in a focused and spartan way, as if the user has ADHD. "
                 "Think as long as you need, and size code, diffs and file contents to the task."
             )
