@@ -36680,14 +36680,21 @@ def run_ensure_health():
                   "serving a stale version; run: measure.py setup-daemon",
                   file=sys.stderr)
         elif _daemon_ensure == "noop-install-failed":
-            # #107: the sticky marker used to wedge SILENTLY --
-            # the dashboard died and every diagnostic said OK. Name the state
-            # and the exact command that clears it, every time it suppresses.
+            # #107 named this state but routed it to stderr, where a SessionStart
+            # hook's output is swallowed (stdout is context, stderr is not --
+            # see the routing note near _install_task_scheduler_daemon). So the
+            # dashboard stayed silently dead, the exact wedge #107 set out to
+            # kill (mostly Windows: MS-Store Python, missing/policy-blocked
+            # schtasks). This ONE message is the deliberate exception to the
+            # "errors -> stderr" convention: it is not a transient error but a
+            # persistent, user-recoverable state, so it MUST reach the
+            # session-visible stdout stream. It self-clears the moment a
+            # verified-healthy daemon (or an explicit setup-daemon) removes the
+            # marker, so it can never nag past the fix.
             _mk_reason = _daemon_install_failed_reason()
             print("  [Token Optimizer] dashboard daemon self-heal is disabled: "
                   f"a previous install failed permanently ({_mk_reason or 'reason unknown'}). "
-                  "To retry, run: python3 measure.py setup-daemon",
-                  file=sys.stderr)
+                  "To retry, run: python3 measure.py setup-daemon")
     except Exception as _e:
         print(f"  [Token Optimizer] dashboard daemon self-heal failed: {_e}", file=sys.stderr)
 
