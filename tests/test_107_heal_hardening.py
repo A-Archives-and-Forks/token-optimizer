@@ -329,18 +329,30 @@ def test_marker_reason_helper(m):
 # Cluster A visibility (T3-H5): the wedge must never be silent
 # ---------------------------------------------------------------------------
 def test_ensure_health_surfaces_the_wedge():
-    """run_ensure_health must print a one-liner (to stderr) when the marker is
-    suppressing the daemon, naming the exact command that clears it."""
+    """run_ensure_health must print a one-liner when the marker is suppressing
+    the daemon, naming the exact command that clears it -- and it must land on
+    the SessionStart hook's *stdout* (session-visible context), NOT stderr.
+
+    #107 originally routed this to stderr, which a SessionStart hook swallows,
+    so the dashboard stayed silently dead -- the exact wedge #107 set out to
+    kill. This message is the deliberate exception to the "errors -> stderr"
+    convention: a persistent, user-recoverable state must reach the user."""
     src = _measure_source()
     idx = src.index("def run_ensure_health")
     body = src[idx:]
     branch = body.index('== "noop-install-failed"')
-    window = body[branch:branch + 800]
+    # Scope to JUST this branch (up to the enclosing try's `except`), so the
+    # trailing `except ... file=sys.stderr` handler can't leak into the window.
+    branch_body = body[branch:]
+    end = branch_body.index("\n    except Exception")
+    window = branch_body[:end]
     assert "setup-daemon" in window, (
         "the suppression one-liner must name the clearing command"
     )
-    assert "file=sys.stderr" in window, (
-        "the suppression one-liner must go to stderr, not hook stdout"
+    assert "file=sys.stderr" not in window, (
+        "the suppression one-liner must reach hook STDOUT (session-visible), "
+        "not stderr -- stderr is swallowed by the SessionStart hook, which is "
+        "what made the wedge silent in the first place"
     )
     assert "_daemon_install_failed_reason" in window, (
         "the one-liner should include the recorded failure reason"
