@@ -59,6 +59,13 @@ export interface RealizedSavings {
     /** Current pool cache-hit rate (0..1). */
     afterCacheHit: number;
     sessionsPerMonth: number;
+    /**
+     * Days of post-baseline history behind the monthly projection (floor of the
+     * after-window span, clamped >= 1). Drives the dashboard's young-install
+     * guard: < 30 -> show the measured cumulative ("so far") instead of the
+     * "/mo" run-rate. 0 when not ready.
+     */
+    trackedDays: number;
     beforeMixLabel: string;
     afterMixLabel: string;
     cumulativeSavedUsd: number;
