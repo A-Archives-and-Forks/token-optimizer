@@ -902,6 +902,14 @@ function renderDaily(data) {
     </div>
   </div>`;
 }
+/**
+ * Provider-neutral billing transparency caption (parity with the Python
+ * dashboard's subscription-default wording, dashboard.html:3922). The TS ports
+ * have no billing-mode detection — Python's keepwarm_billing_mode reads
+ * ANTHROPIC_* env vars and ~/.claude.json, none of which exist on OpenClaw —
+ * so the conservative flat-plan wording always applies.
+ */
+const BILLING_CAPTION = "Valued at your provider's API rates. On a flat plan this is capacity freed inside your limits, not cash refunded.";
 function renderSavings(data) {
     const s = data.savings;
     // --- Item 5: updated header copy — no longer implies "install day" ---
@@ -975,7 +983,15 @@ function renderSavings(data) {
     // arms (counterfactual - actual), so when that net is <= 0 we show a neutral "roughly flat"
     // card instead of clamping a positive number beside net-negative arms. No display clamp.
     const heroReady = s.ready && s.monthlySavingsUsd > 0;
-    const pctDisplay = heroReady && s.transformationPct > 0
+    // Young-install guard (parity: Python dashboard.html renderSavings, lines
+    // 3915-3917). With < 30 days of post-baseline history the "/mo" run-rate
+    // annualizes a tiny sample (sessionsPerMonth = after.length /
+    // afterWindowDays * 30) and reads as fake; show the measured cumulative
+    // instead. trackedDays is 0 when not ready, but every consumer below is
+    // additionally gated on heroReady/ready, so that case is unreachable.
+    const trackedDays = Math.max(1, Math.floor(s.trackedDays ?? 0));
+    const runRate = trackedDays >= 30;
+    const pctDisplay = heroReady && runRate && s.transformationPct > 0
         ? `<span style="font-size:28px;color:var(--c-accent-cyan);font-family:var(--font-mono)">&minus;${(s.transformationPct * 100).toFixed(0)}%</span>`
         : "";
     // Cache-reuse split: shown only when the arms differ, so identical tokens+mix with a
@@ -985,17 +1001,22 @@ function renderSavings(data) {
         : "";
     const hero = heroReady
         ? `<div class="card">
-        <div class="card-header"><span>Monthly transformation</span> ${installLine}</div>
+        <div class="card-header"><span>${runRate ? "Monthly transformation" : `Saved so far &middot; ${trackedDays} day${trackedDays === 1 ? "" : "s"} tracked`}</span> ${installLine}</div>
         <div style="display:flex;align-items:baseline;gap:var(--s-3);padding:var(--s-2) 0;flex-wrap:wrap">
-          <div class="daily-stat-val" style="font-size:64px">${fmtCost(s.monthlySavingsUsd)}</div>
-          <div style="color:var(--c-text-dim);font-size:15px">/ month</div>
+          <div class="daily-stat-val" style="font-size:64px">${fmtCost(runRate ? s.monthlySavingsUsd : s.compressionMeasuredUsd)}</div>
+          <div style="color:var(--c-text-dim);font-size:15px">${runRate ? "/ month" : "so far"}</div>
           ${pctDisplay}
         </div>
-        <div style="font-size:13px;color:var(--c-text-dim);margin-bottom:var(--s-2)">
+        ${runRate
+            ? `<div style="font-size:13px;color:var(--c-text-dim);margin-bottom:var(--s-2)">
           est. <strong style="color:var(--c-text-main)">${fmtCost(s.actualMonthlyUsd)}/mo</strong> now
           vs <strong style="color:var(--c-text-dim)">${fmtCost(s.counterfactualMonthlyUsd)}/mo</strong> the old way
           &mdash; volume held constant on both sides, pure efficiency gain
-        </div>
+        </div>`
+            : `<div style="font-size:13px;color:var(--c-text-dim);margin-bottom:var(--s-2)">
+          Counted directly from metered context removals (tool replacements, lean resumes, checkpoint restores).
+          The monthly run-rate estimate appears once 30 days of post-baseline history are on record.
+        </div>`}
         <div class="savings-beforeafter">
           <span class="sba-before">${fmtCost(s.beforeCostPerSession)}<small>/session</small></span>
           <span class="sba-arrow">&rarr;</span>
@@ -1003,8 +1024,9 @@ function renderSavings(data) {
           <span class="sba-delta">${s.savingsPerSession >= 0 ? "&minus;" : "+"}${fmtCost(Math.abs(s.savingsPerSession))}/session</span>
         </div>
         <div style="color:var(--c-text-dim);font-size:13px;margin-top:var(--s-2)">
-          ${esc(s.beforeMixLabel)} &rarr; ${esc(s.afterMixLabel)}${cacheLine} &middot; ~${Math.round(s.sessionsPerMonth)} sessions/mo
+          ${esc(s.beforeMixLabel)} &rarr; ${esc(s.afterMixLabel)}${cacheLine}${runRate ? ` &middot; ~${Math.round(s.sessionsPerMonth)} sessions/mo` : ""}
         </div>
+        <div style="font-size:12px;color:var(--c-text-dim);margin-top:var(--s-2)">${BILLING_CAPTION}</div>
       </div>`
         : s.ready
             ? `<div class="card">
@@ -1022,14 +1044,14 @@ function renderSavings(data) {
           <span style="color:var(--c-text-dim);font-size:13px">${esc(s.status)}</span>
         </div>`}
       </div>`;
-    const cumulative = s.cumulativeSavedUsd > 0
+    const cumulative = runRate && s.cumulativeSavedUsd > 0
         ? `<div class="card">
         <div class="card-header"><span>Saved so far</span></div>
         <div class="daily-stat-val" style="font-size:36px;padding:var(--s-2) 0">${fmtCost(s.cumulativeSavedUsd)}</div>
         <div style="color:var(--c-text-dim);font-size:13px">Per-session efficiency applied across every post-baseline session.</div>
       </div>`
         : "";
-    const levers = heroReady && s.breakdown.length
+    const levers = heroReady && runRate && s.breakdown.length
         ? `<div class="card">
         <div class="card-header"><span>Where the savings come from</span></div>
         ${s.breakdown
@@ -1050,11 +1072,12 @@ function renderSavings(data) {
         ? `<div class="card" style="border-left:3px solid var(--c-success)">
         <div class="card-header">
           <span>Counted directly / measured to date</span>
-          <span style="font-family:var(--font-mono);color:var(--c-success)">${fmtCost(s.compressionMeasuredUsd)}/mo</span>
+          <span style="font-family:var(--font-mono);color:var(--c-success)">${fmtCost(s.compressionMeasuredUsd)}${runRate ? "/mo" : " so far"}</span>
         </div>
         <div style="font-size:13px;color:var(--c-text-dim);margin-bottom:var(--s-2)">
           This is the <em>metered slice</em> — directly counted tokens removed from context (tool replacements, lean resumes, checkpoint restores). It is smaller and exact. The transformation headline above is the superset estimate that also includes routing and caching efficiency; do not add these two together.
         </div>
+        <div style="font-size:12px;color:var(--c-text-dim);margin-top:var(--s-2)">${BILLING_CAPTION}</div>
         ${evts.totalCount > 0 ? `<div style="margin-top:var(--s-2)">
           ${evts.categories.map((cat) => `<div class="bar-row">
             <span class="bar-row-label">${esc(cat.label)}</span>

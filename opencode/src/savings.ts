@@ -140,6 +140,13 @@ export interface RealizedSavings {
    * NEVER summed into the transformation headline. Render it as a separate card.
    */
   compressionMeasuredUsd: number;
+  /**
+   * RAW metered compression $ over the lookback window, BEFORE the 30/days
+   * monthly scaling that compressionMeasuredUsd carries. The dashboard's
+   * young-install guard renders this as the cumulative "so far" figure.
+   * Same INVARIANT as compressionMeasuredUsd: never summed into the headline.
+   */
+  compressionMeasuredWindowUsd: number;
   /** Estimated verbosity-steer $ before the baseline-output reprice. */
   verbosityMeasuredUsd: number;
   /** Repriced verbosity-steer $ (estimated output reduction at baseline mix). */
@@ -153,6 +160,13 @@ export interface RealizedSavings {
   /** Current pool cache-hit rate (0..1). */
   afterCacheHit: number;
   sessionsPerMonth: number;
+  /**
+   * Days of post-baseline history behind the monthly projection (floor of the
+   * after-window span, clamped >= 1). Drives the dashboard's young-install
+   * guard: < 30 -> show the measured cumulative ("so far") instead of the
+   * "/mo" run-rate. 0 when not ready.
+   */
+  trackedDays: number;
   beforeMixLabel: string;
   afterMixLabel: string;
   cumulativeSavedUsd: number;
@@ -179,6 +193,7 @@ const NOT_READY = (status: string): RealizedSavings => ({
   counterfactualMonthlyUsd: 0,
   transformationPct: 0,
   compressionMeasuredUsd: 0,
+  compressionMeasuredWindowUsd: 0,
   verbosityMeasuredUsd: 0,
   verbosityTransformationUsd: 0,
   savingsPerSession: 0,
@@ -187,6 +202,7 @@ const NOT_READY = (status: string): RealizedSavings => ({
   beforeCacheHit: 0,
   afterCacheHit: 0,
   sessionsPerMonth: 0,
+  trackedDays: 0,
   beforeMixLabel: "n/a",
   afterMixLabel: "n/a",
   cumulativeSavedUsd: 0,
@@ -484,6 +500,8 @@ export function computeRealizedSavings(
   // as a SEPARATE field so the dashboard can render it in its own card, kept OUT of
   // the transformation headline. INVARIANT: never summed into monthlySavingsUsd.
   const compressionMeasuredUsd = m(Math.max(0, measuredCompression));
+  // Raw window sum (pre-monthly-scale) for the young-install "so far" hero.
+  const compressionMeasuredWindowUsd = Math.max(0, measuredCompression);
 
   // verbosityMeasuredUsd: the RAW estimated verbosity $ (before repricing to
   // baseline output mix). Also a separate field for the dashboard, kept OUT of
@@ -498,6 +516,7 @@ export function computeRealizedSavings(
     counterfactualMonthlyUsd: combinedCf,
     transformationPct,
     compressionMeasuredUsd,
+    compressionMeasuredWindowUsd,
     verbosityMeasuredUsd,
     verbosityTransformationUsd: verbosityAddback,
     savingsPerSession: beforeCps - afterCps,
@@ -506,6 +525,7 @@ export function computeRealizedSavings(
     beforeCacheHit: tPool > 0 ? tCr / tPool : 0,
     afterCacheHit: curHit,
     sessionsPerMonth,
+    trackedDays: Math.max(1, Math.floor(afterWindowDays)),
     beforeMixLabel: mixLabel(beforeMix),
     afterMixLabel: mixLabel(afterMix),
     cumulativeSavedUsd: cumulative,

@@ -56,6 +56,17 @@ export function generateDashboard(opts: DashboardOptions): string {
   const fmtCost = (n: number): string =>
     !Number.isFinite(n) ? "$0" : n >= 1000 ? `$${(n / 1000).toFixed(1)}k` : `$${n.toFixed(2)}`;
 
+  // Young-install guard (parity: Python dashboard.html renderSavings, lines
+  // 3915-3917). With < 30 days of post-baseline history the "/mo" run-rate
+  // annualizes a tiny sample; show the measured cumulative ("so far") instead.
+  const trackedDays = Math.max(1, Math.floor(savings.trackedDays ?? 0));
+  const runRate = trackedDays >= 30;
+  // Provider-neutral billing caption. The TS ports have no billing-mode
+  // detection (Python's keepwarm_billing_mode is Claude-config-only), so the
+  // conservative flat-plan wording always applies.
+  const BILLING_CAPTION =
+    "Valued at your provider's API rates. On a flat plan this is capacity freed inside your limits, not cash refunded.";
+
   const totalSessions = sessions.length;
   const avgRH = totalSessions > 0
     ? sessions.reduce((s, r) => s + num(r.resource_health), 0) / totalSessions
@@ -321,20 +332,27 @@ tr:hover td { background: var(--bg-hover); }
     <!-- so the clamped headline can never sit beside net-negative arms. When the   -->
     <!-- net is <= 0 we show a neutral "roughly flat" card; the measured floor below -->
     <!-- still reports realized savings.                                            -->
+    <!-- Young-install guard: trackedDays < 30 swaps the hero to the measured floor ("so far"). -->
     ${savings.monthlySavingsUsd > 0 ? `
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:var(--s-6);margin-bottom:var(--s-4);">
-      <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-2);">The big picture &middot; estimated</div>
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-2);">${runRate ? "The big picture &middot; estimated" : `Saved so far &middot; ${trackedDays} day${trackedDays === 1 ? "" : "s"} tracked`}</div>
       <div style="display:flex;align-items:baseline;gap:var(--s-2);flex-wrap:wrap;margin-bottom:var(--s-3);">
-        <span style="font-family:monospace;font-size:52px;font-weight:700;line-height:1;color:var(--success)">${fmtCost(savings.monthlySavingsUsd)}</span>
-        <span style="font-size:20px;color:var(--text-dim);font-family:monospace;">/mo${savings.transformationPct > 0 ? ` &mdash; ~${Math.round(savings.transformationPct * 100)}% lighter` : ""}</span>
+        <span style="font-family:monospace;font-size:52px;font-weight:700;line-height:1;color:var(--success)">${fmtCost(runRate ? savings.monthlySavingsUsd : savings.compressionMeasuredWindowUsd)}</span>
+        <span style="font-size:20px;color:var(--text-dim);font-family:monospace;">${runRate ? `/mo${savings.transformationPct > 0 ? ` &mdash; ~${Math.round(savings.transformationPct * 100)}% lighter` : ""}` : " so far"}</span>
       </div>
-      <div style="font-size:13px;color:var(--text-dim);line-height:1.6;margin-bottom:var(--s-4);">
+      ${runRate
+        ? `<div style="font-size:13px;color:var(--text-dim);line-height:1.6;margin-bottom:var(--s-4);">
         Had you worked this period the way you did before Token Optimizer, you'd have paid about
         <strong style="color:var(--text)">${fmtCost(savings.monthlySavingsUsd)} more</strong>
         &mdash; est. <strong style="color:var(--text)">${fmtCost(savings.actualMonthlyUsd)}</strong> now vs
         <strong style="color:var(--text)">${fmtCost(savings.counterfactualMonthlyUsd)}</strong> the old way.
         Your volume is held constant on both sides, so this is pure efficiency, not workload growth.
-      </div>
+      </div>`
+        : `<div style="font-size:13px;color:var(--text-dim);line-height:1.6;margin-bottom:var(--s-4);">
+        Counted directly from metered context removals (tool archives, delta reads, structure maps).
+        The monthly run-rate estimate appears once 30 days of post-baseline history are on record.
+      </div>`}
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:var(--s-3);">${BILLING_CAPTION}</div>
       <!-- Old way vs now grid -->
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:var(--s-4);padding:var(--s-4);background:var(--bg-hover);border-radius:var(--radius);margin-bottom:var(--s-4);">
         <div>
@@ -350,15 +368,15 @@ tr:hover td { background: var(--bg-hover); }
         <div>
           <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-1);">${savings.savingsPerSession >= 0 ? "Cut per session" : "Added per session"}</div>
           <div style="font-family:monospace;font-size:22px;font-weight:700;color:${savings.savingsPerSession >= 0 ? "var(--success)" : "var(--danger)"}">${savings.savingsPerSession >= 0 ? "" : "+"}${fmtCost(Math.abs(savings.savingsPerSession))}</div>
-          <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1);">main-work routing &amp; caching &middot; ~${Math.round(savings.sessionsPerMonth)} sessions/mo</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1);">main-work routing &amp; caching${runRate ? ` &middot; ~${Math.round(savings.sessionsPerMonth)} sessions/mo` : ""}</div>
         </div>
-        <div>
+        ${runRate ? `<div>
           <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-1);">Saved to date</div>
           <div style="font-family:monospace;font-size:22px;font-weight:700;color:var(--success)">${fmtCost(savings.cumulativeSavedUsd)}</div>
           <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1);">all sessions since baseline</div>
-        </div>
+        </div>` : ""}
       </div>
-      <!-- Waterfall breakdown: levers telescope to the headline. -->
+      ${runRate ? `<!-- Waterfall breakdown: levers telescope to the headline. -->
       <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-2);">Where it comes from</div>
       <table>
         <thead><tr><th>Lever</th><th>Est. $/month</th></tr></thead>
@@ -368,7 +386,7 @@ tr:hover td { background: var(--bg-hover); }
             <td style="font-family:monospace;color:${b.monthlyUsd >= 0 ? "var(--success)" : "var(--danger)"}">${b.monthlyUsd >= 0 ? "" : "+"}${fmtCost(Math.abs(b.monthlyUsd))}/mo</td>
           </tr>`).join("")}
         </tbody>
-      </table>
+      </table>` : ""}
     </div>
     ` : `
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:var(--s-6);margin-bottom:var(--s-4);">
@@ -388,13 +406,14 @@ tr:hover td { background: var(--bg-hover); }
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:var(--s-4) var(--s-4) var(--s-3);margin-bottom:var(--s-4);">
       <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);margin-bottom:var(--s-2);">Counted directly &middot; measured to date</div>
       <div style="display:flex;align-items:baseline;gap:var(--s-2);">
-        <span style="font-family:monospace;font-size:32px;font-weight:700;color:var(--text)">${fmtCost(savings.compressionMeasuredUsd)}</span>
-        <span style="font-size:14px;color:var(--text-dim);font-family:monospace;">/mo</span>
+        <span style="font-family:monospace;font-size:32px;font-weight:700;color:var(--text)">${fmtCost(runRate ? savings.compressionMeasuredUsd : savings.compressionMeasuredWindowUsd)}</span>
+        <span style="font-size:14px;color:var(--text-dim);font-family:monospace;">${runRate ? "/mo" : " so far"}</span>
       </div>
       <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-2);line-height:1.6;">
         Tokens TO removed from your context (tool archives, delta reads, structure maps), as metered, before the baseline-mix reprice.
         This is the proven, event-by-event floor &mdash; a subset of the transformation estimate above, not added to it.
       </div>
+      <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-2);">${BILLING_CAPTION}</div>
       <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1);">
         measuring since ${savings.installDate ? esc(savings.installDate) : "your first tracked session"} &mdash; your first tracked session, not necessarily install day
       </div>
