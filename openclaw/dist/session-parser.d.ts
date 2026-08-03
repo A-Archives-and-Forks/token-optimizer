@@ -43,9 +43,10 @@ export declare function extractTopic(text: string): string;
  * Parse a single OpenClaw session JSONL file into an AgentRun.
  *
  * OpenClaw JSONL format:
- * - Each line is a JSON object with at minimum a "type" field
- * - Token data in assistant messages under "usage" or top-level fields
- * - Model ID in "model" field of assistant messages
+ * - Conversation lines are { type: "message", message: { role, content, usage } }
+ *   with the role nested; metadata/markers use type:"session"/"compaction"/"reset"
+ * - Legacy Claude-Code-style logs use a top-level type:"user"/"assistant"
+ * - normalizedType() reconciles both; token data lives under message.usage
  */
 export declare function parseSession(filePath: string, agentName: string, openclawDir?: string): AgentRun | null;
 /**
