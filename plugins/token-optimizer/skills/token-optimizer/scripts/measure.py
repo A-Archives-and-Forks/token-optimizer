@@ -22401,8 +22401,18 @@ def _normalized_platform():
     return raw
 
 
-def setup_daemon(dry_run=False, uninstall=False, this_install_only=False):
+def setup_daemon(dry_run=False, uninstall=False, this_install_only=False, latch_optout=True):
     """Install or remove the persistent dashboard HTTP server daemon.
+
+    ``latch_optout`` (default True) controls whether an uninstall persists the
+    sticky ``daemon_disabled`` opt-out that stops the SessionStart self-heal from
+    ever resurrecting the daemon. The dedicated ``setup-daemon --uninstall``
+    command -- whose whole purpose is "turn my dashboard off" -- passes True.
+    ``cleanup`` (the full-uninstall tidy) passes False: it removes the hooks too,
+    so the self-heal simply stops running after a genuine uninstall, and if the
+    user only tidied up while keeping Token Optimizer active, the self-heal must
+    be free to bring the dashboard back on its own. A tidy is not a deliberate
+    opt-out, and must never silently kill the dashboard until a manual command.
 
     Dispatches to a platform-specific installer/uninstaller. macOS uses
     launchd (LaunchAgent); Windows and Linux installers ship in future
@@ -22427,15 +22437,18 @@ def setup_daemon(dry_run=False, uninstall=False, this_install_only=False):
             _uninstall_systemd_user_daemon(this_install_only=this_install_only, dry_run=dry_run)
         else:
             print(f"[Token Optimizer] Unsupported platform for daemon uninstall: {system}")
-        # Sticky opt-out: persist the user's intent so the SessionStart ensure-
-        # health self-install (`_ensure_dashboard_daemon`) never resurrects a
-        # daemon the user deliberately removed. Mirrors the quality-bar opt-out.
-        # Written on every platform (including unsupported) so a future install
-        # on a now-supported OS still honours the prior opt-out until an explicit
-        # `setup-daemon` clears it.
-        if not dry_run:
+        # Sticky opt-out: persist the user's DELIBERATE intent so the SessionStart
+        # ensure-health self-install (`_ensure_dashboard_daemon`) never resurrects
+        # a daemon the user explicitly turned off. Mirrors the quality-bar opt-out.
+        # Gated on `latch_optout`: only the dedicated `setup-daemon --uninstall`
+        # command sets it. `cleanup` (full-uninstall tidy) passes latch_optout=
+        # False -- it removes the hooks too, so a genuine uninstall stops the
+        # self-heal anyway, and a user who merely tidied while keeping Token
+        # Optimizer active must get the dashboard self-healed back automatically,
+        # never left silently dead pending a manual `setup-daemon`.
+        if not dry_run and latch_optout:
             _set_daemon_disabled(True)
-        else:
+        elif dry_run:
             # A dry-run does NOT write the sticky opt-out, so the SessionStart
             # self-heal would reinstall the daemon. Say so, or the user thinks a
             # preview opted them out for good.
@@ -22670,7 +22683,13 @@ def cleanup(dry_run=False, this_install_only=False):
 
     # 1. Daemon
     print("  [1/3] Dashboard daemon")
-    setup_daemon(dry_run=dry_run, uninstall=True, this_install_only=this_install_only)
+    # latch_optout=False: a cleanup is a tidy, not a deliberate "turn my dashboard
+    # off forever". This removes the daemon now, but does NOT set the sticky
+    # daemon_disabled flag -- so if Token Optimizer stays active, the SessionStart
+    # self-heal brings the dashboard back automatically, with no manual command.
+    # A genuine full uninstall removes the hooks here too, so the self-heal simply
+    # stops running; the sticky flag was never what kept a real uninstall gone.
+    setup_daemon(dry_run=dry_run, uninstall=True, this_install_only=this_install_only, latch_optout=False)
     # The launchd LaunchAgent plist is removed by the macOS uninstaller only.
     # Defensively unlink it here too so a stray plist (a HOME migrated or
     # restored from a Mac, a copied backup) is always cleared, regardless of
