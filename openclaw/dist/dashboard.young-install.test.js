@@ -100,6 +100,10 @@ function render(overrides) {
     // Projected hero and cumulative card are suppressed under the guard.
     (0, bun_test_1.expect)(sv).not.toContain("$1.8k");
     (0, bun_test_1.expect)(sv).not.toContain("999");
+    // A2 fix: under the guard the hero IS the floor, so the measured-floor card must
+    // NOT describe the headline above as a "superset estimate" (it isn't one here).
+    (0, bun_test_1.expect)(sv).not.toContain("superset estimate");
+    (0, bun_test_1.expect)(sv).toContain("the same figure shown above");
 });
 (0, bun_test_1.test)("mature install: run-rate / month hero restored, cumulative card present", () => {
     const sv = render({ trackedDays: 30 });
@@ -112,5 +116,7 @@ function render(overrides) {
     (0, bun_test_1.expect)(sv).toContain("Saved so far");
     (0, bun_test_1.expect)(sv).not.toContain("days tracked");
     (0, bun_test_1.expect)(sv).toContain("capacity freed inside your limits, not cash refunded");
+    // A2: run-rate keeps the original superset framing (hero IS the superset here).
+    (0, bun_test_1.expect)(sv).toContain("superset estimate");
 });
 //# sourceMappingURL=dashboard.young-install.test.js.map

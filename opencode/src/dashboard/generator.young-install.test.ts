@@ -173,6 +173,10 @@ test("young install: hero swaps to measured 'so far', no /mo anywhere in the sav
   // both contain the substring "/mo"; both are suppressed under the guard.
   expect(html).not.toContain("/mo");
   expect(html).not.toContain("Est. $/month");
+  // A2 fix: under the guard the hero IS the floor, so the measured-floor copy must
+  // NOT call it a "subset of the transformation estimate above".
+  expect(html).not.toContain("subset of the transformation estimate above");
+  expect(html).toContain("the same figure shown above");
 });
 
 test("mature install: run-rate /mo hero restored, 'so far' wording absent", () => {
@@ -187,4 +191,6 @@ test("mature install: run-rate /mo hero restored, 'so far' wording absent", () =
   expect(html).not.toContain(" so far");
   expect(html).not.toContain("days tracked");
   expect(html).toContain("capacity freed inside your limits, not cash refunded");
+  // A2: run-rate keeps the original subset framing (hero IS the superset here).
+  expect(html).toContain("subset of the transformation estimate above");
 });
