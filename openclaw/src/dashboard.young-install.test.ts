@@ -104,6 +104,10 @@ test("young install: hero swaps to measured 'so far', no /mo anywhere in the sav
   // Projected hero and cumulative card are suppressed under the guard.
   expect(sv).not.toContain("$1.8k");
   expect(sv).not.toContain("999");
+  // A2 fix: under the guard the hero IS the floor, so the measured-floor card must
+  // NOT describe the headline above as a "superset estimate" (it isn't one here).
+  expect(sv).not.toContain("superset estimate");
+  expect(sv).toContain("the same figure shown above");
 });
 
 test("mature install: run-rate / month hero restored, cumulative card present", () => {
@@ -117,4 +121,6 @@ test("mature install: run-rate / month hero restored, cumulative card present", 
   expect(sv).toContain("Saved so far");
   expect(sv).not.toContain("days tracked");
   expect(sv).toContain("capacity freed inside your limits, not cash refunded");
+  // A2: run-rate keeps the original superset framing (hero IS the superset here).
+  expect(sv).toContain("superset estimate");
 });

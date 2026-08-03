@@ -59,7 +59,7 @@ export function generateDashboard(opts: DashboardOptions): string {
   // Young-install guard (parity: Python dashboard.html renderSavings, lines
   // 3915-3917). With < 30 days of post-baseline history the "/mo" run-rate
   // annualizes a tiny sample; show the measured cumulative ("so far") instead.
-  const trackedDays = Math.max(1, Math.floor(savings.trackedDays ?? 0));
+  const trackedDays = Math.max(1, Math.floor(Number.isFinite(savings.trackedDays) ? savings.trackedDays : 0));
   const runRate = trackedDays >= 30;
   // Provider-neutral billing caption. The TS ports have no billing-mode
   // detection (Python's keepwarm_billing_mode is Claude-config-only), so the
@@ -411,7 +411,9 @@ tr:hover td { background: var(--bg-hover); }
       </div>
       <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-2);line-height:1.6;">
         Tokens TO removed from your context (tool archives, delta reads, structure maps), as metered, before the baseline-mix reprice.
-        This is the proven, event-by-event floor &mdash; a subset of the transformation estimate above, not added to it.
+        ${runRate
+          ? `This is the proven, event-by-event floor &mdash; a subset of the transformation estimate above, not added to it.`
+          : `This is the proven, event-by-event floor &mdash; the same figure shown above. The monthly run-rate estimate appears once 30 days of post-baseline history are on record.`}
       </div>
       <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-2);">${BILLING_CAPTION}</div>
       <div style="font-size:12px;color:var(--text-dim);margin-top:var(--s-1);">

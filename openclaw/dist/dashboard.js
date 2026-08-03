@@ -989,7 +989,7 @@ function renderSavings(data) {
     // afterWindowDays * 30) and reads as fake; show the measured cumulative
     // instead. trackedDays is 0 when not ready, but every consumer below is
     // additionally gated on heroReady/ready, so that case is unreachable.
-    const trackedDays = Math.max(1, Math.floor(s.trackedDays ?? 0));
+    const trackedDays = Math.max(1, Math.floor(Number.isFinite(s.trackedDays) ? s.trackedDays : 0));
     const runRate = trackedDays >= 30;
     const pctDisplay = heroReady && runRate && s.transformationPct > 0
         ? `<span style="font-size:28px;color:var(--c-accent-cyan);font-family:var(--font-mono)">&minus;${(s.transformationPct * 100).toFixed(0)}%</span>`
@@ -1075,7 +1075,9 @@ function renderSavings(data) {
           <span style="font-family:var(--font-mono);color:var(--c-success)">${fmtCost(s.compressionMeasuredUsd)}${runRate ? "/mo" : " so far"}</span>
         </div>
         <div style="font-size:13px;color:var(--c-text-dim);margin-bottom:var(--s-2)">
-          This is the <em>metered slice</em> — directly counted tokens removed from context (tool replacements, lean resumes, checkpoint restores). It is smaller and exact. The transformation headline above is the superset estimate that also includes routing and caching efficiency; do not add these two together.
+          ${runRate
+            ? `This is the <em>metered slice</em> — directly counted tokens removed from context (tool replacements, lean resumes, checkpoint restores). It is smaller and exact. The transformation headline above is the superset estimate that also includes routing and caching efficiency; do not add these two together.`
+            : `This is the <em>metered slice</em> — directly counted tokens removed from context (tool replacements, lean resumes, checkpoint restores). It is the same figure shown above. The monthly run-rate estimate — which also folds in routing and caching efficiency — appears once 30 days of post-baseline history are on record.`}
         </div>
         <div style="font-size:12px;color:var(--c-text-dim);margin-top:var(--s-2)">${BILLING_CAPTION}</div>
         ${evts.totalCount > 0 ? `<div style="margin-top:var(--s-2)">
