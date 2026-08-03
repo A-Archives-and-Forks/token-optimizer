@@ -229,12 +229,33 @@ function extractUserMessageText(record) {
     return "";
 }
 /**
+ * Normalize a record's discriminator to a Claude-Code-style role.
+ *
+ * OpenClaw writes conversation lines as { type: "message", message: { role } }
+ * with the role NESTED, alongside type:"session"/"compaction"/"reset" markers
+ * (verified against openclaw/skills/session-logs/SKILL.md, whose own jq recipe
+ * filters on `.message.role`). Legacy Claude-Code-style logs instead put the
+ * role at the top level as type:"user"/"assistant". Return the effective role
+ * so the downstream user/assistant gates match both shapes. Non-message marker
+ * lines return their raw type (e.g. "session"), which never matches a role
+ * gate and is therefore skipped, exactly as before.
+ */
+function normalizedType(record) {
+    const t = record.type;
+    if (t === "message") {
+        const msg = record.message;
+        return msg?.role; // "user" | "assistant" | "toolResult"
+    }
+    return t;
+}
+/**
  * Parse a single OpenClaw session JSONL file into an AgentRun.
  *
  * OpenClaw JSONL format:
- * - Each line is a JSON object with at minimum a "type" field
- * - Token data in assistant messages under "usage" or top-level fields
- * - Model ID in "model" field of assistant messages
+ * - Conversation lines are { type: "message", message: { role, content, usage } }
+ *   with the role nested; metadata/markers use type:"session"/"compaction"/"reset"
+ * - Legacy Claude-Code-style logs use a top-level type:"user"/"assistant"
+ * - normalizedType() reconciles both; token data lives under message.usage
  */
 function parseSession(filePath, agentName, openclawDir) {
     let content;
@@ -282,7 +303,7 @@ function parseSession(filePath, agentName, openclawDir) {
                 // skip bad timestamps
             }
         }
-        const recType = record.type;
+        const recType = normalizedType(record);
         // Count messages
         if (recType === "user" || recType === "assistant") {
             messageCount++;
@@ -569,7 +590,7 @@ function parseSessionTurnsFromLines(lines, openclawDir) {
         const record = parseLine(line);
         if (!record)
             continue;
-        const recType = record.type;
+        const recType = normalizedType(record);
         if (recType !== "user" && recType !== "assistant")
             continue;
         // Skip sidechain messages (internal tool orchestration, not real user prompts)
@@ -768,7 +789,7 @@ function extractCostlyPrompts(filePath, topN = 5, openclawDir) {
         const record = parseLine(line);
         if (!record)
             continue;
-        const recType = record.type;
+        const recType = normalizedType(record);
         if (recType === "user") {
             // Skip sidechain messages (internal tool orchestration, not real user prompts)
             if (record.isSidechain === true)
