@@ -246,7 +246,7 @@ An em dash means the capability was not verified from first-party material in th
 
 One HTML page, auto-regenerates after every session via the SessionEnd hook, no manual trigger needed. The bookmarkable URL `http://localhost:24842/token-optimizer` is opt-in: it only works after you run `python3 skills/token-optimizer/scripts/measure.py setup-daemon` to start the local server. Until then, open the file path that `measure.py dashboard` prints on the `  Dashboard: ` line.
 
-Per-turn token breakdowns, cost across four pricing tiers, cache analysis with TTL mix and hit rate, quality scores overlaid on every session, subagent cost breakdown, savings tracker with four non-overlapping pools. Zero setup after install. [Full dashboard docs →](https://alexgreensh.github.io/token-optimizer/reference/dashboard/)
+Per-turn token breakdowns, cost across four pricing tiers, cache analysis with TTL mix and hit rate, quality scores overlaid on every session, subagent cost breakdown, savings tracker with four non-overlapping pools. Zero setup after install. [Full dashboard docs →](https://alexgreensh.github.io/token-optimizer/features/dashboard/)
 
 ## What It Saves
 
@@ -527,7 +527,7 @@ Tell it your goal. Get back specific, prioritized fixes with exact token savings
 
 Every insight is grounded in your actual numbers. "Your short sessions score 68 vs 60 for long ones" hits differently than "consider shorter sessions." Coach Mode also identifies project-level optimization opportunities (skills you never use, MCP servers that load eagerly, CLAUDE.md patterns that break your cache) and teaches you how to fix them so future sessions start leaner.
 
-[Read about Coach Mode →](https://alexgreensh.github.io/token-optimizer/features/coach-mode/)
+[Read about Coach Mode →](https://alexgreensh.github.io/token-optimizer/features/token-coach/)
 
 <details>
 <summary><b>Coach Mode details</b></summary>
@@ -640,10 +640,10 @@ Resolves the latest GitHub Release tag, checks out that tag, fetches CHECKSUMS.s
 | Command | What it does | Docs |
 |---|---|---|
 | `/token-optimizer` | Full audit with 6 parallel agents, guided fixes | [→](https://alexgreensh.github.io/token-optimizer/start/quickstart/) |
-| `/token-coach` | 30-day trend analysis, prioritized fixes | [→](https://alexgreensh.github.io/token-optimizer/features/coach-mode/) |
+| `/token-coach` | 30-day trend analysis, prioritized fixes | [→](https://alexgreensh.github.io/token-optimizer/features/token-coach/) |
 | `quick` | 10-second health check | [→](https://alexgreensh.github.io/token-optimizer/reference/cli/) |
 | `doctor` | Installation check, score out of 10 | [→](https://alexgreensh.github.io/token-optimizer/reference/cli/) |
-| `dashboard` | Open the HTML dashboard | [→](https://alexgreensh.github.io/token-optimizer/reference/dashboard/) |
+| `dashboard` | Open the HTML dashboard | [→](https://alexgreensh.github.io/token-optimizer/features/dashboard/) |
 | `savings` | Dollar savings report | [→](https://alexgreensh.github.io/token-optimizer/reference/cli/) |
 | `report` | Per-component token breakdown | [→](https://alexgreensh.github.io/token-optimizer/reference/cli/) |
 | `quality` | Context-quality analysis of live session | [→](https://alexgreensh.github.io/token-optimizer/features/quality-signals/) |
