@@ -5914,6 +5914,10 @@ def generate_standalone_dashboard(days=30, quiet=False, force=False):
     try:
         savings_data = _get_merged_savings(days=30)
         savings_data["since_install"] = _savings_since_install()
+        # Billing-mode transparency: the dashboard captions the savings heroes
+        # differently for flat-plan vs API-billed users ("capacity freed" vs
+        # "spend not incurred"). Conservative default is 'subscription'.
+        savings_data["billing_mode"] = keepwarm_billing_mode()
     except Exception:
         savings_data = {"total_tokens": 0, "total_cost_usd": 0.0, "by_category": {}}
 
@@ -35963,14 +35967,30 @@ def _savings_since_install():
         # Measured = logged runtime + realized structural + realized routing.
         measured = float(full.get("total_cost_usd", 0) or 0)
         measured += float((full.get("model_routing") or {}).get("realized_cost_usd", 0) or 0)
-        # Estimated = genuine TO-realized counterfactuals only. cache_drop and
+        # Estimated = genuine TO-realized counterfactuals only — the same six
+        # categories the dashboard's estimated tier (estItems) sums, so the two
+        # cards agree about what "estimated" contains. cache_drop and
         # output_waste are OPPORTUNITY (avoidable waste TO does not yet prevent),
         # so they are excluded here — counting them would claim money saved that
-        # was actually spent.
+        # was actually spent. mcp_cap_estimated does NOT double-count with
+        # uncaptured_runtime: _get_savings_summary pops mcp_cap out of the
+        # measured totals before _estimate_uncaptured_runtime derives its
+        # per-session proxy from them, so the two pools are disjoint.
         estimated = sum(
             float((full.get(k) or {}).get("cost_saved_usd", 0) or 0)
-            for k in ("behavioral_estimate", "uncaptured_runtime")
+            for k in (
+                "behavioral_estimate", "uncaptured_runtime", "mcp_cap_estimated",
+                "contamination_exit", "handover_rerun",
+            )
         )
+        # Avoided-search: prefer the deterministic observed hint->read measure
+        # (hint_followed); fall back to the cohort estimate (retrieval_serve)
+        # only before any hint has fired, so the two are never summed — the
+        # exact dedup rule the dashboard applies (dashboard.html renderSavings).
+        hf = full.get("hint_followed") or {}
+        rs = full.get("retrieval_serve") or {}
+        avoided = hf if int(hf.get("events") or 0) > 0 else rs
+        estimated += float(avoided.get("cost_saved_usd", 0) or 0)
         return {
             "install_date": d,
             "days": days,
@@ -35995,6 +36015,9 @@ def _live_savings_payload(days=30):
     try:
         savings_data = _get_merged_savings(days=days)
         savings_data["since_install"] = _savings_since_install()
+        # Billing-mode transparency caption wiring — mirrors
+        # generate_standalone_dashboard so live-patched tiles match a full regen.
+        savings_data["billing_mode"] = keepwarm_billing_mode()
     except Exception:
         savings_data = {"total_tokens": 0, "total_cost_usd": 0.0, "by_category": {}}
     try:
@@ -36032,6 +36055,24 @@ def savings_report(days=30, as_json=False):
     now = datetime.now()
     start = (now - timedelta(days=days)).strftime("%Y-%m-%d")
     end = now.strftime("%Y-%m-%d")
+
+    # Young-install guard: with under 30 tracked days, a "/mo" projection would
+    # present a partial sample as a monthly run-rate. Print raw cumulative sums
+    # ("so far") instead. Clock skew / future install dates clamp to 1 day
+    # (cumulative mode — fails safe, never inflates); no install date falls back
+    # to run-rate (totals are ~0, nothing misleading renders).
+    inst = _install_date()
+    tracked = days
+    if inst:
+        try:
+            tracked = min(days, max(1, (now - datetime.fromisoformat(inst)).days + 1))
+        except ValueError:
+            pass
+    run_rate = tracked >= 30
+    per = "/mo" if run_rate else " so far"
+
+    def _mo(c):
+        return c / max(days, 1) * 30 if run_rate else c
 
     print("\n  Token Optimizer Savings Report")
     print(f"  {'=' * 58}")
@@ -36124,32 +36165,35 @@ def savings_report(days=30, as_json=False):
     print(f"  {'TOTAL (measured)':<28s} {total_events:>8,} {total_tokens:>14,} {'$' + f'{total_cost:.2f}':>11s}")
     print()
     print(f"  Daily average: ${daily_avg:.2f} saved (measured)")
-    print(f"  Estimated monthly: ${est_monthly:.2f} (measured)")
+    if run_rate:
+        print(f"  Estimated monthly: ${est_monthly:.2f} (measured)")
+    else:
+        print(f"  Total so far ({tracked} day{'' if tracked == 1 else 's'} tracked): ${total_cost:.2f} (measured)")
 
     # Realized tier — model routing you already did (mix shift vs install baseline).
     routing = summary.get("model_routing") or {}
     routing_realized = float(routing.get("realized_cost_usd", 0.0) or 0.0)
     if routing_realized > 0:
-        r_monthly = routing_realized / max(days, 1) * 30
+        r_monthly = _mo(routing_realized)
         b_share = routing.get("baseline_opus_share", 0.0) * 100
         c_share = routing.get("current_opus_share", 0.0) * 100
-        print(f"  + model routing (realized): ~${r_monthly:.2f}/mo "
+        print(f"  + model routing (realized): ~${r_monthly:.2f}{per} "
               f"(Opus {b_share:.0f}% -> {c_share:.0f}% vs baseline) [measured]")
 
     # Estimated tier — uncaptured runtime (sub-agent compression not attributed).
     uncaptured = summary.get("uncaptured_runtime") or {}
     unc_cost = float(uncaptured.get("cost_saved_usd", 0.0) or 0.0)
     if unc_cost > 0:
-        unc_monthly = unc_cost / max(days, 1) * 30
-        print(f"  + est. uncaptured runtime: ~${unc_monthly:.2f}/mo "
+        unc_monthly = _mo(unc_cost)
+        print(f"  + est. uncaptured runtime: ~${unc_monthly:.2f}{per} "
               f"(sub-agent compression, {uncaptured.get('subagent_dispatches', 0):,} dispatches) [estimated]")
 
     # Estimated tier — behavioral coaching (loops prevented, etc.) that never bills.
     behavioral = summary.get("behavioral_estimate") or {}
     beh_cost = float(behavioral.get("cost_saved_usd", 0.0) or 0.0)
     if beh_cost > 0:
-        beh_monthly = beh_cost / max(days, 1) * 30
-        print(f"  + est. behavioral (loops prevented): ~${beh_monthly:.2f}/mo "
+        beh_monthly = _mo(beh_cost)
+        print(f"  + est. behavioral (loops prevented): ~${beh_monthly:.2f}{per} "
               f"({behavioral.get('loop_events', 0)} loops caught, repeated ~{behavioral.get('prevented_iterations', 0)}x "
               f"before catch; avoided continuation estimated at one more span) [estimated]")
 
@@ -36161,15 +36205,15 @@ def savings_report(days=30, as_json=False):
     mcp_cap_est = summary.get("mcp_cap_estimated") or {}
     mce_cost = float(mcp_cap_est.get("cost_saved_usd", 0.0) or 0.0)
     if mce_cost > 0:
-        mce_monthly = mce_cost / max(days, 1) * 30
-        print(f"  + est. MCP output cap: ~${mce_monthly:.2f}/mo "
+        mce_monthly = _mo(mce_cost)
+        print(f"  + est. MCP output cap: ~${mce_monthly:.2f}{per} "
               f"({mcp_cap_est.get('events', 0)} capped MCP results) [estimated]")
 
     # Estimated tier — FLAGSHIP: contamination-exit avoided rework (cohort).
     ce = summary.get("contamination_exit") or {}
     if float(ce.get("cost_saved_usd", 0.0) or 0.0) > 0:
-        ce_monthly = ce["cost_saved_usd"] / max(days, 1) * 30
-        print(f"  + est. avoided rework (heeded nudges): ~${ce_monthly:.2f}/mo "
+        ce_monthly = _mo(ce["cost_saved_usd"])
+        print(f"  + est. avoided rework (heeded nudges): ~${ce_monthly:.2f}{per} "
               f"({ce.get('heeded_sessions', 0)} heeded vs {ce.get('ignored_sessions', 0)} ignored, "
               f"~{ce.get('delta_tokens_per_session', 0):,} tok/session less rework, "
               f"confidence: {ce.get('confidence', '?')}) [estimated]")
@@ -36177,8 +36221,8 @@ def savings_report(days=30, as_json=False):
     # Estimated tier — handover/continuity avoided rework (cohort).
     hr = summary.get("handover_rerun") or {}
     if float(hr.get("cost_saved_usd", 0.0) or 0.0) > 0:
-        hr_monthly = hr["cost_saved_usd"] / max(days, 1) * 30
-        print(f"  + est. avoided rework (continuity handover): ~${hr_monthly:.2f}/mo "
+        hr_monthly = _mo(hr["cost_saved_usd"])
+        print(f"  + est. avoided rework (continuity handover): ~${hr_monthly:.2f}{per} "
               f"({hr.get('restored_sessions', 0)} restored vs {hr.get('baseline_sessions', 0)} baseline, "
               f"confidence: {hr.get('confidence', '?')}) [estimated]")
 
@@ -36212,24 +36256,24 @@ def savings_report(days=30, as_json=False):
         print(f"  {'-' * 58}")
         print("  COULD SAVE (opportunity — act to realize, not counted above):")
         if pot_cost > 0:
-            pot_monthly = pot_cost / max(days, 1) * 30
-            print(f"    ~${pot_monthly:.2f}/mo structural: prune {potential.get('unused_skills', 0)} unused skills "
+            pot_monthly = _mo(pot_cost)
+            print(f"    ~${pot_monthly:.2f}{per} structural: prune {potential.get('unused_skills', 0)} unused skills "
                   f"(~{potential.get('recoverable_tokens', 0):,} tokens), compounds every session.")
         if routing_potential > 0:
-            rp_monthly = routing_potential / max(days, 1) * 30
-            print(f"    ~${rp_monthly:.2f}/mo routing: move {int(routing.get('routable_fraction', 0.3) * 100)}% "
+            rp_monthly = _mo(routing_potential)
+            print(f"    ~${rp_monthly:.2f}{per} routing: move {int(routing.get('routable_fraction', 0.3) * 100)}% "
                   f"of remaining Opus ({routing.get('current_opus_share', 0.0) * 100:.0f}% of tokens) to Sonnet/Haiku.")
         if cd_tokens > 0:
-            cd_tokens_monthly = int(cd_tokens / max(days, 1) * 30)
-            print(f"    ~{cd_tokens_monthly:,} tokens/mo cache drops: {cache_drop.get('drop_sessions', 0)} sessions idled "
+            cd_tokens_monthly = int(_mo(cd_tokens))
+            print(f"    ~{cd_tokens_monthly:,} tokens{per} cache drops: {cache_drop.get('drop_sessions', 0)} sessions idled "
                   f"past the cache window and re-wrote the prefix — compact before breaks or use the 1h cache.")
         if ow_cost > 0:
-            ow_monthly = ow_cost / max(days, 1) * 30
-            print(f"    ~${ow_monthly:.2f}/mo output: {output_waste.get('avoidable_writes', 0)} of "
+            ow_monthly = _mo(ow_cost)
+            print(f"    ~${ow_monthly:.2f}{per} output: {output_waste.get('avoidable_writes', 0)} of "
                   f"{output_waste.get('writes', 0)} full-file Writes could be targeted Edits.")
         if recl_cost > 0:
-            recl_monthly = recl_cost / max(days, 1) * 30
-            print(f"    ~${recl_monthly:.2f}/mo reclaimable: {reclaimable.get('tokens', 0):,} tokens of stale "
+            recl_monthly = _mo(recl_cost)
+            print(f"    ~${recl_monthly:.2f}{per} reclaimable: {reclaimable.get('tokens', 0):,} tokens of stale "
                   f"re-reads across {reclaimable.get('sessions', 0)} sessions — avoid re-reading or use .contextignore.")
     print(f"  {'=' * 58}")
     print("  Tiers are separate: measured (billed events), estimated (your own")
