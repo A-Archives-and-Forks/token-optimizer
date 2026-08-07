@@ -85,8 +85,53 @@ def _check_consent() -> bool:
         return True  # Fail-open: never block on errors
 
 
+def _plugin_disabled_by_host() -> bool:
+    """Return True if the host explicitly turned this plugin off via
+    ~/.claude/settings.json's enabledPlugins map, so main() can no-op before
+    spawning the dispatch subprocess at all.
+
+    Claude Code's plugin loader does not appear to reliably stop invoking an
+    already-registered plugin's hooks.json commands for existing sessions
+    after enabledPlugins[<name>@<marketplace>] is flipped to false (observed:
+    8/8 sessions started after such an edit still ran hooks and printed
+    "[Token Optimizer]" output). This is a defensive self-check so the plugin
+    honors its own disable flag even when the host does not enforce it,
+    instead of silently continuing to spend tokens on every hook event.
+
+    Fail-open (return False) on any error -- a missing/unreadable settings
+    file, or a plugin/marketplace name we can't resolve, must never silently
+    disable the plugin for users who never touched this setting.
+    """
+    try:
+        plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "").strip()
+        if not plugin_root:
+            return False
+        meta_dir = Path(plugin_root) / ".claude-plugin"
+        plugin_json = meta_dir / "plugin.json"
+        marketplace_json = meta_dir / "marketplace.json"
+        if not plugin_json.is_file() or not marketplace_json.is_file():
+            return False
+        plugin_name = json.loads(plugin_json.read_text(encoding="utf-8")).get("name", "").strip()
+        marketplace_name = json.loads(marketplace_json.read_text(encoding="utf-8")).get("name", "").strip()
+        if not plugin_name or not marketplace_name:
+            return False
+        settings_path = Path.home() / ".claude" / "settings.json"
+        if not settings_path.is_file() or settings_path.is_symlink():
+            return False
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        enabled_plugins = settings.get("enabledPlugins")
+        if not isinstance(enabled_plugins, dict):
+            return False
+        key = f"{plugin_name}@{marketplace_name}"
+        return enabled_plugins.get(key) is False
+    except Exception:
+        return False
+
+
 def main() -> int:
     if len(sys.argv) < 2:
+        return 0
+    if _plugin_disabled_by_host():
         return 0
 
     script_rel = sys.argv[1]
