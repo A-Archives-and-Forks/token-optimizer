@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#106 F2 P2 batch: containment, scope, label sweep, honest reporting.
+"""Containment, scope, label sweep, honest reporting.
 
 P2-1 symlinked ``data`` child escaped containment -- a real identity dir whose
       ``data`` was a symlink redirected the unlinks outside the plugin-data

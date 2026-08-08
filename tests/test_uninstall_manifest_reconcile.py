@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Uninstall-direction manifest reconcile (issue #106 / F3).
+"""Uninstall-direction manifest reconcile (issue #106).
 
 ``/plugin uninstall`` removes the plugin cache dir but does NOT clean the
 plugin's keys in the user's ``installed_plugins.json`` or

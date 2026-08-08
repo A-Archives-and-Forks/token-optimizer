@@ -3792,7 +3792,7 @@ var DB = (function() {
       // point of the card, so it carries the display type rather than sitting in a
       // footnote below the meters.
       var RW_NAMES = { five_hour: '5-hour limit', seven_day: 'Weekly limit' };
-      // USD formatter for the per-window savings figure (KTD1). Mirrors the
+      // USD formatter for the per-window savings figure. Mirrors the
       // money() helper in renderSavings so the runway card and the savings
       // card format dollars identically. Local because runwayCardHtml is a
       // standalone function without renderSavings's scope.
@@ -3815,12 +3815,12 @@ var DB = (function() {
         if (!isFinite(headPct) || !isFinite(offPct) || !isFinite(usedPct)) return '';
         var name = RW_NAMES[w.key] || (esc(w.label) + ' limit');
         var kept = Math.round((headPct - offPct) * 10) / 10;
-        // Per-window USD from the metered savings ledger (KTD1). None when the
+        // Per-window USD from the metered savings ledger. None when the
         // ledger has nothing to show; degrade to no line rather than $-0/NaN.
         var savedUsd = Number(w.saved_usd);
         var hasUsd = isFinite(savedUsd) && savedUsd > 0;
         var spanWord = w.key === 'five_hour' ? '5h' : 'week';
-        // F4: the per-window USD is a pro-rata slice of the N-day savings ledger
+        // The per-window USD is a pro-rata slice of the N-day savings ledger
         // at the recent rate, NOT savings realized within this window. Label it
         // honestly so the headline dollar figure never overclaims.
         var periodDays = Number(rw.period_days) || 30;
@@ -3853,7 +3853,7 @@ var DB = (function() {
           '</div>' +
         '</div>';
       }).join('');
-      // USD-per-window headline (KTD1): the dollar figure reuses the metered
+      // USD-per-window headline: the dollar figure reuses the metered
       // savings ledger, apportioned to each window's span. Build the headline
       // from the windows that carry a saved_usd; fall back to the demoted
       // throughput multiplier only when no window has a dollar figure yet.
@@ -3861,15 +3861,15 @@ var DB = (function() {
       (rw.windows || []).forEach(function (w) {
         var v = Number(w.saved_usd);
         if (!isFinite(v) || v <= 0) return;
-        // F4: honest label -- pro-rata slice of the N-day ledger, not window-
+        // Honest label -- pro-rata slice of the N-day ledger, not window-
         // realized savings. The old per-window wording implied the dollars
         // were actually saved within that window.
         var span = w.key === 'five_hour' ? '5h slice' : 'weekly slice';
         usdParts.push('<em style="font-style:normal;color:var(--c-accent-cyan);">' + rwMoney(v) + '</em> ' + span);
       });
       var usdHeadline = usdParts.join(' &middot; ');
-      // Tier chip reflects the USD spine's measured-vs-estimated boundary
-      // (KTD1): context $ is metered, routing $ is an estimated counterfactual.
+      // Tier chip reflects the USD spine's measured-vs-estimated boundary:
+      // context $ is metered, routing $ is an estimated counterfactual.
       // When routing savings contribute, the dollar figure is estimated; when
       // only context $ contributes, it is measured. None -> no chip change.
       var usdTierChip = (rw.saved_usd_tier === 'measured') ? 'METERED $'
@@ -3885,12 +3885,12 @@ var DB = (function() {
         // No glow on this headline. `.metric-large` carries a text-shadow built
         // from --c-border-strong, which is a light veil on dark but resolves to a
         // DARK halo in light mode, so the words read as smudged rather than lit.
-        // USD-per-window is the headline (KTD1); the throughput multiplier is
-        // demoted to the secondary line below (KTD3).
+        // USD-per-window is the headline; the throughput multiplier is
+        // demoted to the secondary line below.
         (usdHeadline
           ? '<div class="metric-large" style="text-wrap:balance;text-shadow:none;">' + usdHeadline + '</div>'
           : '<div class="metric-large" style="text-wrap:balance;text-shadow:none;"><em style="font-style:normal;color:var(--c-accent-cyan);">' + rw.extra_work_pct + '%</em> more work</div>') +
-        // KTD3 demoted secondary: the per-token throughput multiplier is real but
+        // Demoted secondary: the per-token throughput multiplier is real but
         // a DIFFERENT unit from the window headroom points and the dollar figure.
         // Stated as a separate line with a one-line units note so it is never
         // presented as combinable with the per-window numbers (the old

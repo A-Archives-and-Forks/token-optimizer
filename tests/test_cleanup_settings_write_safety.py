@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#106 F3 (P1): cleanup must never lie about a write, and never clobber.
+"""Cleanup must never lie about a write, and never clobber.
 
 Two data-safety P1s from the CE review of 6d2400e:
 

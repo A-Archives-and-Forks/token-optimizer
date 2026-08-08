@@ -230,8 +230,7 @@ _FOREIGN_RUNTIMES = frozenset({"opencode", "copilot", "hermes"})
 # plugin; copilot_hook_bridge.py) never invoke a _CLAUDE_TARGET_CMDS
 # subcommand as a top-level command — they shell to copilot-rollup /
 # copilot-summary / copilot-doctor / copilot-install / copilot-home, all of
-# which are outside _CLAUDE_TARGET_CMDS. Verified by grep of the hook bridges
-# (see findings/xplat-audit.md).
+# which are outside _CLAUDE_TARGET_CMDS. Verified by grep of the hook bridges.
 _FOREIGN_RUNTIME_EXEMPTIONS: dict[str, frozenset[str]] = {
     "hermes": frozenset({"dashboard"}),
 }
@@ -2305,7 +2304,7 @@ def _context_window_for_model_str(model_str):
       3. _cli_context_size (parsed from the CLI --context-size flag).
       4. The model string itself: 1M for a 1M variant, 200k otherwise.
 
-    Note (F5): the env overrides in steps 1-3 are GLOBAL -- they are not keyed
+    Note: the env overrides in steps 1-3 are GLOBAL -- they are not keyed
     to the model string. A user who exports TOKEN_OPTIMIZER_CONTEXT_SIZE=200000
     for their default sonnet and then runs a 1M-context opus variant will get
     200000 returned for that opus session, inflating fill_pct ~5x. This is
@@ -8810,7 +8809,7 @@ def _scan_jsonl_is_sidechain(filepath, max_lines=200):
         parsed = 0
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
-                # F7: cap on PARSED records, not raw lines -- blank/garbage lines must not
+                # Cap on PARSED records, not raw lines -- blank/garbage lines must not
                 # eat the scan budget before a real record is examined.
                 if parsed >= max_lines:
                     break
@@ -8949,7 +8948,7 @@ def _recompute_session_tokens(conn, rel_tol=0.1, limit=None):
         checked += 1
         new_input = int(parsed.get("total_input_tokens", 0) or 0)
         stored = int(stored_input or 0)
-        # F4: only update when the fresh parse has a positive input. The old condition
+        # Only update when the fresh parse has a positive input. The old condition
         # `stored <= 0 or ...` fired for stored==0 even when the new parse was also 0,
         # overwriting valid cache_create_* on legitimately zero-input rows (e.g. the
         # Codex path, where input_tokens can be 0 but cache_create is real). Requiring
@@ -8961,7 +8960,7 @@ def _recompute_session_tokens(conn, rel_tol=0.1, limit=None):
                 int(parsed.get("total_cache_create_1h", 0) or 0),
                 int(parsed.get("total_cache_create_5m", 0) or 0),
                 float(parsed.get("cache_hit_rate", 0.0) or 0.0),
-                # F3: refresh the model-usage JSON columns too. Downstream cost calcs
+                # Refresh the model-usage JSON columns too. Downstream cost calcs
                 # read BOTH input_tokens and these breakdowns; updating tokens without
                 # the breakdown leaves the row internally inconsistent.
                 json.dumps(parsed.get("model_usage", {})),
@@ -9025,7 +9024,7 @@ def _init_trends_db():
         # never summed into realized savings). Defaults 0 for pre-existing rows.
         if "stale_waste_tokens" not in cols:
             conn.execute("ALTER TABLE session_log ADD COLUMN stale_waste_tokens INTEGER DEFAULT 0")
-        # U1: stable UUID-keyed join column so savings/compression events can
+        # Stable UUID-keyed join column so savings/compression events can
         # join to their originating session without LIKE-scanning jsonl_path.
         # The session UUID is the JSONL file stem (the Claude session UUID).
         if "session_uuid" not in cols:
@@ -9058,7 +9057,7 @@ def _init_trends_db():
         conn.commit()
     except sqlite3.Error:
         pass
-    # U1: backfill session_uuid from jsonl_path basename stem for existing rows,
+    # Backfill session_uuid from jsonl_path basename stem for existing rows,
     # then create an index so joins are O(log n) instead of full-table LIKE scans.
     # Done in Python (not a single SQL UPDATE) because SQLite lacks a basename
     # function and the path separator can vary on Windows.
@@ -9083,14 +9082,14 @@ def _init_trends_db():
         conn.commit()
     except (sqlite3.Error, OSError, ValueError):
         pass
-    # U2: one-time backfill of is_sidechain for rows the migration left NULL.
+    # One-time backfill of is_sidechain for rows the migration left NULL.
     # Gated by the NULL sentinel, so it scans transcripts only on the first init
     # after upgrade; once every row is classified there is nothing to do.
     try:
         _backfill_is_sidechain(conn)
     except (sqlite3.Error, OSError):
         pass
-    # U2b: one-time backfill of outsourcerer sessions collected before the
+    # One-time backfill of outsourcerer sessions collected before the
     # path-based detection was added. Reclassifies them as is_sidechain=1 so
     # they stop inflating the human-session pool. Idempotent.
     try:
@@ -9149,7 +9148,7 @@ def _init_trends_db():
         se_cols = {r[1] for r in conn.execute("PRAGMA table_info(savings_events)").fetchall()}
         if "model" not in se_cols:
             conn.execute("ALTER TABLE savings_events ADD COLUMN model TEXT")
-        # U1: session_uuid + unjoinable columns for direct session joins (no LIKE scan).
+        # Session_uuid + unjoinable columns for direct session joins (no LIKE scan).
         # session_uuid = the Claude session UUID (= JSONL basename stem).
         # unjoinable = 1 when session_id is a short agent_id that cannot be resolved.
         if "session_uuid" not in se_cols:
@@ -9174,7 +9173,7 @@ def _init_trends_db():
         conn.commit()
     except sqlite3.Error:
         pass
-    # U1: backfill session_uuid on savings_events from session_id where it looks
+    # Backfill session_uuid on savings_events from session_id where it looks
     # like a UUID (8-4-4-4-12 hex pattern). Short agent_ids (<=17 chars without
     # dashes) are flagged unjoinable=1 rather than silently treated as Sonnet.
     try:
@@ -9236,7 +9235,7 @@ def _init_trends_db():
             conn.commit()
         except sqlite3.Error:
             pass
-    # U1: idempotent migrations for session_uuid + model on compression_events.
+    # Idempotent migrations for session_uuid + model on compression_events.
     # These columns enable per-event session joins and correct model attribution.
     try:
         ce_cols = {r[1] for r in conn.execute("PRAGMA table_info(compression_events)").fetchall()}
@@ -9245,7 +9244,7 @@ def _init_trends_db():
         if "model" not in ce_cols:
             conn.execute("ALTER TABLE compression_events ADD COLUMN model TEXT")
         if "tier" not in ce_cols:
-            # U1 (coverage build): three-tier accounting tag (measured/estimated/
+            # Three-tier accounting tag (measured/estimated/
             # opportunity). Nullable: pre-existing rows stay NULL and keep their
             # current headline treatment; only new coverage events set a tier.
             conn.execute("ALTER TABLE compression_events ADD COLUMN tier TEXT")
@@ -9263,7 +9262,7 @@ def _init_trends_db():
         conn.commit()
     except sqlite3.Error:
         pass
-    # U1: backfill session_uuid on compression_events from session_id where UUID pattern.
+    # Backfill session_uuid on compression_events from session_id where UUID pattern.
     try:
         import re as _re
         _UUID_PAT2 = _re.compile(
@@ -9479,7 +9478,7 @@ def _log_savings_event(event_type, tokens_saved, session_id=None, detail=None, m
     explicit `model` arg → session JSONL (via session_id) → CLAUDE_MODEL env →
     trends DB dominant → Sonnet fallback. See `_resolve_session_model`.
 
-    U1: also writes session_uuid (the Claude UUID = JSONL stem) so aggregation
+    Also writes session_uuid (the Claude UUID = JSONL stem) so aggregation
     joins directly on session_log.session_uuid rather than LIKE-scanning
     jsonl_path. Agent_ids that cannot be joined are flagged unjoinable=1 so
     the reprice logic skips them instead of silently attributing them to Sonnet.
@@ -9547,7 +9546,7 @@ def _log_compression_event(feature, original_text="", compressed_text="",
     token_estimate.py); it falls back to a bytes/4 proxy only if that module is
     unavailable. Never crashes the caller -- all errors silently caught.
 
-    U1: writes session_uuid (the stable join key) and resolves + stores model
+    Writes session_uuid (the stable join key) and resolves + stores model
     at event-time so _get_merged_savings can reprice at the session's real
     model rate instead of the current dashboard session model (anachronistic).
     """
@@ -9558,7 +9557,7 @@ def _log_compression_event(feature, original_text="", compressed_text="",
         if original_tokens > 0:
             ratio = round(1.0 - compressed_tokens / original_tokens, 4)
 
-        # U1: derive stable join key and resolve event-time model.
+        # Derive stable join key and resolve event-time model.
         session_uuid, _ = _extract_session_uuid(session_id)
         resolved_model = _resolve_session_model(session_id)
 
@@ -9585,7 +9584,7 @@ def _log_compression_event(feature, original_text="", compressed_text="",
 def _get_compression_summary(days=30):
     """Query compression events and return a summary dict.
 
-    U1: if compression_events rows carry a stored model (written at event-time
+    If compression_events rows carry a stored model (written at event-time
     via the session join), compute cost_saved_usd from per-row token * model_rate
     instead of multiplying the aggregate token count by the CURRENT session's
     model rate (which is anachronistic for historical rows). Falls back to the
@@ -9690,7 +9689,7 @@ def _get_compression_summary(days=30):
 # U6: human labels for coverage features. These ARE in _V5_COMPRESSION_CATEGORIES
 # (so tier=measured rows reach the savings headline). Shadow/opportunity rows are
 # excluded by the tier filter in _get_compression_summary, not by this set.
-# Three-tier accounting (KTD5). The single source of truth for tier ordering +
+# Three-tier accounting. The single source of truth for tier ordering +
 # display, mirrored by compression_log._VALID_TIERS on the write side.
 _COMPRESSION_TIERS = ("measured", "estimated", "opportunity")
 _TIER_DISPLAY_NAMES = {
@@ -11092,7 +11091,7 @@ def load_keepwarm_records(path=None):
 
 
 def classify_keepwarm_record(rec, now=None):
-    """Pure-ish resume classifier for one arm record (tick-side, U3-consumed).
+    """Pure-ish resume classifier for one arm record (tick-side, consumed).
 
     Compares the arm record's snapshot of the transcript (mtime + byte_size)
     against the transcript's CURRENT state and returns one of:
@@ -11781,7 +11780,7 @@ def _star_session_pitch():
 
 
 def keepwarm_gate(env=None, claude_json_path=None, settings_path=None):
-    """THE pre-ping gate U3's tick loop calls. Returns (allowed, reason).
+    """THE pre-ping gate the tick loop calls. Returns (allowed, reason).
 
     allowed is True ONLY when ALL hold:
       * not running inside a keep-warm ping subprocess (anti-recursion marker);
@@ -12000,7 +11999,7 @@ def _keepwarm_python3_path():
 def _keepwarm_resolve_claude_bin():
     """Resolve the `claude` CLI to an absolute path at fire time, or None.
 
-    LIVE BUG (infra F6): under launchd the agent inherits a near-empty PATH, so a
+    LIVE BUG: under launchd the agent inherits a near-empty PATH, so a
     bare `"claude"` argv[0] fails FileNotFoundError on every ping (30/30 errors on
     this machine). We resolve `claude` exactly the way the python3 resolver works:
     `shutil.which` first (honours the user's real PATH when the tick runs in a
@@ -12031,7 +12030,7 @@ def _keepwarm_resolve_claude_bin():
 
 def _keepwarm_scheduler_install_lock(soft_fail=False):
     """Serialise concurrent keep-warm scheduler installs. SEPARATE lock from the
-    dashboard's `_daemon_install_lock` (never shared, per plan U4).
+    dashboard's `_daemon_install_lock` (never shared).
 
     Same mkdir-mutex + stale-PID reaping shape as `_daemon_install_lock`, but a
     distinct lock directory so the two installers never block each other.
@@ -12127,7 +12126,7 @@ def _keepwarm_rotate_log(max_bytes=_KEEPWARM_SCHEDULER_LOG_MAX_BYTES):
     # The log is opened+created by launchd (StandardOutPath), which makes it
     # world-readable (0644); it records session_ids + activity. Force 0600 here
     # so the rotation guard (called on install + every tick) also hardens the
-    # perms (infra F1). Best-effort.
+    # perms. Best-effort.
     try:
         if path.exists():
             os.chmod(str(path), 0o600)
@@ -12207,7 +12206,7 @@ def _keepwarm_write_scheduler_marker(bootstrap_rc="__unset__"):
     ensure-health's repair keys on this marker AND consent so a user-deleted
     plist is only regenerated for a machine we actually installed on (#59). Atomic
     0600 write via mkstemp + os.replace. `bootstrap_rc` records the launchctl
-    bootstrap outcome (infra F4): an int rc, or None when bootstrap could not run;
+    bootstrap outcome: an int rc, or None when bootstrap could not run;
     omitted (sentinel) for callers that don't know it.
     """
     marker_path = _keepwarm_scheduler_marker_path()
@@ -12340,10 +12339,10 @@ def _keepwarm_scheduler_install_macos(quiet=False):
     except (OSError, subprocess.TimeoutExpired) as e:
         # Bootstrap could not even run: record the failed attempt in the marker
         # (bootstrap_rc=None) so ensure-health knows WE own this path but the
-        # bootstrap never succeeded (infra F4).
+        # bootstrap never succeeded.
         _keepwarm_write_scheduler_marker(bootstrap_rc=None)
         return (False, f"launchctl bootstrap failed: {e}")
-    # Marker written AFTER bootstrap, carrying bootstrap_rc (infra F4): the marker
+    # Marker written AFTER bootstrap, carrying bootstrap_rc: the marker
     # now reflects the ACTUAL bootstrap outcome, not merely an attempt, so a
     # repair keys on a marker that proves a real install path was reached.
     _keepwarm_write_scheduler_marker(bootstrap_rc=int(result.returncode))
@@ -12488,7 +12487,7 @@ def keepwarm_scheduler_repair(gate=None):
         needs_repair = True
     else:
         # Stale if the label marker isn't present (e.g. a hand-edited or
-        # foreign plist sitting at our path). Cheap CAPPED read (infra F3): our
+        # foreign plist sitting at our path). Cheap CAPPED read: our
         # plist is <1KB, so reading the first 8KB is enough to find the Label;
         # this bounds the warm-path cost against an attacker-planted huge file.
         try:
@@ -12510,8 +12509,8 @@ def keepwarm_scheduler_repair(gate=None):
             return "noop-fresh"  # another session is repairing; skip quietly
         ok, _msg = _keepwarm_scheduler_install_macos(quiet=True)
         if not ok:
-            # Surface ONE stderr line so a silently-failing repair is diagnosable
-            # (infra F5); the first line carries the launchctl rc/reason.
+            # Surface ONE stderr line so a silently-failing repair is diagnosable;
+            # the first line carries the launchctl rc/reason.
             try:
                 first = (_msg or "repair failed").strip().splitlines()[0]
                 print(f"[Token Optimizer] keep-warm scheduler repair failed: "
@@ -12629,7 +12628,7 @@ _KEEPWARM_STALE_LOCK_SECONDS = 600
 # orphaned spend (the tick died between pre-log and outcome). The ping timeout is
 # 180s; 600s leaves generous slack for a slow ping that simply hasn't resolved.
 _KEEPWARM_ORPHAN_FIRING_SECONDS = 600
-# The bland, tool-discouraging ping prompt (U1-verified form A).
+# The bland, tool-discouraging ping prompt (verified form A).
 _KEEPWARM_PING_PROMPT = "Reply with exactly: ok"
 
 
@@ -12982,7 +12981,7 @@ def _keepwarm_extract_cwd(transcript_path):
     """Return the session's ORIGINAL project cwd from the transcript, or None.
 
     Sessions resolve per project dir, so the ping MUST run with cwd = the
-    session's original cwd (verified U1). Transcript event records carry a 'cwd'
+    session's original cwd (verified). Transcript event records carry a 'cwd'
     field; we scan the tail for the most recent non-empty one.
 
     The cwd is attacker-influenceable (the transcript is a same-UID-writable
@@ -13033,9 +13032,9 @@ def _keepwarm_valid_arg(value):
 
 def _keepwarm_build_ping_cmd(session_id, model, claude_bin="claude",
                              budget_usd=_KEEPWARM_PING_BUDGET_USD):
-    """The U1-verified ping command (form A): resume, print, no persistence.
+    """The verified ping command (form A): resume, print, no persistence.
 
-    `claude_bin` is the fire-time-resolved absolute path (infra F6); callers pass
+    `claude_bin` is the fire-time-resolved absolute path; callers pass
     the resolved binary so launchd's empty PATH cannot break the spawn.
     """
     return [
@@ -13197,8 +13196,8 @@ def _keepwarm_fire_ping(record, now=None, runner=None):
         parsed = {"cost_usd": 0.0, "cache_read": 0, "cache_write": 0}
         duration = 0.0
 
-        # Resolve the claude binary to an absolute path at FIRE time (infra F6 /
-        # LIVE BUG). Unresolvable -> book a distinct 'claude-not-found' error
+        # Resolve the claude binary to an absolute path at FIRE time (LIVE BUG).
+        # Unresolvable -> book a distinct 'claude-not-found' error
         # outcome (the firing row is already pre-logged) so the launchd empty-PATH
         # case is diagnosable rather than a generic spawn error.
         if runner is None:
@@ -13219,7 +13218,7 @@ def _keepwarm_fire_ping(record, now=None, runner=None):
             claude_bin = "claude"  # injected runner ignores argv[0] resolution
 
         cmd = _keepwarm_build_ping_cmd(sid, model, claude_bin=claude_bin)
-        # Allowlisted child env (infra F2): only the variables the ping genuinely
+        # Allowlisted child env: only the variables the ping genuinely
         # needs. Inheriting the full os.environ leaked unrelated secrets/config
         # into the claude child; here we pass PATH/HOME/TMPDIR/locale, the
         # anti-recursion marker, and the API credentials IF present -- nothing else.
@@ -13578,7 +13577,7 @@ def keepwarm_tick(now=None, dry_run=False, env=None, runner=None,
             else:
                 summary["skipped"] += 1
 
-        # Persist updated ping counters (extends the record dict; U2's
+        # Persist updated ping counters (extends the record dict;
         # _valid_keepwarm_record tolerates extra keys).
         if changed:
             try:
@@ -14317,7 +14316,7 @@ def _keepwarm_realized_write_usd(prefix_tokens, model):
     Priced at the profile's REAL 1h write rate (input_rate * 2.0 premium) on the
     full prefix. We KNOW the pause resumed warm, so the entire re-write is
     genuinely spared -- this is the realized (not P-discounted) counterfactual,
-    matching U6's honesty stance. Reuses the watchdog/U3 per-token pricing tables
+    matching U6's honesty stance. Reuses the watchdog per-token pricing tables
     (_KEEPWARM_INPUT_USD_PER_TOKEN + _KEEPWARM_WRITE_PREMIUM['1h']). Pure.
     """
     key = _keepwarm_model_norm(model)
@@ -16416,8 +16415,8 @@ def _collect_copilot_sessions(days=90, quiet=False, rebuild=False):
     """Collect Copilot sessions (CLI + VS Code planes) into the trends DB.
 
     Mirrors _collect_hermes_sessions. The two planes are separate session
-    populations with distinct dedup keys — never merged, never summed
-    (plan KTD10/C6). Idempotent via the jsonl_path dedup column.
+    populations with distinct dedup keys — never merged, never summed.
+    Idempotent via the jsonl_path dedup column.
 
     TODO(dedup): the 28-column INSERT here and in _collect_hermes_sessions is
     copy-paste; extract _insert_normalized_session() on the next touch to
@@ -18061,7 +18060,7 @@ def _windows_process_creation(pid):
 def _collect_windows_claude_sessions():
     """Collect running Claude CLI sessions on Windows via PowerShell Get-Process.
 
-    Safety invariants (per adversarial review 2026-04-13):
+    Safety invariants:
     - Only matches on the process image name (claude / claude-*).
       Matching on Window Title would catch Chrome tabs viewing claude.ai,
       editors with 'claude' in the filename, etc. kill_stale_sessions
@@ -18787,7 +18786,7 @@ def _write_settings_atomic(settings_data):
     during the write propagates naturally after cleanup.
 
     Returns True iff the write actually landed, False when the advisory lease
-    was denied and nothing was written (#106 F3 P1). Callers that report
+    was denied and nothing was written (#106). Callers that report
     success to the user MUST check this -- a lease miss is a silent no-op, and
     `cleanup` was printing "Removed: statusLine" / "Cleanup complete" for a
     write that never happened, leaving the dangling statusLine #106 exists to
@@ -18797,7 +18796,7 @@ def _write_settings_atomic(settings_data):
     with _settings_lock() as acquired:
         if not acquired:
             return False
-        # #106 F3 (P2-7): write THROUGH a symlink and preserve the mode.
+        # #106: write THROUGH a symlink and preserve the mode.
         # os.replace onto the link path detaches it, turning a dotfiles-managed
         # symlink into a regular file (the user's repo silently stops tracking
         # their settings) and dropping 0644 to mkstemp's 0600. Resolve the link
@@ -19188,7 +19187,7 @@ DAEMON_IDENTITY_MAGIC = (
     else "token-optimizer-dashboard-v1"
 )
 
-# v5.11.68 (#106 / F2): every runtime suffix that can register a daemon
+# v5.11.68 (#106): every runtime suffix that can register a daemon
 # scheduler artifact. Daemon uninstall sweeps ALL of these by name so a
 # scheduler registration whose plugin-data dir already vanished (e.g. a
 # sibling identity removed by the platform's own GC) still gets unregistered,
@@ -19217,7 +19216,7 @@ _ALL_WINDOWS_TASK_NAMES = (
 
 
 def _scheduler_names_to_sweep(this_install_only: bool, all_names, active_name):
-    """Scheduler identifiers to unregister (#106 F2 / P2-2).
+    """Scheduler identifiers to unregister (#106).
 
     ``this_install_only`` scoped the per-identity FILE sweep but not the
     scheduler loops, so a "just this install" uninstall still booted out every
@@ -19232,7 +19231,7 @@ def _sweep_identity_daemon_files(snap_dir: Path, keys) -> tuple[list[str], list[
     """Delete the daemon artifacts named by ``keys`` from one identity.
 
     Returns ``(removed, failed)`` as path strings. Failures are reported
-    rather than swallowed (#106 F2 / P2-4) so the caller can refuse to claim
+    rather than swallowed (#106) so the caller can refuse to claim
     a clean sweep while a 0600 daemon-token is still on disk.
     """
     files = _daemon_per_identity_files(snap_dir)
@@ -19248,7 +19247,7 @@ def _sweep_identity_daemon_files(snap_dir: Path, keys) -> tuple[list[str], list[
 
 
 def _print_identity_sweep_report(removed, per_identity_removed, failed, this_install_only):
-    """Shared uninstall reporting for all three platforms (#106 F2 / P2-4).
+    """Shared uninstall reporting for all three platforms (#106).
 
     Honesty rules preserved and extended: never print a
     "Deleted" line for a survivor, keep "Nothing to remove" when nothing
@@ -19299,7 +19298,7 @@ def _daemon_per_identity_files(snapshot_dir: Path) -> dict:
 
 
 def _daemon_identity_snapshot_dirs(this_install_only: bool) -> list[Path]:
-    """Snapshot dirs to sweep during daemon uninstall (issue #106 / F2).
+    """Snapshot dirs to sweep during daemon uninstall (issue #106).
 
     Root cause: daemon paths derive from one module-level ``SNAPSHOT_DIR``
     (the resolved identity), but multiple installs create multiple
@@ -19322,7 +19321,7 @@ def _daemon_identity_snapshot_dirs(this_install_only: bool) -> list[Path]:
     try:
         for ident in _all_plugin_data_dirs():
             data_dir = ident / "data"
-            # #106 F2 (P2-1): _all_plugin_data_dirs vets the IDENTITY dir, but
+            # #106: _all_plugin_data_dirs vets the IDENTITY dir, but
             # the dir we actually delete from is its `data` child. A real
             # identity dir whose `data` is a SYMLINK pointed at, say, $HOME
             # made the sweep unlink daemon-token/dashboard-server.py/etc from
@@ -19352,7 +19351,7 @@ def _daemon_identity_snapshot_dirs(this_install_only: bool) -> list[Path]:
 def _daemon_sweep_dir_is_safe(snap_dir: Path) -> bool:
     """True when ``snap_dir`` is a real directory we may delete daemon files from.
 
-    #106 F2 (P2-1). The sweep deletes a fixed allow-list of filenames out of
+    #106. The sweep deletes a fixed allow-list of filenames out of
     every identity's ``data`` dir. That dir must therefore be a REAL directory
     whose realpath lands under the plugin-data base -- otherwise a symlinked
     ``data`` child redirects the unlinks outside the base (the escape found in
@@ -19388,7 +19387,7 @@ def _unlink_if_exists(path: Path) -> bool:
 
     Never follows a symlink to delete its target: a planted symlink named
     ``daemon-token`` must be removed as the link itself, not as whatever it
-    points at (#106 F2 P2-1, defense in depth behind
+    points at (#106, defense in depth behind
     ``_daemon_sweep_dir_is_safe``).
     """
     try:
@@ -19406,7 +19405,7 @@ def _unlink_if_exists(path: Path) -> bool:
 def _unlink_reporting(path: Path) -> tuple[bool, bool]:
     """Delete ``path``; return ``(removed, failed)``.
 
-    #106 F2 (P2-4). ``_unlink_if_exists`` swallows OSError and returns False,
+    #106. ``_unlink_if_exists`` swallows OSError and returns False,
     which is indistinguishable from "was not there". The sweep then printed
     "Swept all token-optimizer-* identities" while a 0600 daemon-token it
     could not delete (read-only dir, EPERM) was still on disk. This variant
@@ -19681,9 +19680,9 @@ def _log_regen(msg):
 # trace in daemon-regen.log -- it stayed empty for weeks while the user reported
 # a dead button. This writes one line per _REJECT_LOG_MIN_GAP seconds PER PATH
 # so a hammering/looping client cannot spam the log, but a real rejected click
-# on a DIFFERENT endpoint is never invisible (F7: was global, which dropped a
+# on a DIFFERENT endpoint is never invisible (was global, which dropped a
 # rejected toggle trace after a recent rejected regenerate). The path is
-# sanitized (F8) so a CR in the request path cannot inject/overwrite a log line
+# sanitized so a CR in the request path cannot inject/overwrite a log line
 # via terminal carriage-return overprint.
 _REJECT_LOG_LAST_TS: dict = {{}}
 _REJECT_LOG_MIN_GAP = 30.0
@@ -19691,7 +19690,7 @@ _REJECT_LOG_MIN_GAP = 30.0
 
 def _sanitize_log_path(path):
     """Strip CR/LF from *path* so a request path containing control chars
-    cannot inject or overwrite a log line (F8). Returns the cleaned string."""
+    cannot inject or overwrite a log line. Returns the cleaned string."""
     if not path:
         return ""
     return path.replace("\\r", "").replace("\\n", "")
@@ -19699,8 +19698,8 @@ def _sanitize_log_path(path):
 
 def _log_reject_regen(path):
     """One rate-limited line PER PATH when an api/* POST is rejected for a bad
-    token. F7: per-path throttle so a rejected toggle is still visible after a
-    recent rejected regenerate. F8: path is sanitized before writing."""
+    token. Per-path throttle so a rejected toggle is still visible after a
+    recent rejected regenerate. Path is sanitized before writing."""
     global _REJECT_LOG_LAST_TS
     now = time.time()
     clean = _sanitize_log_path(path)
@@ -20013,7 +20012,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         got_tok = self.headers.get("X-TO-Token", "")
         clean = self.path.lstrip("/").split("?")[0]
         if not expected_tok or not hmac.compare_digest(expected_tok, got_tok):
-            # R2: leave a trace. This check fires BEFORE the api/regenerate
+            # Leave a trace. This check fires BEFORE the api/regenerate
             # handler, so without a log line a rejected regenerate click was
             # indistinguishable from a dead button (daemon-regen.log stayed
             # empty for weeks). Rate-limited so a looping client can't spam.
@@ -21039,7 +21038,7 @@ def _reclaim_posix_daemon_port(port=DAEMON_PORT, script_name="dashboard-server.p
 def _daemon_ports_to_reclaim(this_install_only: bool):
     """Which daemon ports a POSIX uninstall must SIGTERM-reclaim.
 
-    #106 F2 (P1) added a running-process kill on uninstall because
+    #106 added a running-process kill on uninstall because
     ``launchctl bootout`` / ``systemctl disable`` unregister the job without
     stopping the child, leaving a daemon serving its port with the 0600 CSRF
     token live in memory. But a sweep-all uninstall tears down EVERY runtime's
@@ -21222,7 +21221,7 @@ def _write_uninstall_tombstone(snapshot_dir=None):
     rather than leaving them thinking uninstall succeeded while the daemon
     keeps respawning.
 
-    #106 F2 (P1): the tombstone must OUTLIVE the uninstall. Each generated
+    #106: the tombstone must OUTLIVE the uninstall. Each generated
     dashboard-server.py bakes in its OWN identity's breadcrumb path (see the
     `thrash_path_literal` in the daemon template) and checks it on start
     ("noop-tombstoned"), so a per-identity tombstone is what keeps that
@@ -21405,7 +21404,7 @@ def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
     followed by a "Deleted: script.py" line when the plist is gone but
     the script file remains from a half-uninstall.
 
-    v5.11.68 (#106 / F2): identity-sweeping by default. The LaunchAgent plist
+    v5.11.68 (#106): identity-sweeping by default. The LaunchAgent plist
     is per-RUNTIME (shared across ``token-optimizer-*`` identities of the same
     runtime), so it is removed once. The per-identity files
     (``dashboard-server.py``, ``daemon-token``, ``dashboard-host``,
@@ -21453,7 +21452,7 @@ def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
     for label in _scheduler_names_to_sweep(
             this_install_only, _ALL_LAUNCH_AGENT_LABELS, DAEMON_LABEL):
         plist = LAUNCH_AGENTS_DIR / f"{label}.plist"
-        # #106 F2 (P2-3): bootout by LABEL, unconditionally. The old code only
+        # #106: bootout by LABEL, unconditionally. The old code only
         # booted out when the plist FILE existed, so a job still loaded in
         # launchd whose plist had already been deleted (half-uninstall, manual
         # rm, platform GC) was never unregistered and kept respawning.
@@ -21470,7 +21469,7 @@ def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
                 pass
             if _unlink_if_exists(plist):
                 removed.append(str(plist))
-    # #106 F2 (P1): unregistering the job does NOT stop the process --
+    # #106: unregistering the job does NOT stop the process --
     # `launchctl bootout` / `systemctl disable` drop the registration without
     # SIGTERMing the running child, so the daemon kept serving its port with
     # the 0600 CSRF token live in memory until logout. Reclaim the port(s) now
@@ -21488,7 +21487,7 @@ def _uninstall_launchd_daemon(this_install_only=False, dry_run=False):
         identity_removed, identity_failed = _sweep_identity_daemon_files(
             snap_dir, ("daemon_script", "daemon_token", "daemon_host"))
         sweep_failed.extend(identity_failed)
-        # #106 F2 (P1): the .daemon-thrash tombstone must PERSIST for every
+        # #106: the .daemon-thrash tombstone must PERSIST for every
         # swept identity. Each identity's generated dashboard-server.py checks
         # its OWN breadcrumb path on start and exits "noop-tombstoned"; the
         # previous unlink here re-armed self-revive, so an orphaned LaunchAgent
@@ -22038,7 +22037,7 @@ def _uninstall_task_scheduler_daemon(this_install_only=False, dry_run=False):
     Cleans orphan XML files from any prior naming convention via glob so
     version drift doesn't leave artifacts behind.
 
-    v5.11.68 (#106 / F2): identity-sweeping by default. The scheduled task is
+    v5.11.68 (#106): identity-sweeping by default. The scheduled task is
     per-RUNTIME (shared across ``token-optimizer-*`` identities of the same
     runtime), so it is removed once, and we query+delete EVERY runtime's task
     name so a task whose data dir already vanished still gets unregistered.
@@ -22107,7 +22106,7 @@ def _uninstall_task_scheduler_daemon(this_install_only=False, dry_run=False):
         identity_removed, identity_failed = _sweep_identity_daemon_files(
             snap_dir, ("daemon_script", "windows_launcher", "daemon_token", "daemon_host"))
         sweep_failed.extend(identity_failed)
-        # #106 F2 (P1): the .daemon-thrash tombstone must PERSIST for every
+        # #106: the .daemon-thrash tombstone must PERSIST for every
         # swept identity. Each identity's generated dashboard-server.py checks
         # its OWN breadcrumb path on start and exits "noop-tombstoned"; the
         # previous unlink here re-armed self-revive, so an orphaned LaunchAgent
@@ -22216,7 +22215,7 @@ def _systemd_user_unit_path():
 
 
 def _systemd_user_unit_path_for(unit_name: str) -> Path:
-    """Resolve the unit path for an arbitrary unit name (issue #106 / F2).
+    """Resolve the unit path for an arbitrary unit name (issue #106).
 
     Same base resolution as ``_systemd_user_unit_path`` but for any runtime
     variant's unit name, so the sweeping uninstall can remove a sibling
@@ -22432,7 +22431,7 @@ def _install_systemd_user_daemon(dry_run=False, soft_fail=False, effective_host=
 def _uninstall_systemd_user_daemon(this_install_only=False, dry_run=False):
     """Linux: stop and remove the systemd --user dashboard unit.
 
-    v5.11.68 (#106 / F2): identity-sweeping by default. The systemd unit is
+    v5.11.68 (#106): identity-sweeping by default. The systemd unit is
     per-RUNTIME (shared across ``token-optimizer-*`` identities of the same
     runtime), so it is removed once, and we disable+remove EVERY runtime's
     unit so a unit whose data dir already vanished still gets unregistered.
@@ -22496,7 +22495,7 @@ def _uninstall_systemd_user_daemon(this_install_only=False, dry_run=False):
         )
     except (OSError, subprocess.TimeoutExpired):
         pass
-    # #106 F2 (P1): unregistering the job does NOT stop the process --
+    # #106: unregistering the job does NOT stop the process --
     # `launchctl bootout` / `systemctl disable` drop the registration without
     # SIGTERMing the running child, so the daemon kept serving its port with
     # the 0600 CSRF token live in memory until logout. Reclaim the port(s) now
@@ -22514,7 +22513,7 @@ def _uninstall_systemd_user_daemon(this_install_only=False, dry_run=False):
         identity_removed, identity_failed = _sweep_identity_daemon_files(
             snap_dir, ("daemon_script", "linux_launcher", "daemon_token", "daemon_host"))
         sweep_failed.extend(identity_failed)
-        # #106 F2 (P1): the .daemon-thrash tombstone must PERSIST for every
+        # #106: the .daemon-thrash tombstone must PERSIST for every
         # swept identity. Each identity's generated dashboard-server.py checks
         # its OWN breadcrumb path on start and exits "noop-tombstoned"; the
         # previous unlink here re-armed self-revive, so an orphaned LaunchAgent
@@ -22569,7 +22568,7 @@ def setup_daemon(dry_run=False, uninstall=False, this_install_only=False, latch_
     (DAEMON_PORT = 24842) so the bookmarkable URL is identical
     everywhere.
 
-    v5.11.68 (#106 / F2): ``--uninstall`` is identity-sweeping by default
+    v5.11.68 (#106): ``--uninstall`` is identity-sweeping by default
     (removes the daemon script + 0600 CSRF token from EVERY
     ``token-optimizer-*`` identity, and unregisters every runtime's scheduler
     artifact). Pass ``this_install_only=True`` (``--this-install-only``) to
@@ -22637,7 +22636,7 @@ def setup_daemon(dry_run=False, uninstall=False, this_install_only=False, latch_
 
 
 # ---------------------------------------------------------------------------
-# Uninstall cleanup orchestrator (issue #106 / F3 + cleanup command)
+# Uninstall cleanup orchestrator (issue #106 + cleanup command)
 # ---------------------------------------------------------------------------
 
 # Paths that are intentionally PRESERVED across an uninstall. These hold
@@ -22683,7 +22682,7 @@ def _backup_settings_file(dest_dir: Path) -> Path | None:
 
 
 def _is_our_hook_entry(entry) -> bool:
-    """True when a settings.json hook entry is one WE installed (#106 F3).
+    """True when a settings.json hook entry is one WE installed (#106).
 
     Ownership markers, all anchored on our own script names rather than a bare
     "token-optimizer" substring (a user hook may legitimately mention us in a
@@ -22748,14 +22747,14 @@ def _remove_our_settings_entries(settings: dict) -> list[str]:
             removed.append("statusLine (token-optimizer)")
     # Hook entries we own, across every event.
     #
-    # #106 F3 (P2-6): the old loop dropped ANY group whose filtered hook list
+    # #106: the old loop dropped ANY group whose filtered hook list
     # came out empty -- including a user-authored group that never held a hook
     # of ours (an empty `hooks: []`, or a group of foreign hooks in an event we
     # also use) -- and miscounted each one as "UserPromptSubmit quality-cache
     # hook". A group is now removed ONLY when it actually contained one of our
     # hooks and filtering emptied it; user groups pass through untouched.
     #
-    # #106 F3 (P2-9): the sweep covered UserPromptSubmit + SessionEnd only,
+    # #106: the sweep covered UserPromptSubmit + SessionEnd only,
     # leaving our smart-compact family (PreCompact / SessionStart / Stop /
     # SessionEnd) dangling in settings.json after cleanup -- commands pointing
     # into a plugin tree that is about to be deleted. Every event is now
@@ -22857,7 +22856,7 @@ def cleanup(dry_run=False, this_install_only=False):
             for entry in our_entries:
                 print(f"    Would remove: {entry}")
         else:
-            # #106 F3 P1: do NOT claim "Removed" before the write lands. The
+            # #106: do NOT claim "Removed" before the write lands. The
             # entries are echoed after a confirmed successful write below; a
             # refused read or a denied lease prints a WARNING instead, so the
             # report can never assert a removal that did not happen.
@@ -22872,7 +22871,7 @@ def cleanup(dry_run=False, this_install_only=False):
             else:
                 # Re-read under the backup, re-remove, write atomically.
                 #
-                # #106 F3 P1a: a failed re-read yields {} ("unknown"), and
+                # #106: a failed re-read yields {} ("unknown"), and
                 # writing that would erase every key the user owns. Refuse to
                 # write on a bad read and say so -- their entries stay in
                 # place, which is recoverable; an emptied settings.json is not.
@@ -22886,7 +22885,7 @@ def cleanup(dry_run=False, this_install_only=False):
                     )
                 else:
                     _remove_our_settings_entries(fresh)
-                    # #106 F3 P1b: a denied advisory lease makes the write a
+                    # #106: a denied advisory lease makes the write a
                     # silent no-op. Reporting "Removed" for a write that never
                     # landed leaves the user with the dangling statusLine this
                     # command exists to clear, so surface it instead.
@@ -28237,7 +28236,7 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
         # work" even when it never is (own-session checkpoints are excluded from
         # `chosen` above by construction). Name the source session so a reader
         # cannot mistake it for continuity of the current session.
-        # F10: the regex expects <uuid>-<YYYYMMDD>-<HHMMSS>-... If the checkpoint
+        # The regex expects <uuid>-<YYYYMMDD>-<HHMMSS>-... If the checkpoint
         # filename format ever changes, the match fails and src_sid_short is
         # None. The old code then fell through to the unlabeled "A recent
         # checkpoint is available" message -- the exact cross-session hazard
@@ -28251,7 +28250,7 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
             print(f"[Token Optimizer] A checkpoint from a DIFFERENT session ({src_sid_short}){about} is available at {latest['path']}. "
                   f"This is NOT your own session's prior work -- load it only if you intend to resume that other session's work.")
         elif not src_sid_short:
-            # F10: filename did not match the expected format. Warn so a format
+            # Filename did not match the expected format. Warn so a format
             # change is caught, and still label the pointer as cross-session.
             import sys as _sys
             print(f"[Token Optimizer] WARNING: checkpoint filename {latest['filename']!r} did not match the expected "
@@ -30162,8 +30161,8 @@ def _read_settings_json():
 
     Lossy by design for read-only callers: a missing file, malformed JSON, and
     an unreadable file all collapse to ``{}``. Any caller that will WRITE the
-    result back must use ``_read_settings_json_checked`` instead -- see #106
-    F3 P1, where a failed re-read returned ``{}`` and that empty dict was
+    result back must use ``_read_settings_json_checked`` instead -- see #106,
+    where a failed re-read returned ``{}`` and that empty dict was
     written straight over the user's whole settings.json.
     """
     data, path, _ok = _read_settings_json_checked()
@@ -31816,7 +31815,7 @@ def _get_statusline_path():
     the version-pinned path (still self-healed) when it does not -- a pruned
     marketplace clone, or any non-plugin-cache install.
 
-    Either way the F1 self-disabling guard inside statusline.js still applies:
+    Either way the self-disabling guard inside statusline.js still applies:
     both candidate trees ship the sibling files it checks for.
     """
     if _is_running_from_plugin_cache():
@@ -33140,7 +33139,7 @@ _V5_COMPRESSION_LABELS = {
     "bash_compress_stack": "Bash compress (stack traces)",
     "bash_compress_k8s": "Bash compress (k8s)",
     "bash_compress_cloud": "Bash compress (cloud CLI)",
-    # U4: unmatched-output coverage (tier=measured). U5: first-read skeleton —
+    # Unmatched-output coverage (tier=measured). U5: first-read skeleton —
     # only its ACTIVE (tier=measured) rows reach the headline; shadow rows are
     # tier=opportunity and filtered out in _get_compression_summary.
     "bash_generic": "Bash compress (other commands)",
@@ -33339,7 +33338,7 @@ def runway_snapshot(days=30, now=None):
         if mult < 1.02:
             return None
 
-        # --- USD-per-window: reuse the metered savings ledger (KTD1) ---
+        # --- USD-per-window: reuse the metered savings ledger ---
         # The dollar figure reuses the savings surface that already exists
         # (_get_merged_savings): context tokens_saved priced at the input rate
         # (total_cost_usd, metered) + realized model-routing savings
@@ -33387,10 +33386,10 @@ def runway_snapshot(days=30, now=None):
             head_now = max(0.0, 100.0 - used)
             head_cf = max(0.0, 100.0 - counterfactual)
             # USD attributable to this window's span, from the metered savings
-            # ledger (KTD1). None when there is nothing to show so the panel
+            # ledger. None when there is nothing to show so the panel
             # degrades gracefully (no $-0 / NaN). Derived from the ledger, NOT
             # from context_mult/routing_mult -- the no-double-count invariant.
-            # F6: cap the apportionment fraction at 1.0 so a caller passing
+            # Cap the apportionment fraction at 1.0 so a caller passing
             # days < span_h/24 (e.g. days=1 for the 7d window) cannot produce a
             # window_saved_usd larger than the cumulative ledger. Without this
             # guard days=1 would give the 7d window 168/24 = 7x the ledger total.
@@ -33423,14 +33422,14 @@ def runway_snapshot(days=30, now=None):
             "tokens_consumed": int(consumed),
             "tokens_saved": int(saved),
             "windows": windows,
-            # USD spine (KTD1): metered context $ + estimated routing $, reused
+            # USD spine: metered context $ + estimated routing $, reused
             # from the savings ledger. Apportioned per window above. Exposed at
             # the top level so the surface and tests can assert the no-double-
             # count invariant (USD traces to these, not to the multipliers).
             "saved_usd_context": round(saved_context_usd, 2),
             "saved_usd_routing": round(saved_routing_usd, 2),
             "saved_usd_tier": saved_usd_tier,
-            # F4: the per-window saved_usd is a pro-rata slice of the N-day
+            # The per-window saved_usd is a pro-rata slice of the N-day
             # ledger at the recent rate, NOT savings realized within that
             # window. Expose period_days so the surface can label it honestly.
             "period_days": days,
@@ -34119,7 +34118,7 @@ def _estimate_retrieval_serve_savings(days=30):
         finally:
             conn.close()
         # reads_by_sid is keyed by the JSONL stem (= session UUID), so the served
-        # cohort must be matched by session_uuid (the U1 join key), not the raw
+        # cohort must be matched by session_uuid (the join key), not the raw
         # session_id -- many savings rows carry short agent-ids that never match a
         # UUID stem, which would misclassify served sessions as baseline and
         # OVER-state the avoided-read delta. Include both keys to be safe.
@@ -36129,7 +36128,7 @@ def _get_merged_savings(days=30):
     total_cost = float(savings.get("total_cost_usd", 0.0) or 0.0)
     total_events = int(savings.get("total_events", 0) or 0)
 
-    # U1: fallback rate only used for rows that pre-date the model column (NULL model).
+    # Fallback rate only used for rows that pre-date the model column (NULL model).
     # For rows with a stored model (written at event-time via session join), the cost
     # is already priced correctly by _get_compression_summary's per-row rate.
     fallback_cost_per_mtok = _estimate_compression_cost_per_mtok()
@@ -38447,7 +38446,7 @@ if __name__ == "__main__":
         this_install_only = "--this-install-only" in args
         setup_daemon(dry_run=dry, uninstall=uninstall, this_install_only=this_install_only)
     elif args[0] == "cleanup":
-        # #106 F3 (P2-8): confirm gate. `dry = "--dry-run" in args` meant a
+        # #106: confirm gate. `dry = "--dry-run" in args` meant a
         # typo ("--dryrun", "--dry_run", "-dry-run") silently performed the
         # REAL destructive run -- the flag you reach for to stay safe is
         # exactly the one whose typo costs you. Unknown flags are now rejected,

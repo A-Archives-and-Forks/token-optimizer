@@ -1,4 +1,4 @@
-"""F5: _context_window_for_model_str docstring must not overclaim.
+"""_context_window_for_model_str docstring must not overclaim.
 
 The function resolves a context window for a specific model string, but
 GLOBAL env overrides (CLAUDE_CODE_DISABLE_1M_CONTEXT,
@@ -48,7 +48,7 @@ def test_model_string_200k_when_no_override(m):
 
 
 def test_env_override_wins_over_model_string(m, monkeypatch):
-    """F5: TOKEN_OPTIMIZER_CONTEXT_SIZE is a GLOBAL override -- it wins even
+    """TOKEN_OPTIMIZER_CONTEXT_SIZE is a GLOBAL override -- it wins even
     when the model string names a 1M variant. This is by design (explicit user
     intent), and the docstring now documents it instead of overclaiming."""
     monkeypatch.setenv("TOKEN_OPTIMIZER_CONTEXT_SIZE", "200000")

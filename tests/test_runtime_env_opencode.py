@@ -148,9 +148,9 @@ def test_cmd_claude_code_is_not_opencode():
 
 
 def test_cmd_false_positive_repo_named_opencode():
-    # FALSE-POSITIVE GUARD (KTD-2) — the central correctness risk. A genuine
+    # FALSE-POSITIVE GUARD — the central correctness risk. A genuine
     # Claude Code session must never be misdetected as OpenCode.
-    # Torture F1 (CRITICAL): a user project literally named opencode with a stock
+    # A user project literally named opencode with a stock
     # entry script. The OLD `"opencode" in parts` check flipped this to True.
     assert not runtime_env._is_opencode_command("node /home/me/opencode/index.js")
     assert not runtime_env._is_opencode_command("node /home/me/opencode/src/index.js")

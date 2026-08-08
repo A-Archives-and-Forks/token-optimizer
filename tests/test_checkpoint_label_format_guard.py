@@ -1,4 +1,4 @@
-"""F10: checkpoint filename regex guard.
+"""Checkpoint filename regex guard.
 
 The cross-session warning relies on a regex match against the checkpoint
 filename: `^([0-9a-fA-F-]{8,36})-\d{8}-\d{6}-`. If the filename format ever
@@ -6,7 +6,7 @@ changes, the match fails and the old code fell through to the unlabeled "A
 recent checkpoint is available" message -- the exact cross-session hazard the
 labeled warning was written to eliminate.
 
-F10 fix: (a) emit a stderr warning when the regex doesn't match so a format
+The fix: (a) emit a stderr warning when the regex doesn't match so a format
 change is visible at dev time, and (b) keep the cross-session "DIFFERENT
 session" label even without the source sid, so the fallback never silently
 reverts to the old unlabeled pointer.
@@ -65,7 +65,7 @@ def test_matching_filename_uses_labeled_warning(m, tmp_path, monkeypatch, capsys
 
 
 def test_non_matching_filename_still_labels_cross_session(m, tmp_path, monkeypatch, capsys):
-    """F10: a filename that does NOT match the regex must still get the
+    """A filename that does NOT match the regex must still get the
     cross-session 'DIFFERENT session' label, NOT the old unlabeled message."""
     cp = _fake_checkpoint(tmp_path, "new-format-checkpoint-2026.md")
     monkeypatch.setattr(m, "CHECKPOINT_DIR", tmp_path)
@@ -83,7 +83,7 @@ def test_non_matching_filename_still_labels_cross_session(m, tmp_path, monkeypat
 
 
 def test_non_matching_filename_emits_stderr_warning(m, tmp_path, monkeypatch, capsys):
-    """F10: a non-matching filename must emit a stderr warning so a format
+    """A non-matching filename must emit a stderr warning so a format
     change is visible at dev time."""
     cp = _fake_checkpoint(tmp_path, "new-format-checkpoint-2026.md")
     monkeypatch.setattr(m, "CHECKPOINT_DIR", tmp_path)

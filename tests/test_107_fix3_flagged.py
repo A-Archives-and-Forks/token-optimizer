@@ -1,7 +1,7 @@
 """FIX-3 regression tests for the #107 flagged-item sweep.
 
 Covers:
-* F2 (#107): the WindowsApps interpreter probe must not spawn the
+* The WindowsApps interpreter probe (#107) must not spawn the
   console-subsystem python.exe on the healthy path. A live GUI twin
   (pythonw.exe/pyw.exe) proves the Store install real via POSITIVE PROOF OF
   LIFE (it must WRITE a marker file; its bare exit code is never trusted).
@@ -9,7 +9,7 @@ Covers:
 * T6-M3 carry-forward: dashboard HTML writes in openclaw and opencode are
   atomic (sibling temp file + rename), never truncate-in-place, and the
   openclaw CLI reports a write failure cleanly instead of an uncaught throw.
-* F3: commands/health.md and commands/quick.md route the non-Claude-Code
+* commands/health.md and commands/quick.md route the non-Claude-Code
   (Codex/OpenCode/standalone) invocation through python-launcher.sh instead
   of a bare `python3` console spawn.
 * T1 Finding 6: keepwarm-experiment's `claude --help` spawn routes a missing
@@ -46,12 +46,12 @@ requires_bash = pytest.mark.skipif(
 
 
 # ---------------------------------------------------------------------------
-# F2: WindowsApps probe is flash-free on the healthy path.
+# WindowsApps probe is flash-free on the healthy path.
 # ---------------------------------------------------------------------------
 
 
 def _launcher_defs() -> str:
-    """All launcher function definitions (including the F2 probe and
+    """All launcher function definitions (including the GUI-twin probe and
     find_interpreter), with the top-level cache exec and the discovery chain
     stripped so nothing runs until the driver calls it."""
     src = LAUNCHER.read_text(encoding="utf-8")
@@ -128,7 +128,7 @@ def store(tmp_path: Path) -> Path:
 
 @requires_bash
 def test_live_gui_twin_accepts_without_console_spawn(store, tmp_path):
-    """The F2 regression: a healthy Store install must be accepted WITHOUT
+    """The regression: a healthy Store install must be accepted WITHOUT
     ever spawning the console-subsystem python.exe (the flash). Fails on the
     pre-fix launcher, whose only probe was `python.exe --version`."""
     py = _fake_console_python(store)
@@ -231,7 +231,7 @@ def test_opencode_dashboard_write_is_atomic():
 
 
 # ---------------------------------------------------------------------------
-# F3: command docs route the non-Claude runtime through the launcher.
+# Command docs route the non-Claude runtime through the launcher.
 # ---------------------------------------------------------------------------
 
 

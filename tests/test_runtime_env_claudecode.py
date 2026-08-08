@@ -135,12 +135,12 @@ def test_codex_home_still_wins_with_claudecode_set():
 
 
 def test_copilot_home_beats_claudecode_with_claudecode_set():
-    """Copilot regression guard (F2): the CLAUDECODE tier must NOT steal a
+    """Copilot regression guard: the CLAUDECODE tier must NOT steal a
     genuine Copilot session. CLAUDECODE is inherited by every subprocess
     Claude Code spawns, so a Copilot CLI session launched from a CC Bash tool
     carries CLAUDECODE=1 AND sets COPILOT_HOME. The explicit COPILOT_HOME env
     must win so the nested Copilot session stays ``copilot``, not ``claude``.
-    This mirrors the Codex guard above; before F2, Copilot had no explicit-env
+    This mirrors the Codex guard above; before this fix, Copilot had no explicit-env
     tier above CLAUDECODE and was stolen.
     """
     with tempfile.TemporaryDirectory() as tmp:

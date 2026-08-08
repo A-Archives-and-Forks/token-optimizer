@@ -1,12 +1,12 @@
-"""A rejected regenerate click must leave a trace (R2).
+"""A rejected regenerate click must leave a trace.
 
-Root cause (see findings/dashboard-diagnosis-and-fix.md): the M-4 token check in
+Root cause: the M-4 token check in
 the dashboard daemon's do_POST runs BEFORE the api/regenerate handler. A wrong/
 empty X-TO-Token was rejected with 403 before the handler ever ran, so
 _log_regen was never called and daemon-regen.log stayed empty for weeks while
 the user reported a dead button. The click was indistinguishable from nothing.
 
-U2 adds a rate-limited `_log_reject_regen(path)` call on the token-reject
+The fix adds a rate-limited `_log_reject_regen(path)` call on the token-reject
 branch so a rejected api/* POST always writes one trace line (capped to one per
 ~30s so a looping client cannot spam the log).
 
@@ -41,14 +41,14 @@ def _load_reject_logger(tmp_log: Path):
     """
     src = _generated_src()
     ns = {"time": time, "os": __import__("os")}
-    # F7 made _REJECT_LOG_LAST_TS a per-path dict with a type annotation
+    # _REJECT_LOG_LAST_TS is now a per-path dict with a type annotation
     # (`_REJECT_LOG_LAST_TS: dict = {}`), so allow an optional `: <type>`.
     for const in ("_REJECT_LOG_LAST_TS", "_REJECT_LOG_MIN_GAP"):
         m = re.search(r"^%s(?::[^=]+)? = .*$" % re.escape(const), src, re.M)
         assert m, f"{const} missing from generated daemon"
         exec(m.group(0), ns)
     ns["REGEN_LOG"] = str(tmp_log)
-    # F8: _log_reject_regen now calls _sanitize_log_path — extract it into the ns too.
+    # _log_reject_regen now calls _sanitize_log_path — extract it into the ns too.
     ms = re.search(r"^def _sanitize_log_path\(.*?\n(?=^\S)", src, re.M | re.S)
     assert ms, "_sanitize_log_path missing from generated daemon"
     exec(ms.group(0), ns)
@@ -70,7 +70,7 @@ def test_reject_logger_writes_exactly_one_line(tmp_path):
 
 def test_reject_logger_is_rate_limited(tmp_path):
     """A second call for the SAME path inside the min-gap window must not write
-    another line. F7 made the throttle per-path, so a hammering client on one
+    another line. The throttle is now per-path, so a hammering client on one
     endpoint still gets exactly one line (a DIFFERENT path logging separately is
     the intended per-path behavior, covered by test_reject_log_throttle)."""
     log = tmp_path / "daemon-regen.log"
@@ -123,7 +123,7 @@ def test_do_POST_does_not_log_reject_on_valid_token_path():
 
 
 def test_reject_logger_mirrored_to_plugin_tree():
-    """Both measure.py trees must carry the reject logger (R5)."""
+    """Both measure.py trees must carry the reject logger."""
     a = (SCRIPTS / "measure.py").read_text(encoding="utf-8")
     b = (
         ROOT

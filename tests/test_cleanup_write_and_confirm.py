@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#106 F3 P2: symlink/mode preservation on settings writes + confirm gate.
+"""Symlink/mode preservation on settings writes + confirm gate.
 
 P2-7 os.replace onto SETTINGS_PATH detached a dotfiles-managed symlink
       (settings.json became a regular file, so the user's repo silently

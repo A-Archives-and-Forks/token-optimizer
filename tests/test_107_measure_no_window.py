@@ -480,7 +480,7 @@ def test_shim_tries_gui_interpreters_before_console_ones(shim_src):
     long-lived daemon itself ran as a console process. GUI-subsystem
     interpreters must come first.
 
-    #107 torture T5-M updated the pythonw rung: it is now PATH-resolved into
+    #107 updated the pythonw rung: it is now PATH-resolved into
     ``PYW_EXE`` and guarded against Microsoft Store aliases (see
     ``test_shim_pythonw_rung_guards_windows_store_alias`` in
     test_107_heal_hardening.py), so ``_rung_order`` sees the remaining bare
@@ -644,7 +644,7 @@ def test_heal_repairs_a_cmd_action_task(m, monkeypatch):
 
 def test_heal_repairs_a_bare_console_python_action(m, monkeypatch):
     """Not only .cmd: a task action pointing straight at console python.exe or
-    py.exe flashes just the same. (T2-F5: bare ``cmd.exe`` was REMOVED from
+    py.exe flashes just the same. (Bare ``cmd.exe`` was REMOVED from
     this set -- our installers never bake it, so matching it meant rewriting a
     user's own wrapper arrangement; see test_107_heal_hardening.py.)"""
     for exe in (r"C:\Python\python.exe", r"C:\Windows\py.exe", "python3.exe"):
@@ -705,7 +705,7 @@ def test_heal_is_a_strict_noop_off_windows(m, monkeypatch):
 
 
 def test_heal_failure_never_runs_a_still_flasher_action(m, monkeypatch):
-    """#107 torture Cluster B (T1-H1/T7-H3): this test USED to pin the opposite
+    """#107: this test USED to pin the opposite
     -- a compensating /Run after a failed re-registration. But when the
     install fails, the registered action is still the .cmd flasher, so that
     /Run IS one extra console flash per session, on exactly the hosts the heal
@@ -748,7 +748,7 @@ def test_heal_does_nothing_without_a_pythonw_twin(m, monkeypatch):
 
 
 def test_action_flasher_classifier(m):
-    """T2-F5 update: this test USED to pin ``launcher.BAT`` and bare
+    """Update: this test USED to pin ``launcher.BAT`` and bare
     ``cmd.exe`` as "ours" -- i.e. ANY batch file in our task slot was
     'positively identified' and rewritten, wiping a user's own wrapper.
     A .cmd/.bat now matches only OUR generated launcher name."""
@@ -775,7 +775,7 @@ def test_shim_heal_rewrites_a_stale_on_disk_launcher(m, monkeypatch):
     assert m._heal_windows_launcher_shim() is True
     healed = launcher.read_text(encoding="utf-8")
     assert "where " not in healed.lower()
-    # #107 torture T5-M: the pythonw rung is now PATH-resolved + Store-alias
+    # #107: the pythonw rung is now PATH-resolved + Store-alias
     # guarded, so the first BARE rung is pyw.exe; the guarded pythonw
     # invocation still precedes it.
     assert _rung_order(healed)[0] == "pyw.exe"
@@ -894,7 +894,7 @@ def test_pulse_still_revives_when_marker_absent(m, monkeypatch):
 
 
 def test_transient_install_failure_does_not_arm_the_marker(m, monkeypatch):
-    """#107 torture Cluster A: this test USED to pin the opposite -- ANY
+    """#107: this test USED to pin the opposite -- ANY
     installer failure armed the permanent marker. A missing dashboard file is
     a transient class (disk full once, a regen hiccup); it must stay
     retryable under the 24h throttle, never become a permanent kill switch."""
@@ -965,7 +965,7 @@ def test_restart_stale_does_not_arm_the_marker(m, monkeypatch):
 
 
 def test_revive_spawn_failure_does_not_arm_the_marker(m, monkeypatch):
-    """#107 torture Cluster A (T3-H2/T5-F5): a spawn returning None is the
+    """#107: a spawn returning None is the
     LEAST structural failure in the set (fork EAGAIN under load, AV
     transiently locking the exe, a replaceable corrupt pythonw twin). The
     300s revive throttle bounds retries; one hiccup must not permanently
@@ -1029,7 +1029,7 @@ def test_marker_survives_a_fresh_session(m, monkeypatch):
 
 
 def test_marker_clear_sites_are_bounded():
-    """Structural guard, updated for #107 torture Cluster A: the clear helper
+    """Structural guard, updated for #107: the clear helper
     may be called ONLY from ``setup_daemon`` (explicit install success) and
     ``_ensure_dashboard_daemon`` (verified success / live-daemon disproof).
     Anything else -- a timer, a session hook, a heal that didn't verify --

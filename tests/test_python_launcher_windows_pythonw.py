@@ -534,9 +534,9 @@ def test_kill_after_present_in_mirror():
         "the mirror launcher must carry --kill-after=1s on both probe sites"
     )
     # Exactly three occurrences (one per probe site): the _maybe_swap_to_pythonw
-    # liveness probe, the F2 GUI-twin proof-of-life probe, and the console
+    # liveness probe, the GUI-twin proof-of-life probe, and the console
     # --version fallback probe (both now in _probe_windowsapps_candidate).
-    # Updated from 2 when F2/#107 added the flash-free twin probe.
+    # Updated from 2 when the flash-free twin probe was added (#107).
     assert source.count(b"--kill-after=1s 2s") == 3, (
         "expected exactly three --kill-after=1s probe sites in the mirror; "
         f"got {source.count(b'--kill-after=1s 2s')}"

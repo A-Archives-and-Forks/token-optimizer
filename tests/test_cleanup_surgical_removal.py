@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#106 F3 P2 batch: remove ONLY what we own.
+"""Remove ONLY what we own.
 
 P2-5 foreign marketplace claimed by a bare "token-optimizer" substring and
       deleted from the user's known_marketplaces.json.

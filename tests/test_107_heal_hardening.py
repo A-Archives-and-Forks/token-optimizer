@@ -1,8 +1,8 @@
-"""#107 torture-fix regressions: the sticky marker, the Windows heal, and the
+"""#107 regressions: the sticky marker, the Windows heal, and the
 interpreter-resolution hardening.
 
 The first #107 fix introduced a self-heal whose failure modes were worse than
-the bug (torture findings 107-TORTURE.md, lanes T1/T2/T3/T5/T7). This file
+the bug (lanes T1/T2/T3/T5/T7). This file
 pins the hardened behavior:
 
 Cluster A -- the sticky ``.daemon-install-failed`` marker:
@@ -244,7 +244,7 @@ def test_transient_create_failure_does_not_arm(m, monkeypatch):
 
 def test_port_bound_failure_does_not_arm_and_prints_to_stderr(
         m, monkeypatch, capsys):
-    """T7-H3 / T2-F9: a foreign port owner is transient (never arms), and
+    """A foreign port owner is transient (never arms), and
     under soft_fail the '[Error] Port ...' line must go to stderr -- stdout is
     hook output injected into every session's context."""
     _installer_env(m, monkeypatch, port_owner="pid=999 (netstat: ...)")
@@ -496,7 +496,7 @@ def test_shared_gate_blocks_on_each_condition(m, monkeypatch):
 
 
 def test_restart_path_task_heal_respects_shared_gate(m, monkeypatch):
-    """T2-F6: `_heal_windows_task_action` is ALSO called (ungated, pre-fix)
+    """`_heal_windows_task_action` is ALSO called (ungated, pre-fix)
     from _restart_dashboard_daemon's /End->/Run window. The gate now lives
     inside the primitive, so a disabled/tombstoned/condemned daemon can never
     be resurrected through that second door."""
@@ -512,7 +512,7 @@ def test_restart_path_task_heal_respects_shared_gate(m, monkeypatch):
 
 
 def test_auto_update_restart_is_gated():
-    """T3-F6: the ensure-health auto-update block used to bypass every #59
+    """The ensure-health auto-update block used to bypass every #59
     gate -- a version bump could /Run a daemon the user turned off. The
     restart must now sit behind the shared gate."""
     src = _measure_source()
@@ -578,7 +578,7 @@ def test_windows_action_is_dead_path_classifier(m, monkeypatch):
 
 def test_restart_reports_failure_when_run_fails_and_nothing_serves(
         m, monkeypatch):
-    """T5-H1/T3-F11: `schtasks /Run` exiting nonzero with nothing serving the
+    """`schtasks /Run` exiting nonzero with nothing serving the
     port is a DEMONSTRABLY failed restart. The None-version safe-degrade must
     not convert it into a false 'restarted' (that is how a permanently-dead
     daemon stayed green)."""
@@ -738,7 +738,7 @@ def test_marker_arming_sites_are_definitive_only():
 
 
 # ---------------------------------------------------------------------------
-# T3-F7: a clear that did not clear must not report success
+# A clear that did not clear must not report success
 # ---------------------------------------------------------------------------
 def test_clear_marker_success_is_verified(m):
     m._write_daemon_install_failed_marker("wedge")
@@ -771,7 +771,7 @@ def test_clear_marker_failure_is_loud_and_reports_false(m, capsys):
 
 
 # ---------------------------------------------------------------------------
-# T3-F9: marker presence is an explicit stat policy, not an exists() accident
+# Marker presence is an explicit stat policy, not an exists() accident
 # ---------------------------------------------------------------------------
 def test_marker_state_is_tristate(m):
     assert m._daemon_install_failed_marker_state() == "absent"
@@ -801,7 +801,7 @@ def test_marker_present_fails_closed_on_unreadable_stat(m, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# T3-F10: a marker write that could not be persisted must say so
+# A marker write that could not be persisted must say so
 # ---------------------------------------------------------------------------
 def test_marker_write_failure_is_loud(m, monkeypatch, capsys):
     monkeypatch.setattr(
@@ -815,7 +815,7 @@ def test_marker_write_failure_is_loud(m, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# T2-F5: batch-file classification is scoped to OUR launcher
+# Batch-file classification is scoped to OUR launcher
 # ---------------------------------------------------------------------------
 def test_classifier_scopes_batch_files_to_our_launcher(m):
     assert m._windows_action_is_console_flasher(
@@ -838,7 +838,7 @@ def test_heal_leaves_a_user_wrapper_cmd_alone(m, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# T2-F10: XML-escaped commands + the legacy shim location
+# XML-escaped commands + the legacy shim location
 # ---------------------------------------------------------------------------
 def test_classifier_unescapes_xml_quoted_commands(m):
     """The <Command> value arrives XML-escaped from schtasks /Query; a quoted
