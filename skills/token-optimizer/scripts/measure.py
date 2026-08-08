@@ -7839,7 +7839,7 @@ def generate_coach_block(components=None, trends=None):
         # Check for unused MCP via skill analysis proxy
         never_used = trends.get("skills", {}).get("never_used", [])
         if len(never_used) > 5:
-            lines.append(f"- {len(never_used)} skills were never used in 30 days. Archive unused ones.")
+            lines.append(f"- {len(never_used)} skills not invoked (Skill call or slash command) in 30 days. Review for archiving.")
 
     # Cache hit rate
     if trends:
@@ -8176,11 +8176,43 @@ _PARSE_CACHE_MAX = 2000
 
 
 # A slash-command invocation is written into the user turn as
-# <command-name>name</command-name> (with or without a leading slash). Skills
-# driven by a slash command -- and disable-model-invocation skills, which can
-# ONLY be invoked that way -- never emit a Skill tool_use, so without this they
-# look "unused" no matter how often they run.
-_SLASH_COMMAND_RE = re.compile(r"<command-name>\s*/?\s*([A-Za-z0-9:_-]+)")
+# <command-name>name</command-name> (with or without a leading slash), alongside
+# a <command-args> sibling. Skills driven by a slash command -- and
+# disable-model-invocation skills, which can ONLY be invoked that way -- never
+# emit a Skill tool_use, so without this they look "unused" no matter how often
+# they run. The closing tag is required so a bare mention cannot match.
+_SLASH_COMMAND_RE = re.compile(r"<command-name>\s*/?\s*([A-Za-z0-9:_-]+)\s*</command-name>")
+
+
+def _resolve_installed_skill(name):
+    """Map a slash-command name to the INSTALLED skill's directory name, or None.
+
+    Mirrors the never-used normalization (exact dir name / SKILL.md name via
+    name_to_dir / namespaced ``plugin:skill``). Returns None for anything that is
+    not an installed skill -- built-in commands (/clear, /compact, ...) and custom
+    non-skill commands resolve to None, so they never pollute skill-usage stats.
+    """
+    if not name:
+        return None
+    try:
+        comp = _cached_measure_components()
+        skills = comp.get("skills", {})
+        installed = set(skills.get("names", []))
+        name_to_dir = skills.get("name_to_dir", {}) or {}
+    except Exception:
+        return None
+    if name in installed:
+        return name
+    if name in name_to_dir:
+        return name_to_dir[name]
+    if ":" in name:
+        parent, _, child = name.partition(":")
+        for cand in (parent, child):
+            if cand in installed:
+                return cand
+            if cand in name_to_dir:
+                return name_to_dir[cand]
+    return None
 
 
 def _parse_session_jsonl(filepath):
@@ -8302,13 +8334,19 @@ def _parse_session_jsonl(filepath):
                 if rec_type in ("user", "assistant"):
                     message_count += 1
 
-                # Count slash-command invocations as skill usage. A skill run via
-                # /name (e.g. /briefing, /ai-digest) emits no Skill tool_use, so it
-                # would otherwise be scored "unused". The name is normalized against
-                # the installed skill set in the never-used computation.
-                if rec_type == "user":
-                    for _cn in _SLASH_COMMAND_RE.findall(json.dumps(record.get("message", ""))):
-                        skills_used[_cn] = skills_used.get(_cn, 0) + 1
+                # Count slash-command invocations of INSTALLED skills as usage. A
+                # skill run via /name (e.g. /briefing) emits no Skill tool_use, so
+                # it would otherwise be scored "unused". Gate strictly so nothing
+                # else leaks into skill stats: require the <command-args> sibling
+                # that Claude Code always emits for a real invocation (a pasted
+                # mention in prose has no sibling), scan the raw line rather than
+                # re-serializing, and count ONLY names that resolve to an installed
+                # skill (so /clear, /compact and other non-skill commands are out).
+                if rec_type == "user" and "<command-name>" in line and "<command-args>" in line:
+                    for _cn in _SLASH_COMMAND_RE.findall(line):
+                        _sk = _resolve_installed_skill(_cn)
+                        if _sk:
+                            skills_used[_sk] = skills_used.get(_sk, 0) + 1
 
                 # Extract tool usage from assistant messages
                 if rec_type == "assistant":
