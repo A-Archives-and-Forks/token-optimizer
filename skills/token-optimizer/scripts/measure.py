@@ -5219,7 +5219,7 @@ def _collect_management_data(components=None, trends=None):
                 "install_with_bash_compression_cmd": base + " --enable-bash-compression",
                 "install_with_hot_path_hooks_cmd": base + " --enable-hot-path-hooks --enable-prompt-hooks",
                 "install_with_status_line_cmd": base + " --enable-status-line",
-                "refresh_cmd": f"TOKEN_OPTIMIZER_RUNTIME=codex python3 {mp_cmd} session-end-flush --trigger manual",
+                "refresh_cmd": f"TOKEN_OPTIMIZER_RUNTIME=codex python3 {mp_cmd} session-end-flush --trigger manual --no-defer",
                 "doctor_cmd": f"TOKEN_OPTIMIZER_RUNTIME=codex python3 {mp_cmd} codex-doctor --project {project_arg}",
                 "dashboard_cmd": f"TOKEN_OPTIMIZER_RUNTIME=codex python3 {mp_cmd} dashboard",
             },
@@ -6200,6 +6200,22 @@ def _defer_session_end_flush(args):
             _log_spawn_failure("session-end flush spawn failed")
     except Exception:
         pass
+
+
+def _dispatch_session_end_flush(args):
+    """Route the `session-end-flush` CLI entry (#114).
+
+    Defer by DEFAULT so a legacy bare `session-end-flush` hook fossilized in
+    settings.json (pre-5.11.77 script installs, no --defer) stops running the
+    flush synchronously inline (which wedged Windows stop-hooks at 3/4). Only
+    `--no-defer` forces the inline worker (manual refresh / tests). Returns the
+    chosen mode string so callers/tests can assert the decision without spawning.
+    """
+    if "--no-defer" in args:
+        _run_session_end_flush_worker(args)
+        return "inline"
+    _defer_session_end_flush(args)
+    return "deferred"
 
 
 def _generate_codex_auto_recommendations(components, trends=None, days=30):
@@ -38051,10 +38067,16 @@ if __name__ == "__main__":
         # three phases can't race on trends.db (SQLite serialises within
         # a process but locks out other processes, so three async hook
         # entries would have corrupted the DB). Keeps exit 0 regardless.
-        if "--defer" in args:
-            _defer_session_end_flush(args)
-        else:
-            _run_session_end_flush_worker(args)
+        #
+        # Defer by DEFAULT (#114). A legacy bare `session-end-flush` hook
+        # fossilized in settings.json (pre-5.11.77 script installs, no --defer
+        # flag) otherwise runs this flush synchronously inline and wedges
+        # Windows stop-hooks at 3/4 -- and neither self-heal path rewrites that
+        # settings.json entry. Deferring unless --no-defer is passed makes every
+        # such fossil non-blocking the moment the scripts update, with no
+        # settings.json surgery. --no-defer keeps the synchronous path for
+        # manual refresh / tests; `--defer` stays accepted (now redundant).
+        _dispatch_session_end_flush(args)
         sys.exit(0)
     elif args[0] == "session-end-flush-worker":
         _run_session_end_flush_worker(args)
