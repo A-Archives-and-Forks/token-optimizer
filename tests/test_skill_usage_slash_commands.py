@@ -71,7 +71,7 @@ def test_namespaced_slash_command_resolves_to_installed_parent():
 
 
 def test_non_skill_builtin_command_is_not_counted():
-    """F1: /clear, /compact etc. are not installed skills -> must not pollute usage."""
+    """Built-in commands (/clear, /compact) are not installed skills -> must not pollute usage."""
     res = _parse([
         _cmd("<command-name>clear</command-name>\n<command-args></command-args>"),
         _cmd("<command-name>compact</command-name>\n<command-args></command-args>"),
@@ -80,14 +80,14 @@ def test_non_skill_builtin_command_is_not_counted():
 
 
 def test_pasted_mention_without_command_args_is_not_counted():
-    """F2: a <command-name> tag pasted in prose (no <command-args> sibling) must
+    """A <command-name> tag pasted in prose (no <command-args> sibling) must
     not count as an invocation, even for an installed skill name."""
     res = _parse([_cmd("I saw `<command-name>briefing</command-name>` in my transcript log")])
     assert res["skills_used"] == {}
 
 
 def test_pasted_full_block_in_prose_is_not_counted():
-    """H1: a complete command block embedded in prose (not the leading text) must
+    """A complete command block embedded in prose (not the leading text) must
     not count -- the user is talking about it, not invoking it."""
     res = _parse([_cmd(
         "here is my log: <command-name>briefing</command-name>\n<command-args>evening</command-args> why did it run?")])
@@ -95,7 +95,7 @@ def test_pasted_full_block_in_prose_is_not_counted():
 
 
 def test_tool_result_echoing_a_command_block_is_not_counted():
-    """H2: a tool_result (user-role record) that echoes a command block -- e.g. a
+    """A tool_result (user-role record) that echoes a command block -- e.g. a
     search hit over session logs -- must not count as an invocation."""
     res = _parse([{
         "type": "user", "message": {"role": "user", "content": [
@@ -106,7 +106,7 @@ def test_tool_result_echoing_a_command_block_is_not_counted():
 
 
 def test_skill_dir_with_dot_is_captured():
-    """H3: a skill dir name containing a dot must still be captured."""
+    """A skill dir name containing a dot must still be captured."""
     res = _parse([_cmd("<command-name>my.skill</command-name>\n<command-args></command-args>")])
     assert res["skills_used"].get("my.skill") == 1
 
