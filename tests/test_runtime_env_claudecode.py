@@ -134,6 +134,37 @@ def test_codex_home_still_wins_with_claudecode_set():
         ) == "codex"
 
 
+def test_copilot_home_beats_claudecode_with_claudecode_set():
+    """Copilot regression guard (F2): the CLAUDECODE tier must NOT steal a
+    genuine Copilot session. CLAUDECODE is inherited by every subprocess
+    Claude Code spawns, so a Copilot CLI session launched from a CC Bash tool
+    carries CLAUDECODE=1 AND sets COPILOT_HOME. The explicit COPILOT_HOME env
+    must win so the nested Copilot session stays ``copilot``, not ``claude``.
+    This mirrors the Codex guard above; before F2, Copilot had no explicit-env
+    tier above CLAUDECODE and was stolen.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_home = Path(tmp)
+        (tmp_home / ".copilot").mkdir()
+        assert _detect_with(
+            env={"CLAUDECODE": "1", "COPILOT_HOME": str(tmp_home / ".copilot")},
+            process_opencode=False,
+            home=tmp_home,
+        ) == "copilot"
+
+
+def test_to_copilot_home_beats_claudecode():
+    """The namespaced TOKEN_OPTIMIZER_COPILOT_HOME override also sits above the
+    CLAUDECODE tier (same explicit-env tier as COPILOT_HOME)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_home = Path(tmp)
+        assert _detect_with(
+            env={"CLAUDECODE": "1", "TOKEN_OPTIMIZER_COPILOT_HOME": str(tmp_home)},
+            process_opencode=False,
+            home=tmp_home,
+        ) == "copilot"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

@@ -116,3 +116,37 @@ def test_none_when_reading_older_than_all_windows(m, tmp_path, monkeypatch):
         "available": True, "stale": True, "five_hour_pct": 60.0,
         "seven_day_pct": 80.0, "age_s": 8 * 24 * 3600, "ts": time.time() - 8 * 24 * 3600})
     assert m.runway_snapshot(days=30) is None
+
+
+def test_period_days_exposed_for_honest_label(m, tmp_path, monkeypatch):
+    """F4: the per-window saved_usd is a pro-rata slice of the N-day ledger, not
+    window-realized savings. period_days must be exposed so the surface can
+    label it honestly ('pro-rata of 30d ledger')."""
+    _temp_trends(m, tmp_path, monkeypatch)
+    monkeypatch.setattr(m, "_keepwarm_read_meters", lambda **k: {
+        "available": True, "stale": False, "five_hour_pct": 12.0,
+        "seven_day_pct": 10.0, "age_s": 3.0, "ts": time.time() - 3})
+    r = m.runway_snapshot(days=30)
+    assert r is not None
+    assert r.get("period_days") == 30, "period_days must be exposed for honest labeling"
+
+
+def test_window_saved_usd_capped_when_days_lt_span(m, tmp_path, monkeypatch):
+    """F6: when days < span_h/24 (e.g. days=1 for the 7d window), the pro-rata
+    apportionment must be capped at 1.0 so a window never reports more than
+    the cumulative ledger total. Without the guard days=1 gives the 7d window
+    168/24 = 7x the ledger."""
+    _temp_trends(m, tmp_path, monkeypatch)
+    monkeypatch.setattr(m, "_keepwarm_read_meters", lambda **k: {
+        "available": True, "stale": False, "five_hour_pct": 12.0,
+        "seven_day_pct": 10.0, "age_s": 3.0, "ts": time.time() - 3})
+    r = m.runway_snapshot(days=1)
+    assert r is not None
+    # The 7d window's saved_usd must not exceed the cumulative ledger total.
+    total = r.get("saved_usd_context", 0) + r.get("saved_usd_routing", 0)
+    for w in r["windows"]:
+        if w.get("saved_usd") is not None and total > 0:
+            assert w["saved_usd"] <= total + 0.01, (
+                f"{w['key']} window saved_usd ({w['saved_usd']}) exceeds the "
+                f"cumulative ledger total ({total}) -- F6 guard missing"
+            )

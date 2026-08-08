@@ -41,11 +41,17 @@ def _load_reject_logger(tmp_log: Path):
     """
     src = _generated_src()
     ns = {"time": time, "os": __import__("os")}
+    # F7 made _REJECT_LOG_LAST_TS a per-path dict with a type annotation
+    # (`_REJECT_LOG_LAST_TS: dict = {}`), so allow an optional `: <type>`.
     for const in ("_REJECT_LOG_LAST_TS", "_REJECT_LOG_MIN_GAP"):
-        m = re.search(r"^%s = .*$" % re.escape(const), src, re.M)
+        m = re.search(r"^%s(?::[^=]+)? = .*$" % re.escape(const), src, re.M)
         assert m, f"{const} missing from generated daemon"
         exec(m.group(0), ns)
     ns["REGEN_LOG"] = str(tmp_log)
+    # F8: _log_reject_regen now calls _sanitize_log_path — extract it into the ns too.
+    ms = re.search(r"^def _sanitize_log_path\(.*?\n(?=^\S)", src, re.M | re.S)
+    assert ms, "_sanitize_log_path missing from generated daemon"
+    exec(ms.group(0), ns)
     m = re.search(r"^def _log_reject_regen\(.*?\n(?=^\S)", src, re.M | re.S)
     assert m, "_log_reject_regen missing from generated daemon"
     exec(m.group(0), ns)
@@ -63,15 +69,17 @@ def test_reject_logger_writes_exactly_one_line(tmp_path):
 
 
 def test_reject_logger_is_rate_limited(tmp_path):
-    """A second call inside the min-gap window must not write another line."""
+    """A second call for the SAME path inside the min-gap window must not write
+    another line. F7 made the throttle per-path, so a hammering client on one
+    endpoint still gets exactly one line (a DIFFERENT path logging separately is
+    the intended per-path behavior, covered by test_reject_log_throttle)."""
     log = tmp_path / "daemon-regen.log"
     ns = _load_reject_logger(log)
     ns["_log_reject_regen"]("api/regenerate")
-    ns["_log_reject_regen"]("api/regenerate")  # immediately after
-    ns["_log_reject_regen"]("api/v5/toggle")
+    ns["_log_reject_regen"]("api/regenerate")  # same path, immediately after -> throttled
     text = log.read_text(encoding="utf-8")
     assert text.count("\n") == 1, (
-        "rate limit failed: a hammering client wrote "
+        "per-path rate limit failed: a hammering client on one path wrote "
         f"{text.count(chr(10))} lines, expected 1"
     )
 

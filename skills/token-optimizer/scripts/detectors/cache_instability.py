@@ -1,7 +1,9 @@
 """Cache instability detector: flags CLAUDE.md patterns that break Anthropic prompt cache prefix stability."""
 
 import json
+import os
 import re
+import time
 from pathlib import Path
 
 _TIMESTAMP_PATTERNS = [
@@ -22,9 +24,12 @@ _DYNAMIC_SECTION_MARKERS = [
 
 _IMPORT_RE = re.compile(r"@import\s+[\"']([^\"']+)[\"']")
 
-# Volatile token indicators shared by @import paths, MCP env values, and process
-# prefix files. A value carrying one of these (or a timestamp) is treated as
-# cache-prefix-resident churn.
+# Volatile token indicators for @import paths in CLAUDE.md. Used ONLY by Signal
+# 3 (the @import path scan), NOT by the MCP scan: MCP env/args/url VALUES never
+# reach the model-facing prompt (only tool schemas do), so scanning them for
+# these substrings produced pervasive false positives (any --log-level, a
+# /status URL, a current-site path tripped it). The MCP signal now targets the
+# server SET instead; see _scan_mcp_servers.
 _VOLATILE_TOKENS = ("status", "log", "daily", "current", "temp", "cache")
 
 # Module-level caches keyed by resolved cwd so the 10-session loop in
@@ -36,10 +41,61 @@ _PROCESS_SCAN_CACHE: dict = {}
 # detector cheap even in repos with very large process trees.
 _PROCESS_FILE_CAP = 40
 
+# Cap on a single config/prefix file read, so a huge ~/.claude.json or a
+# symlinked /dev/zero cannot hang or OOM a measure run. 1 MiB is far above any
+# legitimate .mcp.json/.claude.json or process prefix file.
+_READ_CAP_BYTES = 1_000_000
+
+# State filename for the MCP server-set diff (Signal 4). Records the set of MCP
+# server names per resolved cwd so a later run can detect add/remove -- the
+# config-detectable proxy for tool-schema churn in the cached prefix.
+_MCP_STATE_FILENAME = "cache_instability_mcp_state.json"
+
 
 def _has_timestamp(text):
     """Return True if *text* matches any timestamp pattern."""
     return any(pat.search(text) for pat in _TIMESTAMP_PATTERNS)
+
+
+def _safe_read_text(path):
+    """Read up to ``_READ_CAP_BYTES`` from *path* without following symlinks.
+
+    Returns the text (errors replaced) or ``None`` when the file is absent, a
+    symlink, too large, or unreadable. Symlink rejection matters: a symlink in
+    .claude/processes or a project .mcp.json must not be followed into
+    /dev/zero or an attacker-chosen huge file. The cap matters for
+    ~/.claude.json, which accumulates per-project history and can run to many
+    MB. Fail-open: callers treat None as "no signal".
+    """
+    try:
+        if not path.exists() or path.is_symlink():
+            return None
+        if path.stat().st_size > _READ_CAP_BYTES:
+            return None
+        return path.read_text(encoding="utf-8", errors="replace")
+    except (PermissionError, OSError, ValueError):
+        return None
+
+
+def _state_dir():
+    """Resolve a writable state dir for the detector, mirroring
+    plugin_env.resolve_snapshot_dir() without importing it (detectors stay
+    standalone to avoid a circular import). TOKEN_OPTIMIZER_SNAPSHOT_DIR wins
+    (tests/sandbox); else CLAUDE_PLUGIN_DATA/data; else
+    ~/.claude/token-optimizer/data. Returns None only if HOME itself is
+    unresolvable, in which case the snapshot diff is skipped (no finding, no
+    crash).
+    """
+    override = os.environ.get("TOKEN_OPTIMIZER_SNAPSHOT_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA", "").strip()
+    if plugin_data:
+        return Path(plugin_data).expanduser() / "data"
+    try:
+        return Path.home() / ".claude" / "token-optimizer" / "data"
+    except (RuntimeError, OSError):
+        return None
 
 
 def _scan_prefix_lines(lines, surface_label, cutoff_ratio=0.6):
@@ -125,7 +181,8 @@ def _mcp_candidate_files(cwd):
     """Return the ordered list of MCP config files to inspect for *cwd*.
 
     Project-local files first, then the home fallback. Order matters: the
-    project-local ``.claude.json`` overrides the home one for the env scan.
+    project-local ``.claude.json`` overrides the home one for the server-set
+    scan.
     """
     cwd_path = Path(cwd)
     return [
@@ -135,70 +192,140 @@ def _mcp_candidate_files(cwd):
     ]
 
 
-def _scan_mcp_env(cwd):
-    """Signal 4: scan MCP server env/args/url blocks for cache-prefix churn.
+def _read_mcp_server_set(cwd):
+    """Return the set of MCP server names configured for *cwd*.
 
-    ``.mcp.json`` and ``.claude.json`` sit inside the cached prompt prefix; an
-    edit to a server's ``env``/``args``/``url`` invalidates the same cache a
-    CLAUDE.md edit does. Fail-open on missing file / bad JSON.
+    Union of the ``mcpServers`` keys across the candidate config files.
+    ``env``/``args``/``url``/``command`` VALUES are deliberately NOT inspected:
+    they never reach the model-facing prompt (the host loads them to spawn
+    servers; the model receives tool SCHEMAS, not the env values), so their
+    churn does not invalidate the prompt cache. The server SET is the
+    config-detectable proxy for tool-schema churn: adding or removing a server
+    changes the set of tool schemas injected into the cached prefix.
+    """
+    servers = set()
+    for path in _mcp_candidate_files(cwd):
+        text = _safe_read_text(path)
+        if text is None:
+            continue
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        s = data.get("mcpServers")
+        if not isinstance(s, dict):
+            continue
+        for name, cfg in s.items():
+            if isinstance(cfg, dict):
+                servers.add(str(name))
+    return servers
+
+
+def _load_mcp_state(state_path):
+    """Read the persisted server-set state, or {} on any error/missing file."""
+    if state_path is None:
+        return {}
+    text = _safe_read_text(state_path)
+    if text is None:
+        return {}
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_mcp_state(state_path, state):
+    """Atomically persist the server-set state. Fail-open on any I/O error."""
+    if state_path is None:
+        return
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = state_path.with_name(state_path.name + ".tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(tmp, state_path)
+    except (PermissionError, OSError, ValueError):
+        pass
+
+
+def _scan_mcp_servers(cwd):
+    """Signal 4: detect MCP server add/remove between measure runs.
+
+    The cached prompt prefix includes the tool-schema block the host builds from
+    the configured MCP servers. Adding or removing a server changes that block
+    and invalidates the cache for everything after it -- the same effect a
+    CLAUDE.md edit has. The server SET (the ``mcpServers`` keys in .mcp.json /
+    .claude.json) is the config-detectable proxy for that churn.
+
+    What this does NOT do, and why: it does not scan ``env``/``args``/``url``
+    VALUES. Those never reach the model-facing prompt (only tool schemas do), so
+    their churn does not break the prefix cache; scanning them for volatile
+    substrings was the old behaviour and produced pervasive false positives
+    (any ``--log-level``, a ``/status`` URL, a ``current-site`` path tripped
+    it). It also does not detect per-tool description/count churn, because that
+    is not visible in config files -- it requires runtime tool-list capture,
+    which is out of scope for a config-file detector.
+
+    State: one entry per resolved cwd in ``_MCP_STATE_FILENAME`` under the
+    snapshot dir. The first run for a cwd records a baseline and fires nothing
+    (there is no prior set to diff against); subsequent runs fire when the set
+    changes and update the baseline. Fail-open on any I/O error.
     """
     key = str(Path(cwd).resolve())
     if key in _MCP_SCAN_CACHE:
         return _MCP_SCAN_CACHE[key]
 
     findings = []
-    offending_servers = set()
-    try:
-        for path in _mcp_candidate_files(cwd):
-            if not path.exists():
-                continue
-            try:
-                data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            servers = data.get("mcpServers")
-            if not isinstance(servers, dict):
-                continue
-            for server_name, cfg in servers.items():
-                if not isinstance(cfg, dict):
-                    continue
-                values = []
-                env = cfg.get("env")
-                if isinstance(env, dict):
-                    values.extend(str(v) for v in env.values() if v is not None)
-                for field in ("args", "url", "command"):
-                    val = cfg.get(field)
-                    if isinstance(val, list):
-                        values.extend(str(v) for v in val if v is not None)
-                    elif isinstance(val, str):
-                        values.append(val)
-                for value in values:
-                    if _has_timestamp(value) or any(tok in value.lower() for tok in _VOLATILE_TOKENS):
-                        offending_servers.add(str(server_name))
-                        break
-    except (PermissionError, OSError):
-        pass
+    current = _read_mcp_server_set(cwd)
 
-    if offending_servers:
-        names = ", ".join(sorted(offending_servers)[:5])
+    state_dir = _state_dir()
+    state_path = (state_dir / _MCP_STATE_FILENAME) if state_dir is not None else None
+    state = _load_mcp_state(state_path)
+    prev_entry = state.get(key)
+    prev_servers = None
+    if isinstance(prev_entry, dict):
+        ps = prev_entry.get("servers")
+        if isinstance(ps, list):
+            prev_servers = set(ps)
+
+    # First run for this cwd: record baseline, no churn to report yet.
+    if prev_servers is None:
+        state[key] = {"servers": sorted(current), "ts": time.time()}
+        _save_mcp_state(state_path, state)
+        _MCP_SCAN_CACHE[key] = findings
+        return findings
+
+    added = current - prev_servers
+    removed = prev_servers - current
+
+    # Persist the new baseline regardless of whether we fire.
+    state[key] = {"servers": sorted(current), "ts": time.time()}
+    _save_mcp_state(state_path, state)
+
+    if added or removed:
+        parts = []
+        if added:
+            parts.append("+ " + ", ".join(sorted(added)[:5]))
+        if removed:
+            parts.append("- " + ", ".join(sorted(removed)[:5]))
         findings.append({
             "name": "cache_instability",
             "confidence": 0.7,
             "evidence": (
-                f"MCP server env/args blocks in cached prefix churn between sessions "
-                f"({names}): timestamps or volatile tokens in .mcp.json/.claude.json "
-                f"invalidate the prompt cache for everything after them"
+                f"MCP server set changed since last measure ({'; '.join(parts)}): "
+                f"adding/removing a server changes the tool schemas in the cached "
+                f"prompt prefix, invalidating the cache for everything after them"
             ),
             "savings_tokens": 1500,
             "suggestion": (
-                "Move volatile MCP server env values (timestamps, status/log/daily/"
-                "current/temp/cache tokens) out of the cached prefix, or pin them to "
-                "stable values. Edits to .mcp.json/.claude.json break the same prefix "
-                "cache a CLAUDE.md edit does."
+                "MCP server add/remove changes the tool-schema block in the cached "
+                "prefix, so each rotation costs one uncached turn. Keep the server "
+                "set stable across sessions. (Per-tool description churn is not "
+                "detectable from config files alone and is not flagged here.)"
             ),
-            "occurrence_count": len(offending_servers),
+            "occurrence_count": len(added) + len(removed),
         })
 
     _MCP_SCAN_CACHE[key] = findings
@@ -222,7 +349,9 @@ def _scan_process_prefixes(cwd):
 
     ``.a5c/processes`` and ``.claude/processes`` hold prompt prefix files that
     are loaded into the cached prefix; timestamps or auto-gen markers in their
-    first 60% break the cache. Bounded by ``_PROCESS_FILE_CAP``. Fail-open.
+    first 60% break the cache. Bounded by ``_PROCESS_FILE_CAP`` and
+    ``_READ_CAP_BYTES``; symlinks are not followed (a symlinked entry must not
+    pull in an arbitrary huge file). Fail-open.
     """
     key = str(Path(cwd).resolve())
     if key in _PROCESS_SCAN_CACHE:
@@ -233,19 +362,16 @@ def _scan_process_prefixes(cwd):
     try:
         scanned = 0
         for directory in _process_prefix_dirs(cwd):
-            if not directory.exists() or not directory.is_dir():
+            if not directory.exists() or not directory.is_dir() or directory.is_symlink():
                 continue
             for path in sorted(directory.iterdir()):
                 if scanned >= _PROCESS_FILE_CAP:
                     break
-                if not path.is_file() or path.suffix not in (".md", ".txt"):
+                if not path.is_file() or path.is_symlink() or path.suffix not in (".md", ".txt"):
                     continue
                 scanned += 1
-                try:
-                    text = path.read_text(encoding="utf-8", errors="replace")
-                except (PermissionError, OSError):
-                    continue
-                if len(text) < 50:
+                text = _safe_read_text(path)
+                if text is None or len(text) < 50:
                     continue
                 lines = text.splitlines()
                 prefix_cutoff = int(len(lines) * 0.6) or 1
@@ -293,7 +419,10 @@ def detect_cache_instability(session_data):
 
     Surfaces scanned (all additive to the original CLAUDE.md signals):
       1-3. CLAUDE.md prefix: timestamps, auto-gen markers, volatile @imports.
-      4.   MCP server env/args/url blocks in .mcp.json / .claude.json.
+      4.   MCP server add/remove in .mcp.json / .claude.json (the server set is
+           the config-detectable proxy for tool-schema churn in the cached
+           prefix; env/args/url values are NOT scanned -- they never reach the
+           model-facing prompt).
       5.   Process-library prompt prefix files in .a5c/processes, .claude/processes.
     """
     claude_md = session_data.get("claude_md_content", "")
@@ -336,8 +465,8 @@ def detect_cache_instability(session_data):
                 "occurrence_count": len(volatile_imports),
             })
 
-    # Signal 4: MCP server env/args/url blocks (cached-prefix-resident).
-    findings.extend(_scan_mcp_env(Path.cwd()))
+    # Signal 4: MCP server add/remove (cached-prefix tool-schema churn).
+    findings.extend(_scan_mcp_servers(Path.cwd()))
 
     # Signal 5: process-library prompt prefix files (cached-prefix-resident).
     findings.extend(_scan_process_prefixes(Path.cwd()))

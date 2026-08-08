@@ -287,7 +287,9 @@ def test_dashboard_per_window_card_shows_usd():
     end = html.index("}).join('');", start)
     body = html[start:end]
     assert "w.saved_usd" in body
-    assert "freed this" in body, "per-window card does not render the USD freed line"
+    # F4: the per-window USD is labeled as a pro-rata slice at the recent rate,
+    # NOT "freed this window" (which overstated it as window-realized savings).
+    assert "recent rate" in body, "per-window card does not render the honest USD rate line"
     # Graceful: when saved_usd is absent/None, no line is rendered (no $-0/NaN).
     assert "hasUsd" in body, "per-window card does not gate the USD line on presence"
 

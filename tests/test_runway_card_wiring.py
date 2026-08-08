@@ -95,3 +95,24 @@ def test_runway_card_validates_numbers_before_rendering():
     for raw in ("' + w.headroom_pct + '", "' + w.without_headroom_pct + '",
                 "' + w.used_pct + '"):
         assert raw not in body, f"raw interpolation of {raw!r} bypasses validation"
+
+
+def test_runway_usd_label_is_honest_pro_rata():
+    """F4: the per-window USD label must NOT say 'freed this 5h' / 'freed weekly'
+    (that implies window-realized savings). It must say it is a pro-rata slice of
+    the N-day ledger at the recent rate."""
+    html = (ASSETS / "dashboard.html").read_text(encoding="utf-8")
+    start = html.index("function runwayCardHtml(")
+    body = html[start:start + 12000]
+    assert "freed this " not in body, (
+        "runway card still says 'freed this 5h' -- implies window-realized savings (F4)"
+    )
+    assert "freed weekly" not in body, (
+        "runway card still says 'freed weekly' -- implies window-realized savings (F4)"
+    )
+    assert "pro-rata" in body, (
+        "runway card must label the per-window USD as a pro-rata slice (F4)"
+    )
+    assert "period_days" in body, (
+        "runway card must reference period_days for the honest label (F4)"
+    )
