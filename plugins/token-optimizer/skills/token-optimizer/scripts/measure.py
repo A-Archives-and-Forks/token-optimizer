@@ -2297,12 +2297,24 @@ def _is_1m_model(model_str):
 
 def _context_window_for_model_str(model_str):
     """Resolve a context-window size for a SPECIFIC model string (e.g. one
-    parsed straight out of a transcript message), honoring the same
-    explicit-override precedence as detect_context_window() -- but keyed to
-    the model that actually produced the tokens being measured, not an
-    env/config global that may name a different model entirely (e.g. a
-    1M-context variant like "claude-opus-5[1m]" running while
-    CLAUDE_MODEL/settings.json still say plain "opus").
+    parsed straight out of a transcript message).
+
+    Precedence (highest first):
+      1. CLAUDE_CODE_DISABLE_1M_CONTEXT=1 -> 200k (kills the 1M tier globally).
+      2. TOKEN_OPTIMIZER_CONTEXT_SIZE=<int> -> that exact size.
+      3. _cli_context_size (parsed from the CLI --context-size flag).
+      4. The model string itself: 1M for a 1M variant, 200k otherwise.
+
+    Note (F5): the env overrides in steps 1-3 are GLOBAL -- they are not keyed
+    to the model string. A user who exports TOKEN_OPTIMIZER_CONTEXT_SIZE=200000
+    for their default sonnet and then runs a 1M-context opus variant will get
+    200000 returned for that opus session, inflating fill_pct ~5x. This is
+    by design: the overrides are explicit user intent ("treat every session as
+    N tokens"), not a per-model hint. The model-string tier (step 4) only runs
+    when no override is set. The earlier docstring claimed the function keyed
+    to "the model that actually produced the tokens, not an env/config global
+    that may name a different model entirely" -- that was an overclaim; the
+    globals still win when set.
     """
     if os.environ.get("CLAUDE_CODE_DISABLE_1M_CONTEXT") == "1":
         return 200_000
@@ -19667,25 +19679,39 @@ def _log_regen(msg):
 # Rate-limited trace for a rejected api/* POST. The M-4 token check runs BEFORE
 # the api/regenerate handler, so a rejected regenerate click used to leave NO
 # trace in daemon-regen.log -- it stayed empty for weeks while the user reported
-# a dead button. This writes one line per _REJECT_LOG_MIN_GAP seconds so a
-# hammering/looping client cannot spam the log, but a real rejected click is
-# never invisible. Global throttle (not per-path): one trace every ~30s is
-# enough to know the gate is firing.
-_REJECT_LOG_LAST_TS = 0.0
+# a dead button. This writes one line per _REJECT_LOG_MIN_GAP seconds PER PATH
+# so a hammering/looping client cannot spam the log, but a real rejected click
+# on a DIFFERENT endpoint is never invisible (F7: was global, which dropped a
+# rejected toggle trace after a recent rejected regenerate). The path is
+# sanitized (F8) so a CR in the request path cannot inject/overwrite a log line
+# via terminal carriage-return overprint.
+_REJECT_LOG_LAST_TS: dict = {{}}
 _REJECT_LOG_MIN_GAP = 30.0
 
 
+def _sanitize_log_path(path):
+    """Strip CR/LF from *path* so a request path containing control chars
+    cannot inject or overwrite a log line (F8). Returns the cleaned string."""
+    if not path:
+        return ""
+    return path.replace("\\r", "").replace("\\n", "")
+
+
 def _log_reject_regen(path):
-    """One rate-limited line when an api/* POST is rejected for a bad token."""
+    """One rate-limited line PER PATH when an api/* POST is rejected for a bad
+    token. F7: per-path throttle so a rejected toggle is still visible after a
+    recent rejected regenerate. F8: path is sanitized before writing."""
     global _REJECT_LOG_LAST_TS
     now = time.time()
-    if now - _REJECT_LOG_LAST_TS < _REJECT_LOG_MIN_GAP:
+    clean = _sanitize_log_path(path)
+    last = _REJECT_LOG_LAST_TS.get(clean, 0.0)
+    if now - last < _REJECT_LOG_MIN_GAP:
         return
-    _REJECT_LOG_LAST_TS = now
+    _REJECT_LOG_LAST_TS[clean] = now
     try:
         with open(REGEN_LOG, "a", encoding="utf-8") as f:
             f.write("%s REJECT api/* POST token-mismatch path=%s\\n"
-                    % (time.strftime("%Y-%m-%dT%H:%M:%S"), path))
+                    % (time.strftime("%Y-%m-%dT%H:%M:%S"), clean))
     except OSError:
         pass
 
@@ -28211,10 +28237,27 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
         # work" even when it never is (own-session checkpoints are excluded from
         # `chosen` above by construction). Name the source session so a reader
         # cannot mistake it for continuity of the current session.
+        # F10: the regex expects <uuid>-<YYYYMMDD>-<HHMMSS>-... If the checkpoint
+        # filename format ever changes, the match fails and src_sid_short is
+        # None. The old code then fell through to the unlabeled "A recent
+        # checkpoint is available" message -- the exact cross-session hazard
+        # the labeled warning was written to eliminate. Now: (a) log a
+        # one-time stderr warning so a format change is visible at dev time,
+        # and (b) keep the cross-session label even without the sid, so the
+        # fallback never silently reverts to the old unlabeled pointer.
         src_sid_match = re.match(r'^([0-9a-fA-F-]{8,36})-\d{8}-\d{6}-', latest["filename"])
         src_sid_short = src_sid_match.group(1)[:8] if src_sid_match else None
         if src_sid_short and (not sid_safe or not sid_safe.startswith(src_sid_short)):
             print(f"[Token Optimizer] A checkpoint from a DIFFERENT session ({src_sid_short}){about} is available at {latest['path']}. "
+                  f"This is NOT your own session's prior work -- load it only if you intend to resume that other session's work.")
+        elif not src_sid_short:
+            # F10: filename did not match the expected format. Warn so a format
+            # change is caught, and still label the pointer as cross-session.
+            import sys as _sys
+            print(f"[Token Optimizer] WARNING: checkpoint filename {latest['filename']!r} did not match the expected "
+                  f"<uuid>-<date>-<time> format; cross-session label cannot name the source session.",
+                  file=_sys.stderr)
+            print(f"[Token Optimizer] A checkpoint from a DIFFERENT session{about} is available at {latest['path']}. "
                   f"This is NOT your own session's prior work -- load it only if you intend to resume that other session's work.")
         else:
             print(f"[Token Optimizer] A recent checkpoint is available{about} at {latest['path']}. Load it only if it matches what you are working on now.")
@@ -33347,7 +33390,12 @@ def runway_snapshot(days=30, now=None):
             # ledger (KTD1). None when there is nothing to show so the panel
             # degrades gracefully (no $-0 / NaN). Derived from the ledger, NOT
             # from context_mult/routing_mult -- the no-double-count invariant.
-            window_saved_usd = (round(saved_total_usd * span_h / ledger_span_h, 2)
+            # F6: cap the apportionment fraction at 1.0 so a caller passing
+            # days < span_h/24 (e.g. days=1 for the 7d window) cannot produce a
+            # window_saved_usd larger than the cumulative ledger. Without this
+            # guard days=1 would give the 7d window 168/24 = 7x the ledger total.
+            effective_span_h = min(span_h, ledger_span_h)
+            window_saved_usd = (round(saved_total_usd * effective_span_h / ledger_span_h, 2)
                                 if saved_total_usd > 0 else None)
             windows.append({
                 "key": key, "label": label, "span_hours": span_h,
@@ -33382,6 +33430,10 @@ def runway_snapshot(days=30, now=None):
             "saved_usd_context": round(saved_context_usd, 2),
             "saved_usd_routing": round(saved_routing_usd, 2),
             "saved_usd_tier": saved_usd_tier,
+            # F4: the per-window saved_usd is a pro-rata slice of the N-day
+            # ledger at the recent rate, NOT savings realized within that
+            # window. Expose period_days so the surface can label it honestly.
+            "period_days": days,
             "meter_age_s": meters.get("age_s"),
             "meter_ts": meters.get("ts"),
             "meter_stale": meter_stale,

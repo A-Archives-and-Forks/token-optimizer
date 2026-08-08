@@ -199,10 +199,40 @@ def _windows_stdio_kwargs():
     return kwargs
 
 
+def _claude_settings_path() -> Path | None:
+    """Resolve the host's settings.json path, honoring CLAUDE_CONFIG_DIR.
+
+    Mirrors the CLAUDE_CONFIG_DIR handling in the enterprise-consent resolver
+    above and in runtime_env.claude_home(): accept any absolute, existing,
+    non-symlink directory (CLAUDE_CONFIG_DIR may legitimately live OUTSIDE
+    $HOME -- containers, CI runners, relocated config volumes), reject
+    relative/symlink, else fall back to ~/.claude. Without this the disable
+    self-check read the wrong file for every CLAUDE_CONFIG_DIR user and the
+    feature silently no-opped for exactly the population the repo otherwise
+    supports (test_claude_config_dir, test_host_safety_guard, etc.).
+    Returns None when no usable settings.json exists.
+    """
+    claude_config = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    base = None
+    if claude_config:
+        candidate = Path(claude_config).expanduser()
+        try:
+            if candidate.is_absolute() and candidate.is_dir() and not candidate.is_symlink():
+                base = candidate.resolve()
+        except OSError:
+            base = None
+    if base is None:
+        base = Path.home() / ".claude"
+    settings_path = base / "settings.json"
+    if not settings_path.is_file() or settings_path.is_symlink():
+        return None
+    return settings_path
+
+
 def _plugin_disabled_by_host() -> bool:
-    """Return True if the host explicitly turned this plugin off via
-    ~/.claude/settings.json's enabledPlugins map, so main() can no-op before
-    spawning the dispatch subprocess at all.
+    """Return True if the host explicitly turned this plugin off via the host
+    settings.json's enabledPlugins map, so main() can no-op before spawning the
+    dispatch subprocess at all.
 
     Claude Code's plugin loader does not appear to reliably stop invoking an
     already-registered plugin's hooks.json commands for existing sessions
@@ -211,6 +241,11 @@ def _plugin_disabled_by_host() -> bool:
     "[Token Optimizer]" output). This is a defensive self-check so the plugin
     honors its own disable flag even when the host does not enforce it,
     instead of silently continuing to spend tokens on every hook event.
+
+    The settings path is resolved via _claude_settings_path(), which honors
+    CLAUDE_CONFIG_DIR (the consent resolver and runtime_env.claude_home() both
+    do); hardcoding ~/.claude/settings.json left every CLAUDE_CONFIG_DIR user
+    reading the wrong file and never getting the disable honored.
 
     Fail-open (return False) on any error -- a missing/unreadable settings
     file, or a plugin/marketplace name we can't resolve, must never silently
@@ -229,8 +264,8 @@ def _plugin_disabled_by_host() -> bool:
         marketplace_name = json.loads(marketplace_json.read_text(encoding="utf-8")).get("name", "").strip()
         if not plugin_name or not marketplace_name:
             return False
-        settings_path = Path.home() / ".claude" / "settings.json"
-        if not settings_path.is_file() or settings_path.is_symlink():
+        settings_path = _claude_settings_path()
+        if settings_path is None:
             return False
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
         enabled_plugins = settings.get("enabledPlugins")

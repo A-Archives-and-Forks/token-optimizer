@@ -45,12 +45,16 @@ _VALID_RUNTIMES = frozenset(
 )
 _CLAUDE_PLUGIN_ENVS = ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA")
 # Claude Code's own process-env signals. CLAUDECODE is inherited by every
-# subprocess Claude Code spawns, so a genuine Codex/OpenCode launched from a
-# CC Bash tool inherits CLAUDECODE=1. This tier therefore sits BELOW the
-# explicit CODEX_HOME/HERMES_HOME env checks (so a nested-Codex session with
-# CODEX_HOME set still resolves to codex) but ABOVE the weak directory
+# subprocess Claude Code spawns, so a genuine Codex/OpenCode/Copilot launched
+# from a CC Bash tool inherits CLAUDECODE=1. This tier therefore sits BELOW the
+# explicit CODEX_HOME/HERMES_HOME/COPILOT_HOME env checks (so a nested-Codex
+# session with CODEX_HOME set, or a nested-Copilot session with COPILOT_HOME
+# set, still resolves to its own runtime) but ABOVE the weak directory
 # heuristics, so a host with CLAUDECODE=1 and a coexisting ~/.codex DIRECTORY
-# resolves to claude, not codex (issue #120).
+# resolves to claude, not codex (issue #120). Copilot's explicit-env tier is
+# _COPILOT_HOME_ENVS below, NOT the ancestor-process signal (which stays at the
+# weak tier) -- a process scan cannot run ahead of CLAUDECODE without
+# reintroducing the #57 shadowing it was added to prevent.
 _CLAUDE_CODE_ENVS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID")
 # Claude Code's official config-dir override. When set, Claude stores
 # projects/, settings.json, etc. under this directory instead of ~/.claude.
@@ -66,6 +70,14 @@ _HERMES_HOME_ENV = "HERMES_HOME"
 # back-compat location hint (with a guardrail warning for /mnt values).
 _COPILOT_HOME_ENV = "COPILOT_HOME"
 _TO_COPILOT_HOME_ENV = "TOKEN_OPTIMIZER_COPILOT_HOME"
+# Copilot's explicit config-dir env vars. Like CODEX_HOME/HERMES_HOME these are
+# the host's OWN variables, set by/for a genuine Copilot session. They sit ABOVE
+# the CLAUDECODE tier so a Copilot session launched from a CC Bash tool (which
+# inherits CLAUDECODE=1) still resolves to copilot, mirroring the Codex/Hermes
+# guard. The ancestor-process signal (_copilot_signal's ps scan) stays at the
+# weak tier below CLAUDECODE, since a process scan ahead of CLAUDECODE would
+# re-introduce the #57 OpenCode-shadowing problem for the copilot path too.
+_COPILOT_HOME_ENVS = (_COPILOT_HOME_ENV, _TO_COPILOT_HOME_ENV)
 # Windows profile names under /mnt/c/Users that are never a real user home.
 _WINDOWS_NONUSER_PROFILES = frozenset(
     {"public", "all users", "default", "default user", "windows", "wpsystem"}
@@ -733,16 +745,22 @@ def detect_runtime() -> str:
          OpenCode session — "Guy's bug", issue #57; still AFTER Claude env)
       5. CODEX_HOME implies Codex
       6. HERMES_HOME implies Hermes
-      7. Claude Code process env (CLAUDECODE / CLAUDE_CODE_ENTRYPOINT /
+      7. COPILOT_HOME / TOKEN_OPTIMIZER_COPILOT_HOME implies Copilot (explicit
+         config-dir env; sits ABOVE the CLAUDECODE tier so a Copilot session
+         launched from a CC Bash tool, which inherits CLAUDECODE=1, still
+         resolves to copilot -- the same guard Codex/Hermes get. The
+         ancestor-process signal stays at the weak tier below CLAUDECODE.)
+      8. Claude Code process env (CLAUDECODE / CLAUDE_CODE_ENTRYPOINT /
          CLAUDE_CODE_SESSION_ID) implies Claude. Sits BELOW CODEX_HOME/
-         HERMES_HOME so a nested-Codex session launched from a CC Bash tool
-         (which inherits CLAUDECODE=1) still resolves to codex, but ABOVE
-         the directory heuristics so a host with CLAUDECODE=1 and a
-         coexisting ~/.codex DIRECTORY resolves to claude, not codex (#120)
-      8. A populated opencode config dir implies OpenCode (weak tertiary
+         HERMES_HOME/COPILOT_HOME so a nested-Codex/Hermes/Copilot session
+         launched from a CC Bash tool (which inherits CLAUDECODE=1) still
+         resolves to its own runtime, but ABOVE the directory heuristics so
+         a host with CLAUDECODE=1 and a coexisting ~/.codex DIRECTORY resolves
+         to claude, not codex (#120)
+      9. A populated opencode config dir implies OpenCode (weak tertiary
          tier; loses to Claude/Codex/Hermes/Copilot env, beats default)
-      9. COPILOT_HOME or a copilot ancestor process implies Copilot
-      10. Default to Claude Code for backward compatibility
+      10. COPILOT_HOME or a copilot ancestor process implies Copilot
+      11. Default to Claude Code for backward compatibility
 
     Why step 2 is ahead of the Claude env check (KTD-3, issue #57): on a host
     with BOTH Claude Code and OpenCode installed, a stray CLAUDE_PLUGIN_* env var
@@ -776,6 +794,12 @@ def detect_runtime() -> str:
 
     if os.environ.get(_HERMES_HOME_ENV):
         return _RUNTIME_HERMES
+
+    # Copilot explicit config-dir env: ABOVE the CLAUDECODE tier so a Copilot
+    # session launched from a CC Bash tool (inherits CLAUDECODE=1) still
+    # resolves to copilot. Mirrors the CODEX_HOME/HERMES_HOME guard.
+    if any(os.environ.get(v) for v in _COPILOT_HOME_ENVS):
+        return _RUNTIME_COPILOT
 
     if any(os.environ.get(v) for v in _CLAUDE_CODE_ENVS):
         return _RUNTIME_CLAUDE
