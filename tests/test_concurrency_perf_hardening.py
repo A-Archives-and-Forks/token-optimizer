@@ -46,7 +46,7 @@ def _extract(src, names, extra_ns=None):
     return ns
 
 
-# --- B2-1: atomic dashboard write ------------------------------------------
+# --- atomic dashboard write ------------------------------------------
 
 def test_dashboard_write_is_atomic():
     """The dashboard write loop must use a temp file + os.replace, never a bare
@@ -65,7 +65,7 @@ def test_dashboard_write_is_atomic():
     assert "except BaseException" in body, "temp cleanup must catch BaseException so a _HookTimeout mid-write doesn't leak the temp"
 
 
-# --- B2-2: bounded transcript preload --------------------------------------
+# --- bounded transcript preload --------------------------------------
 
 def test_transcript_preload_has_size_guard():
     src = (SCRIPTS / "measure.py").read_text(encoding="utf-8")
@@ -76,7 +76,7 @@ def test_transcript_preload_has_size_guard():
     assert m, "preload does not skip oversized transcripts before parse_session_turns"
 
 
-# --- B2-3: bounded reject-throttle dict ------------------------------------
+# --- bounded reject-throttle dict ------------------------------------
 
 def test_reject_throttle_dict_is_bounded():
     src = _generated_src()
@@ -91,7 +91,7 @@ def test_reject_throttle_dict_is_bounded():
     assert len(d) <= cap, f"reject dict grew past cap: {len(d)} > {cap}"
 
 
-# --- B2-6: full control-char stripping in the log sanitizer -----------------
+# --- full control-char stripping in the log sanitizer -----------------
 
 def test_sanitize_log_path_strips_esc_and_control():
     src = _generated_src()
@@ -108,7 +108,7 @@ def test_sanitize_log_path_strips_esc_and_control():
     assert san("\x00\x07\x1f\x7f") == ""
 
 
-# --- B2-5: unique temp for MCP state write ----------------------------------
+# --- unique temp for MCP state write ----------------------------------
 
 def test_mcp_state_write_uses_unique_temp(tmp_path):
     import detectors.cache_instability as ci
@@ -126,7 +126,7 @@ def test_mcp_state_write_uses_unique_temp(tmp_path):
     assert "tempfile.mkstemp(" in m.group(0), "MCP state write not using a unique temp name"
 
 
-# --- B2-7: hook disable-check fails open on oversized config ----------------
+# --- hook disable-check fails open on oversized config ----------------
 
 def test_hook_disable_check_fails_open_on_huge_settings(tmp_path, monkeypatch):
     sys.path.insert(0, str(ROOT / "hooks"))
