@@ -2791,7 +2791,7 @@ def quick_scan(as_json=False):
                 avg_per_skill = skills.get("tokens", 0) // max(skills.get("count", 1), 1)
                 savings = len(never_used) * avg_per_skill
                 quick_win = {
-                    "action": f"Archive {len(never_used)} unused skills",
+                    "action": f"Review {len(never_used)} skills not invoked in the window",
                     "savings": savings,
                     "detail": f"save ~{savings:,} tokens/session",
                     "extend": f"Extends peak quality zone by ~{savings:,} tokens",
@@ -6578,7 +6578,7 @@ def generate_auto_recommendations(components, trends=None, days=30):
             skill_list = ", ".join(sorted(never_used)[:show_count])
             remaining = len(never_used) - show_count
             quick.append(
-                f"**Review {show_count} unused skills for archiving ({len(never_used)} of {installed_count} never used in {days} days)**: "
+                f"**Review {show_count} skills not invoked in {days} days ({len(never_used)} of {installed_count}, counting Skill calls and slash commands)**: "
                 f"Each installed skill costs ~{_actual_avg} tokens in the startup menu, every session, whether you use it or not.\n"
                 f"  Start with these: {skill_list}"
                 + (f"\n  ({remaining} more will surface after you archive these and re-run.)" if remaining > 0 else "") +
@@ -6592,8 +6592,8 @@ def generate_auto_recommendations(components, trends=None, days=30):
             overhead = len(never_used) * _actual_avg
             skill_list = ", ".join(sorted(never_used))
             medium.append(
-                f"**Review {len(never_used)} unused skills**: "
-                f"These skills haven't been invoked in {days} days: {skill_list}. "
+                f"**Review {len(never_used)} skills not invoked in {days} days**: "
+                f"No Skill call or slash command for these in {days} days: {skill_list}. "
                 f"Consider archiving to ~/.claude/skills/_archived/. ~{overhead:,} tokens recoverable."
             )
 
@@ -8175,6 +8175,14 @@ _parse_session_jsonl_cache = {}
 _PARSE_CACHE_MAX = 2000
 
 
+# A slash-command invocation is written into the user turn as
+# <command-name>name</command-name> (with or without a leading slash). Skills
+# driven by a slash command -- and disable-model-invocation skills, which can
+# ONLY be invoked that way -- never emit a Skill tool_use, so without this they
+# look "unused" no matter how often they run.
+_SLASH_COMMAND_RE = re.compile(r"<command-name>\s*/?\s*([A-Za-z0-9:_-]+)")
+
+
 def _parse_session_jsonl(filepath):
     """Parse a single JSONL session file in one streaming pass.
 
@@ -8293,6 +8301,14 @@ def _parse_session_jsonl(filepath):
                 # Count user/assistant messages
                 if rec_type in ("user", "assistant"):
                     message_count += 1
+
+                # Count slash-command invocations as skill usage. A skill run via
+                # /name (e.g. /briefing, /ai-digest) emits no Skill tool_use, so it
+                # would otherwise be scored "unused". The name is normalized against
+                # the installed skill set in the never-used computation.
+                if rec_type == "user":
+                    for _cn in _SLASH_COMMAND_RE.findall(json.dumps(record.get("message", ""))):
+                        skills_used[_cn] = skills_used.get(_cn, 0) + 1
 
                 # Extract tool usage from assistant messages
                 if rec_type == "assistant":

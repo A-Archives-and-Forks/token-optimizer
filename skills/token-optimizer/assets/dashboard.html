@@ -3431,9 +3431,9 @@ var DB = (function() {
     if (!isCodex && neverUsed.length > 0) {
       var overhead = t.skills.never_used_overhead || (neverUsed.length * 100);
       var PREVIEW_COUNT = 4;
-      html += '<div class="card wide"><div class="card-header"><span>Never Used (' + neverUsed.length + ' skills)</span><span class="label">~' + fn(overhead) + ' tokens wasted/session</span></div>' +
+      html += '<div class="card wide"><div class="card-header"><span>Not Invoked (' + neverUsed.length + ' skills)</span><span class="label">~' + fn(overhead) + ' tokens/session</span></div>' +
         '<p style="font-size:13px;color:var(--c-text-dim);font-family:var(--font-mono);margin-bottom:var(--s-2);">' +
-        'Each unused skill loads ~100 tokens of frontmatter every session. Click a skill to see its details, or click "Quick Wins" to archive them.</p>';
+        'No Skill call or slash command for these in the window. Each still loads ~100 tokens of frontmatter every session. A skill you drive by slash command counts as invoked; if one you use often shows here, open an issue. Click a skill for details, or "Quick Wins" to archive.</p>';
 
       function buildSkillRow(name) {
         var sd = skillsDetail[name];
@@ -4274,7 +4274,7 @@ var DB = (function() {
     // ---- SAVE MORE: suggestions, promoted right under the hero ----
     var parts = [];
     if ((Number(sp.cost_saved_usd) || 0) > 0 && unusedSkills > 0) {
-      parts.push('Prune ' + unusedSkills + ' skill' + (unusedSkills === 1 ? '' : 's') + ' you have never used. Worth about ' + money(mo(sp.cost_saved_usd)) + per + ', automatically, from then on.');
+      parts.push('Review ' + unusedSkills + ' skill' + (unusedSkills === 1 ? '' : 's') + ' not invoked in this window. Archiving what you no longer need is worth about ' + money(mo(sp.cost_saved_usd)) + per + ', automatically, from then on.');
     }
     if ((Number(mr.potential_cost_usd) || 0) > 0) {
       parts.push('Let Token Optimizer route more of your routine work to lighter models. Recovers about ' + money(mo(mr.potential_cost_usd)) + per + '.');
