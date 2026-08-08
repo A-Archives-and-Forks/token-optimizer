@@ -68,7 +68,7 @@ def test_search_loop_has_opencode_path(rel):
     """Resolving RUNTIME=opencode is useless if the measure.py/fleet.py search glob
     never looks under the OpenCode plugin cache — the script resolves opencode and
     then fails 'not found'. Every preamble's search loop must include a
-    ~/.config/opencode/plugins/cache path (issue #57, caught in torture)."""
+    ~/.config/opencode/plugins/cache path (issue #57)."""
     text = _read(rel)
     assert ".config/opencode/plugins/cache" in text, (
         f"{rel}: RUNTIME resolves opencode but the script-search loop has no "

@@ -1,6 +1,6 @@
 """The regenerate button must not dead-click on a stale/empty token.
 
-Root cause (see findings/dashboard-diagnosis-and-fix.md): the page's load-time
+Root cause: the page's load-time
 `_fetchToken` is fire-and-forget, so on a daemon that warmed slowly
 `window.__TOKEN_API_TOKEN` could still be empty when the reader clicked
 Regenerate. Every click then sent an empty `X-TO-Token` and the server silently
@@ -8,7 +8,7 @@ Regenerate. Every click then sent an empty `X-TO-Token` and the server silently
 `daemon-regen.log` stayed empty for weeks. A stale (but non-empty) page token
 hit the same wall.
 
-The fix is client-first (KTD2): on a 403, auto-refetch the token and retry the
+The fix is client-first: on a 403, auto-refetch the token and retry the
 POST exactly once; if it still fails, surface a prominent inline error instead
 of a tiny span. If the token is empty at click time, lazy-fetch it before the
 first POST (that is a prerequisite, not a retry).
@@ -138,7 +138,7 @@ def test_regen_reloads_on_success():
 
 
 def test_regen_contract_mirrored_to_plugin_tree():
-    """Both dashboard.html trees must carry the same retry contract (R5)."""
+    """Both dashboard.html trees must carry the same retry contract."""
     a = (ASSETS / "dashboard.html").read_text(encoding="utf-8")
     b = (
         ROOT

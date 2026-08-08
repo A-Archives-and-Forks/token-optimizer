@@ -98,7 +98,7 @@ def test_runway_card_validates_numbers_before_rendering():
 
 
 def test_runway_usd_label_is_honest_pro_rata():
-    """F4: the per-window USD label must NOT say 'freed this 5h' / 'freed weekly'
+    """The per-window USD label must NOT say 'freed this 5h' / 'freed weekly'
     (that implies window-realized savings). It must say it is a pro-rata slice of
     the N-day ledger at the recent rate."""
     html = (ASSETS / "dashboard.html").read_text(encoding="utf-8")

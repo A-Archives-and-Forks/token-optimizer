@@ -354,7 +354,7 @@ def _load_full_measure():
 
 
 def test_windows_legacy_nul_sessionend_hook_reads_as_not_current(monkeypatch):
-    """#118 F1: the pre-fix >NUL SessionEnd command matched all three
+    """The pre-fix >NUL SessionEnd command matched all three
     substrings and read as 'current', so existing broken Windows installs were
     never healed ('already up to date. Nothing to do.'). It must now read as
     NOT current on win32 so setup_hook's upgrade branch rewrites it."""
@@ -382,7 +382,7 @@ def test_posix_nul_sessionend_hook_is_win32_gated(monkeypatch):
 
 
 def test_windows_resolved_command_matches_native_root_after_normalization():
-    """#118 F2 (documents WHY): _resolve_hook_command embeds a forward-slash
+    """_resolve_hook_command embeds a forward-slash
     root on Windows, so a raw substring test of the native-backslash root
     against the resolved command fails; normalized containment succeeds."""
     module = _load_measure_hook_resolver("Windows")
@@ -393,7 +393,7 @@ def test_windows_resolved_command_matches_native_root_after_normalization():
 
 
 def test_setup_all_hooks_containment_is_separator_normalized():
-    """#118 F2 (reversion guard, non-vacuous): setup_all_hooks' 'already
+    """setup_all_hooks' 'already
     present' test must normalize separators on BOTH operands. A revert to the
     raw `plugin_root_str in existing_cmd` reintroduces the perpetual
     settings.json rewrite on Windows (forward-slash resolved root never

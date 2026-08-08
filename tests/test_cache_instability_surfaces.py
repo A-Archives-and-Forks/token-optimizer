@@ -11,7 +11,7 @@ cache-prefix-resident surfaces that churn just as often:
 These tests prove each new surface FIRES on real cache-prefix churn and does NOT
 fire on stable/noise, that the guards are load-bearing (the new signals still
 run when CLAUDE.md is absent), and that the 3 original CLAUDE.md signals are
-unchanged. The F1 regression guard (env values must NOT be scanned) is
+unchanged. The regression guard (env values must NOT be scanned) is
 test_mcp_env_values_are_not_scanned.
 """
 
@@ -99,7 +99,7 @@ def test_mcp_stable_server_set_does_not_fire(ci, tmp_path):
 
 
 def test_mcp_env_values_are_not_scanned(ci, tmp_path):
-    """F1 regression guard: env/args/url VALUES never reach the model-facing
+    """Regression guard: env/args/url VALUES never reach the model-facing
     prompt, so volatile substrings in them (--log-level, a /status URL, a
     current-site path, a daily token) must NOT fire when the server SET is
     stable. The old behaviour false-positived on nearly every real .mcp.json."""
@@ -136,7 +136,7 @@ def test_mcp_bad_json_fails_open(ci, tmp_path):
 
 
 def test_mcp_symlink_config_not_followed(ci, tmp_path):
-    """F9: a symlinked .mcp.json must not be followed (path-traversal / huge-file guard)."""
+    """A symlinked .mcp.json must not be followed (path-traversal / huge-file guard)."""
     real = tmp_path / "real.json"
     real.write_text(json.dumps({"mcpServers": {"x": {}}}), encoding="utf-8")
     link = tmp_path / ".mcp.json"
@@ -167,7 +167,7 @@ def test_process_stable_prefix_does_not_fire(ci, tmp_path):
 
 
 def test_process_symlink_not_followed(ci, tmp_path):
-    """F9: a symlinked process prefix file must not be read."""
+    """A symlinked process prefix file must not be read."""
     d = tmp_path / ".claude" / "processes"
     d.mkdir(parents=True, exist_ok=True)
     real = tmp_path / "real.md"

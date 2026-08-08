@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Daemon uninstall sweeps all token-optimizer-* identities (issue #106 / F2).
+"""Daemon uninstall sweeps all token-optimizer-* identities (issue #106).
 
 Root cause: daemon paths derive from one module-level ``SNAPSHOT_DIR`` (the
 resolved identity), but multiple installs create multiple
@@ -189,7 +189,7 @@ def test_nothing_to_remove_honesty_preserved(tmp_path, monkeypatch, capsys):
 
 
 def test_ports_to_reclaim_scope():
-    """Gauntlet3 B-F1: sweep-all must reclaim EVERY runtime's port, not just the
+    """Sweep-all must reclaim EVERY runtime's port, not just the
     resolved runtime's, or a sibling daemon + live CSRF token survives."""
     all_ports = set(measure._daemon_ports_to_reclaim(this_install_only=False))
     assert all_ports == {24842, 24843, 24844, 24845}

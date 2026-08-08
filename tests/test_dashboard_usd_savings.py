@@ -1,4 +1,4 @@
-"""USD-per-window savings model (U4, KTD1).
+"""USD-per-window savings model.
 
 The runway card used to show three incoherent numbers: a headline
 `extra_work_pct` (a per-token throughput multiplier, `context_mult ×
@@ -7,7 +7,7 @@ routing_mult − 1`) alongside two per-window panels showing
 Three metrics, two unit systems, presented as if they combined -- users could
 not reconcile 40.2 with 8.4 + 20.1.
 
-U4 replaces that with a single coherent USD-per-window figure that REUSES the
+This replaces that with a single coherent USD-per-window figure that REUSES the
 already-metered savings ledger (`_get_merged_savings`): context `tokens_saved`
 priced at the input rate (`total_cost_usd`, metered) + realized model-routing
 savings (`model_routing.realized_cost_usd`, estimated counterfactual), apportioned
@@ -114,7 +114,7 @@ def test_saved_usd_equals_apportioned_metered_sum(m, tmp_path, monkeypatch):
     assert r["saved_usd_routing"] == 50.0
 
 
-# ----- the no-double-count invariant (the spine of KTD1) -----
+# ----- the no-double-count invariant -----
 
 def test_saved_usd_does_not_derive_from_throughput_multipliers(m, tmp_path, monkeypatch):
     """Changing the routing multiplier (-> extra_work_pct) must NOT change saved_usd.
@@ -237,10 +237,10 @@ def test_proxy_disclosure_mentions_ledger_reuse(m, tmp_path, monkeypatch):
     assert "not derived from the throughput multipliers" in r["proxy"]
 
 
-# ----- extra_work_pct kept (KTD3), demoted in the surface -----
+# ----- extra_work_pct kept, demoted in the surface -----
 
 def test_extra_work_pct_still_present(m, tmp_path, monkeypatch):
-    """KTD3: the throughput multiplier is kept as a demoted secondary, not deleted."""
+    """The throughput multiplier is kept as a demoted secondary, not deleted."""
     _temp_trends(m, tmp_path, monkeypatch)
     monkeypatch.setattr(m, "_input_rate_mix_ratio", lambda days=30: 1.4)
     monkeypatch.setattr(m, "_keepwarm_read_meters", _fresh_meters())
@@ -267,7 +267,7 @@ def test_dashboard_renders_usd_per_window_headline():
     assert "usdHeadline" in body and "? '<div class=\"metric-large" in body, (
         "USD headline is not the lead metric-large"
     )
-    # The % is demoted to a secondary line with a units note (KTD3).
+    # The % is demoted to a secondary line with a units note.
     assert "more work per token" in body, (
         "extra_work_pct is not demoted to a per-token secondary line"
     )
@@ -287,14 +287,14 @@ def test_dashboard_per_window_card_shows_usd():
     end = html.index("}).join('');", start)
     body = html[start:end]
     assert "w.saved_usd" in body
-    # F4: the per-window USD is labeled as a pro-rata slice at the recent rate,
+    # The per-window USD is labeled as a pro-rata slice at the recent rate,
     # NOT "freed this window" (which overstated it as window-realized savings).
     assert "recent rate" in body, "per-window card does not render the honest USD rate line"
     # Graceful: when saved_usd is absent/None, no line is rendered (no $-0/NaN).
     assert "hasUsd" in body, "per-window card does not gate the USD line on presence"
 
 
-# ----- both trees byte-identical (R5) -----
+# ----- both trees byte-identical -----
 
 def test_measure_py_trees_byte_identical():
     a = (SCRIPTS / "measure.py").read_bytes()

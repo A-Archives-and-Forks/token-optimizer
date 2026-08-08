@@ -1,4 +1,4 @@
-"""F3 regression: _plugin_disabled_by_host must honor CLAUDE_CONFIG_DIR.
+"""Regression: _plugin_disabled_by_host must honor CLAUDE_CONFIG_DIR.
 
 The self-check previously hardcoded ~/.claude/settings.json, so every
 CLAUDE_CONFIG_DIR user (containers, CI, relocated config volumes) read the
@@ -94,7 +94,7 @@ def test_fail_open_when_no_settings(plugin_meta, tmp_path, monkeypatch):
 
 
 def test_claude_config_dir_honored_when_disabled(plugin_meta, tmp_path, monkeypatch):
-    """F3 core: CLAUDE_CONFIG_DIR points elsewhere; the disable must be read
+    """Core: CLAUDE_CONFIG_DIR points elsewhere; the disable must be read
     from $CLAUDE_CONFIG_DIR/settings.json, not ~/.claude/settings.json."""
     home = tmp_path / "home"
     relocated = tmp_path / "relocated"

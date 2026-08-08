@@ -119,7 +119,7 @@ def test_none_when_reading_older_than_all_windows(m, tmp_path, monkeypatch):
 
 
 def test_period_days_exposed_for_honest_label(m, tmp_path, monkeypatch):
-    """F4: the per-window saved_usd is a pro-rata slice of the N-day ledger, not
+    """The per-window saved_usd is a pro-rata slice of the N-day ledger, not
     window-realized savings. period_days must be exposed so the surface can
     label it honestly ('pro-rata of 30d ledger')."""
     _temp_trends(m, tmp_path, monkeypatch)
@@ -132,7 +132,7 @@ def test_period_days_exposed_for_honest_label(m, tmp_path, monkeypatch):
 
 
 def test_window_saved_usd_capped_when_days_lt_span(m, tmp_path, monkeypatch):
-    """F6: when days < span_h/24 (e.g. days=1 for the 7d window), the pro-rata
+    """When days < span_h/24 (e.g. days=1 for the 7d window), the pro-rata
     apportionment must be capped at 1.0 so a window never reports more than
     the cumulative ledger total. Without the guard days=1 gives the 7d window
     168/24 = 7x the ledger."""

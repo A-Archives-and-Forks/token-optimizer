@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#106 F2 (P1): the uninstall tombstone must OUTLIVE the uninstall.
+"""The uninstall tombstone must OUTLIVE the uninstall.
 
 Root cause of the regression these tests pin:
 ``_uninstall_*_daemon`` wrote the adv-006 ``.daemon-thrash`` tombstone first
@@ -21,7 +21,7 @@ Contract pinned here:
      tombstone (``setup_daemon`` unlinks it before starting), so uninstall
      never re-arms revive.
 
-Gauntlet3 B-F2 reconciliation: the ``.daemon-thrash`` breadcrumb has two kinds
+The ``.daemon-thrash`` breadcrumb has two kinds
 with opposite lifetimes. The UNINSTALL tombstone (content ==
 ``_UNINSTALL_TOMBSTONE_MARKER``) is permanent -- the generated daemon honors it
 forever, so a surviving daemon script cannot self-clear it after 60s and mint a
@@ -178,7 +178,7 @@ def _age_file(path: Path, seconds: float) -> None:
 
 
 def test_generated_daemon_never_resurrects_after_uninstall(measure, tmp_path):
-    """Gauntlet3 B-F2: an aged UNINSTALL tombstone next to a live dashboard must
+    """An aged UNINSTALL tombstone next to a live dashboard must
     NOT self-clear. The surviving daemon must stay dead, not mint a fresh token."""
     snap = tmp_path / "active" / "data"
     snap.mkdir(parents=True)
@@ -225,9 +225,9 @@ def test_generated_daemon_empty_thrash_tombstone_still_self_heals(measure, tmp_p
 
 
 def test_uninstall_reclaims_the_daemon_port(measure, tmp_path, monkeypatch):
-    """#106 F2 (P1b): unregistering must be followed by an actual process kill.
+    """Unregistering must be followed by an actual process kill.
 
-    Gauntlet3 B-F1: a sweep-all uninstall reclaims EVERY runtime's port, not
+    A sweep-all uninstall reclaims EVERY runtime's port, not
     just the resolved runtime's, or a sibling daemon + live CSRF token survives.
     """
     active = tmp_path / "active" / "data"
