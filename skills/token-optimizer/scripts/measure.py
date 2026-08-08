@@ -6063,7 +6063,12 @@ def generate_standalone_dashboard(days=30, quiet=False, force=False):
                 with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                     f.write(injected)
                 os.replace(tmp_name, str(wp))
-            except OSError:
+            except BaseException:
+                # BaseException, not OSError: the SessionEnd flush worker runs this
+                # under a 20s hook budget that raises _HookTimeout (a BaseException).
+                # A bare `except OSError` would let a mid-write timeout skip the
+                # unlink and leak a ~5MB .dash-*.tmp. Clean up on any interruption,
+                # then re-raise so the timeout still propagates to the worker.
                 try:
                     os.unlink(tmp_name)
                 except OSError:
