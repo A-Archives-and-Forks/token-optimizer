@@ -1,0 +1,148 @@
+"""The regenerate button must not dead-click on a stale/empty token.
+
+Root cause (see findings/dashboard-diagnosis-and-fix.md): the page's load-time
+`_fetchToken` is fire-and-forget, so on a daemon that warmed slowly
+`window.__TOKEN_API_TOKEN` could still be empty when the reader clicked
+Regenerate. Every click then sent an empty `X-TO-Token` and the server silently
+403'd BEFORE the `api/regenerate` handler -- the button looked dead and
+`daemon-regen.log` stayed empty for weeks. A stale (but non-empty) page token
+hit the same wall.
+
+The fix is client-first (KTD2): on a 403, auto-refetch the token and retry the
+POST exactly once; if it still fails, surface a prominent inline error instead
+of a tiny span. If the token is empty at click time, lazy-fetch it before the
+first POST (that is a prerequisite, not a retry).
+
+There is no JS runtime in this repo's test harness, so these tests assert the
+contract against the shipped JS source text -- the same approach
+test_runway_card_wiring.py takes for the runway card. They fail at edit time if
+the retry wiring is removed or weakened, which is the regression that matters.
+"""
+
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+ASSETS = ROOT / "skills" / "token-optimizer" / "assets"
+
+
+def _regen_body(html: str) -> str:
+    start = html.index("window.__TOKEN_REGENERATE = function()")
+    # The assignment is `window.__TOKEN_REGENERATE = function() { ... };`. Walk
+    # braces from the function body's opening `{` to its matching close, then
+    # include the trailing `};`. A naive `index("};", start)` stops at the first
+    # inner callback's `};` and truncates the contract under test.
+    open_brace = html.index("{", start)
+    depth = 0
+    i = open_brace
+    while i < len(html):
+        ch = html[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                # Include the closing `};` of the assignment.
+                return html[start:i + 2]
+        i += 1
+    raise AssertionError("unterminated __TOKEN_REGENERATE function")
+
+
+def test_regen_handler_exists():
+    html = (ASSETS / "dashboard.html").read_text(encoding="utf-8")
+    assert "window.__TOKEN_REGENERATE = function()" in html
+
+
+def test_regen_lazy_fetches_an_empty_token_before_first_post():
+    """An empty page token must be fetched before POSTing, not retried against.
+
+    The lazy-fetch is the prerequisite for the first POST. Without it the empty-
+    token case still 403s silently.
+    """
+    body = _regen_body((ASSETS / "dashboard.html").read_text(encoding="utf-8"))
+    assert "window.__TOKEN_API_TOKEN" in body, "handler no longer reads the token"
+    assert "_fetchToken(" in body, "handler no longer calls _fetchToken"
+    # The empty-token branch must gate the first attempt on a fetch, and that
+    # fetch must NOT count as a retry (attempt(false), not attempt(true)).
+    assert re.search(r"if\s*\(\s*window\.__TOKEN_API_TOKEN\s*\)\s*\{[^}]*attempt\(false\)", body), (
+        "empty-token branch must POST via attempt(false), not skip the fetch"
+    )
+    # The else branch lazy-fetches then POSTs via attempt(false). The branch
+    # contains an inner callback `}` so a single [^}]* can't span it; assert the
+    # else block body carries both the fetch and the non-retry first attempt.
+    # Target the BOTTOM if/else (the dispatch), not earlier `else` keywords
+    # inside fail()/attempt() definitions.
+    dispatch_idx = body.index("if (window.__TOKEN_API_TOKEN)")
+    dispatch = body[dispatch_idx:]
+    assert "attempt(false)" in dispatch, "dispatch must POST via attempt(false)"
+    assert "_fetchToken(" in dispatch, "dispatch does not lazy-fetch the token"
+    # The lazy-fetch else branch must not itself retry on the first POST.
+    else_idx = dispatch.index("else")
+    else_block = dispatch[else_idx:]
+    assert "attempt(false)" in else_block, (
+        "else branch must start at attempt(false), not attempt(true) (the fetch "
+        "is a prerequisite, not a retry)"
+    )
+    assert "attempt(true)" not in else_block, (
+        "else branch must not retry on the first POST after a lazy fetch"
+    )
+
+
+def test_regen_retries_exactly_once_on_403():
+    """A 403 on the POST must refetch the token and retry exactly once.
+
+    The `haveRetried` flag is the single guard against both an infinite loop
+    (persistent bad token) and a missing retry (stale token never refreshed).
+    """
+    body = _regen_body((ASSETS / "dashboard.html").read_text(encoding="utf-8"))
+    # The retry is triggered only by an authError (403) and only when not yet retried.
+    assert "e.authError" in body, "handler no longer branches on authError (403)"
+    assert "haveRetried" in body, "handler lost the single-retry guard"
+    # Exactly one call site flips the flag to true (the retry); the first
+    # attempt always passes false. Two `attempt(true)` would mean a loop.
+    assert body.count("attempt(true)") == 1, (
+        "expected exactly one retry entry point (attempt(true)), got "
+        f"{body.count('attempt(true)')}"
+    )
+    # The retry path must refetch the token before re-POSTing.
+    retry_block = body[body.index("attempt(true)"):]
+    assert "_fetchToken(" in retry_block, "retry does not refetch the token before re-POSTing"
+
+
+def test_regen_surfaces_a_prominent_persistent_failure():
+    """A persistent failure must show a prominent block, not the tiny status span.
+
+    The old `to-regen-msg` span is 12-13px and dim -- a dead click left no
+    visible trace. The fix adds a dedicated `to-regen-error` block shown only on
+    failure, and the handler must surface failures there.
+    """
+    html = (ASSETS / "dashboard.html").read_text(encoding="utf-8")
+    assert 'id="to-regen-error"' in html, "prominent error block missing from the template"
+    body = _regen_body(html)
+    assert "to-regen-error" in body, "handler does not touch the prominent error block"
+    # The block must be hidden at the start of a click (so a prior failure
+    # clears on retry) and shown on failure.
+    assert re.search(r"errBox\.hidden\s*=\s*true", body), (
+        "handler does not clear the error block at the start of a click"
+    )
+    assert re.search(r"errBox\.hidden\s*=\s*false", body), (
+        "handler does not reveal the error block on failure"
+    )
+    # The button must be re-enabled on failure (no stuck "Regenerating...").
+    assert "btn.disabled = false" in body, "button not re-enabled on failure"
+
+
+def test_regen_reloads_on_success():
+    body = _regen_body((ASSETS / "dashboard.html").read_text(encoding="utf-8"))
+    assert "location.reload()" in body, "handler no longer reloads on success"
+
+
+def test_regen_contract_mirrored_to_plugin_tree():
+    """Both dashboard.html trees must carry the same retry contract (R5)."""
+    a = (ASSETS / "dashboard.html").read_text(encoding="utf-8")
+    b = (
+        ROOT
+        / "plugins" / "token-optimizer" / "skills" / "token-optimizer" / "assets"
+        / "dashboard.html"
+    ).read_text(encoding="utf-8")
+    assert a == b, "dashboard.html drifted between the two install trees"
