@@ -25,6 +25,8 @@ if [ -z "$RUNTIME" ]; then
     RUNTIME="opencode"
   elif [ -n "$CODEX_HOME" ]; then
     RUNTIME="codex"
+  elif [ -n "$CLAUDECODE" ] || [ -n "$CLAUDE_CODE_ENTRYPOINT" ] || [ -n "$CLAUDE_CODE_SESSION_ID" ]; then
+    RUNTIME="claude"
   elif [ -d "$HOME/.config/opencode" ] && [ ! -d "$HOME/.codex" ]; then
     RUNTIME="opencode"
   elif [ -d "$HOME/.codex" ]; then
