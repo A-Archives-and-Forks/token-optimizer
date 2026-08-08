@@ -8181,7 +8181,32 @@ _PARSE_CACHE_MAX = 2000
 # disable-model-invocation skills, which can ONLY be invoked that way -- never
 # emit a Skill tool_use, so without this they look "unused" no matter how often
 # they run. The closing tag is required so a bare mention cannot match.
-_SLASH_COMMAND_RE = re.compile(r"<command-name>\s*/?\s*([A-Za-z0-9:_-]+)\s*</command-name>")
+_SLASH_COMMAND_RE = re.compile(r"<command-name>\s*/?\s*([A-Za-z0-9:_+.-]+)\s*</command-name>")
+
+
+def _leading_user_text(message):
+    """Return the leading user-authored text of a user message, or ''.
+
+    A real slash invocation IS the whole user turn, so we look only at the first
+    text the user actually typed. tool_result blocks (tool returns are written as
+    user-role records) are excluded, so a search hit or a pasted transcript
+    fragment that happens to echo a <command-name> block is not read as an
+    invocation.
+    """
+    content = message.get("content") if isinstance(message, dict) else message
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                return ""
+            btype = block.get("type")
+            if btype == "text":
+                return block.get("text", "") or ""
+            # A tool_result (or any non-text) leading block means this user record
+            # is not a typed invocation.
+            return ""
+    return ""
 
 
 def _resolve_installed_skill(name):
@@ -8337,16 +8362,19 @@ def _parse_session_jsonl(filepath):
                 # Count slash-command invocations of INSTALLED skills as usage. A
                 # skill run via /name (e.g. /briefing) emits no Skill tool_use, so
                 # it would otherwise be scored "unused". Gate strictly so nothing
-                # else leaks into skill stats: require the <command-args> sibling
-                # that Claude Code always emits for a real invocation (a pasted
-                # mention in prose has no sibling), scan the raw line rather than
-                # re-serializing, and count ONLY names that resolve to an installed
-                # skill (so /clear, /compact and other non-skill commands are out).
-                if rec_type == "user" and "<command-name>" in line and "<command-args>" in line:
-                    for _cn in _SLASH_COMMAND_RE.findall(line):
-                        _sk = _resolve_installed_skill(_cn)
-                        if _sk:
-                            skills_used[_sk] = skills_used.get(_sk, 0) + 1
+                # else leaks into skill stats: a real invocation IS the whole user
+                # turn, so require the command block to be the LEADING user-authored
+                # text (a pasted fragment in prose or a tool_result echo is not),
+                # require the <command-args> sibling Claude Code always emits, and
+                # count ONLY names that resolve to an installed skill (so /clear,
+                # /compact and other non-skill commands never pollute skill stats).
+                if rec_type == "user":
+                    _lead = _leading_user_text(record.get("message", {})).lstrip()
+                    if _lead.startswith("<command-name>") and "<command-args>" in _lead:
+                        for _cn in _SLASH_COMMAND_RE.findall(_lead):
+                            _sk = _resolve_installed_skill(_cn)
+                            if _sk:
+                                skills_used[_sk] = skills_used.get(_sk, 0) + 1
 
                 # Extract tool usage from assistant messages
                 if rec_type == "assistant":

@@ -26,7 +26,7 @@ sys.path.insert(0, str(SCRIPTS))
 # The installed skills the resolver will see in these tests.
 _FAKE_COMPONENTS = {
     "skills": {
-        "names": ["briefing", "ai-digest", "token-coach", "compound-engineering"],
+        "names": ["briefing", "ai-digest", "token-coach", "compound-engineering", "my.skill"],
         "name_to_dir": {"Cross Session": "cross-session"},
     }
 }
@@ -84,6 +84,31 @@ def test_pasted_mention_without_command_args_is_not_counted():
     not count as an invocation, even for an installed skill name."""
     res = _parse([_cmd("I saw `<command-name>briefing</command-name>` in my transcript log")])
     assert res["skills_used"] == {}
+
+
+def test_pasted_full_block_in_prose_is_not_counted():
+    """H1: a complete command block embedded in prose (not the leading text) must
+    not count -- the user is talking about it, not invoking it."""
+    res = _parse([_cmd(
+        "here is my log: <command-name>briefing</command-name>\n<command-args>evening</command-args> why did it run?")])
+    assert res["skills_used"] == {}
+
+
+def test_tool_result_echoing_a_command_block_is_not_counted():
+    """H2: a tool_result (user-role record) that echoes a command block -- e.g. a
+    search hit over session logs -- must not count as an invocation."""
+    res = _parse([{
+        "type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result",
+             "content": "prior turn: <command-name>briefing</command-name>\n<command-args>evening</command-args>"}]},
+    }])
+    assert res["skills_used"] == {}
+
+
+def test_skill_dir_with_dot_is_captured():
+    """H3: a skill dir name containing a dot must still be captured."""
+    res = _parse([_cmd("<command-name>my.skill</command-name>\n<command-args></command-args>")])
+    assert res["skills_used"].get("my.skill") == 1
 
 
 def test_skill_tool_call_still_counts():
