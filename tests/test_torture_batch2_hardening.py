@@ -59,6 +59,10 @@ def test_dashboard_write_is_atomic():
     assert "os.replace(" in body, "dashboard write is not atomically replaced"
     # the truncating open must target the temp fd, never the live path directly
     assert "os.open(str(wp)" not in body, "dashboard still opens the live path with O_TRUNC (non-atomic)"
+    # the temp-cleanup must catch BaseException, not just OSError: this write runs
+    # under the flush worker's hook budget, which raises _HookTimeout (a
+    # BaseException). A bare `except OSError` would leak the temp on timeout.
+    assert "except BaseException" in body, "temp cleanup must catch BaseException so a _HookTimeout mid-write doesn't leak the temp"
 
 
 # --- B2-2: bounded transcript preload --------------------------------------
