@@ -1,6 +1,8 @@
 """Cache instability detector: flags CLAUDE.md patterns that break Anthropic prompt cache prefix stability."""
 
+import json
 import re
+from pathlib import Path
 
 _TIMESTAMP_PATTERNS = [
     re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}"),  # ISO datetime
@@ -20,24 +22,41 @@ _DYNAMIC_SECTION_MARKERS = [
 
 _IMPORT_RE = re.compile(r"@import\s+[\"']([^\"']+)[\"']")
 
+# Volatile token indicators shared by @import paths, MCP env values, and process
+# prefix files. A value carrying one of these (or a timestamp) is treated as
+# cache-prefix-resident churn.
+_VOLATILE_TOKENS = ("status", "log", "daily", "current", "temp", "cache")
 
-def detect_cache_instability(session_data):
-    """Detect CLAUDE.md patterns that break Anthropic's prefix-based prompt cache.
+# Module-level caches keyed by resolved cwd so the 10-session loop in
+# run_all_detectors reads each surface file at most once per measure run.
+_MCP_SCAN_CACHE: dict = {}
+_PROCESS_SCAN_CACHE: dict = {}
 
-    Anthropic caches a byte-identical prefix. Content that changes between sessions
-    (timestamps, auto-generated sections, volatile imports) invalidates the cache
-    for everything after it. Moving volatile content to the end preserves cache hits
-    on the stable prefix.
+# Bound on the number of process-library prefix files scanned, to keep the
+# detector cheap even in repos with very large process trees.
+_PROCESS_FILE_CAP = 40
+
+
+def _has_timestamp(text):
+    """Return True if *text* matches any timestamp pattern."""
+    return any(pat.search(text) for pat in _TIMESTAMP_PATTERNS)
+
+
+def _scan_prefix_lines(lines, surface_label, cutoff_ratio=0.6):
+    """Run the timestamp-pattern scan and the auto-gen-marker scan over *lines*.
+
+    Returns the same finding dicts the CLAUDE.md path produces today, with the
+    surface label parameterised so the helper can be reused for other
+    cache-prefix-resident surfaces. When *surface_label* is ``"CLAUDE.md"`` the
+    output is byte-identical to the pre-refactor CLAUDE.md signals.
     """
-    claude_md = session_data.get("claude_md_content", "")
-    if not claude_md or len(claude_md) < 200:
+    if not lines:
         return []
 
     findings = []
-    lines = claude_md.splitlines()
+    prefix_cutoff = int(len(lines) * cutoff_ratio)
 
-    # Signal 1: Timestamps or dates in the first 60% of CLAUDE.md
-    prefix_cutoff = int(len(lines) * 0.6)
+    # Signal 1: Timestamps or dates in the first 60% of the surface
     early_timestamps = []
     for i, line in enumerate(lines[:prefix_cutoff]):
         for pat in _TIMESTAMP_PATTERNS:
@@ -56,12 +75,12 @@ def detect_cache_instability(session_data):
                 "name": "cache_instability",
                 "confidence": 0.75,
                 "evidence": (
-                    f"Timestamps in CLAUDE.md prefix ({evidence_lines}) invalidate prompt cache "
+                    f"Timestamps in {surface_label} prefix ({evidence_lines}) invalidate prompt cache "
                     f"for ~{wasted_tokens:,} tokens of stable content below them"
                 ),
                 "savings_tokens": wasted_tokens,
                 "suggestion": (
-                    f"Move timestamped content to the bottom of CLAUDE.md. "
+                    f"Move timestamped content to the bottom of {surface_label}. "
                     f"Anthropic's prompt cache is prefix-based: everything before the first "
                     f"changing line gets cached. ~{wasted_tokens:,} tokens of stable rules "
                     f"could get cache hits (90% cost reduction) if timestamps move to the end."
@@ -87,42 +106,240 @@ def detect_cache_instability(session_data):
                 "name": "cache_instability",
                 "confidence": 0.7,
                 "evidence": (
-                    f"Auto-generated sections in CLAUDE.md prefix ({markers_found} at "
-                    f"L{dynamic_sections[0][0]}) change between sessions, breaking cache"
+                    f"Auto-generated sections in {surface_label} prefix ({markers_found} at "
+                    f"L{first_dynamic}) change between sessions, breaking cache"
                 ),
                 "savings_tokens": wasted_tokens,
                 "suggestion": (
-                    "Move auto-generated sections to the end of CLAUDE.md. "
+                    f"Move auto-generated sections to the end of {surface_label}. "
                     "Content that changes per-session should be after stable content "
                     "to preserve prompt cache hits on the prefix."
                 ),
                 "occurrence_count": len(dynamic_sections),
             })
 
-    # Signal 3: @import of volatile files in the first 60%
-    volatile_imports = []
-    for i, line in enumerate(lines[:prefix_cutoff]):
-        match = _IMPORT_RE.search(line)
-        if match:
-            path = match.group(1)
-            volatile_indicators = ["status", "log", "daily", "current", "temp", "cache"]
-            if any(v in path.lower() for v in volatile_indicators):
-                volatile_imports.append((i + 1, path))
+    return findings
 
-    if volatile_imports:
+
+def _mcp_candidate_files(cwd):
+    """Return the ordered list of MCP config files to inspect for *cwd*.
+
+    Project-local files first, then the home fallback. Order matters: the
+    project-local ``.claude.json`` overrides the home one for the env scan.
+    """
+    cwd_path = Path(cwd)
+    return [
+        cwd_path / ".mcp.json",
+        cwd_path / ".claude.json",
+        Path.home() / ".claude.json",
+    ]
+
+
+def _scan_mcp_env(cwd):
+    """Signal 4: scan MCP server env/args/url blocks for cache-prefix churn.
+
+    ``.mcp.json`` and ``.claude.json`` sit inside the cached prompt prefix; an
+    edit to a server's ``env``/``args``/``url`` invalidates the same cache a
+    CLAUDE.md edit does. Fail-open on missing file / bad JSON.
+    """
+    key = str(Path(cwd).resolve())
+    if key in _MCP_SCAN_CACHE:
+        return _MCP_SCAN_CACHE[key]
+
+    findings = []
+    offending_servers = set()
+    try:
+        for path in _mcp_candidate_files(cwd):
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            servers = data.get("mcpServers")
+            if not isinstance(servers, dict):
+                continue
+            for server_name, cfg in servers.items():
+                if not isinstance(cfg, dict):
+                    continue
+                values = []
+                env = cfg.get("env")
+                if isinstance(env, dict):
+                    values.extend(str(v) for v in env.values() if v is not None)
+                for field in ("args", "url", "command"):
+                    val = cfg.get(field)
+                    if isinstance(val, list):
+                        values.extend(str(v) for v in val if v is not None)
+                    elif isinstance(val, str):
+                        values.append(val)
+                for value in values:
+                    if _has_timestamp(value) or any(tok in value.lower() for tok in _VOLATILE_TOKENS):
+                        offending_servers.add(str(server_name))
+                        break
+    except (PermissionError, OSError):
+        pass
+
+    if offending_servers:
+        names = ", ".join(sorted(offending_servers)[:5])
+        findings.append({
+            "name": "cache_instability",
+            "confidence": 0.7,
+            "evidence": (
+                f"MCP server env/args blocks in cached prefix churn between sessions "
+                f"({names}): timestamps or volatile tokens in .mcp.json/.claude.json "
+                f"invalidate the prompt cache for everything after them"
+            ),
+            "savings_tokens": 1500,
+            "suggestion": (
+                "Move volatile MCP server env values (timestamps, status/log/daily/"
+                "current/temp/cache tokens) out of the cached prefix, or pin them to "
+                "stable values. Edits to .mcp.json/.claude.json break the same prefix "
+                "cache a CLAUDE.md edit does."
+            ),
+            "occurrence_count": len(offending_servers),
+        })
+
+    _MCP_SCAN_CACHE[key] = findings
+    return findings
+
+
+def _process_prefix_dirs(cwd):
+    """Return the ordered list of process-library prefix directories to scan."""
+    cwd_path = Path(cwd)
+    home = Path.home()
+    return [
+        cwd_path / ".a5c" / "processes",
+        cwd_path / ".claude" / "processes",
+        home / ".a5c" / "processes",
+        home / ".claude" / "processes",
+    ]
+
+
+def _scan_process_prefixes(cwd):
+    """Signal 5: scan process-library prompt prefix files for cache-prefix churn.
+
+    ``.a5c/processes`` and ``.claude/processes`` hold prompt prefix files that
+    are loaded into the cached prefix; timestamps or auto-gen markers in their
+    first 60% break the cache. Bounded by ``_PROCESS_FILE_CAP``. Fail-open.
+    """
+    key = str(Path(cwd).resolve())
+    if key in _PROCESS_SCAN_CACHE:
+        return _PROCESS_SCAN_CACHE[key]
+
+    findings = []
+    unstable_files = []
+    try:
+        scanned = 0
+        for directory in _process_prefix_dirs(cwd):
+            if not directory.exists() or not directory.is_dir():
+                continue
+            for path in sorted(directory.iterdir()):
+                if scanned >= _PROCESS_FILE_CAP:
+                    break
+                if not path.is_file() or path.suffix not in (".md", ".txt"):
+                    continue
+                scanned += 1
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except (PermissionError, OSError):
+                    continue
+                if len(text) < 50:
+                    continue
+                lines = text.splitlines()
+                prefix_cutoff = int(len(lines) * 0.6) or 1
+                for line in lines[:prefix_cutoff]:
+                    if _has_timestamp(line):
+                        unstable_files.append(path.name)
+                        break
+                    if any(marker in line for marker in _DYNAMIC_SECTION_MARKERS):
+                        unstable_files.append(path.name)
+                        break
+            if scanned >= _PROCESS_FILE_CAP:
+                break
+    except (PermissionError, OSError):
+        pass
+
+    if unstable_files:
+        names = ", ".join(unstable_files[:5])
         findings.append({
             "name": "cache_instability",
             "confidence": 0.6,
             "evidence": (
-                "@import of volatile files in CLAUDE.md prefix: "
-                + ", ".join(p for _, p in volatile_imports[:3])
+                f"Process-library prompt prefix files contain timestamps or auto-gen "
+                f"markers in their first 60% ({names}), breaking the cached prefix"
             ),
-            "savings_tokens": 2000,
+            "savings_tokens": 1500,
             "suggestion": (
-                "Move @import of volatile files to the end of CLAUDE.md, or use "
-                "path-scoped rules files instead (which only load when relevant)."
+                "Move timestamped or auto-generated content in .a5c/processes and "
+                ".claude/processes prefix files to the end of each file, or strip the "
+                "volatile header. These files load into the cached prompt prefix."
             ),
-            "occurrence_count": len(volatile_imports),
+            "occurrence_count": len(unstable_files),
         })
+
+    _PROCESS_SCAN_CACHE[key] = findings
+    return findings
+
+
+def detect_cache_instability(session_data):
+    """Detect CLAUDE.md patterns that break Anthropic's prefix-based prompt cache.
+
+    Anthropic caches a byte-identical prefix. Content that changes between sessions
+    (timestamps, auto-generated sections, volatile imports) invalidates the cache
+    for everything after it. Moving volatile content to the end preserves cache hits
+    on the stable prefix.
+
+    Surfaces scanned (all additive to the original CLAUDE.md signals):
+      1-3. CLAUDE.md prefix: timestamps, auto-gen markers, volatile @imports.
+      4.   MCP server env/args/url blocks in .mcp.json / .claude.json.
+      5.   Process-library prompt prefix files in .a5c/processes, .claude/processes.
+    """
+    claude_md = session_data.get("claude_md_content", "")
+    # New surfaces must still run when CLAUDE.md is absent/small. With an empty
+    # `lines` list every original prefix loop is a no-op, so the 3 original
+    # signals behave exactly as before when CLAUDE.md is missing.
+    lines = claude_md.splitlines() if (claude_md and len(claude_md) >= 200) else []
+
+    findings = []
+
+    # Signals 1 & 2: timestamps and auto-gen markers in the CLAUDE.md prefix.
+    # _scan_prefix_lines with surface_label="CLAUDE.md" is byte-identical to the
+    # pre-refactor CLAUDE.md path.
+    findings.extend(_scan_prefix_lines(lines, "CLAUDE.md"))
+
+    # Signal 3: @import of volatile files in the first 60%
+    if lines:
+        prefix_cutoff = int(len(lines) * 0.6)
+        volatile_imports = []
+        for i, line in enumerate(lines[:prefix_cutoff]):
+            match = _IMPORT_RE.search(line)
+            if match:
+                path = match.group(1)
+                if any(v in path.lower() for v in _VOLATILE_TOKENS):
+                    volatile_imports.append((i + 1, path))
+
+        if volatile_imports:
+            findings.append({
+                "name": "cache_instability",
+                "confidence": 0.6,
+                "evidence": (
+                    "@import of volatile files in CLAUDE.md prefix: "
+                    + ", ".join(p for _, p in volatile_imports[:3])
+                ),
+                "savings_tokens": 2000,
+                "suggestion": (
+                    "Move @import of volatile files to the end of CLAUDE.md, or use "
+                    "path-scoped rules files instead (which only load when relevant)."
+                ),
+                "occurrence_count": len(volatile_imports),
+            })
+
+    # Signal 4: MCP server env/args/url blocks (cached-prefix-resident).
+    findings.extend(_scan_mcp_env(Path.cwd()))
+
+    # Signal 5: process-library prompt prefix files (cached-prefix-resident).
+    findings.extend(_scan_process_prefixes(Path.cwd()))
 
     return findings
