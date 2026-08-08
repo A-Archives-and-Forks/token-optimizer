@@ -19664,6 +19664,32 @@ def _log_regen(msg):
         pass
 
 
+# Rate-limited trace for a rejected api/* POST. The M-4 token check runs BEFORE
+# the api/regenerate handler, so a rejected regenerate click used to leave NO
+# trace in daemon-regen.log -- it stayed empty for weeks while the user reported
+# a dead button. This writes one line per _REJECT_LOG_MIN_GAP seconds so a
+# hammering/looping client cannot spam the log, but a real rejected click is
+# never invisible. Global throttle (not per-path): one trace every ~30s is
+# enough to know the gate is firing.
+_REJECT_LOG_LAST_TS = 0.0
+_REJECT_LOG_MIN_GAP = 30.0
+
+
+def _log_reject_regen(path):
+    """One rate-limited line when an api/* POST is rejected for a bad token."""
+    global _REJECT_LOG_LAST_TS
+    now = time.time()
+    if now - _REJECT_LOG_LAST_TS < _REJECT_LOG_MIN_GAP:
+        return
+    _REJECT_LOG_LAST_TS = now
+    try:
+        with open(REGEN_LOG, "a", encoding="utf-8") as f:
+            f.write("%s REJECT api/* POST token-mismatch path=%s\\n"
+                    % (time.strftime("%Y-%m-%dT%H:%M:%S"), path))
+    except OSError:
+        pass
+
+
 def _resolve_measure_py():
     """Find the NEWEST installed measure.py at call time, not at generation time.
 
@@ -19959,11 +19985,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         expected_tok = _read_token()
         got_tok = self.headers.get("X-TO-Token", "")
+        clean = self.path.lstrip("/").split("?")[0]
         if not expected_tok or not hmac.compare_digest(expected_tok, got_tok):
+            # R2: leave a trace. This check fires BEFORE the api/regenerate
+            # handler, so without a log line a rejected regenerate click was
+            # indistinguishable from a dead button (daemon-regen.log stayed
+            # empty for weeks). Rate-limited so a looping client can't spam.
+            _log_reject_regen(clean)
             self.send_error(403, "Forbidden: invalid token")
             return
 
-        clean = self.path.lstrip("/").split("?")[0]
         if clean == "api/v5/toggle":
             length = int(self.headers.get("Content-Length", 0))
             if length > 4096:
@@ -33265,6 +33296,37 @@ def runway_snapshot(days=30, now=None):
         if mult < 1.02:
             return None
 
+        # --- USD-per-window: reuse the metered savings ledger (KTD1) ---
+        # The dollar figure reuses the savings surface that already exists
+        # (_get_merged_savings): context tokens_saved priced at the input rate
+        # (total_cost_usd, metered) + realized model-routing savings
+        # (model_routing.realized_cost_usd, estimated counterfactual). We do NOT
+        # invent a window-%->USD conversion and do NOT re-derive USD from the
+        # runway multipliers (context_mult/routing_mult) -- that would re-multiply
+        # savings already counted in the ledger and double-count the same dollars.
+        # Apportion by span: the ledger is cumulative over `days`, so the share
+        # attributable to a window is its span as a fraction of the ledger window.
+        # The two pools are disjoint (tokens never sent vs cheaper model for the
+        # same tokens), so summing them is not a double-count -- this mirrors
+        # _savings_since_install's measured = total_cost_usd + realized_cost_usd.
+        saved_context_usd = 0.0
+        saved_routing_usd = 0.0
+        try:
+            merged = _get_merged_savings(days=days)
+            saved_context_usd = float(merged.get("total_cost_usd", 0.0) or 0.0)
+            mr = merged.get("model_routing") or {}
+            saved_routing_usd = float(mr.get("realized_cost_usd", 0.0) or 0.0)
+        except Exception:
+            pass
+        saved_total_usd = saved_context_usd + saved_routing_usd
+        ledger_span_h = max(days, 1) * 24.0
+        # Measured-vs-estimated boundary: context $ is metered from actual
+        # tokens_saved; routing $ is an estimated counterfactual (baseline mix
+        # vs current). The proxy disclosure below carries this through to the
+        # surface so a bare number is never printed without its honesty label.
+        saved_usd_tier = ("estimated" if saved_routing_usd > 0
+                          else ("measured" if saved_context_usd > 0 else None))
+
         windows = []
         meter_age_s = meters.get("age_s")
         for key, label, span_h in (("five_hour", "5h", 5), ("seven_day", "7d", 168)):
@@ -33281,6 +33343,12 @@ def runway_snapshot(days=30, now=None):
             counterfactual = min(100.0, used * mult)
             head_now = max(0.0, 100.0 - used)
             head_cf = max(0.0, 100.0 - counterfactual)
+            # USD attributable to this window's span, from the metered savings
+            # ledger (KTD1). None when there is nothing to show so the panel
+            # degrades gracefully (no $-0 / NaN). Derived from the ledger, NOT
+            # from context_mult/routing_mult -- the no-double-count invariant.
+            window_saved_usd = (round(saved_total_usd * span_h / ledger_span_h, 2)
+                                if saved_total_usd > 0 else None)
             windows.append({
                 "key": key, "label": label, "span_hours": span_h,
                 "used_pct": round(used, 1),
@@ -33291,6 +33359,8 @@ def runway_snapshot(days=30, now=None):
                 # more room" is not a sentence anyone should read.
                 "headroom_multiple": round(head_now / head_cf, 1) if head_cf > 0.5 else None,
                 "would_be_capped": head_cf <= 0.5,
+                "saved_usd": window_saved_usd,
+                "saved_usd_tier": saved_usd_tier,
             })
         if not windows:
             return None
@@ -33305,13 +33375,23 @@ def runway_snapshot(days=30, now=None):
             "tokens_consumed": int(consumed),
             "tokens_saved": int(saved),
             "windows": windows,
+            # USD spine (KTD1): metered context $ + estimated routing $, reused
+            # from the savings ledger. Apportioned per window above. Exposed at
+            # the top level so the surface and tests can assert the no-double-
+            # count invariant (USD traces to these, not to the multipliers).
+            "saved_usd_context": round(saved_context_usd, 2),
+            "saved_usd_routing": round(saved_routing_usd, 2),
+            "saved_usd_tier": saved_usd_tier,
             "meter_age_s": meters.get("age_s"),
             "meter_ts": meters.get("ts"),
             "meter_stale": meter_stale,
             "proxy": ("Model weighting inside the provider's rate-limit windows is "
                       "not published; public input-rate ratios are used as a "
                       "stand-in. Window state is measured, the counterfactual is "
-                      "estimated."),
+                      "estimated. Per-window dollars reuse the metered savings "
+                      "ledger (context tokens never sent, priced at input rates, "
+                      "plus an estimated model-routing counterfactual) and are not "
+                      "derived from the throughput multipliers."),
         }
     except Exception:
         return None
