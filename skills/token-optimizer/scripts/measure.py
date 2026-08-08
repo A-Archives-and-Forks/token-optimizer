@@ -12432,10 +12432,18 @@ def _keepwarm_scheduler_install_macos(quiet=False):
     # Rotation guard on install so a stale oversized log doesn't carry over.
     _keepwarm_rotate_log()
     try:
-        plist_path.write_text(_keepwarm_generate_scheduler_plist(), encoding="utf-8")
+        plist_changed = _write_file_if_changed(plist_path, _keepwarm_generate_scheduler_plist())
     except OSError as e:
         return (False, f"could not write plist {plist_path}: {e}")
     uid = os.getuid()
+    # Skip the reload when nothing changed and the agent is already loaded: an
+    # unconditional bootout+bootstrap re-fires the macOS background-item banner on
+    # every re-install/refresh even though the on-disk agent is already correct.
+    if not plist_changed and _launchagent_loaded(_KEEPWARM_SCHEDULER_LABEL):
+        _keepwarm_write_scheduler_marker(bootstrap_rc=0)
+        return (True, (
+            f"Keep-warm scheduler already current ({_KEEPWARM_SCHEDULER_LABEL}); "
+            f"left in place (no reload)."))
     # Idempotent: bootout any existing instance first (ignore failure: not loaded).
     try:
         subprocess.run(
@@ -20401,6 +20409,60 @@ except OSError:
 '''
 
 
+def _write_file_if_changed(path, content, mode=None):
+    """Write *content* to *path* only if it differs from what is already on disk.
+
+    Returns True if the file was created or its content changed, False if it
+    already matched (so nothing was written). macOS re-fires the "App Background
+    Activity" / background-item banner whenever a LaunchAgent plist is rewritten
+    -- even with byte-identical content -- so an unconditional rewrite on every
+    ensure/repair pass spams the user. Skipping the no-op write leaves the file
+    untouched and the banner silent.
+    """
+    try:
+        if path.read_text(encoding="utf-8") == content:
+            if mode is not None:
+                try:
+                    path.chmod(mode)
+                except OSError:
+                    pass
+            return False
+    except (OSError, ValueError):
+        pass
+    path.write_text(content, encoding="utf-8")
+    if mode is not None:
+        try:
+            path.chmod(mode)
+        except OSError:
+            pass
+    return True
+
+
+def _launchagent_loaded(label):
+    """True if a LaunchAgent with *label* is currently loaded in this GUI domain.
+
+    Used to decide whether a bootout+bootstrap is actually needed: if the plist
+    did not change AND the agent is already loaded, reloading it only re-fires the
+    macOS background-item banner for no benefit. Best-effort: any failure (no
+    launchctl, non-macOS, timeout) returns False so the caller falls back to the
+    reload it would have done anyway.
+    """
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        return False
+    try:
+        # 2s, not 10s: a loaded agent answers in milliseconds, and this runs on the
+        # SessionStart hot path. On timeout we return False and the caller falls
+        # back to the reload it would have done anyway.
+        r = subprocess.run(
+            ["launchctl", "print", f"gui/{getuid()}/{label}"],
+            capture_output=True, text=True, timeout=2, creationflags=_NO_WINDOW,
+        )
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def _generate_plist():
     """Generate the launchd plist XML for the dashboard daemon."""
     from xml.sax.saxutils import escape as _xml_escape
@@ -21275,12 +21337,24 @@ def _install_launchd_daemon(dry_run=False, soft_fail=False, effective_host=None)
             SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
             DAEMON_LOG_DIR.mkdir(parents=True, exist_ok=True)
             daemon_script = SNAPSHOT_DIR / "dashboard-server.py"
-            daemon_script.write_text(_generate_daemon_script(), encoding="utf-8")
-            daemon_script.chmod(0o755)
+            script_changed = _write_file_if_changed(daemon_script, _generate_daemon_script(), 0o755)
             LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-            PLIST_PATH.write_text(_generate_plist(), encoding="utf-8")
+            plist_changed = _write_file_if_changed(PLIST_PATH, _generate_plist())
         except OSError as e:
             return _fail(f"[Error] Could not write daemon files: {e}")
+
+        # Nothing changed and the daemon is already loaded and serving -> skip the
+        # bootout+bootstrap. Reloading a healthy, current daemon only re-fires the
+        # macOS "App Background Activity" banner for no benefit. (A reinstall after
+        # uninstall has an unloaded agent, so this guard is skipped and the reload
+        # below still runs.)
+        if (not script_changed and not plist_changed
+                and _launchagent_loaded(DAEMON_LABEL)
+                and _verify_daemon_port(timeout_seconds=1, retries=1, retry_sleep=0)):
+            print("[Token Optimizer] Dashboard server already current and running.\n")
+            print("  Bookmark this URL:")
+            print(f"    http://localhost:{DAEMON_PORT}/token-optimizer")
+            return True
 
         # Stop existing daemon if running (bootout is idempotent -- non-zero
         # exit when nothing is loaded is expected and ignored).
@@ -37080,6 +37154,13 @@ def run_ensure_health():
         legacy_dir = RUNTIME_DIR / "_backups" / "token-optimizer"
         candidate_paths = {SNAPSHOT_DIR / "dashboard-server.py",
                            legacy_dir / "dashboard-server.py"}
+        # The auto-update refresh writes dashboard-server.py (not the LaunchAgent
+        # plist) and reloads via `launchctl kickstart`, which restarts the process
+        # without re-registering the background item -- so it does NOT fire the
+        # macOS "App Background Activity" banner. That banner comes from plist
+        # rewrites and bootout+bootstrap, which the install/repair paths now guard
+        # with _write_file_if_changed + _launchagent_loaded. So this block keeps its
+        # original version-marker staleness check (daemon stays version-current).
         needs_refresh = False
         for p in candidate_paths:
             if p.exists():
