@@ -5844,6 +5844,12 @@ def generate_standalone_dashboard(days=30, quiet=False, force=False):
     # the deferred flush worker never turns this into a multi-second parse storm. Older
     # rows are fetched on demand in served mode.
     _turn_preload_budget = _int_env("TOKEN_OPTIMIZER_TURN_PRELOAD_MAX", 40)
+    # Also bound per-file size: parse_session_turns reads a whole transcript, and a
+    # single long session JSONL can reach 100MB+. Preloading 40 of those under the
+    # 45s regen-step / 20s flush budget trips REGEN_STEP_TIMEOUT and can kill a
+    # flush worker mid-dashboard-write. Skip oversized transcripts here; served mode
+    # still fetches their rows on demand, exactly like older rows past the count cap.
+    _turn_preload_maxbytes = _int_env("TOKEN_OPTIMIZER_TURN_PRELOAD_MAX_BYTES", 8_000_000)
     try:
         for day in (trends or {}).get("daily", [])[:7]:
             if len(session_turns) >= _turn_preload_budget:
@@ -5857,6 +5863,11 @@ def generate_standalone_dashboard(days=30, quiet=False, force=False):
                     continue
                 jsonl_resolved = str(Path(jsonl_path).expanduser()) if jsonl_path.startswith("~") else jsonl_path
                 if not os.path.exists(jsonl_resolved):
+                    continue
+                try:
+                    if os.path.getsize(jsonl_resolved) > _turn_preload_maxbytes:
+                        continue
+                except OSError:
                     continue
                 turns = parse_session_turns(jsonl_resolved)
                 if turns:
@@ -6040,9 +6051,24 @@ def generate_standalone_dashboard(days=30, quiet=False, force=False):
     for wp in write_paths:
         try:
             wp.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(str(wp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(injected)
+            # Atomic write: three uncoordinated callers can target this same path
+            # (background freshness regen, manual POST /api/regenerate, and the
+            # SessionEnd flush worker's inline gen). A plain O_TRUNC write lets two
+            # of them interleave into a torn/mixed file, and a GET between the
+            # truncate and the final byte serves partial HTML. Write to a temp
+            # sibling then os.replace so every reader sees one complete generation.
+            tmp_fd, tmp_name = tempfile.mkstemp(dir=str(wp.parent), prefix=".dash-", suffix=".tmp")
+            try:
+                os.fchmod(tmp_fd, 0o600)
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                    f.write(injected)
+                os.replace(tmp_name, str(wp))
+            except OSError:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
             wrote_any = True
         except OSError:
             continue
@@ -19686,14 +19712,21 @@ def _log_regen(msg):
 # via terminal carriage-return overprint.
 _REJECT_LOG_LAST_TS: dict = {{}}
 _REJECT_LOG_MIN_GAP = 30.0
+# Cap the per-path throttle dict. It lives for the daemon's lifetime (launchd
+# KeepAlive) and _log_reject_regen fires before token auth, so a client -- remote
+# in opt-in network mode -- POSTing many distinct bad-token paths would otherwise
+# grow it without bound (memory-leak / OOM-restart DoS). Evict oldest half at cap.
+_REJECT_LOG_MAX_KEYS = 512
 
 
 def _sanitize_log_path(path):
-    """Strip CR/LF from *path* so a request path containing control chars
-    cannot inject or overwrite a log line. Returns the cleaned string."""
+    """Keep only printable ASCII in *path* so a request path containing control
+    chars cannot inject or overwrite a log line. Drops CR/LF AND ESC and every
+    other control byte (a bare ESC sequence like \\x1b[2J would clear the screen
+    when the log is cat'd). Returns the cleaned string."""
     if not path:
         return ""
-    return path.replace("\\r", "").replace("\\n", "")
+    return "".join(c for c in path if 32 <= ord(c) < 127)
 
 
 def _log_reject_regen(path):
@@ -19707,6 +19740,10 @@ def _log_reject_regen(path):
     if now - last < _REJECT_LOG_MIN_GAP:
         return
     _REJECT_LOG_LAST_TS[clean] = now
+    if len(_REJECT_LOG_LAST_TS) > _REJECT_LOG_MAX_KEYS:
+        _stale = sorted(_REJECT_LOG_LAST_TS, key=_REJECT_LOG_LAST_TS.get)[:len(_REJECT_LOG_LAST_TS) // 2]
+        for _k in _stale:
+            _REJECT_LOG_LAST_TS.pop(_k, None)
     try:
         with open(REGEN_LOG, "a", encoding="utf-8") as f:
             f.write("%s REJECT api/* POST token-mismatch path=%s\\n"

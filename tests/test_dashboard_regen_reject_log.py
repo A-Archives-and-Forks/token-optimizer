@@ -43,7 +43,7 @@ def _load_reject_logger(tmp_log: Path):
     ns = {"time": time, "os": __import__("os")}
     # _REJECT_LOG_LAST_TS is now a per-path dict with a type annotation
     # (`_REJECT_LOG_LAST_TS: dict = {}`), so allow an optional `: <type>`.
-    for const in ("_REJECT_LOG_LAST_TS", "_REJECT_LOG_MIN_GAP"):
+    for const in ("_REJECT_LOG_LAST_TS", "_REJECT_LOG_MIN_GAP", "_REJECT_LOG_MAX_KEYS"):
         m = re.search(r"^%s(?::[^=]+)? = .*$" % re.escape(const), src, re.M)
         assert m, f"{const} missing from generated daemon"
         exec(m.group(0), ns)
