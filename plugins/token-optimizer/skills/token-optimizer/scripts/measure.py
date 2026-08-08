@@ -2295,6 +2295,33 @@ def _is_1m_model(model_str):
     return True
 
 
+def _context_window_for_model_str(model_str):
+    """Resolve a context-window size for a SPECIFIC model string (e.g. one
+    parsed straight out of a transcript message), honoring the same
+    explicit-override precedence as detect_context_window() -- but keyed to
+    the model that actually produced the tokens being measured, not an
+    env/config global that may name a different model entirely (e.g. a
+    1M-context variant like "claude-opus-5[1m]" running while
+    CLAUDE_MODEL/settings.json still say plain "opus").
+    """
+    if os.environ.get("CLAUDE_CODE_DISABLE_1M_CONTEXT") == "1":
+        return 200_000
+    raw = os.environ.get("TOKEN_OPTIMIZER_CONTEXT_SIZE", "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    if _cli_context_size:
+        return _cli_context_size
+    m = (model_str or "").lower().strip()
+    if not m:
+        return None
+    if "haiku" in m:
+        return 200_000
+    return 1_000_000 if _is_1m_model(m) else 200_000
+
+
 _codex_config_cache: tuple[float, dict] | None = None
 
 
@@ -24263,6 +24290,12 @@ def _parse_jsonl_for_quality(filepath):
         "total_entries": idx,
         "context_tokens": context_tokens,
         "model": current_model,
+        # Context-window size for THIS session's actual model, not the
+        # env/config global that detect_context_window() falls back to.
+        # See _context_window_for_model_str() -- fixes fill%/quality scoring
+        # for sessions whose live model differs from CLAUDE_MODEL/settings.json
+        # (e.g. a 1M-context variant while the global default says plain).
+        "model_context_window": _context_window_for_model_str(current_model),
     }
 
 
@@ -28125,7 +28158,19 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
             return
         desc = _checkpoint_descriptor(latest["path"])
         about = f" (prior work on {desc})" if desc else ""
-        print(f"[Token Optimizer] A recent checkpoint is available{about} at {latest['path']}. Load it only if it matches what you are working on now.")
+        # Make the cross-session nature explicit: project+branch alone is not
+        # distinguishing in a shared checkout with many concurrent sessions in
+        # the same cwd/branch, so an unlabeled pointer reads as "your own prior
+        # work" even when it never is (own-session checkpoints are excluded from
+        # `chosen` above by construction). Name the source session so a reader
+        # cannot mistake it for continuity of the current session.
+        src_sid_match = re.match(r'^([0-9a-fA-F-]{8,36})-\d{8}-\d{6}-', latest["filename"])
+        src_sid_short = src_sid_match.group(1)[:8] if src_sid_match else None
+        if src_sid_short and (not sid_safe or not sid_safe.startswith(src_sid_short)):
+            print(f"[Token Optimizer] A checkpoint from a DIFFERENT session ({src_sid_short}){about} is available at {latest['path']}. "
+                  f"This is NOT your own session's prior work -- load it only if you intend to resume that other session's work.")
+        else:
+            print(f"[Token Optimizer] A recent checkpoint is available{about} at {latest['path']}. Load it only if it matches what you are working on now.")
         return
 
     if is_compact and sid_safe:
