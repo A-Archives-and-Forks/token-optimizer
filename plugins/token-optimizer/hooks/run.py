@@ -260,12 +260,22 @@ def _plugin_disabled_by_host() -> bool:
         marketplace_json = meta_dir / "marketplace.json"
         if not plugin_json.is_file() or not marketplace_json.is_file():
             return False
+        # Cap reads: this runs on every hook event (a fresh process each time, so
+        # nothing can be cached across events). settings.json is user-controlled and
+        # could be pathologically large; an oversized config reads as "can't tell" ->
+        # fail-open (plugin treated as enabled), the safe default.
+        _CFG_MAX = 4_000_000
+        for _cfg in (plugin_json, marketplace_json):
+            if _cfg.stat().st_size > _CFG_MAX:
+                return False
         plugin_name = json.loads(plugin_json.read_text(encoding="utf-8")).get("name", "").strip()
         marketplace_name = json.loads(marketplace_json.read_text(encoding="utf-8")).get("name", "").strip()
         if not plugin_name or not marketplace_name:
             return False
         settings_path = _claude_settings_path()
         if settings_path is None:
+            return False
+        if settings_path.stat().st_size > _CFG_MAX:
             return False
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
         enabled_plugins = settings.get("enabledPlugins")

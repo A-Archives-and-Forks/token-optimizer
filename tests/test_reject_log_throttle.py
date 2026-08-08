@@ -57,16 +57,18 @@ def _reject_section(src: str) -> str:
 # ---- sanitization --------------------------------------------------------
 
 def test_sanitize_function_exists(daemon_src):
-    """_sanitize_log_path must exist and strip CR/LF."""
+    """_sanitize_log_path must exist and strip control chars (CR/LF AND ESC)."""
     assert "def _sanitize_log_path" in daemon_src, (
-        "_sanitize_log_path must be defined in the daemon script (F8)"
+        "_sanitize_log_path must be defined in the daemon script"
     )
-    # Check the sanitize function itself contains CR/LF stripping logic.
+    # The sanitizer now keeps only printable ASCII (32..126), which drops CR/LF,
+    # ESC, and every other control byte -- a stronger guard than the old
+    # CR/LF-only replace.
     sanitize_start = daemon_src.index("def _sanitize_log_path(")
     sanitize_end = daemon_src.index("def _log_reject_regen(")
     sanitize_section = daemon_src[sanitize_start:sanitize_end]
-    assert "\\r" in sanitize_section or "replace" in sanitize_section, (
-        "_sanitize_log_path must strip CR/LF from the path (F8)"
+    assert "ord(c)" in sanitize_section and "127" in sanitize_section, (
+        "_sanitize_log_path must keep only printable ASCII (strips CR/LF and ESC)"
     )
 
 

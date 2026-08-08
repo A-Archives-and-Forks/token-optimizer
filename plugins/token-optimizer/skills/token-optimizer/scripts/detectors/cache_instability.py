@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 
@@ -243,9 +244,21 @@ def _save_mcp_state(state_path, state):
         return
     try:
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = state_path.with_name(state_path.name + ".tmp")
-        tmp.write_text(json.dumps(state), encoding="utf-8")
-        os.replace(tmp, state_path)
+        # Unique temp name (not a fixed ".tmp" sibling): two concurrent measure
+        # runs in different cwds would otherwise write the SAME ".tmp" and clobber
+        # each other, so one os.replace promotes the wrong content and the other
+        # raises FileNotFoundError. mkstemp gives each writer its own temp.
+        fd, tmp = tempfile.mkstemp(dir=str(state_path.parent), prefix=state_path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(state))
+            os.replace(tmp, state_path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
     except (PermissionError, OSError, ValueError):
         pass
 
