@@ -44,6 +44,14 @@ _VALID_RUNTIMES = frozenset(
     {_RUNTIME_CLAUDE, _RUNTIME_CODEX, _RUNTIME_HERMES, _RUNTIME_OPENCODE, _RUNTIME_COPILOT}
 )
 _CLAUDE_PLUGIN_ENVS = ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA")
+# Claude Code's own process-env signals. CLAUDECODE is inherited by every
+# subprocess Claude Code spawns, so a genuine Codex/OpenCode launched from a
+# CC Bash tool inherits CLAUDECODE=1. This tier therefore sits BELOW the
+# explicit CODEX_HOME/HERMES_HOME env checks (so a nested-Codex session with
+# CODEX_HOME set still resolves to codex) but ABOVE the weak directory
+# heuristics, so a host with CLAUDECODE=1 and a coexisting ~/.codex DIRECTORY
+# resolves to claude, not codex (issue #120).
+_CLAUDE_CODE_ENVS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID")
 # Claude Code's official config-dir override. When set, Claude stores
 # projects/, settings.json, etc. under this directory instead of ~/.claude.
 _CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
@@ -725,10 +733,16 @@ def detect_runtime() -> str:
          OpenCode session — "Guy's bug", issue #57; still AFTER Claude env)
       5. CODEX_HOME implies Codex
       6. HERMES_HOME implies Hermes
-      7. A populated opencode config dir implies OpenCode (weak tertiary
+      7. Claude Code process env (CLAUDECODE / CLAUDE_CODE_ENTRYPOINT /
+         CLAUDE_CODE_SESSION_ID) implies Claude. Sits BELOW CODEX_HOME/
+         HERMES_HOME so a nested-Codex session launched from a CC Bash tool
+         (which inherits CLAUDECODE=1) still resolves to codex, but ABOVE
+         the directory heuristics so a host with CLAUDECODE=1 and a
+         coexisting ~/.codex DIRECTORY resolves to claude, not codex (#120)
+      8. A populated opencode config dir implies OpenCode (weak tertiary
          tier; loses to Claude/Codex/Hermes/Copilot env, beats default)
-      8. COPILOT_HOME or a copilot ancestor process implies Copilot
-      9. Default to Claude Code for backward compatibility
+      9. COPILOT_HOME or a copilot ancestor process implies Copilot
+      10. Default to Claude Code for backward compatibility
 
     Why step 2 is ahead of the Claude env check (KTD-3, issue #57): on a host
     with BOTH Claude Code and OpenCode installed, a stray CLAUDE_PLUGIN_* env var
@@ -762,6 +776,9 @@ def detect_runtime() -> str:
 
     if os.environ.get(_HERMES_HOME_ENV):
         return _RUNTIME_HERMES
+
+    if any(os.environ.get(v) for v in _CLAUDE_CODE_ENVS):
+        return _RUNTIME_CLAUDE
 
     if _opencode_config_signal():
         return _RUNTIME_OPENCODE
