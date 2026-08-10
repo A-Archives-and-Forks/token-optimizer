@@ -3953,8 +3953,13 @@ var DB = (function() {
             '<div id="to-regen-error" hidden style="margin-top:10px;padding:10px 14px;font-size:15px;font-weight:500;color:var(--c-waste);background:rgba(255,95,95,.08);border:1px solid rgba(255,95,95,.35);border-radius:8px;line-height:1.5;text-wrap:pretty;"></div></div>';
         })() +
         '<div style="margin-top:var(--s-4);padding-top:var(--s-3);border-top:1px solid var(--c-border);font-size:14px;color:var(--c-text-dim);line-height:1.7;text-wrap:pretty;">' +
-          'Your usage is measured. The window comparison and the routing dollars are estimated: ' + esc(rw.proxy) + ' ' +
-          'Per-window dollars reuse the metered savings ledger (context tokens never sent, priced at input rates) plus an estimated model-routing counterfactual; they are not derived from the throughput multipliers. The &asymp;' + rw.extra_work_pct + '% is a separate per-token throughput multiplier, not a sum of the per-window figures.' +
+          // rw.proxy is now the single source of the measured-vs-estimated boundary
+          // AND the ledger detail (deduped: this used to repeat the ledger sentence
+          // and re-state "usage is measured"). We add only the one fact proxy can't
+          // carry -- the throughput-% is its own unit, not a sum of the dollars --
+          // because it needs the live JS value.
+          esc(rw.proxy) + ' ' +
+          'The &asymp;' + rw.extra_work_pct + '% is a separate per-token throughput multiplier, not a sum of the per-window dollar figures.' +
         '</div>' +
       '</div>';
     }
@@ -6255,6 +6260,13 @@ var DB = (function() {
     if (payload.cache_health && typeof payload.cache_health === 'object') {
       data.cache_health = payload.cache_health;
     }
+    // Live window/runway card: pick up a fresher 5h/7d reading the instant the
+    // statusline writes one, so an open dashboard auto-updates instead of needing
+    // a manual Regenerate. safeRender('Savings') below repaints runwayCardHtml, and
+    // its "as of / N ago" label recomputes live from the new meter_ts.
+    if (payload.runway && typeof payload.runway === 'object') {
+      data.runway = payload.runway;
+    }
     safeRender('Savings', 'savings', renderSavings);
     safeRender('Overview', 'overview', renderOverview);
     var stamp = document.getElementById('to-live-stamp');
@@ -6636,13 +6648,18 @@ document.addEventListener('DOMContentLoaded', function() {
   // No-op unless the custom API is live (served over http, health probe passed) —
   // so a file:// open stays in static mode with no CORS noise. Fail-silent: on any
   // error the numbers already rendered stay put.
+  var _savingsInFlight = false;
   function refreshSavingsLive() {
-    if (!window.__TOKEN_API_LIVE) return;
+    // In-flight guard: the 60s poll, the visibilitychange handler, and the on-load
+    // call can otherwise overlap and fire concurrent /api/savings fetches (each
+    // recomputing runway server-side). Skip while one is already outstanding.
+    if (!window.__TOKEN_API_LIVE || _savingsInFlight) return;
+    _savingsInFlight = true;
     var base = window.__TOKEN_API_BASE || '';
     fetch(base + '/api/savings', { method: 'GET', credentials: 'include' })
       .then(function(r) { return r.ok ? r.json() : null; })
-      .then(function(d) { if (d && d.ok) DB.refreshSavings(d); })
-      .catch(function() {});
+      .then(function(d) { if (d && d.ok) DB.refreshSavings(d); _savingsInFlight = false; })
+      .catch(function() { _savingsInFlight = false; });
   }
 
   // Refresh when the tab is brought back to the foreground, so returning to an
@@ -6651,6 +6668,18 @@ document.addEventListener('DOMContentLoaded', function() {
     document.addEventListener('visibilitychange', function() {
       if (document.visibilityState === 'visible') refreshSavingsLive();
     });
+  }
+
+  // Auto-refresh the live tiles (incl. the 5h/7d window card) every ~60s while the
+  // tab is open, so a new rate-limit reading surfaces on its own instead of needing
+  // a manual Regenerate. refreshSavingsLive is a no-op unless __TOKEN_API_LIVE, and
+  // is a small JSON GET (never a full-page regen); skip while the tab is hidden.
+  if (typeof setInterval === 'function') {
+    setInterval(function() {
+      if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
+        refreshSavingsLive();
+      }
+    }, 60000);
   }
 
   // Probe for our custom API server before init.
