@@ -165,10 +165,32 @@ const CONTINUATION_WORDS = new Set(["continue", "resume"]);
 // ---------------------------------------------------------------------------
 // Per-item keep/drop filter (GitHub #103) — set-overlap rule, no float threshold
 // ---------------------------------------------------------------------------
-// SAME regex as the resume-topic tokenizer (continuity.ts:749) so a
-// decision/file naming the current project overlaps the keep set on identical
-// token boundaries across runtimes.
+// DELIBERATELY ASCII-only, and DELIBERATELY NOT the (wider) resume-topic tokenizer
+// TOPIC_TOKEN_RE. Do not "unify" them (#127): widening this to match non-ASCII would make a
+// non-Latin item produce 3+ tokens that then fail the ASCII-only keep-set overlap test,
+// dropping needed lines. The keep set is prompt + cwd + in-project paths (ASCII in practice),
+// so a non-Latin item must stay inconclusive (<3 tokens) and be kept, not overlap-tested.
 const RECOVER_TOKEN_RE = /[a-zA-Z0-9_./:-]+/g;
+// --- Non-English topic tokenizer (#127) — mirrors Python measure.py _topic_tokens ---
+// Two branches: ASCII/accented-Latin run OR a whole non-ASCII (CJK) run as one token (a token
+// never mixes ASCII and non-ASCII). Latin-1/Extended-A ranges skip × U+00D7 / ÷ U+00F7 (symbols).
+const TOPIC_TOKEN_RE = /[a-zA-Z0-9_.:À-ÖØ-öø-ÿĀ-ɏ/-]+|[^\x00-\x7F]+/g;
+// Script-aware floor: CJK (Hangul/Han/Kana, >= U+3000) kept at len>=2 (결제/모듈 are real words);
+// ASCII/accented-Latin keep the len>3 English stopword heuristic. Code-point counts match Python.
+const CJK_MIN = 0x3000;
+function topicTokenKept(w) {
+    const cps = [...w];
+    const isCjk = cps.some((ch) => (ch.codePointAt(0) ?? 0) >= CJK_MIN);
+    return isCjk ? cps.length >= 2 : cps.length > 3;
+}
+function extractTopicTokens(text, stop) {
+    const out = new Set();
+    for (const w of (text ?? "").toLowerCase().match(TOPIC_TOKEN_RE) ?? []) {
+        if (topicTokenKept(w) && !stop?.has(w))
+            out.add(w);
+    }
+    return out;
+}
 // Combined stopword set for the keep/drop tokenizer (mirrors Python
 // _RESUME_TOPIC_STOPWORDS | _CONTINUATION_WORDS). Lazily computed on first use
 // because RESUME_TOPIC_STOPWORDS is declared further down this file (TDZ).
@@ -355,10 +377,10 @@ function keywordRelevanceScore(text, checkpointPath, precomputedContent) {
         if (lower.includes(phrase))
             return 1.0;
     }
-    // Content-word extraction: tokens >3 chars (avoids stopword list)
+    // Content-word extraction via the shared non-English tokenizer (#127): two-branch
+    // class + script-aware floor (CJK kept at len>=2, ASCII/Latin at len>3). See extractTopicTokens.
     function contentWords(s) {
-        const matches = s.toLowerCase().match(/[a-zA-Z0-9_./:-]+/g) ?? [];
-        return new Set(matches.filter((w) => w.length > 3));
+        return extractTopicTokens(s);
     }
     const textTokens = contentWords(text);
     // A bare continuation WORD ("continue", "resume") only means "resume my
@@ -806,7 +828,11 @@ function extractHintedPaths(checkpointContent) {
 // on "resume the nginx process".  `resume the X` only fires when X is a
 // session/work noun, not an arbitrary process or command name.
 // Mirrors Python _RESUME_INTENT_RE (just fixed in measure.py).
-exports.RESUME_INTENT_RE = /\b(last session|previous session|prior session|earlier session|last time|where we left off|pick(?:ing)? up where|continue (?:working|where|on|our|the|with|that|this)|carry on (?:with|where)|what we (?:discussed|talked about|were (?:doing|working))|resume (?:our|that|this|work|the (?:work|session|project|task|conversation|thread|discussion))|recap (?:of )?(?:our|the|last)|yesterday we|earlier we|we were working on)\b/i;
+exports.RESUME_INTENT_RE = /\b(last session|previous session|prior session|earlier session|last time|where we left off|pick(?:ing)? up where|continue (?:working|where|on|our|the|with|that|this|from)|carry on (?:with|where)|what we (?:discussed|talked about|were (?:doing|working))|resume (?:our|that|this|work|the (?:work|session|project|task|conversation|thread|discussion))|recap (?:of )?(?:our|the|last)|yesterday we|earlier we|we were working on)\b/i;
+// Strip ALL intent phrases from a prompt (Python's re.sub replaces every match). Separate
+// global-flagged copy on purpose: never put `g` on RESUME_INTENT_RE itself — isResumeIntent()
+// calls .test() on it, and a global regex makes .test() stateful via lastIndex.
+const RESUME_INTENT_STRIP_RE = new RegExp(exports.RESUME_INTENT_RE.source, "gi");
 /**
  * True when the prompt asks to continue or recall prior work.
  * Exported for tests.
@@ -841,11 +867,11 @@ const RESUME_TOPIC_BAR = Number.parseFloat(process.env.TOKEN_OPTIMIZER_RESUME_TO
  * Mirrors Python _resume_topic_score in measure.py.
  */
 function resumeTopicScore(promptText, checkpointContent) {
-    const residual = (promptText ?? "").toLowerCase().replace(exports.RESUME_INTENT_RE, " ");
-    const topicTokens = new Set((residual.match(/[a-zA-Z0-9_./:-]+/g) ?? []).filter((w) => w.length > 3 && !RESUME_TOPIC_STOPWORDS.has(w)));
+    const residual = (promptText ?? "").toLowerCase().replace(RESUME_INTENT_STRIP_RE, " ");
+    const topicTokens = extractTopicTokens(residual, RESUME_TOPIC_STOPWORDS);
     if (topicTokens.size === 0)
         return 0.0;
-    const cpTokens = new Set((checkpointContent.toLowerCase().match(/[a-zA-Z0-9_./:-]+/g) ?? []).filter((w) => w.length > 3));
+    const cpTokens = extractTopicTokens(checkpointContent);
     if (cpTokens.size === 0)
         return 0.0;
     let hits = 0;
