@@ -28770,7 +28770,7 @@ def _checkpoint_topic_score(prompt_text, checkpoint, cwd=None):
 # resume/fresh first-prompt mix (tests/baselines/replay-metrics.json). Tuned so
 # genuine resumes clear it and fresh/unrelated openings stay below it.
 CHECKPOINT_RELEVANCE_THRESHOLD = _float_env(
-    "TOKEN_OPTIMIZER_CHECKPOINT_RELEVANCE_THRESHOLD", 0.35
+    "TOKEN_OPTIMIZER_CHECKPOINT_RELEVANCE_THRESHOLD", 0.25
 )
 
 # Recency prior: a small, weak bonus for a fresh checkpoint, never enough on its
@@ -28782,6 +28782,15 @@ _RELEVANCE_RECENCY_WINDOW_MIN = 180
 # working set lives under it. Small enough that content overlap still governs;
 # the scorer works WITHOUT it (R4).
 _RELEVANCE_CWD_BONUS = 0.10
+# Resume-intent bonus (U6 calibration): when the prompt carries a resume cue
+# ("continue working on...", "resume the...", "pick up where...") AND there is
+# SOME content overlap (content_score > 0), add this bonus. Real resume prompts
+# are often long and verbose, so pure precision under-scores them; the bonus
+# lifts genuine resume prompts over the threshold while fresh prompts that
+# happen to mention a topic (no resume cue) stay below. A bare "continue" with
+# no topical tokens has content_score = 0.0, so it gets NO bonus and stays
+# below the bar (#129).
+_RELEVANCE_RESUME_INTENT_BONUS = 0.15
 
 # Harness / task-notification markup that can pollute ``active_task``. Stripped
 # before tokenizing so forged sentinels and scheduler noise do not masquerade as
@@ -28904,6 +28913,18 @@ def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
         content_score = sum(idf[t] for t in hits) / denom
 
     score = content_score
+    # U6 resume-intent bonus: when the prompt carries a resume cue AND there is
+    # some content overlap, add a bonus. Real resume prompts are often long and
+    # verbose, so pure precision under-scores them; the bonus lifts genuine
+    # resume prompts over the threshold while fresh prompts that happen to
+    # mention a topic (no resume cue) stay below. A bare "continue" with no
+    # topical tokens has content_score = 0.0, so it gets NO bonus (#129).
+    if content_score > 0.0:
+        try:
+            if _resume_intent(str(text or "")):
+                score += _RELEVANCE_RESUME_INTENT_BONUS
+        except Exception:
+            pass
     # Weak recency prior (never enough alone to clear the threshold). Only apply
     # when the checkpoint has SOME parseable content -- a non-UTF-8 / sidecarless
     # checkpoint must score a clean 0.0, not 0.0 + a recency tip (#127/#28760).
@@ -28950,7 +28971,7 @@ _RESUME_INTENT_RE = re.compile(
     # "from" added so "continue from checkpoint" / "continue from where we left off"
     # is recognized; the cue is the verb "continue from", NOT a bare "from
     # checkpoint" (which would false-match "import data from checkpoint file").
-    r"continue (?:working|where|on|our|the|with|that|this|from)|"
+    r"continue (?:working|where|on|our|the|with|that|this|from|to)|"
     r"carry on (?:with|where)|what we (?:discussed|talked about|were (?:doing|working))|"
     r"resume (?:our|that|this|work|the (?:work|session|project|task|conversation|thread|discussion))|"
     r"recap (?:of )?(?:our|the|last)|"

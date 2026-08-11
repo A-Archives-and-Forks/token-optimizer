@@ -1,0 +1,219 @@
+{
+  "_comment": "Sanitized real-history fixtures for U6 (R6). Openings are derived from real Claude Code session first-prompts (home-dir project, 2026-07). Checkpoint sidecars are synthetic but topic-faithful to the work those sessions resumed. All PII, image refs, URLs to private paths, and session-internal handover text have been stripped. No secrets. Incidents are labeled by their GitHub issue number.",
+  "resume_openings": [
+    {
+      "id": "resume-tr-previous-run",
+      "prompt": "continue the total recall session from the previous run today - latest message was about where things stand, grounded in the actual git state",
+      "expected_checkpoint_id": "cp-total-recall"
+    },
+    {
+      "id": "resume-to-mcp-bug",
+      "prompt": "Let's continue working on Token Optimizer. The MCP bug that we fixed the other day is still happening. Here is the user responding. I think it was issue 88 or something.",
+      "expected_checkpoint_id": "cp-token-optimizer-mcp"
+    },
+    {
+      "id": "resume-panorays-revamp",
+      "prompt": "continue the panorays site revamp session can you grab the data?",
+      "expected_checkpoint_id": "cp-panorays-revamp"
+    },
+    {
+      "id": "resume-tr-thin-results",
+      "prompt": "Please continue working on Total-Recall. The last session about Total-Recall was investigating thin results in Recall sessions.",
+      "expected_checkpoint_id": "cp-total-recall"
+    },
+    {
+      "id": "resume-headline-media",
+      "prompt": "I want us to continue to work on the Headline Media website, the current client site that we have. I started making some updates.",
+      "expected_checkpoint_id": "cp-headline-media"
+    },
+    {
+      "id": "resume-to-parity",
+      "prompt": "continue working on token optimizer for full parity of the recent changes",
+      "expected_checkpoint_id": "cp-token-optimizer-mcp"
+    }
+  ],
+  "fresh_openings": [
+    {
+      "id": "fresh-hello",
+      "prompt": "hello"
+    },
+    {
+      "id": "fresh-karpathy-gist",
+      "prompt": "read this full idea by karpathy about how text as an image can be cheaper than pure text, then check with the current research of what we want to do with total recall"
+    },
+    {
+      "id": "fresh-telegram-guardrail",
+      "prompt": "We recently added some guardrail with Telegram for specific moves that Ms. Chief can make, and it has made her completely inept and inefficient for me when I tag her in chats with other people."
+    },
+    {
+      "id": "fresh-morning-brief-missing",
+      "prompt": "what's going on with those? The morning brief didn't arrive and those updates, and why is Gemini jumping in? Why didn't the Claude instances work?"
+    },
+    {
+      "id": "fresh-marketing-brains",
+      "prompt": "At 10x company, we are building marketing brains and GTM brains for teams. Right now, what we have is the 10x brain skill, but I think we need to make this more modular."
+    },
+    {
+      "id": "fresh-security-scans",
+      "prompt": "hey Galit sent over 2 security scans of an optimizer and repo forensics repos: can you please check out? see if any of these are actually relevant."
+    }
+  ],
+  "checkpoints": [
+    {
+      "id": "cp-total-recall",
+      "filename": "aaaa1111-20260720-090000-checkpoint.md",
+      "active_task": "Total Recall v2: investigate thin results in Recall sessions, improve retrieval quality",
+      "decisions": [
+        "Switch to LoCoMo benchmark for eval",
+        "Add LongMemEval as secondary benchmark"
+      ],
+      "modified_files": [
+        "/Users/alex/projects/total-recall/core/recall.py",
+        "/Users/alex/projects/total-recall/core/retrieval.py"
+      ],
+      "trigger": "stop",
+      "age_seconds": 600
+    },
+    {
+      "id": "cp-token-optimizer-mcp",
+      "filename": "bbbb2222-20260720-100000-checkpoint.md",
+      "active_task": "Token Optimizer: fix MCP bug issue 88, full parity of recent changes",
+      "decisions": [
+        "Patch MCP hook resolver to handle missing config",
+        "Sync mirror after fix"
+      ],
+      "modified_files": [
+        "/Users/alex/projects/token-optimizer/measure.py",
+        "/Users/alex/projects/token-optimizer/hooks/hooks.json"
+      ],
+      "trigger": "stop",
+      "age_seconds": 1200
+    },
+    {
+      "id": "cp-panorays-revamp",
+      "filename": "cccc3333-20260720-110000-checkpoint.md",
+      "active_task": "Panorays website revamp: redesign landing page, migrate content, grab site data",
+      "decisions": [
+        "Use Tailwind for the new landing page",
+        "Migrate blog posts last"
+      ],
+      "modified_files": [
+        "/Users/alex/projects/panorays-site/src/index.html",
+        "/Users/alex/projects/panorays-site/src/styles.css"
+      ],
+      "trigger": "stop",
+      "age_seconds": 1800
+    },
+    {
+      "id": "cp-headline-media",
+      "filename": "dddd4444-20260720-120000-checkpoint.md",
+      "active_task": "Headline Media website: client site updates, list reviewer skill integration",
+      "decisions": [
+        "Update the list reviewer skill for Headline Media",
+        "Fix responsive layout on mobile"
+      ],
+      "modified_files": [
+        "/Users/alex/projects/headline-media/src/components/ReviewList.tsx",
+        "/Users/alex/projects/headline-media/src/pages/index.tsx"
+      ],
+      "trigger": "stop",
+      "age_seconds": 900
+    }
+  ],
+  "incidents": [
+    {
+      "id": "incident-129-vague-continue-stale",
+      "issue": 129,
+      "description": "Vague 'continue' + stale unrelated pool -> below threshold, no pointer",
+      "prompt": "continue",
+      "checkpoints": [
+        {
+          "id": "cp-unrelated-marketing",
+          "filename": "eeee5555-20260715-090000-checkpoint.md",
+          "active_task": "marketing audit content strategy for Q2",
+          "decisions": [],
+          "modified_files": ["/Users/alex/projects/marketing-audit/report.md"],
+          "trigger": "stop",
+          "age_seconds": 7200
+        }
+      ],
+      "expected": "no_match"
+    },
+    {
+      "id": "incident-61-cross-project-leak",
+      "issue": 61,
+      "description": "Cross-project leak: a token-optimizer checkpoint must not surface in an unrelated project's session",
+      "prompt": "help me write a linkedin post about our marketing services",
+      "cwd": "/Users/alex/projects/marketing-agency",
+      "checkpoints": [
+        {
+          "id": "cp-token-optimizer-unrelated",
+          "filename": "ffff6666-20260720-100000-checkpoint.md",
+          "active_task": "Token Optimizer: fix checkpoint injection in measure.py",
+          "decisions": [],
+          "modified_files": ["/Users/alex/projects/token-optimizer/measure.py"],
+          "trigger": "stop",
+          "age_seconds": 300
+        }
+      ],
+      "expected": "no_match"
+    },
+    {
+      "id": "incident-own-session-exclusion",
+      "issue": null,
+      "description": "Own-session checkpoint is never surfaced to itself",
+      "prompt": "continue the token optimizer checkpoint injection fix",
+      "session_id": "aaaa1111-2222-4333-8444-aaaaaaaaaaaa",
+      "checkpoints": [
+        {
+          "id": "cp-own-session",
+          "filename": "aaaa1111-2222-4333-8444-aaaaaaaaaaaa-20260720-100000-checkpoint.md",
+          "active_task": "Token Optimizer: fix checkpoint injection in measure.py",
+          "decisions": [],
+          "modified_files": ["/Users/alex/projects/token-optimizer/measure.py"],
+          "trigger": "stop",
+          "age_seconds": 300
+        }
+      ],
+      "expected": "no_match"
+    },
+    {
+      "id": "incident-non-utf8",
+      "issue": null,
+      "description": "Non-UTF-8 checkpoint content with no sidecar scores 0.0 without aborting the candidate loop",
+      "prompt": "continue the token optimizer checkpoint injection fix",
+      "checkpoints": [
+        {
+          "id": "cp-non-utf8",
+          "filename": "abcd1234-20260720-100000-checkpoint.md",
+          "active_task": null,
+          "decisions": [],
+          "modified_files": [],
+          "trigger": "stop",
+          "age_seconds": 300,
+          "corrupt_body": true,
+          "no_sidecar": true
+        }
+      ],
+      "expected": "no_match"
+    },
+    {
+      "id": "incident-cjk",
+      "issue": 127,
+      "description": "CJK (Korean) opening prompt tokenizes without crashing, scores sensibly",
+      "prompt": "결제 모듈 리팩터링 다시 시작",
+      "checkpoints": [
+        {
+          "id": "cp-cjk-match",
+          "filename": "bbbb2222-20260720-100000-checkpoint.md",
+          "active_task": "결제 모듈 리팩터링 및 테스트",
+          "decisions": [],
+          "modified_files": ["/Users/alex/projects/token-optimizer/measure.py"],
+          "trigger": "stop",
+          "age_seconds": 300
+        }
+      ],
+      "expected": "match"
+    }
+  ]
+}
