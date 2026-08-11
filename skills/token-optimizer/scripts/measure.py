@@ -38288,6 +38288,107 @@ def _verbosity_measured_savings(baseline_avg, post_nudge_outputs):
     return int(delta * len(outs))
 
 
+def _calibrate_prior_verbosity_nudges(session_id, filepath):
+    """Book the MEASURED saving of a prior verbosity nudge (U5, R5, D1).
+
+    The nudge event itself books 0 -- there is no counterfactual at fire time.
+    This pass runs on a later UserPromptSubmit turn: it finds the most recent
+    ``verbosity_steer`` event for this session, reads how many pre-nudge turns
+    and what pre-nudge average output it recorded, then measures the ACTUAL
+    post-nudge output from the live transcript and books
+    ``max(0, baseline - post_avg) x post_turns`` as a ``verbosity_steer_measured``
+    event via :func:`_verbosity_measured_savings`. Without this wiring the
+    measurement was dead code -- nothing in the real path ever computed the
+    counterfactual, so a nudge's saving was never actually credited (D1).
+
+    Idempotent per source nudge: a measured row records ``calibrates_ts=<ts>`` of
+    the nudge it settled, and calibrated timestamps are skipped, so it never
+    double-credits. When there are no post-nudge turns yet the nudge is left
+    uncalibrated for a later turn to measure. Returns the measured tokens booked
+    (0 if none). Best-effort: never raises into the caller.
+    """
+    try:
+        if not filepath or not Path(filepath).exists():
+            return 0
+        sid = str(session_id or "").strip()
+        if not sid:
+            return 0
+        session_uuid, _ = _extract_session_uuid(sid)
+        conn = _init_trends_db()
+        try:
+            rows = conn.execute(
+                "SELECT timestamp, detail FROM savings_events "
+                "WHERE event_type='verbosity_steer' "
+                "AND (session_id = ? OR session_uuid = ?) "
+                "AND detail LIKE '%pre_turns=%' "
+                "ORDER BY timestamp DESC LIMIT 5",
+                (sid, session_uuid),
+            ).fetchall()
+            done = conn.execute(
+                "SELECT detail FROM savings_events "
+                "WHERE event_type='verbosity_steer_measured' "
+                "AND (session_id = ? OR session_uuid = ?)",
+                (sid, session_uuid),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        calibrated_ts = set()
+        for (d,) in done:
+            match = re.search(r"calibrates_ts=(\S+)", d or "")
+            if match:
+                calibrated_ts.add(match.group(1))
+
+        source = None
+        for ts, detail in rows:
+            if ts in calibrated_ts:
+                continue
+            source = (ts, detail or "")
+            break
+        if not source:
+            return 0
+        src_ts, src_detail = source
+        m_turns = re.search(r"pre_turns=(\d+)", src_detail)
+        m_avg = re.search(r"pre_avg_out=(\d+)", src_detail)
+        if not m_turns or not m_avg:
+            return 0
+        pre_turns = int(m_turns.group(1))
+        pre_avg = int(m_avg.group(1))
+
+        # Collect assistant output_tokens in transcript order.
+        outputs = []
+        for line in Path(filepath).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if entry.get("type") == "assistant" and "message" in entry:
+                out = int(entry["message"].get("usage", {}).get("output_tokens", 0) or 0)
+                if out > 0:
+                    outputs.append(out)
+
+        post_outputs = outputs[pre_turns:]
+        if not post_outputs:
+            # No post-nudge turns yet: nothing to measure. Leave the nudge
+            # uncalibrated so a later turn settles it.
+            return 0
+
+        measured = _verbosity_measured_savings(pre_avg, post_outputs)
+        _log_savings_event(
+            "verbosity_steer_measured",
+            measured,
+            session_id=sid,
+            detail=(f"calibrates_ts={src_ts} post_turns={len(post_outputs)} "
+                    f"pre_avg_out={pre_avg}"),
+        )
+        return measured
+    except Exception:
+        return 0
+
+
 def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
     """Tiered conciseness nudge for UserPromptSubmit.
 
@@ -38380,6 +38481,18 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
                     "the inferred transcript against.\n"
                 )
             return ""
+
+        # U5/D1: before deciding on a new nudge, settle any prior nudge in this
+        # session whose post-nudge output we can now observe. The nudge event
+        # books 0 at fire time; THIS is where the real counterfactual
+        # (_verbosity_measured_savings) is computed and credited. Runs before the
+        # cooldown/fill early-returns so a settled nudge is measured even on a
+        # turn that does not itself nudge. Best-effort; never blocks the nudge.
+        try:
+            _calibrate_prior_verbosity_nudges(
+                session_id or os.environ.get("CLAUDE_SESSION_ID", ""), filepath)
+        except Exception:
+            pass
 
         window_note = _format_window_note(cached)
 
