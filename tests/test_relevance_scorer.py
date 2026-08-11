@@ -189,6 +189,68 @@ def test_cjk_opening_prompt_tokenizes_and_scores(m, tmp_path):
         f"CJK topical overlap must clear the threshold; got {score}")
 
 
+# --- T8: adversarial keyword-stuffing cannot game the score above threshold (D3) ---
+
+def _big_doc_cp(tmp_path):
+    """A checkpoint whose sidecar carries MANY distinctive topic tokens."""
+    return _write_cp(
+        tmp_path, "aaaa1111-20260811-120000-checkpoint.md",
+        active_task=("Refactor payment gateway reconcile stripe webhook retries migrate "
+                     "ledger schema backfill invoices harden idempotency reconciliation "
+                     "dashboard currency rounding refunds"),
+        decisions=["adopt double-entry bookkeeping model",
+                   "shard ledger by tenant identifier",
+                   "encrypt cardholder tokens at rest",
+                   "replay webhooks through durable queue",
+                   "expose settlement metrics prometheus exporter"],
+        modified_files=["src/payments/gateway.py", "src/payments/ledger.py",
+                        "src/payments/webhooks.py", "src/payments/settlement.py",
+                        "src/billing/invoices.py", "src/billing/refunds.py"])
+
+
+def test_keyword_stuffing_cannot_exceed_threshold(m, tmp_path):
+    """D3: the OLD scorer was pure precision (hits_weight / prompt_weight), which
+    hits 1.0 whenever every prompt token appears in the doc. An adversarial fresh
+    opening keyword-stuffed from a large checkpoint's own vocabulary therefore
+    scored a perfect 1.0 with NO resume cue. The length-normalized (F1) scorer
+    folds in recall, so covering only a sliver of a big checkpoint cannot clear
+    the bar."""
+    cp = _big_doc_cp(tmp_path)
+
+    # A fresh opening (no resume cue) stuffed with a few of the checkpoint's own
+    # distinctive tokens. Every token is present in the doc -> OLD precision = 1.0.
+    stuffed = "stripe webhook ledger"
+    prompt_tokens = m._topic_tokens(stuffed, m._RESUME_TOPIC_STOPWORDS)
+    doc_tokens = m._checkpoint_sidecar_doc_tokens(cp)
+    assert prompt_tokens and prompt_tokens.issubset(doc_tokens), (
+        "fixture sanity: every stuffed token must be in the doc so OLD precision "
+        "would have been a perfect 1.0")
+
+    score = m.checkpoint_relevance_score(stuffed, cp, pool=[cp])
+    assert score < m.CHECKPOINT_RELEVANCE_THRESHOLD, (
+        f"keyword-stuffed fresh opening must NOT clear the threshold; got {score}")
+
+    # An unrelated opening padded with buzzwords (its own topic + a token that
+    # grazes the doc) must also stay well below.
+    padded = ("kubernetes helm chart rollout canary istio sidecar mesh "
+              "observability grafana stripe")
+    padded_score = m.checkpoint_relevance_score(padded, cp, pool=[cp])
+    assert padded_score < m.CHECKPOINT_RELEVANCE_THRESHOLD, (
+        f"unrelated keyword-padded opening must stay below threshold; got {padded_score}")
+
+
+def test_genuine_broad_resume_still_clears(m, tmp_path):
+    """No over-correction: a genuine resume that covers the checkpoint's real
+    topic (not padding) still clears the threshold."""
+    cp = _big_doc_cp(tmp_path)
+    genuine = ("continue the payment gateway work: the stripe webhook retries, the "
+               "ledger schema migration, the invoices backfill and the refunds "
+               "reconciliation")
+    score = m.checkpoint_relevance_score(genuine, cp, pool=[cp])
+    assert score >= m.CHECKPOINT_RELEVANCE_THRESHOLD, (
+        f"a genuine broad-coverage resume must still clear the threshold; got {score}")
+
+
 # --- T7: threshold constant is exposed and documented as calibrated ---
 
 def test_threshold_constant_exposed(m):

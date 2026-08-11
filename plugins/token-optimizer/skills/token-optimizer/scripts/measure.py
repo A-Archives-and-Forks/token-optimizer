@@ -28792,6 +28792,12 @@ _RELEVANCE_CWD_BONUS = 0.10
 # below the bar (#129).
 _RELEVANCE_RESUME_INTENT_BONUS = 0.15
 
+# D3 (stuffing defense): cap each term's IDF contribution so a single ultra-rare
+# token cannot spike the score, and length-normalize the overlap (see
+# checkpoint_relevance_score) so an opening that pads itself with many keywords
+# cannot reach 1.0 by precision alone. Calibrated so genuine resumes still clear.
+_RELEVANCE_IDF_CAP = _float_env("TOKEN_OPTIMIZER_RELEVANCE_IDF_CAP", 3.0)
+
 # Harness / task-notification markup that can pollute ``active_task``. Stripped
 # before tokenizing so forged sentinels and scheduler noise do not masquerade as
 # topical content. Tags are removed wholesale; the residual text is then passed
@@ -28904,13 +28910,33 @@ def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
                 df[t] = df.get(t, 0) + 1
         n = len(pool_docs)
         import math as _math
-        idf = {}
-        for t in prompt_tokens:
+
+        def _idf(t):
+            # IDF over the pool, CAPPED (D3) so one ultra-rare term cannot
+            # dominate the sum. df(t) = # pool checkpoints whose doc contains t.
             d = df.get(t, 0)
-            idf[t] = _math.log((n + 1) / (d + 1)) + 1.0
+            return min(_math.log((n + 1) / (d + 1)) + 1.0, _RELEVANCE_IDF_CAP)
+
         hits = prompt_tokens & doc_tokens
-        denom = sum(idf[t] for t in prompt_tokens) or 1.0
-        content_score = sum(idf[t] for t in hits) / denom
+        # Length-normalized overlap via IDF-weighted F1, NOT precision (D3).
+        # Bare precision (hits_weight / prompt_weight) tops out at 1.0 whenever
+        # EVERY prompt token happens to appear in the doc, so an opening
+        # keyword-stuffed from a checkpoint's own vocabulary scored a perfect 1.0
+        # and sailed past the threshold with no resume cue at all. F1 folds in
+        # RECALL (how much of the checkpoint's distinctive content the opening
+        # actually covers), so a stuffed opening that reproduces only a small
+        # fraction of a large checkpoint is dragged down by low recall and cannot
+        # clear the bar, while a genuine resume that covers the checkpoint's real
+        # topic still scores well regardless of incidental padding.
+        matched_weight = sum(_idf(t) for t in hits)
+        prompt_weight = sum(_idf(t) for t in prompt_tokens) or 1.0
+        doc_weight = sum(_idf(t) for t in doc_tokens) or 1.0
+        precision = matched_weight / prompt_weight
+        recall = matched_weight / doc_weight
+        if precision + recall > 0:
+            content_score = 2 * precision * recall / (precision + recall)
+        else:
+            content_score = 0.0
 
     score = content_score
     # U6 resume-intent bonus: when the prompt carries a resume cue AND there is
