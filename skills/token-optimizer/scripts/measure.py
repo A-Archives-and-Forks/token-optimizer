@@ -28884,7 +28884,12 @@ _CHECKPOINT_SCAFFOLD_STOPWORDS = frozenset({
     # folder-skeleton container words
     "retainer", "deliverables", "deliverable", "clients", "client",
     "reports", "report", "references", "reference", "scripts", "script",
-    "config", "configs", "company", "brain", "src", "lib", "libs",
+    # NOTE: only UNIVERSAL filesystem/dev-scaffolding words belong here -- never a
+    # word that can be part of a real project slug. "company"/"brain" were removed
+    # (2026-08-12): they name a real sub-project (gambit-company-brain), and listing
+    # them made "continue working on the company brain" score 0.0 on a genuine
+    # resume (a curated-against-one-tree false negative, flagged by Fable review).
+    "config", "configs", "src", "lib", "libs",
     "app", "apps", "data", "notes", "note", "file", "files", "docs", "doc",
     "projects", "project", "sessions", "session", "build", "builds",
     # file-extension + doc-type basename noise: a dated brief filename like
@@ -29077,10 +29082,18 @@ def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
         for _t in base_tokens:
             if any(_c in _t for _c in "\\/-_.:"):
                 for _w in _PATH_WORD_SPLIT_RE.split(_t):
+                    # Keep every distinctive (non-stopword, non-digit, non-scaffold)
+                    # sub-word, whether or not it hits the doc. A hitting sub-word
+                    # helps precision; a NON-hitting distinctive one (e.g. a foreign
+                    # client name "acme" in a pasted path) must stay in the prompt
+                    # set so it dilutes precision -- otherwise dropping it makes
+                    # precision 1.0 by construction and a foreign path grazing one
+                    # shared word false-matches the wrong client (H2 regression).
+                    # Scaffolding/generic segments (users/reports/...) and pure
+                    # digits are still excluded so they neither help nor dilute.
                     if (_w and _w not in _RESUME_TOPIC_STOPWORDS
                             and _topic_token_kept(_w) and not _w.isdigit()
-                            and _w not in _CHECKPOINT_SCAFFOLD_STOPWORDS
-                            and _w in doc_tokens):
+                            and _w not in _CHECKPOINT_SCAFFOLD_STOPWORDS):
                         prompt_tokens.add(_w)
             else:
                 prompt_tokens.add(_t)
@@ -29159,13 +29172,17 @@ def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
                 return 1.0
             return 1.0 + _RELEVANCE_PATH_TF_WEIGHT * min(tf, _RELEVANCE_PATH_TF_CAP)
 
+        # M2: PRECISION counts every token symmetrically in BOTH the numerator and
+        # the denominator (no CJK special-casing). An earlier attempt excluded CJK
+        # from the denominator only, which let CJK hits push precision past 1.0 and a
+        # pure-CJK one-word graze false-match the WRONG checkpoint (0.52). Excluding
+        # CJK from both sides instead zeroed out LEGITIMATE pure-CJK resumes (no Latin
+        # basis -> precision 0). Symmetric inclusion is correct on all three: precision
+        # is bounded at 1.0; a genuine CJK resume that covers its checkpoint's CJK
+        # topic scores high; a CJK graze that shares one word of several is diluted by
+        # the unmatched CJK words in prompt_weight and stays below the bar.
         matched_plain = sum(_idf(t) for t in hits)
-        # M2: exclude CJK / non-Latin glue tokens (ord >= U+3000) from the PRECISION
-        # denominator only. A non-Latin resume ("...결제 모듈 작업을 이어서") pads with
-        # grammatical particles that never appear in the doc; counting them in
-        # prompt_weight diluted precision below the bar. Latin-only prompts have no
-        # CJK tokens, so their prompt_weight is unchanged and the acme guard holds.
-        prompt_weight = sum(_idf(t) for t in prompt_tokens if not _has_cjk(t)) or 1.0
+        prompt_weight = sum(_idf(t) for t in prompt_tokens) or 1.0
         matched_doc_weight = sum(_idf(t) * _path_weight(t) for t in hits)
         doc_weight = sum(_idf(t) * _path_weight(t) for t in doc_tokens) or 1.0
         precision = matched_plain / prompt_weight

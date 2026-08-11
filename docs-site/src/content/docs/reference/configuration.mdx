@@ -74,6 +74,11 @@ These tune `checkpoint_relevance_score`, the IDF-weighted content-overlap scorer
 | `TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_WEIGHT` | 0.5 | 0.0–2.0 | Weight of the path-identity frequency boost (a token recurring across a checkpoint's file paths out-ranks the same word quoted once in prose). 0 disables the boost. |
 | `TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_CAP` | 8 | 1–50 | Cap on the per-token path frequency counted by the boost, so one mega-repeated path segment cannot dominate recall. |
 | `TOKEN_OPTIMIZER_RELEVANCE_IDF_CAP` | 3.0 | 1.0–100.0 | Cap on each term's IDF contribution, so one ultra-rare token cannot spike the score (keyword-stuffing defense). |
+
+### Checkpoint & continuity triggers
+
+| Variable | Default | Effect |
+|---|---|---|
 | `TOKEN_OPTIMIZER_EDIT_BATCH_WRITE_THRESHOLD` | 4 | Write-count delta that triggers an edit-batch checkpoint |
 | `TOKEN_OPTIMIZER_EDIT_BATCH_FILE_THRESHOLD` | 3 | Changed-file delta that triggers an edit-batch checkpoint |
 | `TOKEN_OPTIMIZER_CONTINUITY_MAX_SESSIONS` | 5 | Maximum prior sessions represented in a continuity hint |
