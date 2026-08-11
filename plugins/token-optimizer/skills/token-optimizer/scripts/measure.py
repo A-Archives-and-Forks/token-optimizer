@@ -38240,6 +38240,33 @@ def _format_window_note(cached):
     return f" ({size} window, source: {source})" if source else f" ({size} window)"
 
 
+def _verbosity_measured_savings(baseline_avg, post_nudge_outputs):
+    """Measured output-token savings from a verbosity nudge (U5, R5).
+
+    Computes the REAL saving from post-nudge output: max(0, baseline_avg -
+    actual_post_nudge_avg) x turns. Never an estimate, never a negative
+    saving. ``baseline_avg`` is the session's pre-nudge average output tokens
+    (recorded in the nudge event detail). ``post_nudge_outputs`` is the list of
+    output_tokens for the turns AFTER the nudge. Returns 0 when there is no
+    post-nudge data yet (no counterfactual to measure against).
+    """
+    try:
+        baseline = int(baseline_avg) if baseline_avg is not None else 0
+    except (TypeError, ValueError):
+        return 0
+    try:
+        outs = [int(o) for o in (post_nudge_outputs or []) if int(o) > 0]
+    except (TypeError, ValueError):
+        return 0
+    if not outs:
+        return 0
+    post_avg = sum(outs) / len(outs)
+    delta = baseline - post_avg
+    if delta <= 0:
+        return 0
+    return int(delta * len(outs))
+
+
 def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
     """Tiered conciseness nudge for UserPromptSubmit.
 
@@ -38417,19 +38444,20 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
             },
         })
 
-        # Log estimated output token savings (best-effort, non-blocking).
-        # The 10-15% reduction is an ASSUMPTION — we can't measure the counterfactual
-        # (what the model would have output without the nudge). But we CAN record the
-        # session's prior average output tokens so a follow-through calibration can
-        # compare the actual post-nudge output against the pre-nudge baseline.
+        # U5 (R5): book 0 at nudge time. The old code booked a hardcoded
+        # 10-15% x 800 ASSUMED saving the moment the nudge fired, without
+        # measuring the counterfactual. In the competitor's data output actually
+        # ROSE after the nudge, so the assumed figure was actively wrong. Now:
+        # the nudge event books 0 (no counterfactual yet), and we record the
+        # session's pre-nudge avg output so a later calibration pass can compute
+        # the real measured saving via _verbosity_measured_savings (max(0,
+        # baseline_avg - actual_post_nudge_avg) x turns). Never an estimate,
+        # never a negative saving.
         try:
             _session_id = session_id or os.environ.get("CLAUDE_SESSION_ID", "")
-            _est_output_reduction = 0.10 if fill_pct < 75 else 0.15
-            _avg_response_tokens = 800
-            _est_saved = int(_avg_response_tokens * _est_output_reduction)
 
             # Empirical calibration: record the session's pre-nudge avg output
-            # so we can later compare against the actual post-nudge output.
+            # so a later pass can compare against the actual post-nudge output.
             _pre_nudge_avg_output = 0
             _pre_nudge_turns = 0
             try:
@@ -38460,7 +38488,7 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
                        f" pre_avg_out={_pre_nudge_avg_output} pre_turns={_pre_nudge_turns}")
             _log_savings_event(
                 "verbosity_steer",
-                _est_saved,
+                0,
                 session_id=_session_id,
                 detail=_detail,
             )
