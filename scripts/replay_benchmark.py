@@ -159,7 +159,10 @@ def _cp_from_spec(tmp_path, spec):
             "decisions": spec.get("decisions", []),
             "modified_files": [{"path": p, "action": "edit", "range": None}
                                for p in spec.get("modified_files", [])],
-            "recent_reads": [],
+            # Honor the spec's recent_reads (real checkpoints carry project
+            # identity in read paths too). Defaults to [] when absent, so older
+            # specs are unchanged.
+            "recent_reads": list(spec.get("recent_reads", [])),
         }
         sidecar_path = tmp_path / cp_path.name.replace(".md", ".json")
         sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
