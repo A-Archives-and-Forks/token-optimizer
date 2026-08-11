@@ -28628,6 +28628,179 @@ def _checkpoint_topic_score(prompt_text, checkpoint, cwd=None):
     return min(score, 1.0), sidecar
 
 
+# --- U2: content-based, cwd-free, IDF-weighted checkpoint relevance scorer ---
+#
+# Defensible relevance of an opening prompt (or any opening-context text) against
+# a checkpoint's SIDECAR fields, without folder/path-prefix matching (R4). Overlap
+# is weighted by inverse document frequency across the checkpoint pool so generic
+# glue ("the", "run", "fix", "build") that appears in every checkpoint cannot
+# dominate. Recency is only a weak prior; cwd is an OPTIONAL same-work bonus and
+# is never required. Sanitizes harness markup out of sidecar fields first so a
+# polluted ``active_task`` (e.g. ``<task-notification>`` noise) cannot skew the
+# score. Never raises: a non-UTF-8 / unreadable checkpoint scores 0.0 for itself
+# and never aborts the candidate loop.
+#
+# Calibration source for the threshold: the U7 replay benchmark over the real
+# resume/fresh first-prompt mix (tests/baselines/replay-metrics.json). Tuned so
+# genuine resumes clear it and fresh/unrelated openings stay below it.
+CHECKPOINT_RELEVANCE_THRESHOLD = _float_env(
+    "TOKEN_OPTIMIZER_CHECKPOINT_RELEVANCE_THRESHOLD", 0.35
+)
+
+# Recency prior: a small, weak bonus for a fresh checkpoint, never enough on its
+# own to clear the threshold (a bare "continue" with no topical or same-work
+# signal must stay below the bar -- #129). Window matches the legacy scorer.
+_RELEVANCE_RECENCY_BONUS = 0.05
+_RELEVANCE_RECENCY_WINDOW_MIN = 180
+# Optional same-work bonus when a caller hands a cwd and the checkpoint's
+# working set lives under it. Small enough that content overlap still governs;
+# the scorer works WITHOUT it (R4).
+_RELEVANCE_CWD_BONUS = 0.10
+
+# Harness / task-notification markup that can pollute ``active_task``. Stripped
+# before tokenizing so forged sentinels and scheduler noise do not masquerade as
+# topical content. Tags are removed wholesale; the residual text is then passed
+# through _safe_recovered_scalar for control-char / whitespace normalization.
+_SIDECAR_MARKUP_TAG_RE = re.compile(r"<[A-Za-z/][^<>]*>")
+_SIDECAR_MARKUP_SENTINELS = (
+    "task-notification", "system:", "scheduled task", "[token optimizer]",
+)
+
+
+def _sanitize_sidecar_text(value, limit=400):
+    """Strip harness markup + control chars from a sidecar scalar before scoring.
+
+    A polluted ``active_task`` like ``<task-notification>system: scheduled task
+    #7 fired</task-notification> fix checkpoint injection`` must be reduced to
+    its real content so the markup tokens do not inflate relevance. Never
+    raises; returns '' on any error.
+    """
+    try:
+        text = str(value or "")
+    except Exception:
+        return ""
+    text = _SIDECAR_MARKUP_TAG_RE.sub(" ", text)
+    # Drop standalone sentinel phrases the tags leave behind.
+    for sent in _SIDECAR_MARKUP_SENTINELS:
+        text = text.replace(sent, " ")
+    return _safe_recovered_scalar(text, limit=limit)
+
+
+def _checkpoint_sidecar_doc_tokens(checkpoint_path):
+    """Distinctive topic tokens drawn from a checkpoint's sidecar fields.
+
+    Builds a single ``document`` from the sanitized sidecar fields that actually
+    carry topic signal: ``active_task``, ``topic``, ``decisions``,
+    ``modified_files`` basenames, ``recent_reads`` basenames, and ``active_plan``.
+    Returns a set of lowercase topic tokens (via the shared non-English tokenizer
+    so CJK sidecars score correctly). Returns an empty set on any error or when
+    the sidecar is absent/empty -- the scorer then falls back to 0.0 for content.
+    """
+    try:
+        sc = _read_checkpoint_sidecar(checkpoint_path) or {}
+    except Exception:
+        return set()
+    parts = [_sanitize_sidecar_text(sc.get("active_task")),
+             _sanitize_sidecar_text(sc.get("topic")),
+             _sanitize_sidecar_text(sc.get("active_plan"))]
+    for d in (sc.get("decisions") or []):
+        parts.append(_sanitize_sidecar_text(d))
+    for mf in (sc.get("modified_files") or []):
+        p = mf.get("path") if isinstance(mf, dict) else mf
+        if p:
+            parts.append(_sanitize_sidecar_text(Path(str(p)).name))
+    for r in (sc.get("recent_reads") or []):
+        if r:
+            parts.append(_sanitize_sidecar_text(Path(str(r)).name))
+    doc = "\n".join(p for p in parts if p)
+    if not doc.strip():
+        return set()
+    return _topic_tokens(doc)
+
+
+def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
+    """IDF-weighted content-overlap relevance of ``text`` vs a checkpoint sidecar.
+
+    Tokenizes ``text`` and the checkpoint's sanitized sidecar fields, weights
+    overlap by inverse document frequency across ``pool`` (a list of checkpoint
+    paths; when None or a single element, IDF is uniform and this reduces to
+    precision), adds a weak recency prior, and an OPTIONAL ``cwd`` same-work
+    bonus. Returns 0.0-1.0. Never raises: non-UTF-8 / unreadable checkpoints
+    score 0.0 for themselves without aborting a caller's candidate loop.
+
+    A bare "continue"/"resume" with no topical tokens yields 0.0 from content,
+    so it stays below ``CHECKPOINT_RELEVANCE_THRESHOLD`` unless a strong same-
+    work signal (cwd bonus) lifts it -- the #129 guard.
+    """
+    # Strip resume-cue glue ("continue"/"resume"/"session"/"work"/...) from the
+    # prompt so a bare "continue" has NO topical tokens and scores on recency +
+    # work-path only (U2.4 / #129). Reuses the shared non-English tokenizer so
+    # CJK prompts tokenize correctly (#127).
+    try:
+        prompt_tokens = _topic_tokens(str(text or ""), _RESUME_TOPIC_STOPWORDS)
+    except Exception:
+        return 0.0
+    try:
+        doc_tokens = _checkpoint_sidecar_doc_tokens(checkpoint_path)
+    except Exception:
+        doc_tokens = set()
+
+    content_score = 0.0
+    if prompt_tokens and doc_tokens:
+        # IDF across the pool: df(t) = # pool checkpoints whose doc contains t.
+        pool_paths = []
+        if pool:
+            for item in pool:
+                p = item.get("path") if isinstance(item, dict) else item
+                if p:
+                    pool_paths.append(p)
+        if not pool_paths:
+            pool_paths = [checkpoint_path]
+        df = {}
+        pool_docs = []
+        for pp in pool_paths:
+            try:
+                pdoc = _checkpoint_sidecar_doc_tokens(pp)
+            except Exception:
+                pdoc = set()
+            pool_docs.append(pdoc)
+        for pdoc in pool_docs:
+            for t in pdoc:
+                df[t] = df.get(t, 0) + 1
+        n = len(pool_docs)
+        import math as _math
+        idf = {}
+        for t in prompt_tokens:
+            d = df.get(t, 0)
+            idf[t] = _math.log((n + 1) / (d + 1)) + 1.0
+        hits = prompt_tokens & doc_tokens
+        denom = sum(idf[t] for t in prompt_tokens) or 1.0
+        content_score = sum(idf[t] for t in hits) / denom
+
+    score = content_score
+    # Weak recency prior (never enough alone to clear the threshold). Only apply
+    # when the checkpoint has SOME parseable content -- a non-UTF-8 / sidecarless
+    # checkpoint must score a clean 0.0, not 0.0 + a recency tip (#127/#28760).
+    if doc_tokens:
+        try:
+            cp_path = Path(str(checkpoint_path))
+            if cp_path.exists():
+                age_min = (datetime.now().timestamp() - cp_path.stat().st_mtime) / 60
+                if 0 <= age_min < _RELEVANCE_RECENCY_WINDOW_MIN:
+                    score += _RELEVANCE_RECENCY_BONUS
+        except Exception:
+            pass
+    # Optional same-work bonus (R4: the scorer works without cwd).
+    if cwd:
+        try:
+            sc = _read_checkpoint_sidecar(checkpoint_path) or {}
+            if _checkpoint_in_project(sc, cwd):
+                score += _RELEVANCE_CWD_BONUS
+        except Exception:
+            pass
+    return min(score, 1.0)
+
+
 def codex_prompt_hints(prompt_text="", session_id=None, cwd=None, max_age_minutes=60 * 24 * 7):
     """Return short topic-relevant continuity hints for Codex UserPromptSubmit.
 
