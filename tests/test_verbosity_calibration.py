@@ -101,6 +101,71 @@ def test_nudge_books_zero_not_assumed(m, monkeypatch, tmp_path):
             f"nudge event must book 0 (no counterfactual yet), not an assumed figure; got {ts}")
 
 
+def test_real_nudge_path_settles_prior_nudge_with_measured_delta(m, monkeypatch, tmp_path):
+    """D1: the REAL UserPromptSubmit path must invoke the measure-not-assume
+    logic. A prior nudge recorded a pre-nudge baseline; a later run_verbosity_steer
+    turn must call _verbosity_measured_savings on the observed post-nudge output
+    and book a measured verbosity_steer_measured event (not dead code)."""
+    # A prior nudge fired at turn 2 with pre-nudge avg output 800.
+    m._log_savings_event(
+        "verbosity_steer", 0, session_id=LIVE_SID,
+        detail="fill=80% score=70 tier=strong pre_avg_out=800 pre_turns=2")
+
+    # Transcript: 2 pre-nudge turns (800,800) then 2 post-nudge turns (400,500).
+    # post avg = 450 -> measured = (800-450) x 2 = 700.
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"quality-cache-{LIVE_SID}.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(m, "_quality_cache_path_for", lambda fp=None: cache_path)
+    monkeypatch.setattr(m, "_read_quality_cache", lambda cp: {
+        "fill_pct": 47, "score": 73, "session_efficiency": 60,
+        "nudge_count": 0, "last_nudge_time": 0})
+    transcript = tmp_path / "transcript.jsonl"
+    _write_transcript(transcript, [800, 800, 400, 500])
+
+    # Spy on the measurement to prove the real path invokes it.
+    calls = []
+    real = m._verbosity_measured_savings
+    def _spy(baseline, outs):
+        result = real(baseline, outs)
+        calls.append((baseline, list(outs), result))
+        return result
+    monkeypatch.setattr(m, "_verbosity_measured_savings", _spy)
+
+    m.run_verbosity_steer(transcript_path=str(transcript), quiet=True,
+                          session_id=LIVE_SID)
+
+    assert calls, "real nudge path must invoke _verbosity_measured_savings (D1: not dead code)"
+    assert calls[0] == (800, [400, 500], 700), f"measured delta wrong: {calls[0]}"
+
+    # The measured saving must be booked to the DB.
+    conn = m._init_trends_db()
+    try:
+        row = conn.execute(
+            "SELECT tokens_saved FROM savings_events "
+            "WHERE event_type='verbosity_steer_measured' AND session_id=?",
+            (LIVE_SID,)).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, "a verbosity_steer_measured event must be booked"
+    assert row[0] == 700, f"must book the measured 700, got {row[0]}"
+
+    # Idempotent: a second turn must not double-credit the same nudge.
+    calls.clear()
+    m.run_verbosity_steer(transcript_path=str(transcript), quiet=True,
+                          session_id=LIVE_SID)
+    conn = m._init_trends_db()
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM savings_events "
+            "WHERE event_type='verbosity_steer_measured' AND session_id=?",
+            (LIVE_SID,)).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 1, f"prior nudge must be settled once, not re-credited; got {n} rows"
+
+
 def test_no_assumed_constant_remains_in_source():
     """The hardcoded 0.10/0.15 x 800 assumed figure must be gone from the
     verbosity nudge path."""
