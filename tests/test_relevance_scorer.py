@@ -15,9 +15,25 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
+
+
+def _age_out(*paths):
+    """Push file mtimes past the recency window so the weak recency prior (a flat
+    +0.05 for a <3h-old checkpoint) does not confound a content/precision guard.
+    A genuine resume typed hours later hits this branch; the recency tip is an
+    orthogonal, documented prior tested separately."""
+    old = time.time() - 60 * 60 * 24
+    for p in paths:
+        for f in (Path(p), Path(str(p).replace(".md", ".json"))):
+            try:
+                os.utime(f, (old, old))
+            except OSError:
+                pass
 
 import pytest
 
@@ -263,3 +279,221 @@ def test_threshold_constant_exposed(m):
     assert isinstance(m.CHECKPOINT_RELEVANCE_THRESHOLD, float)
     assert 0.0 < m.CHECKPOINT_RELEVANCE_THRESHOLD < 1.0, (
         "threshold must be a defensible (0,1) constant calibrated via U7 replay")
+
+
+# ======================================================================
+# ROUND-2 torture-coverage tests (C1/H1/H2/H3/M2/knobs/L1) + multi-client
+# ======================================================================
+
+def _acme_cp(tmp_path, name="aaaa1111-20260812-120000-checkpoint.md"):
+    """A acme client checkpoint whose identity lives ONLY in path dirs, with a
+    real clients/<x>/Retainer-Deliverables/... skeleton and a /compact active_task
+    (mirrors the real acme checkpoint whose active_task is literally '/compact')."""
+    return _write_cp(
+        tmp_path, name, active_task="/compact",
+        modified_files=[
+            "clients/acme/Retainer-Deliverables/acme-competitor-monitor/scripts/monitor.py",
+            "clients/acme/Retainer-Deliverables/acme-competitor-monitor/reports/2026-08-11__BRIEF.html",
+            "clients/acme/Retainer-Deliverables/acme-competitor-monitor/references/competitor.md"],
+        recent_reads=[
+            "clients/acme/Retainer-Deliverables/acme-competitor-monitor/config/monitor.json"])
+
+
+def _acme_cp(tmp_path, name="bbbb2222-20260812-120100-checkpoint.md"):
+    """A SECOND client sharing the IDENTICAL folder skeleton; only the distinctive
+    identity words differ (acme/pricing/tracker vs acme/competitor/monitor)."""
+    return _write_cp(
+        tmp_path, name, active_task="/compact",
+        modified_files=[
+            "clients/acme/Retainer-Deliverables/acme-pricing-tracker/scripts/tracker.py",
+            "clients/acme/Retainer-Deliverables/acme-pricing-tracker/reports/2026-08-11__BRIEF.html",
+            "clients/acme/Retainer-Deliverables/acme-pricing-tracker/references/pricing.md"],
+        recent_reads=[
+            "clients/acme/Retainer-Deliverables/acme-pricing-tracker/config/tracker.json"])
+
+
+# --- R2-A: universal multi-client fix. Two clients, SHARED structure. Each
+# client's own named prompt returns its own checkpoint; neither crosses; a
+# shared-scaffolding prompt returns neither (H3 lexical stoplist). ---
+
+def test_two_client_pool_no_cross_leak(m, tmp_path):
+    acme = _acme_cp(tmp_path)
+    acme = _acme_cp(tmp_path)
+    pool = [acme, acme]
+    TH = m.CHECKPOINT_RELEVANCE_THRESHOLD
+    gp = "continue working on the acme competitor monitor"
+    ap = "continue working on the acme pricing tracker"
+    # own-named prompt -> own checkpoint, above threshold
+    assert m.checkpoint_relevance_score(gp, acme, pool=pool) >= TH
+    assert m.checkpoint_relevance_score(ap, acme, pool=pool) >= TH
+    # cross-client -> below threshold (must NOT leak)
+    assert m.checkpoint_relevance_score(gp, acme, pool=pool) < TH, (
+        "acme prompt must NOT match the acme checkpoint")
+    assert m.checkpoint_relevance_score(ap, acme, pool=pool) < TH, (
+        "acme prompt must NOT match the acme checkpoint")
+    # a prompt made only of shared filesystem-scaffolding words matches NEITHER
+    scaffold = "continue the retainer deliverables clients reports"
+    assert m.checkpoint_relevance_score(scaffold, acme, pool=pool) < TH
+    assert m.checkpoint_relevance_score(scaffold, acme, pool=pool) < TH
+
+
+# --- R2-B: H3 container-word kills on a single-client pool (uniform IDF) ---
+
+def test_h3_scaffolding_prompts_stay_below_threshold(m, tmp_path):
+    acme = _acme_cp(tmp_path)
+    TH = m.CHECKPOINT_RELEVANCE_THRESHOLD
+    for scaffold in ("continue the retainer deliverables", "continue the clients work",
+                     "continue the reports", "continue the references",
+                     "continue the scripts", "continue the config"):
+        s = m.checkpoint_relevance_score(scaffold, acme, pool=[acme])
+        assert s < TH, f"scaffolding prompt {scaffold!r} must stay below threshold; got {s}"
+    # the genuine acme resume on the SAME checkpoint still clears
+    assert m.checkpoint_relevance_score(
+        "continue working on the acme competitor monitor", acme, pool=[acme]) >= TH
+
+
+# --- R2-C: prose-only-identity checkpoint (identity lives in active_task/decisions,
+# paths are generic). A prompt naming that prose identity still scores. ---
+
+def test_prose_only_identity_checkpoint_scores(m, tmp_path):
+    cp = _write_cp(
+        tmp_path, "cccc3333-20260812-120200-checkpoint.md",
+        active_task="refactor the keepwarm predictor sustain heuristic",
+        decisions=["tune the keepwarm decay window",
+                   "gate sustain on predictor confidence"],
+        modified_files=["src/core/engine.py"])  # generic path, no identity words
+    score = m.checkpoint_relevance_score(
+        "continue the keepwarm predictor sustain work", cp, pool=[cp])
+    assert score >= m.CHECKPOINT_RELEVANCE_THRESHOLD, (
+        f"a prompt naming the prose-only identity must still clear; got {score}")
+
+
+# --- R2-D: CJK+Latin resume. CJK glue must not dilute precision; a CJK resume
+# cue must register as intent. Latin-only unrelated prompt stays low. ---
+
+def test_cjk_latin_resume_clears_and_latin_guard_holds(m, tmp_path):
+    acme = _acme_cp(tmp_path)
+    acme = _acme_cp(tmp_path)
+    pool = [acme, acme]
+    TH = m.CHECKPOINT_RELEVANCE_THRESHOLD
+    cjk = m.checkpoint_relevance_score(
+        "acme competitor monitor 결제 모듈 작업을 이어서", acme, pool=pool)
+    assert cjk >= TH, f"CJK+Latin resume must clear the threshold; got {cjk}"
+    # CJK resume cue alone is recognized as resume intent
+    assert m._resume_intent("결제 모듈 작업을 이어서")
+    assert m._resume_intent("继续 acme competitor monitor")
+    # a Latin-only unrelated prompt that only grazes a shared word ("competitor")
+    # stays below threshold in a realistic 2-client pool (the acme guard, M1). Age
+    # the pool out of the recency window first so this asserts the CONTENT/precision
+    # guard, not the orthogonal +0.05 recency prior (which correctly biases toward a
+    # just-created checkpoint). On the real 50-checkpoint pool this graze is 0.219.
+    _age_out(acme, acme)
+    latin = m.checkpoint_relevance_score(
+        "continue the competitor analysis for acme corp", acme, pool=pool)
+    assert latin < TH, f"Latin acme-style prompt must stay below threshold; got {latin}"
+
+
+# --- R2-E: junk-date prompt. The only overlap with the doc is a 4-digit year,
+# which C1 drops from path words, so no match. ---
+
+def test_junk_date_prompt_no_match(m, tmp_path):
+    acme = _acme_cp(tmp_path)
+    # the year must NOT be a doc token (C1 drops pure-numeric path segments)
+    assert "2026" not in m._checkpoint_sidecar_doc_tokens(acme)
+    score = m.checkpoint_relevance_score(
+        "continue working on the report from 2026-08-11", acme, pool=[acme])
+    assert score < m.CHECKPOINT_RELEVANCE_THRESHOLD, (
+        f"a junk-date-only prompt must not match; got {score}")
+
+
+# --- R2-F: pasted-path prompt matches the RIGHT client, not the wrong one, and
+# scores >= the spoken form (H2: pasting can only help precision). ---
+
+def test_pasted_path_matches_right_not_wrong(m, tmp_path):
+    acme = _acme_cp(tmp_path)
+    acme = _acme_cp(tmp_path)
+    pool = [acme, acme]
+    TH = m.CHECKPOINT_RELEVANCE_THRESHOLD
+    pasted = ("continue /Users/alex/CascadeProjects/clients/acme/Retainer-Deliverables/"
+              "acme-competitor-monitor/reports/2026-08-11__BRIEF.html")
+    spoken = "continue working on the acme competitor monitor"
+    ps = m.checkpoint_relevance_score(pasted, acme, pool=pool)
+    ss = m.checkpoint_relevance_score(spoken, acme, pool=pool)
+    assert ps >= ss, f"pasted path must not score below the spoken form; pasted={ps} spoken={ss}"
+    assert ps >= TH, f"pasted real acme path must clear the threshold; got {ps}"
+    # and it must NOT cross to the wrong client
+    assert m.checkpoint_relevance_score(pasted, acme, pool=pool) < TH, (
+        "pasted acme path must not match the acme checkpoint")
+    # "continue <path>" is recognized as resume intent
+    assert m._resume_intent(pasted)
+
+
+# --- R2-G: H1 dead checkpoint. Body file deleted, sidecar lingers -> 0.0. ---
+
+def test_dead_checkpoint_orphan_sidecar_scores_zero(m, tmp_path):
+    acme = _acme_cp(tmp_path)
+    Path(acme).unlink()  # delete the .md body; sidecar .json remains
+    assert not Path(acme).is_file()
+    score = m.checkpoint_relevance_score(
+        "continue the acme competitor monitor", acme, pool=[acme])
+    assert score == 0.0, f"orphan-sidecar / deleted-body checkpoint must score 0.0; got {score}"
+
+
+# --- R2-H: L1 recency must not leak onto an empty / separator-only prompt ---
+
+def test_empty_and_separator_prompts_score_zero(m, tmp_path):
+    acme = _acme_cp(tmp_path)  # fresh checkpoint (recency window would apply)
+    for empty in ("", "   ", "--- === ...", "\t\n"):
+        s = m.checkpoint_relevance_score(empty, acme, pool=[acme])
+        assert s == 0.0, f"empty/separator prompt {empty!r} must score 0.0 (no recency leak); got {s}"
+
+
+# --- R2-I: knob clamps. An out-of-range env knob cannot force the score or flip
+# the F1 sign. ---
+
+def test_relevance_knobs_are_clamped(monkeypatch):
+    def _reload():
+        if "measure" in sys.modules:
+            del sys.modules["measure"]
+        return importlib.import_module("measure")
+
+    monkeypatch.setenv("TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_CAP", "100000")
+    monkeypatch.setenv("TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_WEIGHT", "-5")
+    monkeypatch.setenv("TOKEN_OPTIMIZER_RELEVANCE_IDF_CAP", "-1")
+    monkeypatch.setenv("TOKEN_OPTIMIZER_RELEVANCE_RESUME_BONUS_PRECISION_FLOOR", "9")
+    monkeypatch.setenv("TOKEN_OPTIMIZER_CHECKPOINT_RELEVANCE_THRESHOLD", "5")
+    mod = _reload()
+    try:
+        assert mod._RELEVANCE_PATH_TF_CAP == 50, mod._RELEVANCE_PATH_TF_CAP
+        assert mod._RELEVANCE_PATH_TF_WEIGHT == 0.0, mod._RELEVANCE_PATH_TF_WEIGHT
+        assert mod._RELEVANCE_IDF_CAP == 1.0, mod._RELEVANCE_IDF_CAP
+        assert mod._RELEVANCE_RESUME_BONUS_PRECISION_FLOOR == 0.99
+        assert mod.CHECKPOINT_RELEVANCE_THRESHOLD == 0.9
+    finally:
+        if "measure" in sys.modules:
+            del sys.modules["measure"]
+
+
+def test_path_tf_cap_100000_does_not_force_score_to_one(m, tmp_path, monkeypatch):
+    # With a huge PATH_TF_CAP the OLD code let one mega-repeated path word drive
+    # recall (and F1) to ~1.0. The clamp bounds it; the score stays a sane content
+    # score, not a forced 1.0.
+    acme = _acme_cp(tmp_path)
+    score = m.checkpoint_relevance_score(
+        "continue working on the acme competitor monitor", acme, pool=[acme])
+    assert score < 0.99, f"score must not be forced to 1.0 by the cap; got {score}"
+
+
+# --- R2-J: L4 defensive guards. bytes text and a non-sequence pool must not raise
+# or leak a repr. ---
+
+def test_bytes_text_and_bad_pool_are_guarded(m, tmp_path):
+    acme = _acme_cp(tmp_path)
+    # bytes prompt: must be decoded, not str()'d into a b'...' repr
+    s1 = m.checkpoint_relevance_score(
+        b"continue working on the acme competitor monitor", acme, pool=[acme])
+    assert s1 >= m.CHECKPOINT_RELEVANCE_THRESHOLD, s1
+    # a string pool (wrong type) must not iterate its characters as paths / raise
+    s2 = m.checkpoint_relevance_score(
+        "continue working on the acme competitor monitor", acme, pool="not-a-list")
+    assert 0.0 <= s2 <= 1.0
