@@ -112,3 +112,77 @@ def test_mix_weighted_expected_tokens_is_net_savings(replay, tmp_path):
     assert metrics["mix_weighted_expected_tokens"] < 0, (
         f"the mix-weighted expected tokens must be net savings (negative); "
         f"got {metrics['mix_weighted_expected_tokens']}")
+
+
+# --- T5: the benchmark scans REAL historical first-prompts, not only fixtures ---
+
+def _write_transcript(path, first_user_prompt):
+    """A minimal Claude Code transcript whose first user entry is the prompt."""
+    lines = [
+        json.dumps({"type": "user", "isMeta": True,
+                    "message": {"content": "<meta bootstrap>"}}),
+        json.dumps({"type": "user",
+                    "message": {"content": first_user_prompt}}),
+        json.dumps({"type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "ok"}]}}),
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def test_scans_historical_first_prompts(replay, tmp_path):
+    """U7 minor: the benchmark must be able to scan the FIRST user prompt of real
+    session transcripts and classify each as resume vs fresh -- not just replay
+    the 17 curated fixtures."""
+    hist_root = tmp_path / "projects"
+    (hist_root / "proj-a").mkdir(parents=True)
+    (hist_root / "proj-b").mkdir(parents=True)
+    _write_transcript(hist_root / "proj-a" / "sess1.jsonl",
+                      "continue where we left off on the payment gateway")
+    _write_transcript(hist_root / "proj-b" / "sess2.jsonl",
+                      "write me a haiku about the ocean")
+
+    # Empty/None root -> opt-out, nothing scanned (keeps the fixture baseline pure).
+    assert replay.scan_historical_first_prompts(None) == {}
+    assert replay.scan_historical_first_prompts(str(tmp_path / "does-not-exist")) == {}
+
+    out = replay.scan_historical_first_prompts(str(hist_root))
+    assert out["historical_scanned"] == 2, f"must scan both transcripts; got {out}"
+    assert out["historical_resume_intent"] == 1, (
+        f"the 'continue where we left off' opening must classify as resume; got {out}")
+    assert out["historical_fresh"] == 1, (
+        f"the haiku opening must classify as fresh; got {out}")
+
+
+# --- T6: a "stale" spec produces a genuinely stale file (staleness exercised) ---
+
+def test_stale_spec_is_actually_stale_on_disk(replay, m, tmp_path):
+    """The #129 stale-pool incident must exercise staleness for real: the
+    relevance scorer's recency bonus reads the checkpoint FILE mtime, so a spec
+    labelled stale must age the file on disk, not only a dict field. A genuinely
+    stale checkpoint must therefore lose the recency bonus a fresh one gets."""
+    import os as _os
+    import time as _time
+    d = tmp_path / "cps"
+    d.mkdir()
+    # Longer task + a partial-overlap prompt with NO resume cue, so the score sits
+    # below the 1.0 cap and the 0.05 recency delta is observable (a saturated
+    # score would hide it).
+    task = ("token optimizer checkpoint injection targeting fix mirror sync "
+            "parity relevance scorer statusline pointer")
+    fresh = replay._cp_from_spec(d, {
+        "id": "f", "filename": "aaaa1111-20260811-120000-checkpoint.md",
+        "active_task": task, "modified_files": ["measure.py"], "age_seconds": 60})
+    stale = replay._cp_from_spec(d, {
+        "id": "s", "filename": "bbbb2222-20260811-120000-checkpoint.md",
+        "active_task": task, "modified_files": ["measure.py"], "age_seconds": 43200})
+
+    age_min = (_time.time() - _os.path.getmtime(stale["path"])) / 60
+    assert age_min > 180, (
+        f"a stale fixture must be older than the recency window on disk; got {age_min:.0f}min")
+
+    prompt = "checkpoint injection targeting"
+    s_fresh = m.checkpoint_relevance_score(prompt, fresh["path"], pool=[fresh])
+    s_stale = m.checkpoint_relevance_score(prompt, stale["path"], pool=[stale])
+    assert s_stale < s_fresh, (
+        "a genuinely stale checkpoint must lose the recency bonus the fresh one "
+        f"gets (staleness exercised); fresh={s_fresh} stale={s_stale}")

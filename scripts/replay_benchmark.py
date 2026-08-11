@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """U7 — replay benchmark over historical first-prompts (anti-overfit gate).
 
-Replays all U6 historical first-prompts (resume + fresh + incidents) through the
-relevance scorer and emits a diffable metrics report. Guards against overfitting
-to the competitor's fresh-only slice (R7): a pull-only-style silence-on-resume
-(recall drop) FAILS; a fresh-direction false-positive rise FAILS.
+Replays the curated U6 first-prompt corpus (resume + fresh + incidents) through
+the relevance scorer and emits a diffable metrics report, and ADDITIONALLY scans
+"all historical first-prompts" from real session transcripts when a history root
+is provided (``--history-root`` / ``TOKEN_OPTIMIZER_HISTORY_ROOT``) so the resume
+detector is measured against whatever users actually typed, not only the 17
+fixtures. Guards against overfitting to the competitor's fresh-only slice (R7): a
+pull-only-style silence-on-resume (recall drop) FAILS; a fresh-direction
+false-positive rise FAILS.
 
 Metrics:
   - resume_recall: fraction of resume openings that matched the right checkpoint
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -66,6 +71,75 @@ def _load_fixtures():
     return json.loads(FIXTURES.read_text(encoding="utf-8"))
 
 
+def _extract_first_user_prompt(jsonl_path):
+    """Return the FIRST real user prompt text from a Claude Code transcript, or
+    None. Skips meta/system entries; handles both string and content-block
+    message shapes. Never raises."""
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if entry.get("type") != "user" or entry.get("isMeta"):
+                    continue
+                msg = entry.get("message") or {}
+                content = msg.get("content")
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    text = " ".join(
+                        c.get("text", "") for c in content
+                        if isinstance(c, dict) and c.get("type") == "text")
+                else:
+                    text = ""
+                text = text.strip()
+                if text:
+                    return text
+    except OSError:
+        return None
+    return None
+
+
+def scan_historical_first_prompts(root=None, limit=1000):
+    """Scan REAL session transcripts for their first user prompt and classify
+    each as resume-intent vs fresh via ``measure._resume_intent``.
+
+    This is the "all historical first-prompts" corpus (U7): unlike the 17 curated
+    fixtures, it exercises the resume detector against whatever users actually
+    typed, so a regex/scorer change that silently reclassifies real openings is
+    caught. Opt-in and deterministic: when ``root`` is falsy nothing is scanned
+    (so the committed fixture baseline is never perturbed and no private
+    transcripts are read during CI). Returns a counts dict, or ``{}`` when there
+    is nothing to scan. Never raises.
+    """
+    if not root:
+        return {}
+    try:
+        root = Path(root)
+        if not root.exists():
+            return {}
+        prompts = []
+        for p in sorted(root.rglob("*.jsonl"))[:limit]:
+            text = _extract_first_user_prompt(p)
+            if text:
+                prompts.append(text)
+        if not prompts:
+            return {}
+        resume = sum(1 for t in prompts if measure._resume_intent(t))
+        return {
+            "historical_scanned": len(prompts),
+            "historical_resume_intent": resume,
+            "historical_fresh": len(prompts) - resume,
+        }
+    except Exception:
+        return {}
+
+
 def _cp_from_spec(tmp_path, spec):
     filename = spec["filename"]
     cp_path = tmp_path / filename
@@ -76,6 +150,7 @@ def _cp_from_spec(tmp_path, spec):
         cp_path.write_text(
             f"# Session State Checkpoint\n# Generated: test\nbody: {task}\n",
             encoding="utf-8")
+    sidecar_path = None
     if not spec.get("no_sidecar"):
         sidecar = {
             "version": 1, "trigger": spec.get("trigger", "stop"),
@@ -86,11 +161,25 @@ def _cp_from_spec(tmp_path, spec):
                                for p in spec.get("modified_files", [])],
             "recent_reads": [],
         }
-        (tmp_path / cp_path.name.replace(".md", ".json")).write_text(
-            json.dumps(sidecar), encoding="utf-8")
+        sidecar_path = tmp_path / cp_path.name.replace(".md", ".json")
+        sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+    # Age the file on DISK so a "stale" spec is genuinely stale. The relevance
+    # scorer's recency bonus reads the checkpoint file's mtime, NOT the ``created``
+    # dict field below -- so without this a spec labelled stale still got the
+    # recency bonus (fresh mtime), and #129's stale-pool incident passed for the
+    # wrong reason (bare "continue" scores 0 regardless). Now age_seconds is
+    # authoritative for both mtime and ``created``.
+    age_seconds = spec.get("age_seconds", 60)
+    old_ts = (datetime.now() - timedelta(seconds=age_seconds)).timestamp()
+    try:
+        os.utime(cp_path, (old_ts, old_ts))
+        if sidecar_path is not None:
+            os.utime(sidecar_path, (old_ts, old_ts))
+    except OSError:
+        pass
     return {
         "filename": filename, "path": str(cp_path),
-        "created": datetime.now() - timedelta(seconds=spec.get("age_seconds", 60)),
+        "created": datetime.now() - timedelta(seconds=age_seconds),
         "trigger": spec.get("trigger", "stop"),
     }
 
@@ -181,7 +270,7 @@ def run_benchmark(tmp_path=None):
         + fresh_ratio * (fresh_fp_rate * _FRESH_FP_COST)
     )
 
-    return {
+    metrics = {
         "resume_recall": round(resume_recall, 4),
         "fresh_precision": round(fresh_precision, 4),
         "incident_pass_rate": round(incident_pass_rate, 4),
@@ -196,6 +285,15 @@ def run_benchmark(tmp_path=None):
         "threshold": measure.CHECKPOINT_RELEVANCE_THRESHOLD,
         "resume_intent_bonus": measure._RELEVANCE_RESUME_INTENT_BONUS,
     }
+
+    # "All historical first-prompts" (U7): additionally scan REAL session
+    # transcripts when a history root is provided (env override; unset in CI so
+    # the fixture baseline stays reproducible and no private transcripts are read
+    # by default). The extra keys only appear when something was actually scanned.
+    hist = scan_historical_first_prompts(os.environ.get("TOKEN_OPTIMIZER_HISTORY_ROOT"))
+    if hist:
+        metrics.update(hist)
+    return metrics
 
 
 def check_regression(metrics):
@@ -224,7 +322,13 @@ def main(argv=None):
                         help="Compare metrics to a baseline JSON file.")
     parser.add_argument("--write-baseline", default=None,
                         help="Write the current metrics as a baseline JSON file.")
+    parser.add_argument("--history-root", default=None,
+                        help="Scan real session transcripts under this dir for "
+                             "their first user prompt (all historical first-prompts).")
     args = parser.parse_args(argv)
+
+    if args.history_root:
+        os.environ["TOKEN_OPTIMIZER_HISTORY_ROOT"] = args.history_root
 
     metrics = run_benchmark()
 
@@ -259,6 +363,10 @@ def main(argv=None):
             print(f"  fresh_false_positives: {metrics['fresh_false_positives']}")
         print(f"  incident_pass_rate:  {metrics['incident_pass_rate']:.2f} ({metrics['incident_passes']}/{metrics['incident_total']})")
         print(f"  mix_weighted_expected_tokens: {metrics['mix_weighted_expected_tokens']}")
+        if "historical_scanned" in metrics:
+            print(f"  historical_first_prompts:  {metrics['historical_scanned']} scanned "
+                  f"({metrics['historical_resume_intent']} resume-intent, "
+                  f"{metrics['historical_fresh']} fresh)")
         if not passed:
             print("  REGRESSION:")
             for f in failures:

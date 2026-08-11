@@ -134,7 +134,7 @@
           "decisions": [],
           "modified_files": ["/Users/alex/projects/marketing-audit/report.md"],
           "trigger": "stop",
-          "age_seconds": 7200
+          "age_seconds": 43200
         }
       ],
       "expected": "no_match"

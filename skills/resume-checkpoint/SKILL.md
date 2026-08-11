@@ -30,7 +30,21 @@ Call this skill when the user is **continuing prior work** and you need the prio
 ## Invocation
 
 ```bash
-python3 "$SKILL_DIR/scripts/pull_checkpoint.py" --prompt "<the user's opening/continuation prompt>" [--cwd "$PWD"] [--session-id "$SESSION_ID"]
+# Resolve pull_checkpoint.py. In a plugin install $CLAUDE_PLUGIN_ROOT points at
+# the plugin root; otherwise find the newest installed copy across channels so a
+# stale plugin-cache copy never shadows a fresh install.
+PULL_PY=""
+if [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/skills/resume-checkpoint/scripts/pull_checkpoint.py" ]; then
+  PULL_PY="$CLAUDE_PLUGIN_ROOT/skills/resume-checkpoint/scripts/pull_checkpoint.py"
+else
+  PULL_PY="$(find -L "$HOME/.claude/skills" "$HOME/.claude/plugins/cache" "$HOME/.codex/skills" "$HOME/.codex/plugins/cache" "$HOME/.config/opencode/plugins/cache" "$HOME/.config/opencode/plugins" -type f -path '*resume-checkpoint/scripts/pull_checkpoint.py' 2>/dev/null | head -1)"
+fi
+if [ -z "$PULL_PY" ] || [ ! -f "$PULL_PY" ]; then echo "[Error] pull_checkpoint.py not found. Is Token Optimizer installed?"; exit 1; fi
+
+# $CLAUDE_SESSION_ID is the live session id the harness sets. Passing it is what
+# excludes THIS session's own checkpoints (own-session recovery is the
+# SessionStart/compact path's job, not the pull tool's).
+python3 "$PULL_PY" --prompt "<the user's opening/continuation prompt>" [--cwd "$PWD"] [--session-id "$CLAUDE_SESSION_ID"]
 ```
 
 The `--prompt` is what the scorer ranks against. Pass the user's actual continuation text, not a paraphrase.
