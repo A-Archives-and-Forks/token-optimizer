@@ -264,6 +264,37 @@
         }
       ],
       "expected": "match"
+    },
+    {
+      "id": "incident-cross-client-false-positive",
+      "issue": null,
+      "description": "Cross-client false positive: a resume-phrased prompt naming a DIFFERENT client ('competitor analysis for acme corp') grazes gambit's competitor-monitor checkpoint on the shared word 'competitor' only. Unmatched high-IDF tokens (acme, corp, analysis) are negative evidence -- the resume-intent bonus is scaled by precision (with a floor), so an incidental one-word overlap cannot ride the flat cue over threshold. Guards the multi-client regime where two clients share the clients/<x>/Retainer-Deliverables/ path shape.",
+      "prompt": "continue working on the competitor analysis for acme corp",
+      "expected": "no_match",
+      "checkpoints": [
+        {
+          "id": "cp-gambit-acme-guard",
+          "filename": "ff99ee88-20260811-221941-milestone-edit-batch.md",
+          "active_task": "let's finalize the connectors and make the scale environments adapted, i'll do the rest of the stuff",
+          "decisions": [
+            "the skill already has the fs/connector split so the answer is yes, cleanly",
+            "draft a self-contained scan prompt so everything is connected"
+          ],
+          "modified_files": [
+            "/Users/alexgreenshpun/CascadeProjects/Prompts/10x Company/clients/gambit/Retainer-Deliverables/gambit-competitor-monitor/references/07-market-sweep.md",
+            "/Users/alexgreenshpun/CascadeProjects/Prompts/10x Company/clients/gambit/Retainer-Deliverables/gambit-company-brain/competitor-monitor/reports/2026-08-11__BRIEF.html",
+            "/Users/alexgreenshpun/CascadeProjects/Prompts/10x Company/clients/gambit/Retainer-Deliverables/gambit-competitor-monitor/scripts/build_cloud_prompt.py",
+            "/Users/alexgreenshpun/CascadeProjects/Prompts/10x Company/clients/gambit/Retainer-Deliverables/gambit-competitor-monitor/references/09-environments.md"
+          ],
+          "recent_reads": [
+            "/Users/alexgreenshpun/CascadeProjects/Prompts/10x Company/clients/gambit/Retainer-Deliverables/gambit-competitor-monitor/SKILL.md",
+            "/Users/alexgreenshpun/CascadeProjects/Prompts/10x Company/clients/gambit/Retainer-Deliverables/gambit-competitor-monitor/references/06-scheduling.md",
+            "/Users/alexgreenshpun/CascadeProjects/Prompts/10x Company/clients/gambit/Retainer-Deliverables/gambit-competitor-monitor/config/competitors.json"
+          ],
+          "trigger": "milestone-edit-batch",
+          "age_seconds": 600
+        }
+      ]
     }
   ]
 }
