@@ -419,13 +419,47 @@ def test_pasted_path_matches_right_not_wrong(m, tmp_path):
     spoken = "continue working on the acme competitor monitor"
     ps = m.checkpoint_relevance_score(pasted, acme, pool=pool)
     ss = m.checkpoint_relevance_score(spoken, acme, pool=pool)
-    assert ps >= ss, f"pasted path must not score below the spoken form; pasted={ps} spoken={ss}"
+    # NOTE: we deliberately do NOT require pasted >= spoken. Making a pasted path
+    # out-score the spoken form was the round-2 goal that CAUSED the H2 regression
+    # (dropping non-matching path words made precision 1.0 by construction, so a
+    # FOREIGN pasted path grazing one shared word false-matched the wrong client).
+    # The correct invariant is weaker: a pasted REAL acme path still clears the
+    # bar (its generic segments like users/cascadeprojects dilute precision, which
+    # is fine), and it never crosses to the wrong client.
     assert ps >= TH, f"pasted real acme path must clear the threshold; got {ps}"
-    # and it must NOT cross to the wrong client
     assert m.checkpoint_relevance_score(pasted, acme, pool=pool) < TH, (
         "pasted acme path must not match the acme checkpoint")
+    # And a FOREIGN pasted path sharing only a scaffolding/sub-project word must not
+    # out-score the spoken form (the H2 fix: unmatched distinctive words dilute).
+    foreign = ("continue /Users/alex/other/acme-competitor-analysis/plan-notes.md")
+    assert m.checkpoint_relevance_score(foreign, acme, pool=pool) <= ss + 1e-9, (
+        "a foreign pasted path must not out-score the genuine spoken resume")
     # "continue <path>" is recognized as resume intent
     assert m._resume_intent(pasted)
+
+
+# --- R2.5-A: a project whose slug is built only from scaffolding-adjacent words
+# must still be resumable. "company"/"brain" were wrongly in the scaffold stoplist,
+# so a genuine "continue working on the company brain" scored 0.0 (Fable-flagged FN).
+def test_stoplist_named_project_still_resumes(m, tmp_path):
+    cb = _write_cp(
+        tmp_path, "bbbb2222-20260812-120000-checkpoint.md",
+        active_task="/compact",
+        modified_files=[
+            "/Users/alex/CascadeProjects/clients/acme/Retainer-Deliverables/"
+            "acme-company-brain/competitor-monitor/reports/2026-08-11__BRIEF.html"],
+        recent_reads=[
+            "/Users/alex/CascadeProjects/clients/acme/Retainer-Deliverables/"
+            "acme-company-brain/SKILL.md"])
+    # unrelated distractor so the pool has >1 doc
+    other = _write_cp(tmp_path, "cccc3333-20260812-120000-checkpoint.md",
+                      active_task="refactor the payment ledger",
+                      modified_files=["/Users/alex/proj/ledger/src/pay.py"])
+    pool = [cb, other]
+    score = m.checkpoint_relevance_score(
+        "continue working on the company brain", cb, pool=pool)
+    assert score >= m.CHECKPOINT_RELEVANCE_THRESHOLD, (
+        f"a stoplist-named project (company brain) must resume, not score ~0; got {score}")
 
 
 # --- R2-G: H1 dead checkpoint. Body file deleted, sidecar lingers -> 0.0. ---
