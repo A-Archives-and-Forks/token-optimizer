@@ -28293,6 +28293,33 @@ def _neutralize_recovered_body(text, limit=4000):
     return text
 
 
+def _opening_context_text(cwd):
+    """Derive a short content signal for the current opening from ``cwd``.
+
+    At SessionStart there is no user prompt yet, so the only available opening
+    signal is the project implied by cwd. Returns the cwd's project dir name
+    with hyphens/underscores split into words so it tokenizes against sidecar
+    topics ("token-optimizer" -> "token optimizer"). Returns '' for a home /
+    generic cwd so the relevance fallback has no signal and stays silent (R4:
+    many users do not open a clean project folder). Never raises.
+    """
+    if not cwd:
+        return ""
+    try:
+        name = Path(str(cwd)).name
+    except Exception:
+        return ""
+    if not name:
+        return ""
+    generic = {"Users", "home",
+               ".claude", "projects", "src", "tests", "test", "scripts", "memory",
+               "assets", "skills", "commands", "docs", "node_modules", "dist", "lib",
+               Path.home().name, cwd_to_project_dir_name().lstrip("-")}
+    if name in generic or name.startswith(".") or name.startswith("-"):
+        return ""
+    return name.replace("-", " ").replace("_", " ")
+
+
 def _emit_codex_session_start(text):
     """Emit SessionStart context as Codex-valid stdout (issue #81, marketplace path).
 
@@ -28404,28 +28431,70 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
         # Prefer one whose work lives under the CURRENT cwd, so a home-dir / catch-all
         # cwd does not surface an unrelated project's checkpoint (e.g. a token-optimizer
         # checkpoint leaking into an unrelated tool's session run from the same home dir).
-        # When cwd cannot disambiguate, fall back to the most recent but LABEL it with its
-        # project + branch so an irrelevant pointer is self-evidently ignorable, not a
-        # mystery the next session investigates.
+        #
+        # U1 (R1): the old blind fallback surfaced ``checkpoints[0]`` (most recent
+        # from ANY project) whenever no cwd-prefix match existed, so an unrelated/
+        # fresh session got pointed at an irrelevant checkpoint and sometimes read
+        # it (~1,500 tokens wasted). Now: when no cwd-prefix match exists, score
+        # the candidates with the U2 relevance scorer against the cwd-derived
+        # opening context and fire ONLY if the best score clears
+        # CHECKPOINT_RELEVANCE_THRESHOLD. A home-dir / generic cwd yields no
+        # opening context -> no score -> no pointer. The cross-session label,
+        # the "NOT your own prior work" framing, the filename-format warning path,
+        # the 30-min age gate, and own-session exclusion are all preserved.
         try:
             cur = Path(cwd) if cwd else Path.cwd()
         except Exception:
             cur = None
+        # Filter candidates once: own-session excluded, 30-min age gate applied.
+        # The age gate and own-session exclusion are evaluated here (before
+        # selection) so a stale or own-session checkpoint can never be the
+        # relevance winner either.
+        candidates = []
+        for cp in checkpoints:
+            if sid_safe and sid_safe in cp["filename"]:
+                continue
+            try:
+                age_seconds = (datetime.now() - cp["created"]).total_seconds()
+            except Exception:
+                continue
+            if age_seconds > 1800:
+                continue
+            candidates.append(cp)
+        if not candidates:
+            return
+        # Strong same-work signal: a checkpoint whose working set lives under
+        # the current cwd. Fires directly (parallel sessions in the same project
+        # are relevant, and the cross-session label disambiguates them).
         chosen = None
         if cur is not None and str(cur) != str(Path.home()):
             cur_prefix = str(cur) + os.sep
-            for cp in checkpoints:
-                if sid_safe and sid_safe in cp["filename"]:
-                    continue
+            for cp in candidates:
                 if any(str(p).startswith(cur_prefix) for p in _checkpoint_work_paths(cp["path"])):
                     chosen = cp
                     break
-        latest = chosen or checkpoints[0]
-        age_seconds = (datetime.now() - latest["created"]).total_seconds()
-        if age_seconds > 1800:
-            return
-        if sid_safe and sid_safe in latest["filename"]:
-            return
+        if chosen is not None:
+            latest = chosen
+        else:
+            # Relevance-gated fallback (U1): score candidates against the
+            # cwd-derived opening context (content-based, cwd-free per R4) and
+            # fire only if the best clears the threshold. No blind recency fall
+            # back -- silence is correct when nothing is relevant.
+            opening_ctx = _opening_context_text(cur)
+            best = None
+            best_score = 0.0
+            for cp in candidates:
+                try:
+                    s = checkpoint_relevance_score(
+                        opening_ctx, cp["path"], pool=candidates, cwd=str(cur) if cur else None)
+                except Exception:
+                    s = 0.0
+                if s > best_score:
+                    best_score = s
+                    best = cp
+            if best is None or best_score < CHECKPOINT_RELEVANCE_THRESHOLD:
+                return
+            latest = best
         desc = _checkpoint_descriptor(latest["path"])
         about = f" (prior work on {desc})" if desc else ""
         # Make the cross-session nature explicit: project+branch alone is not
