@@ -29067,13 +29067,11 @@ def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
         base_tokens = _topic_tokens(str(text or ""), _RESUME_TOPIC_STOPWORDS)
         # Query-side path handling (mirror of the doc side): a prompt that names a
         # project with separators ("gambit-competitor-monitor", "measure.py") or
-        # PASTES a full path tokenizes as ONE blob under _TOPIC_TOKEN_RE.
-        # H2: for such a separator-bearing blob, count ONLY the sub-words that
-        # ACTUALLY hit a doc token toward the prompt set. The blob itself and its
-        # generic non-hitting segments (users/alexgreenshpun/cascadeprojects) are
-        # dropped, so a pasted path can only RAISE precision, never dilute it --
-        # pasting the real path now scores >= the spoken form instead of inverting
-        # below it. C1: pure-numeric date/year segments are junk and never counted.
+        # PASTES a full path tokenizes as ONE blob under _TOPIC_TOKEN_RE. Split it
+        # into sub-words and keep every DISTINCTIVE one (non-stopword, non-digit,
+        # non-scaffold) whether or not it hits the doc -- see the loop below for why
+        # non-hitting words must stay (they dilute precision so a foreign pasted path
+        # cannot false-match). C1: pure-numeric date/year segments are junk, dropped.
         # Scaffolding words (H3) are excluded here too so a pasted path's shared
         # container segments do not enter the prompt weight. A plain space-separated
         # prompt has no separator-bearing token, so its set is unchanged -- the #129
