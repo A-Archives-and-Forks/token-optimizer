@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 import codex_io
-from runtime_env import codex_home, runtime_home
+from runtime_env import codex_home
 
 MANAGED_BEGIN = "# BEGIN token-optimizer status line"
 MANAGED_END = "# END token-optimizer status line"
@@ -253,41 +253,17 @@ def status() -> str:
     return "not configured"
 
 
-_RESUMABLE_SIGNAL = "⤸resumable"
-_RESUMABLE_FLAG_TTL_MS = 30 * 60 * 1000
-
-
-def resumable_signal(sid):
-    """Return the ``⤸resumable`` signal when a relevance-cleared checkpoint
-    exists for this session, else ``''``.
-
-    U3: a UI-only existence signal (R2). The SessionStart hook
-    (measure.compact_restore) writes a per-session flag file beside the quality
-    cache when its pointer fires; this reads it. The signal is for terminal UI
-    consumption only and must never be placed in any hook ``additionalContext``
-    payload (zero billed tokens). Stale flags (>30 min) are ignored. Never
-    raises.
-    """
-    if not sid:
-        return ""
-    try:
-        safe = re.sub(r"[^a-zA-Z0-9_-]", "", str(sid))
-        if not safe:
-            return ""
-        cache_dir = runtime_home() / "token-optimizer"
-        flag_path = cache_dir / f"resumable-{safe}.json"
-        if not flag_path.exists():
-            return ""
-        import json as _json, time as _time
-        flag = _json.loads(flag_path.read_text(encoding="utf-8"))
-        ts = flag.get("ts")
-        if not isinstance(ts, (int, float)):
-            return ""
-        if (_time.time() * 1000 - ts) > _RESUMABLE_FLAG_TTL_MS:
-            return ""
-        return _RESUMABLE_SIGNAL
-    except Exception:
-        return ""
+# NOTE (D4): a per-session ``resumable-<sid>.json`` flag is written by the
+# SessionStart hook (measure._write_resumable_flag) and rendered as a
+# ``⤸resumable`` token by the Claude statusline (statusline.js reads the flag).
+# Codex has NO equivalent surface: its native ``[tui].status_line`` is a static
+# list of built-in item names (STATUS_ITEMS) and cannot invoke a Python function
+# per render, and the only per-turn Codex hook (UserPromptSubmit) is a BILLED
+# ``additionalContext`` channel the UI-only signal must never touch. A
+# ``resumable_signal`` accessor previously lived here but nothing could invoke
+# it, so it was dead code; it has been removed rather than left as a false
+# promise that Codex surfaces the signal. If Codex ever gains a command-driven
+# status item, re-add an accessor and wire it into that item.
 
 
 def build_parser() -> argparse.ArgumentParser:

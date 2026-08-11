@@ -173,19 +173,57 @@ def test_signal_never_in_hook_additional_context(m, tmp_path, monkeypatch, capsy
         f"the resumable signal must never appear in additionalContext (billed); got: {out!r}")
 
 
-# --- T5: codex_statusline.resumable_signal() reads the flag (Python accessor) ---
+# --- T4b: eligible candidate below relevance threshold -> flag STILL written (D4) ---
 
-def test_codex_resumable_signal_reads_flag(m, tmp_path, monkeypatch):
+def test_flag_written_for_eligible_candidate_even_below_threshold(m, tmp_path, monkeypatch):
+    """D4: the resumable flag must fire whenever an ELIGIBLE (age + own-session
+    filtered) candidate exists -- not only when the billed pointer clears the
+    relevance bar. This is the missed-genuine-resume case the statusline was
+    built for (R2): the billed pointer stays silent (no tokens), but the flag is
+    still written so the near-zero-cost statusline can signal it."""
+    # An unrelated checkpoint whose work lives OUTSIDE the cwd -> no cwd match and
+    # low relevance, so the billed pointer must stay silent.
+    cp = _cp(tmp_path, "a1b2c3d4-20260811-120000-checkpoint.md",
+             "marketing audit content strategy for Q2",
+             ["/Users/alex/projects/marketing-audit/report.md"])
+    proj = tmp_path / "unrelated_cwd"
+    proj.mkdir()
+    monkeypatch.setattr(m, "CHECKPOINT_DIR", tmp_path)
+    monkeypatch.setattr(m, "list_checkpoints", lambda: [cp])
+    flag_dir = tmp_path / "cache"
+    flag_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(m, "QUALITY_CACHE_DIR", flag_dir, raising=True)
+
+    sid = "live-session-id"
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        m.compact_restore(session_id=sid, cwd=str(proj), new_session_only=True)
+    out = buf.getvalue()
+
+    # Billed pointer stays silent (nothing relevant enough).
+    assert "checkpoint" not in out.lower() or "available" not in out.lower(), (
+        f"billed pointer must stay silent below threshold; got: {out!r}")
+    # But the flag IS written for the eligible candidate (this is the D4 fix;
+    # the old code cleared the flag and returned here).
+    flag_path = m._resumable_flag_path(sid)
+    assert flag_path is not None and flag_path.exists(), (
+        "the resumable flag must be written for an eligible candidate even when "
+        "the billed pointer does not fire (D4)")
+    flag = json.loads(flag_path.read_text(encoding="utf-8"))
+    assert flag.get("checkpoint") == str(cp["path"]), (
+        f"the flag must point at the eligible candidate; got {flag.get('checkpoint')!r}")
+
+
+# --- T5: Codex carries NO resumable signal (D4: the dead accessor was removed) ---
+
+def test_codex_has_no_resumable_signal_accessor():
+    """D4: ``codex_statusline.resumable_signal`` was dead code -- Codex's native
+    status_line is a static item list that cannot invoke Python per render, so
+    nothing could ever call it. It has been removed rather than left as a false
+    promise that Codex surfaces the signal."""
     import codex_statusline
     importlib.reload(codex_statusline)
-    home = tmp_path / "home"
-    sid = "aaaa1111-2222-3333-8444-aaaaaaaaaaaa"
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    # No flag -> empty signal.
-    assert codex_statusline.resumable_signal(sid) == "", (
-        "resumable_signal must be empty when no flag is present")
-    _write_flag(home, sid)
-    sig = codex_statusline.resumable_signal(sid)
-    assert _SIGNAL in sig, (
-        f"resumable_signal must return the signal when a flag is present; got: {sig!r}")
+    assert not hasattr(codex_statusline, "resumable_signal"), (
+        "the dead resumable_signal accessor must be removed (or genuinely wired "
+        "into a Codex render surface, which the native status_line cannot provide)")
