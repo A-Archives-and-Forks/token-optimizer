@@ -28719,7 +28719,11 @@ def _read_checkpoint_sidecar(checkpoint_path):
         if sidecar_path.exists():
             data = json.loads(sidecar_path.read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError, TypeError):
+    # L2: a sidecar written in a non-UTF-8 encoding (cp1252 export, stray byte)
+    # raises UnicodeDecodeError from read_text before json ever sees it; without
+    # it in the tuple the whole candidate loop aborts. ValueError also covers
+    # json.JSONDecodeError, but both are listed for intent.
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError, OSError, TypeError):
         pass
     return {}
 
@@ -28796,8 +28800,22 @@ def _checkpoint_topic_score(prompt_text, checkpoint, cwd=None):
 # Calibration source for the threshold: the U7 replay benchmark over the real
 # resume/fresh first-prompt mix (tests/baselines/replay-metrics.json). Tuned so
 # genuine resumes clear it and fresh/unrelated openings stay below it.
-CHECKPOINT_RELEVANCE_THRESHOLD = _float_env(
-    "TOKEN_OPTIMIZER_CHECKPOINT_RELEVANCE_THRESHOLD", 0.25
+def _clamp(value, lo, hi):
+    """Clamp a numeric knob into [lo, hi]. A mis-set env knob (typo, fuzz, a
+    hostile TOKEN_OPTIMIZER_* export) must never be able to force the relevance
+    score to a constant or flip the F1 sign -- every relevance knob is clamped at
+    definition to a safe range. Never raises; a non-numeric value returns lo."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return lo
+    if v != v:  # NaN
+        return lo
+    return max(lo, min(hi, v))
+
+
+CHECKPOINT_RELEVANCE_THRESHOLD = _clamp(
+    _float_env("TOKEN_OPTIMIZER_CHECKPOINT_RELEVANCE_THRESHOLD", 0.25), 0.1, 0.9
 )
 
 # Recency prior: a small, weak bonus for a fresh checkpoint, never enough on its
@@ -28825,15 +28843,15 @@ _RELEVANCE_RESUME_INTENT_BONUS = 0.15
 # ("...for full parity of the recent changes") -- from being over-penalized:
 # effective factor = FLOOR + (1-FLOOR)*precision, so precision only modulates the
 # top (1-FLOOR) of the bonus. Env-tunable.
-_RELEVANCE_RESUME_BONUS_PRECISION_FLOOR = _float_env(
-    "TOKEN_OPTIMIZER_RELEVANCE_RESUME_BONUS_PRECISION_FLOOR", 0.5
+_RELEVANCE_RESUME_BONUS_PRECISION_FLOOR = _clamp(
+    _float_env("TOKEN_OPTIMIZER_RELEVANCE_RESUME_BONUS_PRECISION_FLOOR", 0.5), 0.0, 0.99
 )
 
 # D3 (stuffing defense): cap each term's IDF contribution so a single ultra-rare
 # token cannot spike the score, and length-normalize the overlap (see
 # checkpoint_relevance_score) so an opening that pads itself with many keywords
 # cannot reach 1.0 by precision alone. Calibrated so genuine resumes still clear.
-_RELEVANCE_IDF_CAP = _float_env("TOKEN_OPTIMIZER_RELEVANCE_IDF_CAP", 3.0)
+_RELEVANCE_IDF_CAP = _clamp(_float_env("TOKEN_OPTIMIZER_RELEVANCE_IDF_CAP", 3.0), 1.0, 100.0)
 
 # Path-identity weighting (root-cause fix): a checkpoint's project identity lives
 # in its file PATHS, not its prose. A word that recurs across many of a
@@ -28848,8 +28866,37 @@ _RELEVANCE_IDF_CAP = _float_env("TOKEN_OPTIMIZER_RELEVANCE_IDF_CAP", 3.0)
 # most". Query side and IDF are untouched, so the #129 bare-continue guard (empty
 # topical set -> content 0.0 -> no bonus) and the fresh-precision negatives are
 # unaffected: this only re-ranks checkpoints that ALREADY share topical tokens.
-_RELEVANCE_PATH_TF_WEIGHT = _float_env("TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_WEIGHT", 0.5)
-_RELEVANCE_PATH_TF_CAP = _int_env("TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_CAP", 8)
+_RELEVANCE_PATH_TF_WEIGHT = _clamp(
+    _float_env("TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_WEIGHT", 0.5), 0.0, 2.0)
+_RELEVANCE_PATH_TF_CAP = int(_clamp(
+    _int_env("TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_CAP", 8), 1, 50))
+
+# H3 (fixAC2): FILESYSTEM-SCAFFOLDING words. A single-client checkpoint pool has
+# uniform IDF, so structural container words (retainer, deliverables, clients,
+# reports) weigh the same as true project-identity words. These are NOT project
+# names; they name the folder skeleton every project shares. They are EXCLUDED
+# from the hit set (so they grant no path-TF boost and a resume that only grazes
+# them fires no bonus) but KEPT in the doc denominator (so the cross-client recall
+# guard keeps its teeth). A genuine resume must still hit >=1 non-scaffolding
+# identity token for content to score. Proven necessary: compound-segment-only
+# (no lexical stoplist) FAILS in a diverse multi-client pool.
+_CHECKPOINT_SCAFFOLD_STOPWORDS = frozenset({
+    # folder-skeleton container words
+    "retainer", "deliverables", "deliverable", "clients", "client",
+    "reports", "report", "references", "reference", "scripts", "script",
+    "config", "configs", "company", "brain", "src", "lib", "libs",
+    "app", "apps", "data", "notes", "note", "file", "files", "docs", "doc",
+    "projects", "project", "sessions", "session", "build", "builds",
+    # file-extension + doc-type basename noise: a dated brief filename like
+    # ``2026-08-11__BRIEF.html`` splits into {brief, html} -- shared by EVERY
+    # client's reports folder, so it is scaffolding, not project identity. Without
+    # these a pasted path false-matched a different client on the shared basename.
+    # (Only len>=4 Latin tokens survive _topic_token_kept, so 2-3 char extensions
+    # like md/py/js/yml are already dropped; these are the >=4 ones.)
+    "html", "htm", "json", "yaml", "toml", "xml", "csv", "jpeg", "text",
+    "brief", "draft", "readme", "index", "summary", "main", "tests", "test",
+    "utils", "util", "dist", "temp", "tmp", "cache",
+})
 
 # Harness / task-notification markup that can pollute ``active_task``. Stripped
 # before tokenizing so forged sentinels and scheduler noise do not masquerade as
@@ -28895,11 +28942,17 @@ _PATH_WORD_SPLIT_RE = re.compile(r"[\\/\-_.:\s]+")
 
 
 def _path_topic_words(path_str):
-    """Separator-split topic words from a full file path (dirs + basename)."""
+    """Separator-split topic words from a full file path (dirs + basename).
+
+    C1: pure-numeric segments (a 4-digit year like ``2026`` from a dated brief
+    filename ``2026-08-11__BRIEF.html``) carry no project identity and are
+    dropped, so a prompt that merely mentions the date ("the report from
+    2026-08-11") cannot false-match on the year.
+    """
     return {
         w
         for w in _PATH_WORD_SPLIT_RE.split(str(path_str or "").lower())
-        if w and _topic_token_kept(w)
+        if w and _topic_token_kept(w) and not w.isdigit()
     }
 
 
@@ -28980,42 +29033,68 @@ def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
     so it stays below ``CHECKPOINT_RELEVANCE_THRESHOLD`` unless a strong same-
     work signal (cwd bonus) lifts it -- the #129 guard.
     """
+    # L4: a bytes ``text`` (mis-typed caller / raw stdin) must be decoded, never
+    # str()'d -- str(b"...") leaks a b'...' repr whose "b" and quote chars would
+    # tokenize as junk topic words.
+    if isinstance(text, (bytes, bytearray)):
+        try:
+            text = bytes(text).decode("utf-8", "replace")
+        except Exception:
+            text = ""
+    # H1: a checkpoint whose body file has been deleted is DEAD even if its sidecar
+    # JSON lingers. Score it 0.0 up front so an orphan sidecar can never be
+    # resurrected as a match. Guarded so a bad path type still degrades to 0.0.
+    try:
+        if not Path(str(checkpoint_path)).is_file():
+            return 0.0
+    except Exception:
+        return 0.0
+    # Doc tokens first: H2 needs them to decide which query-split sub-words count.
+    try:
+        doc_tokens = _checkpoint_sidecar_doc_tokens(checkpoint_path)
+    except Exception:
+        doc_tokens = set()
     # Strip resume-cue glue ("continue"/"resume"/"session"/"work"/...) from the
     # prompt so a bare "continue" has NO topical tokens and scores on recency +
     # work-path only (U2.4 / #129). Reuses the shared non-English tokenizer so
     # CJK prompts tokenize correctly (#127).
     try:
-        prompt_tokens = _topic_tokens(str(text or ""), _RESUME_TOPIC_STOPWORDS)
-        # Query-side path split (mirror of the doc side): a prompt that names a
-        # project with separators ("acme-competitor-monitor", "measure.py")
-        # tokenizes as ONE blob under _TOPIC_TOKEN_RE and could never overlap the
-        # separator-split path WORDS in the checkpoint doc. AUGMENT (never replace)
-        # the prompt set with the split sub-words so the hyphenated/dotted form
-        # matches the same way the spoken form ("acme competitor monitor")
-        # already does. A natural space-separated prompt has no separator-bearing
-        # token, so its set is unchanged -- the #129 bare-continue guard (empty
-        # topical set) still holds.
-        _split_extra = set()
-        for _t in prompt_tokens:
+        base_tokens = _topic_tokens(str(text or ""), _RESUME_TOPIC_STOPWORDS)
+        # Query-side path handling (mirror of the doc side): a prompt that names a
+        # project with separators ("acme-competitor-monitor", "measure.py") or
+        # PASTES a full path tokenizes as ONE blob under _TOPIC_TOKEN_RE.
+        # H2: for such a separator-bearing blob, count ONLY the sub-words that
+        # ACTUALLY hit a doc token toward the prompt set. The blob itself and its
+        # generic non-hitting segments (users/alexgreenshpun/cascadeprojects) are
+        # dropped, so a pasted path can only RAISE precision, never dilute it --
+        # pasting the real path now scores >= the spoken form instead of inverting
+        # below it. C1: pure-numeric date/year segments are junk and never counted.
+        # Scaffolding words (H3) are excluded here too so a pasted path's shared
+        # container segments do not enter the prompt weight. A plain space-separated
+        # prompt has no separator-bearing token, so its set is unchanged -- the #129
+        # bare-continue guard (empty topical set) still holds.
+        prompt_tokens = set()
+        for _t in base_tokens:
             if any(_c in _t for _c in "\\/-_.:"):
-                _split_extra |= {
-                    w for w in _PATH_WORD_SPLIT_RE.split(_t)
-                    if w and w not in _RESUME_TOPIC_STOPWORDS and _topic_token_kept(w)
-                }
-        prompt_tokens = prompt_tokens | _split_extra
+                for _w in _PATH_WORD_SPLIT_RE.split(_t):
+                    if (_w and _w not in _RESUME_TOPIC_STOPWORDS
+                            and _topic_token_kept(_w) and not _w.isdigit()
+                            and _w not in _CHECKPOINT_SCAFFOLD_STOPWORDS
+                            and _w in doc_tokens):
+                        prompt_tokens.add(_w)
+            else:
+                prompt_tokens.add(_t)
     except Exception:
         return 0.0
-    try:
-        doc_tokens = _checkpoint_sidecar_doc_tokens(checkpoint_path)
-    except Exception:
-        doc_tokens = set()
 
     content_score = 0.0
     precision = 0.0
     if prompt_tokens and doc_tokens:
         # IDF across the pool: df(t) = # pool checkpoints whose doc contains t.
         pool_paths = []
-        if pool:
+        # L4: only iterate a genuine sequence pool. A stray string pool would
+        # otherwise iterate its characters as "paths".
+        if pool and isinstance(pool, (list, tuple)):
             for item in pool:
                 p = item.get("path") if isinstance(item, dict) else item
                 if p:
@@ -29042,7 +29121,15 @@ def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
             d = df.get(t, 0)
             return min(_math.log((n + 1) / (d + 1)) + 1.0, _RELEVANCE_IDF_CAP)
 
-        hits = prompt_tokens & doc_tokens
+        hits_all = prompt_tokens & doc_tokens
+        # H3 (fixAC2): drop filesystem-scaffolding words from the HIT set. They are
+        # structural container words shared by every project (retainer, clients,
+        # reports, ...), not identity. Excluding them from hits means they give no
+        # path-TF boost and a resume that only grazes them cannot fire the bonus,
+        # yet they stay in ``doc_tokens`` below so the recall denominator (the
+        # cross-client guard) keeps its teeth. content_score can only be > 0 when a
+        # NON-scaffolding identity token is hit -- the identity-hit gate.
+        hits = hits_all - _CHECKPOINT_SCAFFOLD_STOPWORDS
         # Length-normalized overlap via IDF-weighted F1, NOT precision (D3).
         # Bare precision (hits_weight / prompt_weight) tops out at 1.0 whenever
         # EVERY prompt token happens to appear in the doc, so an opening
@@ -29073,7 +29160,12 @@ def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
             return 1.0 + _RELEVANCE_PATH_TF_WEIGHT * min(tf, _RELEVANCE_PATH_TF_CAP)
 
         matched_plain = sum(_idf(t) for t in hits)
-        prompt_weight = sum(_idf(t) for t in prompt_tokens) or 1.0
+        # M2: exclude CJK / non-Latin glue tokens (ord >= U+3000) from the PRECISION
+        # denominator only. A non-Latin resume ("...결제 모듈 작업을 이어서") pads with
+        # grammatical particles that never appear in the doc; counting them in
+        # prompt_weight diluted precision below the bar. Latin-only prompts have no
+        # CJK tokens, so their prompt_weight is unchanged and the acme guard holds.
+        prompt_weight = sum(_idf(t) for t in prompt_tokens if not _has_cjk(t)) or 1.0
         matched_doc_weight = sum(_idf(t) * _path_weight(t) for t in hits)
         doc_weight = sum(_idf(t) * _path_weight(t) for t in doc_tokens) or 1.0
         precision = matched_plain / prompt_weight
@@ -29109,10 +29201,11 @@ def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
                 score += _RELEVANCE_RESUME_INTENT_BONUS * (_f + (1.0 - _f) * precision)
         except Exception:
             pass
-    # Weak recency prior (never enough alone to clear the threshold). Only apply
-    # when the checkpoint has SOME parseable content -- a non-UTF-8 / sidecarless
-    # checkpoint must score a clean 0.0, not 0.0 + a recency tip (#127/#28760).
-    if doc_tokens:
+    # Weak recency prior (never enough alone to clear the threshold). L1: gate on
+    # content_score > 0, NOT merely doc_tokens -- an empty / separator-only prompt
+    # (or one whose only overlap is a scaffolding word) has content_score 0.0 and
+    # must score a clean 0.0, not 0.0 + a recency tip that leaks it onto the board.
+    if content_score > 0.0:
         try:
             cp_path = Path(str(checkpoint_path))
             if cp_path.exists():
@@ -29150,6 +29243,11 @@ def codex_prompt_hints(prompt_text="", session_id=None, cwd=None, max_age_minute
 # continuity hook upgrades from a one-line hint to a FULL lean reconstruction,
 # scoped to the same project. Kept tight to avoid firing on incidental "continue".
 _RESUME_INTENT_RE = re.compile(
+    # H2: "continue <path>" -- a bare "continue" followed by a pasted absolute or
+    # relative path ("continue /Users/.../acme-competitor-monitor",
+    # "continue \\srv\\share\\...") is a resume cue: the path IS the topic. Matched
+    # without a trailing \b so it fires on the leading slash/backslash/tilde/dot.
+    r"(?:continue\s+[\\/~.])|"
     r"\b(last session|previous session|prior session|earlier session|last time|"
     r"where we left off|pick(?:ing)? up where|"
     # "from" added so "continue from checkpoint" / "continue from where we left off"
@@ -29206,9 +29304,19 @@ def _extract_session_id_from_prompt(text):
     return (m.group(1) or m.group(2)).lower()
 
 
+# M2: CJK / non-Latin resume cues (继续 zh, 이어서 / 계속 ko, 続ける ja). Kept in a
+# SEPARATE regex, consulted only for intent DETECTION -- deliberately NOT part of
+# _RESUME_INTENT_RE, whose .sub() strips cues from a prompt residual. CJK scripts
+# have no word boundaries, so a glued Han run ("继续数据库迁移工作") is ONE token;
+# stripping "继续" from the prompt but not the checkpoint would break the identical-
+# run match the #127 parity fixture pins. Detection-only avoids that.
+_CJK_RESUME_CUE_RE = re.compile(r"继续|이어서|계속|続ける")
+
+
 def _resume_intent(text):
-    """True when the prompt asks to continue/recall prior work."""
-    return bool(_RESUME_INTENT_RE.search(text or ""))
+    """True when the prompt asks to continue/recall prior work (Latin or CJK cue)."""
+    t = text or ""
+    return bool(_RESUME_INTENT_RE.search(t) or _CJK_RESUME_CUE_RE.search(t))
 
 
 # Generic glue words that carry no topic once the resume cue is removed; keeping
@@ -29234,8 +29342,13 @@ _TOPIC_TOKEN_RE = re.compile(r"[a-zA-Z0-9_.:À-ÖØ-öø-ÿĀ-ɏ/-]+|[^\x00-\x7F
 _CJK_MIN = 0x3000
 
 
+def _has_cjk(w):
+    """True when a token contains any CJK / non-Latin-script char (ord >= U+3000)."""
+    return any(ord(ch) >= _CJK_MIN for ch in w)
+
+
 def _topic_token_kept(w):
-    if any(ord(ch) >= _CJK_MIN for ch in w):
+    if _has_cjk(w):
         return len(w) >= 2
     return len(w) > 3
 
