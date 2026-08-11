@@ -28322,12 +28322,15 @@ def _opening_context_text(cwd):
 
 # --- U3: near-zero-cost statusline existence signal for a resumable checkpoint ---
 #
-# When the SessionStart pointer fires (a relevance-cleared checkpoint exists),
-# write a per-session flag file beside the quality cache. The statusline (JS for
-# Claude, codex_statusline.resumable_signal for Codex) reads it and shows a
-# compact ``⤸resumable`` token in the terminal UI ONLY -- never in any hook
-# ``additionalContext`` payload, so it costs zero billed tokens (R2). The flag
-# is ts-gated (30 min) so the signal does not outlive the resumable window.
+# When an eligible checkpoint exists for a new session (D4: age + own-session
+# filtered, whether or not the billed pointer clears the relevance bar), write a
+# per-session flag file beside the quality cache. The Claude statusline
+# (statusline.js) reads it and shows a compact ``⤸resumable`` token in the
+# terminal UI ONLY -- never in any hook ``additionalContext`` payload, so it
+# costs zero billed tokens (R2). Codex has no non-billed render surface for this
+# (its native status_line is a static item list), so it carries no equivalent
+# signal -- see codex_statusline.py. The flag is ts-gated (30 min) so the signal
+# does not outlive the resumable window.
 _RESUMABLE_FLAG_TTL_MS = 30 * 60 * 1000
 
 
@@ -28526,16 +28529,14 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
                 if any(str(p).startswith(cur_prefix) for p in _checkpoint_work_paths(cp["path"])):
                     chosen = cp
                     break
-        if chosen is not None:
-            latest = chosen
-        else:
-            # Relevance-gated fallback (U1): score candidates against the
-            # cwd-derived opening context (content-based, cwd-free per R4) and
-            # fire only if the best clears the threshold. No blind recency fall
-            # back -- silence is correct when nothing is relevant.
+        # Relevance-gate the candidates once (content-based, cwd-free per R4).
+        # The result drives BOTH the statusline flag target and the billed-pointer
+        # decision below. No blind recency fallback -- silence is correct for the
+        # BILLED pointer when nothing is relevant.
+        best = None
+        best_score = 0.0
+        if chosen is None:
             opening_ctx = _opening_context_text(cur)
-            best = None
-            best_score = 0.0
             for cp in candidates:
                 try:
                     s = checkpoint_relevance_score(
@@ -28545,13 +28546,28 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
                 if s > best_score:
                     best_score = s
                     best = cp
-            if best is None or best_score < CHECKPOINT_RELEVANCE_THRESHOLD:
-                _clear_resumable_flag(sid_safe)
-                return
+
+        # D4: the statusline resumable signal fires whenever an ELIGIBLE (age +
+        # own-session filtered) candidate exists -- NOT only when the billed
+        # pointer clears the relevance bar. This is the missed-genuine-resume
+        # case (R2): the billed pointer stays silent to save tokens, but the
+        # near-zero-cost statusline still tells the user a resumable checkpoint is
+        # available. Only the BILLED pointer is gated on relevance. The flag
+        # points at the strongest eligible candidate we can identify (cwd match >
+        # relevance winner > most-recent eligible; candidates are recent-first).
+        flag_target = chosen or best or candidates[0]
+        _write_resumable_flag(sid_safe, flag_target["path"])
+
+        # Billed pointer: fire only on a strong same-work (cwd) signal or when the
+        # relevance winner clears the threshold. Otherwise stay silent -- the
+        # statusline already carries the zero-cost signal for this eligible
+        # candidate.
+        if chosen is not None:
+            latest = chosen
+        elif best is not None and best_score >= CHECKPOINT_RELEVANCE_THRESHOLD:
             latest = best
-        # U3: a relevance-cleared checkpoint exists -> set the statusline signal
-        # flag (UI-only, zero billed tokens). Cleared on every non-firing path.
-        _write_resumable_flag(sid_safe, latest["path"])
+        else:
+            return
         desc = _checkpoint_descriptor(latest["path"])
         about = f" (prior work on {desc})" if desc else ""
         # Make the cross-session nature explicit: project+branch alone is not
