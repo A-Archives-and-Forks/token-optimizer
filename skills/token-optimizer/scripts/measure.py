@@ -28818,6 +28818,16 @@ _RELEVANCE_CWD_BONUS = 0.10
 # no topical tokens has content_score = 0.0, so it gets NO bonus and stays
 # below the bar (#129).
 _RELEVANCE_RESUME_INTENT_BONUS = 0.15
+# The resume-intent bonus is scaled by precision so a prompt that names a
+# DIFFERENT project and only grazes a shared container word cannot ride the flat
+# cue over the threshold (cross-client false positive). A FLOOR keeps genuine but
+# verbose resumes -- which name the right project yet pad with unmatched words
+# ("...for full parity of the recent changes") -- from being over-penalized:
+# effective factor = FLOOR + (1-FLOOR)*precision, so precision only modulates the
+# top (1-FLOOR) of the bonus. Env-tunable.
+_RELEVANCE_RESUME_BONUS_PRECISION_FLOOR = _float_env(
+    "TOKEN_OPTIMIZER_RELEVANCE_RESUME_BONUS_PRECISION_FLOOR", 0.5
+)
 
 # D3 (stuffing defense): cap each term's IDF contribution so a single ultra-rare
 # token cannot spike the score, and length-normalize the overlap (see
@@ -29001,6 +29011,7 @@ def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
         doc_tokens = set()
 
     content_score = 0.0
+    precision = 0.0
     if prompt_tokens and doc_tokens:
         # IDF across the pool: df(t) = # pool checkpoints whose doc contains t.
         pool_paths = []
@@ -29082,7 +29093,20 @@ def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
     if content_score > 0.0:
         try:
             if _resume_intent(str(text or "")):
-                score += _RELEVANCE_RESUME_INTENT_BONUS
+                # Scale the bonus by PRECISION (IDF-weighted fraction of the
+                # prompt's distinctive tokens the checkpoint actually contains).
+                # A genuine resume names the project -> most tokens match ->
+                # near-full bonus. A prompt that names a DIFFERENT thing and only
+                # grazes a shared container word ("competitor analysis for acme
+                # corp" overlapping acme's competitor-monitor on just
+                # "competitor") has high unmatched high-IDF mass -> low precision
+                # -> little bonus, so it cannot ride the flat cue over the bar and
+                # false-match the wrong client. Unmatched distinctive tokens are
+                # treated as negative evidence. #129 still holds: a bare "continue"
+                # has content_score 0.0 and never reaches here. The FLOOR protects
+                # genuine verbose resumes (see the constant's comment).
+                _f = _RELEVANCE_RESUME_BONUS_PRECISION_FLOOR
+                score += _RELEVANCE_RESUME_INTENT_BONUS * (_f + (1.0 - _f) * precision)
         except Exception:
             pass
     # Weak recency prior (never enough alone to clear the threshold). Only apply
