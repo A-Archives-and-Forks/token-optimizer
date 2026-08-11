@@ -28971,7 +28971,11 @@ _RESUME_INTENT_RE = re.compile(
     # "from" added so "continue from checkpoint" / "continue from where we left off"
     # is recognized; the cue is the verb "continue from", NOT a bare "from
     # checkpoint" (which would false-match "import data from checkpoint file").
-    r"continue (?:working|where|on|our|the|with|that|this|from|to)|"
+    # "to" is deliberately EXCLUDED (D2): "continue to <verb>" ("continue to
+    # refactor", "continue to write the tests") means keep doing the CURRENT task,
+    # not resume a prior session -- matching it re-opened fresh-session lean
+    # injection on Codex for any such prompt in a project with recent checkpoints.
+    r"continue (?:working|where|on|our|the|with|that|this|from)|"
     r"carry on (?:with|where)|what we (?:discussed|talked about|were (?:doing|working))|"
     r"resume (?:our|that|this|work|the (?:work|session|project|task|conversation|thread|discussion))|"
     r"recap (?:of )?(?:our|the|last)|"
