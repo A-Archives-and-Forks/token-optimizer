@@ -88,15 +88,21 @@ def test_high_topical_overlap_above_threshold(m, tmp_path):
 def test_generic_word_only_overlap_stays_low(m, tmp_path):
     # Three checkpoints that all share the generic glue word "work" but each
     # carries a DISTINCTIVE topic that appears in only one of them.
+    # Directory names are deliberately NON-topical (alpha/beta/gamma) so the
+    # prompt word "project" genuinely misses every doc. The scorer now splits
+    # path DIRECTORY segments into topic words (a real checkpoint's identity
+    # lives in its dirs, e.g. clients/gambit/...), so a dir literally named
+    # "project-*" would inject "project" into the docs and defeat the very point
+    # of this test -- that a generic word carries no signal.
     cp_a = _write_cp(tmp_path, "aaaa1111-20260811-120000-checkpoint.md",
                      active_task="work on token optimizer checkpoint injection",
-                     modified_files=["project-a/measure.py"])
+                     modified_files=["alpha/measure.py"])
     cp_b = _write_cp(tmp_path, "bbbb2222-20260811-120100-checkpoint.md",
                      active_task="work on marketing audit content strategy",
-                     modified_files=["project-b/audit.md"])
+                     modified_files=["beta/audit.md"])
     cp_c = _write_cp(tmp_path, "cccc3333-20260811-120200-checkpoint.md",
                      active_task="work on billing payment integration",
-                     modified_files=["project-c/billing.py"])
+                     modified_files=["gamma/billing.py"])
     pool = [cp_a, cp_b, cp_c]
     # Generic-only prompt: the only shared word is "work" (low IDF, appears in
     # every checkpoint); "project" misses all. IDF-weighted precision stays low
