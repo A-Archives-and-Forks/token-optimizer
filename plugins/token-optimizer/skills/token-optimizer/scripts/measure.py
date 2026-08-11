@@ -28727,6 +28727,17 @@ def _read_checkpoint_sidecar(checkpoint_path):
 def _safe_recovered_scalar(value, limit=160):
     text = " ".join(str(value or "").split())
     text = re.sub(r"[\x00-\x1f\x7f]", " ", text)
+    # D5: defang forged RECOVERED-DATA sentinels and instruction-like role
+    # prefixes the SAME way the body scrubber (_neutralize_recovered_body) does.
+    # Sidecar scalars (active_task / decisions) originate from prior-session
+    # content and are prompt-injectable; without this a forged "[/RECOVERED]" in
+    # active_task could close the fenced pull block and smuggle the following text
+    # in as live instructions. Scalars are single-line after the whitespace
+    # collapse above, so the body's line-structure handling is not needed.
+    text = re.sub(r"\[(\s*/?\s*RECOVERED\b)", r"(\1", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?i)^(\s*)(system|assistant|user|human|developer|tool|instructions?)(\s*:)",
+        r"\1[\2]\3", text)
     return text[: max(0, limit)]
 
 
