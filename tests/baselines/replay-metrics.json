@@ -1,0 +1,15 @@
+{
+  "resume_recall": 1.0,
+  "fresh_precision": 1.0,
+  "incident_pass_rate": 1.0,
+  "mix_weighted_expected_tokens": -900,
+  "resume_hits": 6,
+  "resume_total": 6,
+  "fresh_correct_rejections": 6,
+  "fresh_total": 6,
+  "fresh_false_positives": [],
+  "incident_passes": 5,
+  "incident_total": 5,
+  "threshold": 0.25,
+  "resume_intent_bonus": 0.15
+}
