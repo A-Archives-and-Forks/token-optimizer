@@ -28825,6 +28825,22 @@ _RELEVANCE_RESUME_INTENT_BONUS = 0.15
 # cannot reach 1.0 by precision alone. Calibrated so genuine resumes still clear.
 _RELEVANCE_IDF_CAP = _float_env("TOKEN_OPTIMIZER_RELEVANCE_IDF_CAP", 3.0)
 
+# Path-identity weighting (root-cause fix): a checkpoint's project identity lives
+# in its file PATHS, not its prose. A word that recurs across many of a
+# checkpoint's modified_files / recent_reads paths (acme x10, attention x10,
+# optimizer x10) is a strong identity signal; the SAME word appearing once in an
+# active_task/decision sentence is incidental. Because the doc token set is
+# frequency-blind, an unrelated review/handoff checkpoint that merely QUOTES a
+# project name in prose scored identically to the real project checkpoint. So we
+# weight each doc-side token by how often it appears in the checkpoint's PATHS
+# (capped, D3-style, so one mega-repeated word cannot dominate). Prose-only
+# tokens keep weight 1.0, honoring "use active_task as a weak secondary signal at
+# most". Query side and IDF are untouched, so the #129 bare-continue guard (empty
+# topical set -> content 0.0 -> no bonus) and the fresh-precision negatives are
+# unaffected: this only re-ranks checkpoints that ALREADY share topical tokens.
+_RELEVANCE_PATH_TF_WEIGHT = _float_env("TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_WEIGHT", 0.5)
+_RELEVANCE_PATH_TF_CAP = _int_env("TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_CAP", 8)
+
 # Harness / task-notification markup that can pollute ``active_task``. Stripped
 # before tokenizing so forged sentinels and scheduler noise do not masquerade as
 # topical content. Tags are removed wholesale; the residual text is then passed
@@ -28854,15 +28870,68 @@ def _sanitize_sidecar_text(value, limit=400):
     return _safe_recovered_scalar(text, limit=limit)
 
 
+# File-path words carry a checkpoint's project identity. Real checkpoints store
+# identity in the DIRECTORY segments of their file paths, e.g.
+# .../clients/acme/.../acme-competitor-monitor/reports/2026-08-11__BRIEF.html
+# -- the distinctive words (acme, competitor, monitor) live in the dirs, not the
+# basename. Split the WHOLE path (dirs AND basename) on / \ - _ . : and whitespace
+# so that path -> {clients, acme, competitor, monitor, reports, ...} and a
+# natural spoken prompt ("the acme competitor monitor") can overlap it. Pool IDF
+# then down-weights the generic containers (users, clients, projects, reports,
+# retainer, deliverables) that appear in most checkpoints, so no hand-kept
+# stoplist is needed. Kept separate from _TOPIC_TOKEN_RE (which deliberately KEEPS
+# separators inside a token, #127 parity) so non-path fields are untouched.
+_PATH_WORD_SPLIT_RE = re.compile(r"[\\/\-_.:\s]+")
+
+
+def _path_topic_words(path_str):
+    """Separator-split topic words from a full file path (dirs + basename)."""
+    return {
+        w
+        for w in _PATH_WORD_SPLIT_RE.split(str(path_str or "").lower())
+        if w and _topic_token_kept(w)
+    }
+
+
+def _checkpoint_path_tf(checkpoint_path):
+    """Frequency of each path-identity word across a checkpoint's file paths.
+
+    Counts, per word, how many of the checkpoint's modified_files + recent_reads
+    paths that word appears in (set-per-path so a single path with a repeated
+    segment counts once for that path, but a project name recurring across many
+    files accumulates). This is the strength of the path-identity signal used by
+    ``checkpoint_relevance_score`` to out-rank incidental prose mentions. Returns
+    an empty Counter on any error.
+    """
+    from collections import Counter as _Counter
+    tf = _Counter()
+    try:
+        sc = _read_checkpoint_sidecar(checkpoint_path) or {}
+    except Exception:
+        return tf
+    for mf in (sc.get("modified_files") or []):
+        p = mf.get("path") if isinstance(mf, dict) else mf
+        if p:
+            tf.update(_path_topic_words(p))
+    for r in (sc.get("recent_reads") or []):
+        if r:
+            tf.update(_path_topic_words(r))
+    return tf
+
+
 def _checkpoint_sidecar_doc_tokens(checkpoint_path):
     """Distinctive topic tokens drawn from a checkpoint's sidecar fields.
 
     Builds a single ``document`` from the sanitized sidecar fields that actually
-    carry topic signal: ``active_task``, ``topic``, ``decisions``,
-    ``modified_files`` basenames, ``recent_reads`` basenames, and ``active_plan``.
-    Returns a set of lowercase topic tokens (via the shared non-English tokenizer
-    so CJK sidecars score correctly). Returns an empty set on any error or when
-    the sidecar is absent/empty -- the scorer then falls back to 0.0 for content.
+    carry topic signal: ``active_task``, ``topic``, ``decisions``, and
+    ``active_plan`` (via the shared non-English tokenizer so CJK sidecars score
+    correctly), UNIONED with separator-split path WORDS from ``modified_files``
+    and ``recent_reads`` (dirs AND basename -- see ``_path_topic_words``). The
+    path words are where a checkpoint's project identity actually lives; keeping
+    only the basename discarded the identity words held in the directory
+    segments. Returns a set of lowercase topic tokens, or an empty set on any
+    error / when the sidecar is absent-or-empty -- the scorer then falls back to
+    0.0 for content.
     """
     try:
         sc = _read_checkpoint_sidecar(checkpoint_path) or {}
@@ -28873,17 +28942,18 @@ def _checkpoint_sidecar_doc_tokens(checkpoint_path):
              _sanitize_sidecar_text(sc.get("active_plan"))]
     for d in (sc.get("decisions") or []):
         parts.append(_sanitize_sidecar_text(d))
+    doc = "\n".join(p for p in parts if p)
+    tokens = _topic_tokens(doc) if doc.strip() else set()
+    # Union separator-split WORDS from the full modified_files / recent_reads
+    # paths (dirs carry the project identity: acme, attention, optimizer, ...).
     for mf in (sc.get("modified_files") or []):
         p = mf.get("path") if isinstance(mf, dict) else mf
         if p:
-            parts.append(_sanitize_sidecar_text(Path(str(p)).name))
+            tokens |= _path_topic_words(p)
     for r in (sc.get("recent_reads") or []):
         if r:
-            parts.append(_sanitize_sidecar_text(Path(str(r)).name))
-    doc = "\n".join(p for p in parts if p)
-    if not doc.strip():
-        return set()
-    return _topic_tokens(doc)
+            tokens |= _path_topic_words(r)
+    return tokens
 
 
 def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
@@ -28906,6 +28976,23 @@ def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
     # CJK prompts tokenize correctly (#127).
     try:
         prompt_tokens = _topic_tokens(str(text or ""), _RESUME_TOPIC_STOPWORDS)
+        # Query-side path split (mirror of the doc side): a prompt that names a
+        # project with separators ("acme-competitor-monitor", "measure.py")
+        # tokenizes as ONE blob under _TOPIC_TOKEN_RE and could never overlap the
+        # separator-split path WORDS in the checkpoint doc. AUGMENT (never replace)
+        # the prompt set with the split sub-words so the hyphenated/dotted form
+        # matches the same way the spoken form ("acme competitor monitor")
+        # already does. A natural space-separated prompt has no separator-bearing
+        # token, so its set is unchanged -- the #129 bare-continue guard (empty
+        # topical set) still holds.
+        _split_extra = set()
+        for _t in prompt_tokens:
+            if any(_c in _t for _c in "\\/-_.:"):
+                _split_extra |= {
+                    w for w in _PATH_WORD_SPLIT_RE.split(_t)
+                    if w and w not in _RESUME_TOPIC_STOPWORDS and _topic_token_kept(w)
+                }
+        prompt_tokens = prompt_tokens | _split_extra
     except Exception:
         return 0.0
     try:
@@ -28955,11 +29042,31 @@ def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
         # fraction of a large checkpoint is dragged down by low recall and cannot
         # clear the bar, while a genuine resume that covers the checkpoint's real
         # topic still scores well regardless of incidental padding.
-        matched_weight = sum(_idf(t) for t in hits)
+        #
+        # PRECISION is the prompt's view (plain IDF): how much of what the user
+        # named is covered. RECALL is the DOC's view, weighted by path-identity
+        # frequency (``_path_weight``): a matched word that recurs across the
+        # checkpoint's file paths counts for more of the doc's identity than the
+        # same word buried once in prose. This is what lets the real acme
+        # checkpoint (acme x10 in paths) out-rank a review checkpoint that only
+        # quotes "acme competitor monitor" in a decision sentence.
+        try:
+            path_tf = _checkpoint_path_tf(checkpoint_path)
+        except Exception:
+            path_tf = {}
+
+        def _path_weight(t):
+            tf = path_tf.get(t, 0)
+            if tf <= 0:
+                return 1.0
+            return 1.0 + _RELEVANCE_PATH_TF_WEIGHT * min(tf, _RELEVANCE_PATH_TF_CAP)
+
+        matched_plain = sum(_idf(t) for t in hits)
         prompt_weight = sum(_idf(t) for t in prompt_tokens) or 1.0
-        doc_weight = sum(_idf(t) for t in doc_tokens) or 1.0
-        precision = matched_weight / prompt_weight
-        recall = matched_weight / doc_weight
+        matched_doc_weight = sum(_idf(t) * _path_weight(t) for t in hits)
+        doc_weight = sum(_idf(t) * _path_weight(t) for t in doc_tokens) or 1.0
+        precision = matched_plain / prompt_weight
+        recall = matched_doc_weight / doc_weight
         if precision + recall > 0:
             content_score = 2 * precision * recall / (precision + recall)
         else:
