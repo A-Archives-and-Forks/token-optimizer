@@ -28320,6 +28320,58 @@ def _opening_context_text(cwd):
     return name.replace("-", " ").replace("_", " ")
 
 
+# --- U3: near-zero-cost statusline existence signal for a resumable checkpoint ---
+#
+# When the SessionStart pointer fires (a relevance-cleared checkpoint exists),
+# write a per-session flag file beside the quality cache. The statusline (JS for
+# Claude, codex_statusline.resumable_signal for Codex) reads it and shows a
+# compact ``⤸resumable`` token in the terminal UI ONLY -- never in any hook
+# ``additionalContext`` payload, so it costs zero billed tokens (R2). The flag
+# is ts-gated (30 min) so the signal does not outlive the resumable window.
+_RESUMABLE_FLAG_TTL_MS = 30 * 60 * 1000
+
+
+def _resumable_flag_path(sid):
+    """Per-session resumable flag file path, or None when no usable sid."""
+    if not sid:
+        return None
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "", str(sid))
+    if not safe:
+        return None
+    return QUALITY_CACHE_DIR / f"resumable-{safe}.json"
+
+
+def _write_resumable_flag(sid, checkpoint_path):
+    """Record that a relevance-cleared checkpoint exists for this session.
+
+    Best-effort, never raises: the flag is a UI nicety, not a correctness gate.
+    """
+    p = _resumable_flag_path(sid)
+    if p is None:
+        return
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        import time as _t
+        payload = json.dumps({"checkpoint": str(checkpoint_path),
+                              "ts": int(_t.time() * 1000)})
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def _clear_resumable_flag(sid):
+    """Remove a stale resumable flag for this session (no relevance-cleared cp)."""
+    p = _resumable_flag_path(sid)
+    if p is None:
+        return
+    try:
+        p.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _emit_codex_session_start(text):
     """Emit SessionStart context as Codex-valid stdout (issue #81, marketplace path).
 
@@ -28462,6 +28514,7 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
                 continue
             candidates.append(cp)
         if not candidates:
+            _clear_resumable_flag(sid_safe)
             return
         # Strong same-work signal: a checkpoint whose working set lives under
         # the current cwd. Fires directly (parallel sessions in the same project
@@ -28493,8 +28546,12 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
                     best_score = s
                     best = cp
             if best is None or best_score < CHECKPOINT_RELEVANCE_THRESHOLD:
+                _clear_resumable_flag(sid_safe)
                 return
             latest = best
+        # U3: a relevance-cleared checkpoint exists -> set the statusline signal
+        # flag (UI-only, zero billed tokens). Cleared on every non-firing path.
+        _write_resumable_flag(sid_safe, latest["path"])
         desc = _checkpoint_descriptor(latest["path"])
         about = f" (prior work on {desc})" if desc else ""
         # Make the cross-session nature explicit: project+branch alone is not
