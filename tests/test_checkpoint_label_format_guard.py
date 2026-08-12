@@ -57,7 +57,10 @@ def test_matching_filename_uses_labeled_warning(m, tmp_path, monkeypatch, capsys
     monkeypatch.setattr(m, "CHECKPOINT_DIR", tmp_path)
     monkeypatch.setattr(m, "list_checkpoints", lambda: [cp])
     monkeypatch.setattr(m, "_checkpoint_descriptor", lambda p: "test-project")
-    monkeypatch.setattr(m, "_checkpoint_work_paths", lambda p: [])
+    # U1: the pointer now fires via a cwd-prefix (same-work) match, not the
+    # removed blind recency fallback. Put the checkpoint's work under cwd so
+    # the label-format path is reached and the F10 guard is still exercised.
+    monkeypatch.setattr(m, "_checkpoint_work_paths", lambda p: [str(tmp_path / "src" / "file.py")])
     m.compact_restore(session_id="different-session-id", cwd=str(tmp_path), new_session_only=True)
     out = capsys.readouterr().out
     assert "DIFFERENT session" in out
@@ -71,7 +74,7 @@ def test_non_matching_filename_still_labels_cross_session(m, tmp_path, monkeypat
     monkeypatch.setattr(m, "CHECKPOINT_DIR", tmp_path)
     monkeypatch.setattr(m, "list_checkpoints", lambda: [cp])
     monkeypatch.setattr(m, "_checkpoint_descriptor", lambda p: "test-project")
-    monkeypatch.setattr(m, "_checkpoint_work_paths", lambda p: [])
+    monkeypatch.setattr(m, "_checkpoint_work_paths", lambda p: [str(tmp_path / "src" / "file.py")])
     m.compact_restore(session_id="different-session-id", cwd=str(tmp_path), new_session_only=True)
     captured = capsys.readouterr()
     assert "DIFFERENT session" in captured.out, (
@@ -89,7 +92,7 @@ def test_non_matching_filename_emits_stderr_warning(m, tmp_path, monkeypatch, ca
     monkeypatch.setattr(m, "CHECKPOINT_DIR", tmp_path)
     monkeypatch.setattr(m, "list_checkpoints", lambda: [cp])
     monkeypatch.setattr(m, "_checkpoint_descriptor", lambda p: "")
-    monkeypatch.setattr(m, "_checkpoint_work_paths", lambda p: [])
+    monkeypatch.setattr(m, "_checkpoint_work_paths", lambda p: [str(tmp_path / "src" / "file.py")])
     m.compact_restore(session_id="different-session-id", cwd=str(tmp_path), new_session_only=True)
     captured = capsys.readouterr()
     assert "did not match" in captured.err, (

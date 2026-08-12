@@ -1,0 +1,300 @@
+{
+  "_comment": "REAL-checkpoint fixtures for U6/U7 (R6/R7), rebuilt 2026-08-11 from ~/.claude/token-optimizer/checkpoints/*.md (50 real files). REPLACES the earlier synthetic set whose checkpoints carried clean project-named active_task fields -- that fantasy is exactly what hid the path-identity bug (GATE-real-data.md): real checkpoints store project identity in the DIRECTORY segments of modified_files/recent_reads paths (clients/acme/.../acme-competitor-monitor, PROJECTS/attention-span, PROJECTS/token-optimizer + the alexgreensh-token-optimizer plugin tree), while active_task is messy voice-transcript prose that does NOT name the project. The scorer must recover identity from paths, not active_task. active_task/decisions here are lightly paraphrased from the real files (PII/secrets stripped, kept distinct per checkpoint so the replay winner-mapping is deterministic); the file PATHS are the real ones. Incidents are labeled by their GitHub issue number.",
+  "resume_openings": [
+    {
+      "id": "resume-acme-monitor",
+      "prompt": "continue working on the acme competitor monitor",
+      "expected_checkpoint_id": "cp-acme"
+    },
+    {
+      "id": "resume-token-optimizer",
+      "prompt": "continue the token optimizer checkpoint work",
+      "expected_checkpoint_id": "cp-token-optimizer"
+    },
+    {
+      "id": "resume-attention-span",
+      "prompt": "continue the attention span project",
+      "expected_checkpoint_id": "cp-attention-span"
+    },
+    {
+      "id": "resume-acme-market-sweep",
+      "prompt": "let's resume the acme competitor monitor, grab the latest market sweep",
+      "expected_checkpoint_id": "cp-acme"
+    },
+    {
+      "id": "resume-attention-benchmarks",
+      "prompt": "continue where we left off on the attention span benchmarks",
+      "expected_checkpoint_id": "cp-attention-span"
+    },
+    {
+      "id": "resume-token-optimizer-parity",
+      "prompt": "continue working on token optimizer for full parity of the recent changes",
+      "expected_checkpoint_id": "cp-token-optimizer"
+    }
+  ],
+  "fresh_openings": [
+    {
+      "id": "fresh-limerick-cats",
+      "prompt": "write a limerick about cats"
+    },
+    {
+      "id": "fresh-dinner-party",
+      "prompt": "help me plan a dinner party"
+    },
+    {
+      "id": "fresh-hello",
+      "prompt": "hello"
+    },
+    {
+      "id": "fresh-karpathy-gist",
+      "prompt": "read this idea by karpathy about text as an image being cheaper than pure text"
+    },
+    {
+      "id": "fresh-kubernetes",
+      "prompt": "explain how kubernetes ingress routing works"
+    },
+    {
+      "id": "fresh-cook-dinner",
+      "prompt": "what should i cook for dinner tonight"
+    }
+  ],
+  "checkpoints": [
+    {
+      "id": "cp-acme",
+      "filename": "aa11bb22-20260811-221941-milestone-edit-batch.md",
+      "active_task": "let's finalize the connectors and make the scale environments adapted, i'll do the rest of the stuff",
+      "decisions": [
+        "the skill already has the fs/connector split so the answer is yes, cleanly",
+        "draft a self-contained scan prompt so everything is connected"
+      ],
+      "modified_files": [
+        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/references/07-market-sweep.md",
+        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-company-brain/competitor-monitor/reports/2026-08-11__BRIEF.html",
+        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/scripts/build_cloud_prompt.py",
+        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/references/09-environments.md"
+      ],
+      "recent_reads": [
+        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/SKILL.md",
+        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/references/06-scheduling.md",
+        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/config/competitors.json"
+      ],
+      "trigger": "milestone-edit-batch",
+      "age_seconds": 600
+    },
+    {
+      "id": "cp-token-optimizer",
+      "filename": "aa22cc33-20260811-223302-quality-80.md",
+      "active_task": "ok so what about the eval, we reran it, it now doesn't cost extra?",
+      "decisions": [
+        "clean measurement now that the fix means no checkpoint contamination on fresh runs",
+        "the tests are green because they test the function in isolation"
+      ],
+      "modified_files": [
+        "/Users/dev/work",
+        "/Users/alexgreenshpun/.claude/plugins/marketplaces/alexgreensh-token-optimizer/REVIEW-DEFECTS.md",
+        "/Users/alexgreenshpun/.claude/plugins/marketplaces/alexgreensh-token-optimizer/plugins/token-optimizer/skills/token-optimizer/scripts/measure.py"
+      ],
+      "recent_reads": [
+        "/Users/dev/work",
+        "/Users/dev/work"
+      ],
+      "trigger": "quality-80",
+      "age_seconds": 1200
+    },
+    {
+      "id": "cp-attention-span",
+      "filename": "aa33dd44-20260811-223221-quality-80.md",
+      "active_task": "just show me what changes in the readme, badges etc",
+      "decisions": [
+        "you reach the point in ~6 words instead of ~40, answer in the first line 75% of the time",
+        "option A, measuring this well is actually the point"
+      ],
+      "modified_files": [
+        "/Users/dev/work",
+        "/Users/dev/work",
+        "/Users/dev/work",
+        "/Users/dev/work"
+      ],
+      "recent_reads": [
+        "/Users/dev/work",
+        "/Users/dev/work",
+        "/Users/dev/work"
+      ],
+      "trigger": "quality-80",
+      "age_seconds": 900
+    },
+    {
+      "id": "cp-total-recall",
+      "filename": "aa44ee55-20260811-120000-stop.md",
+      "active_task": "rerun the retrieval benchmark and diff each question against the committed baseline",
+      "decisions": [
+        "keep locomo as the primary eval, longmemeval as secondary"
+      ],
+      "modified_files": [
+        "/Users/dev/work",
+        "/Users/dev/work"
+      ],
+      "recent_reads": [
+        "/Users/dev/work"
+      ],
+      "trigger": "stop",
+      "age_seconds": 1800
+    },
+    {
+      "id": "cp-miss-chief",
+      "filename": "aa55ff66-20260811-110000-stop.md",
+      "active_task": "the telegram guardrail made her inept when i tag her in chats with other people",
+      "decisions": [
+        "scope the guardrail to outbound sends only, not tagged-in reads"
+      ],
+      "modified_files": [
+        "/Users/dev/work"
+      ],
+      "recent_reads": [
+        "/Users/dev/work"
+      ],
+      "trigger": "stop",
+      "age_seconds": 2400
+    }
+  ],
+  "incidents": [
+    {
+      "id": "incident-129-vague-continue-stale",
+      "issue": 129,
+      "description": "Vague 'continue' (no topical tokens) + stale unrelated pool -> below threshold, no pointer. The bare cue is stripped to an empty topical set, so content is 0.0 and neither the resume-intent bonus (gated on content>0) nor the capped recency fallback can lift it.",
+      "prompt": "continue",
+      "checkpoints": [
+        {
+          "id": "cp-stale-attention",
+          "filename": "cc11dd22-20260810-090000-stop.md",
+          "active_task": "just show me what changes in the readme, badges etc",
+          "decisions": [],
+          "modified_files": [
+            "/Users/dev/work"
+          ],
+          "recent_reads": [],
+          "trigger": "stop",
+          "age_seconds": 43200
+        }
+      ],
+      "expected": "no_match"
+    },
+    {
+      "id": "incident-61-cross-project-leak",
+      "issue": 61,
+      "description": "Cross-project leak: a token-optimizer checkpoint must not surface in an unrelated marketing session. The cwd is a different project so the same-work bonus must not fire, and there is no topical overlap, so no pointer.",
+      "prompt": "help me write a linkedin post about our marketing services",
+      "cwd": "/Users/dev/work Company/clients/marketing-agency",
+      "checkpoints": [
+        {
+          "id": "cp-token-optimizer-unrelated",
+          "filename": "cc22ee33-20260811-100000-stop.md",
+          "active_task": "ok so what about the eval, we reran it, it now doesn't cost extra?",
+          "decisions": [],
+          "modified_files": [
+            "/Users/alexgreenshpun/.claude/plugins/marketplaces/alexgreensh-token-optimizer/plugins/token-optimizer/skills/token-optimizer/scripts/measure.py"
+          ],
+          "recent_reads": [],
+          "trigger": "stop",
+          "age_seconds": 300
+        }
+      ],
+      "expected": "no_match"
+    },
+    {
+      "id": "incident-own-session-exclusion",
+      "issue": null,
+      "description": "Own-session checkpoint is never surfaced to itself. The prompt strongly matches the checkpoint's project, but the live session id equals the checkpoint's source session, so the pull tool excludes it -> no_match.",
+      "prompt": "continue the token optimizer checkpoint work",
+      "session_id": "aa22cc33-2222-4333-8444-aaaaaaaaaaaa",
+      "checkpoints": [
+        {
+          "id": "cp-own-session",
+          "filename": "aa22cc33-2222-4333-8444-aaaaaaaaaaaa-20260811-100000-quality-80.md",
+          "active_task": "ok so what about the eval, we reran it, it now doesn't cost extra?",
+          "decisions": [],
+          "modified_files": [
+            "/Users/alexgreenshpun/.claude/plugins/marketplaces/alexgreensh-token-optimizer/plugins/token-optimizer/skills/token-optimizer/scripts/measure.py"
+          ],
+          "recent_reads": [],
+          "trigger": "quality-80",
+          "age_seconds": 300
+        }
+      ],
+      "expected": "no_match"
+    },
+    {
+      "id": "incident-non-utf8",
+      "issue": null,
+      "description": "Non-UTF-8 checkpoint body with no sidecar scores 0.0 without aborting the candidate loop -> no_match.",
+      "prompt": "continue the token optimizer checkpoint work",
+      "checkpoints": [
+        {
+          "id": "cp-non-utf8",
+          "filename": "cc33ff44-20260811-100000-stop.md",
+          "active_task": null,
+          "decisions": [],
+          "modified_files": [],
+          "recent_reads": [],
+          "trigger": "stop",
+          "age_seconds": 300,
+          "corrupt_body": true,
+          "no_sidecar": true
+        }
+      ],
+      "expected": "no_match"
+    },
+    {
+      "id": "incident-cjk",
+      "issue": 127,
+      "description": "CJK (Korean) opening prompt tokenizes without crashing and scores sensibly against a Korean active_task -> match.",
+      "prompt": "결제 모듈 리팩터링 다시 시작",
+      "checkpoints": [
+        {
+          "id": "cp-cjk-match",
+          "filename": "cc44aa55-20260811-100000-stop.md",
+          "active_task": "결제 모듈 리팩터링 및 테스트",
+          "decisions": [],
+          "modified_files": [
+            "/Users/dev/work"
+          ],
+          "recent_reads": [],
+          "trigger": "stop",
+          "age_seconds": 300
+        }
+      ],
+      "expected": "match"
+    },
+    {
+      "id": "incident-cross-client-false-positive",
+      "issue": null,
+      "description": "Cross-client false positive: a resume-phrased prompt naming a DIFFERENT client ('competitor analysis for acme corp') grazes acme's competitor-monitor checkpoint on the shared word 'competitor' only. Unmatched high-IDF tokens (acme, corp, analysis) are negative evidence -- the resume-intent bonus is scaled by precision (with a floor), so an incidental one-word overlap cannot ride the flat cue over threshold. Guards the multi-client regime where two clients share the clients/<x>/Retainer-Deliverables/ path shape.",
+      "prompt": "continue working on the competitor analysis for acme corp",
+      "expected": "no_match",
+      "checkpoints": [
+        {
+          "id": "cp-acme-acme-guard",
+          "filename": "ff99ee88-20260811-221941-milestone-edit-batch.md",
+          "active_task": "let's finalize the connectors and make the scale environments adapted, i'll do the rest of the stuff",
+          "decisions": [
+            "the skill already has the fs/connector split so the answer is yes, cleanly",
+            "draft a self-contained scan prompt so everything is connected"
+          ],
+          "modified_files": [
+            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/references/07-market-sweep.md",
+            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-company-brain/competitor-monitor/reports/2026-08-11__BRIEF.html",
+            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/scripts/build_cloud_prompt.py",
+            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/references/09-environments.md"
+          ],
+          "recent_reads": [
+            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/SKILL.md",
+            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/references/06-scheduling.md",
+            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/config/competitors.json"
+          ],
+          "trigger": "milestone-edit-batch",
+          "age_seconds": 600
+        }
+      ]
+    }
+  ]
+}

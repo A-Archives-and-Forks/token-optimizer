@@ -279,6 +279,26 @@ process.stdin.on('end', () => {
     // ---- ROW 2: Session details ----
     const row2Parts = [];
 
+    // U3: near-zero-cost "resumable checkpoint" existence signal.
+    // When the SessionStart pointer fired (a relevance-cleared checkpoint
+    // exists for this session), compact_restore wrote a per-session flag file
+    // beside the quality cache. Show a compact ⤸resumable token in the
+    // statusline UI ONLY -- this is never injected as additionalContext, so it
+    // costs zero billed tokens (R2). Stale flags (>30 min) are ignored so the
+    // signal does not outlive the resumable window.
+    try {
+      if (safeSessionId) {
+        const flagPath = path.join(cacheDir, `resumable-${safeSessionId}.json`);
+        if (fs.existsSync(flagPath)) {
+          const flag = JSON.parse(fs.readFileSync(flagPath, 'utf8'));
+          const ts = typeof flag.ts === 'number' ? flag.ts : NaN;
+          if (isFinite(ts) && (Date.now() - ts) < (30 * 60 * 1000)) {
+            row2Parts.push(`\x1b[36m⤸resumable${RESET}`);
+          }
+        }
+      }
+    } catch (e) {}
+
     // SessionEfficiency
     if (q) {
       const se = q.session_efficiency;

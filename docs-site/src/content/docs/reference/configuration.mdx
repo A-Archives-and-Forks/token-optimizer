@@ -62,6 +62,23 @@ The read cache operates in one of four modes, selected with `TOKEN_OPTIMIZER_REA
 | `TOKEN_OPTIMIZER_CHECKPOINT_FILES` | 10 | Maximum active/recent files retained in extracted checkpoint state |
 | `TOKEN_OPTIMIZER_CHECKPOINT_EVENT_MAX` | 1000 | Maximum checkpoint telemetry events retained after pruning |
 | `TOKEN_OPTIMIZER_CHECKPOINT_COOLDOWN_SECONDS` | 90 | Minimum time between checkpoint fires |
+
+### Checkpoint relevance scorer
+
+These tune `checkpoint_relevance_score`, the IDF-weighted content-overlap scorer that decides which prior checkpoint (if any) a continuation prompt resumes. Every value is **hard-clamped to a safe range at load** — an out-of-range or non-numeric value is coerced into the range rather than trusted — so a mis-set knob can never force the score to a constant or flip the F1 sign. Defaults are calibrated against the real checkpoint pool; change them only with a reason.
+
+| Variable | Default | Safe range (clamped) | Effect |
+|---|---|---|---|
+| `TOKEN_OPTIMIZER_CHECKPOINT_RELEVANCE_THRESHOLD` | 0.25 | 0.1–0.9 | Minimum score for the pull tool to resume a checkpoint. Lower widens recall (risks vague-continue false matches, #129); higher demands a stronger topical/resume signal. |
+| `TOKEN_OPTIMIZER_RELEVANCE_RESUME_BONUS_PRECISION_FLOOR` | 0.5 | 0.0–0.99 | Floor for the precision-scaled resume-intent bonus: effective factor = floor + (1−floor)·precision. Higher protects verbose genuine resumes; lower makes a cross-client graze pay more for its unmatched tokens. |
+| `TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_WEIGHT` | 0.5 | 0.0–2.0 | Weight of the path-identity frequency boost (a token recurring across a checkpoint's file paths out-ranks the same word quoted once in prose). 0 disables the boost. |
+| `TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_CAP` | 8 | 1–50 | Cap on the per-token path frequency counted by the boost, so one mega-repeated path segment cannot dominate recall. |
+| `TOKEN_OPTIMIZER_RELEVANCE_IDF_CAP` | 3.0 | 1.0–100.0 | Cap on each term's IDF contribution, so one ultra-rare token cannot spike the score (keyword-stuffing defense). |
+
+### Checkpoint & continuity triggers
+
+| Variable | Default | Effect |
+|---|---|---|
 | `TOKEN_OPTIMIZER_EDIT_BATCH_WRITE_THRESHOLD` | 4 | Write-count delta that triggers an edit-batch checkpoint |
 | `TOKEN_OPTIMIZER_EDIT_BATCH_FILE_THRESHOLD` | 3 | Changed-file delta that triggers an edit-batch checkpoint |
 | `TOKEN_OPTIMIZER_CONTINUITY_MAX_SESSIONS` | 5 | Maximum prior sessions represented in a continuity hint |
