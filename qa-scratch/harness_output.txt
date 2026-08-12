@@ -1,0 +1,144 @@
+========================================================================================================================
+CHECKPOINT RELEVANCE SCORER - CONTAINER-WORD FP FIX COMPARISON
+threshold = 0.25   variants: baseline, fixA, fixB, fixC, fixAC, fixAC2
+========================================================================================================================
+
+## GATE-CORE POSITIVES (must stay >= 0.25; winner = expected checkpoint)
+prompt                                             pool             exp       | baseline    fixA    fixB    fixC   fixAC  fixAC2 | winner(baseline..fixAC)
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+continue working on the gambit competitor monitor  pool-mixed       aa11bb22  |   0.478   0.577   0.508   0.478   0.577   0.478 | aa11bb/aa11bb/aa11bb/aa11bb/aa11bb/aa11bb
+continue working on the gambit competitor monitor  pool-gambit-only gb01      |   0.497   0.553   0.529   0.497   0.553   0.497 | gb01-2/gb01-2/gb01-2/gb01-2/gb01-2/gb01-2
+continue the token optimizer checkpoint work       pool-mixed       aa22cc33  |   0.391   0.421   0.448   0.391   0.421   0.391 | aa22cc/aa22cc/aa22cc/aa22cc/aa22cc/aa22cc
+continue the token optimizer checkpoint work       pool-gambit-only N/A       |   0.050   0.050   0.050   0.050   0.050   0.050 | gb01-2/gb01-2/gb01-2/gb01-2/gb01-2/gb01-2  <-- BASELINE FAIL
+continue the attention span project                pool-mixed       aa33dd44  |   0.413   0.429   0.443   0.413   0.429   0.413 | aa33dd/aa33dd/aa33dd/aa33dd/aa33dd/aa33dd
+continue the attention span project                pool-gambit-only N/A       |   0.050   0.050   0.050   0.050   0.050   0.050 | gb01-2/gb01-2/gb01-2/gb01-2/gb01-2/gb01-2  <-- BASELINE FAIL
+
+## GATE-VERBOSE (real resume_openings; must stay >= 0.25 on pool-mixed, no regression)
+prompt                                             pool             exp       | baseline    fixA    fixB    fixC   fixAC  fixAC2 | winner(baseline..fixAC)
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+let's resume the gambit competitor monitor, grab t pool-mixed       aa11bb22  |   0.353   0.446   0.367   0.353   0.446   0.353 | aa11bb/aa11bb/aa11bb/aa11bb/aa11bb/aa11bb
+let's resume the gambit competitor monitor, grab t pool-gambit-only gb01      |   0.374   0.427   0.388   0.374   0.427   0.374 | gb01-2/gb01-2/gb01-2/gb01-2/gb01-2/gb01-2
+continue where we left off on the attention span b pool-mixed       aa33dd44  |   0.495   0.516   0.522   0.495   0.516   0.495 | aa33dd/aa33dd/aa33dd/aa33dd/aa33dd/aa33dd
+continue where we left off on the attention span b pool-gambit-only N/A       |   0.050   0.050   0.050   0.050   0.050   0.050 | gb01-2/gb01-2/gb01-2/gb01-2/gb01-2/gb01-2  <-- BASELINE FAIL
+continue working on token optimizer for full parit pool-mixed       aa22cc33  |   0.280   0.297   0.319   0.280   0.297   0.280 | aa22cc/aa22cc/aa22cc/aa22cc/aa22cc/aa22cc
+continue working on token optimizer for full parit pool-gambit-only N/A       |   0.050   0.050   0.050   0.050   0.050   0.050 | gb01-2/gb01-2/gb01-2/gb01-2/gb01-2/gb01-2  <-- BASELINE FAIL
+
+## CONTAINER-WORD FALSE POSITIVES (must be < 0.25 on BOTH pools)
+prompt                                             pool             | baseline    fixA    fixB    fixC   fixAC  fixAC2 | verdict
+--------------------------------------------------------------------------------------------------------------------------------
+continue the retainer deliverables                 pool-mixed       |   0.395   0.050   0.417   0.395   0.050   0.050 | base=NO fixA=OK fixB=NO fixC=NO fixA=OK fixA=OK
+continue the retainer deliverables                 pool-gambit-only |   0.355   0.227   0.371   0.205   0.117   0.050 | base=NO fixA=OK fixB=NO fixC=OK fixA=OK fixA=OK
+continue the clients work                          pool-mixed       |   0.302   0.050   0.314   0.302   0.050   0.050 | base=NO fixA=OK fixB=NO fixC=NO fixA=OK fixA=OK
+continue the clients work                          pool-gambit-only |   0.280   0.050   0.289   0.130   0.050   0.050 | base=NO fixA=OK fixB=NO fixC=OK fixA=OK fixA=OK
+continue the competitor monitor for beta client    pool-mixed       |   0.329   0.385   0.346   0.329   0.385   0.329 | base=NO fixA=NO fixB=NO fixC=NO fixA=NO fixA=NO
+continue the competitor monitor for beta client    pool-gambit-only |   0.385   0.423   0.407   0.385   0.423   0.385 | base=NO fixA=NO fixB=NO fixC=NO fixA=NO fixA=NO
+continue the reports                               pool-mixed       |   0.235   0.050   0.227   0.085   0.050   0.050 | base=OK fixA=OK fixB=OK fixC=OK fixA=OK fixA=OK
+continue the reports                               pool-gambit-only |   0.248   0.050   0.236   0.098   0.050   0.050 | base=OK fixA=OK fixB=OK fixC=OK fixA=OK fixA=OK
+continue the references work                       pool-mixed       |   0.275   0.050   0.257   0.125   0.050   0.050 | base=NO fixA=OK fixB=NO fixC=OK fixA=OK fixA=OK
+continue the references work                       pool-gambit-only |   0.244   0.050   0.226   0.094   0.050   0.050 | base=OK fixA=OK fixB=OK fixC=OK fixA=OK fixA=OK
+let's resume the retainer                          pool-mixed       |   0.152   0.050   0.164   0.152   0.050   0.050 | base=OK fixA=OK fixB=OK fixC=OK fixA=OK fixA=OK
+let's resume the retainer                          pool-gambit-only |   0.130   0.119   0.139   0.130   0.119   0.050 | base=OK fixA=OK fixB=OK fixC=OK fixA=OK fixA=OK
+continue the scripts                               pool-mixed       |   0.230   0.050   0.228   0.080   0.050   0.050 | base=OK fixA=OK fixB=OK fixC=OK fixA=OK fixA=OK
+continue the scripts                               pool-gambit-only |   0.248   0.050   0.237   0.098   0.050   0.050 | base=OK fixA=OK fixB=OK fixC=OK fixA=OK fixA=OK
+continue the config                                pool-mixed       |   0.235   0.050   0.227   0.085   0.050   0.050 | base=OK fixA=OK fixB=OK fixC=OK fixA=OK fixA=OK
+continue the config                                pool-gambit-only |   0.294   0.275   0.307   0.144   0.125   0.050 | base=NO fixA=NO fixB=NO fixC=OK fixA=OK fixA=OK
+continue the company brain                         pool-mixed       |   0.334   0.206   0.338   0.334   0.099   0.085 | base=NO fixA=OK fixB=NO fixC=NO fixA=OK fixA=OK
+continue the company brain                         pool-gambit-only |   0.408   0.437   0.432   0.408   0.437   0.322 | base=NO fixA=NO fixB=NO fixC=NO fixA=NO fixA=NO
+retainer deliverables competitor monitor reports   pool-mixed       |   0.429   0.262   0.458   0.429   0.262   0.220 | base=NO fixA=NO fixB=NO fixC=NO fixA=NO fixA=OK
+retainer deliverables competitor monitor reports   pool-gambit-only |   0.418   0.296   0.445   0.418   0.296   0.281 | base=NO fixA=NO fixB=NO fixC=NO fixA=NO fixA=NO
+
+## NEGATIVES (must be < 0.25)
+label                prompt                                 pool             | baseline    fixA    fixB    fixC   fixAC  fixAC2 | verdict
+-----------------------------------------------------------------------------------------------------------------------------------------
+#129-bare-continue   continue                               pool-mixed       |   0.050   0.050   0.050   0.050   0.050   0.050 | base=OK fixA=OK fixB=OK fixC=OK fixA=OK fixA=OK
+#129-bare-continue   continue                               pool-gambit-only |   0.050   0.050   0.050   0.050   0.050   0.050 | base=OK fixA=OK fixB=OK fixC=OK fixA=OK fixA=OK
+cross-client-acme    continue the competitor analysis for a pool-mixed       |   0.225   0.252   0.233   0.225   0.252   0.225 | base=OK fixA=NO fixB=OK fixC=OK fixA=NO fixA=OK
+cross-client-acme    continue the competitor analysis for a pool-gambit-only |   0.254   0.272   0.265   0.254   0.272   0.254 | base=NO fixA=NO fixB=NO fixC=NO fixA=NO fixA=NO
+fresh-limerick       write a limerick about cats            pool-mixed       |   0.050   0.050   0.050   0.050   0.050   0.050 | base=OK fixA=OK fixB=OK fixC=OK fixA=OK fixA=OK
+fresh-limerick       write a limerick about cats            pool-gambit-only |   0.050   0.050   0.050   0.050   0.050   0.050 | base=OK fixA=OK fixB=OK fixC=OK fixA=OK fixA=OK
+
+## DETAIL: gate-core winner per-checkpoint scores (pool-mixed)
+
+  prompt: 'continue working on the gambit competitor monitor'  (expected aa11bb22)
+    aa11bb22-20260811-221941-milestone-edi base= 0.478 fixA= 0.577 fixB= 0.508 fixC= 0.478 fixA= 0.577 fixA= 0.478  <-- expected
+    aa22cc33-20260811-223302-quality-80    base= 0.050 fixA= 0.050 fixB= 0.050 fixC= 0.050 fixA= 0.050 fixA= 0.050
+    aa33dd44-20260811-223221-quality-80    base= 0.050 fixA= 0.050 fixB= 0.050 fixC= 0.050 fixA= 0.050 fixA= 0.050
+    aa44ee55-20260811-120000-stop          base= 0.050 fixA= 0.050 fixB= 0.050 fixC= 0.050 fixA= 0.050 fixA= 0.050
+    aa55ff66-20260811-110000-stop          base= 0.050 fixA= 0.050 fixB= 0.050 fixC= 0.050 fixA= 0.050 fixA= 0.050
+
+  prompt: 'continue the token optimizer checkpoint work'  (expected aa22cc33)
+    aa11bb22-20260811-221941-milestone-edi base= 0.050 fixA= 0.050 fixB= 0.050 fixC= 0.050 fixA= 0.050 fixA= 0.050
+    aa22cc33-20260811-223302-quality-80    base= 0.391 fixA= 0.421 fixB= 0.448 fixC= 0.391 fixA= 0.421 fixA= 0.391  <-- expected
+    aa33dd44-20260811-223221-quality-80    base= 0.050 fixA= 0.050 fixB= 0.050 fixC= 0.050 fixA= 0.050 fixA= 0.050
+    aa44ee55-20260811-120000-stop          base= 0.050 fixA= 0.050 fixB= 0.050 fixC= 0.050 fixA= 0.050 fixA= 0.050
+    aa55ff66-20260811-110000-stop          base= 0.050 fixA= 0.050 fixB= 0.050 fixC= 0.050 fixA= 0.050 fixA= 0.050
+
+  prompt: 'continue the attention span project'  (expected aa33dd44)
+    aa11bb22-20260811-221941-milestone-edi base= 0.050 fixA= 0.050 fixB= 0.050 fixC= 0.050 fixA= 0.050 fixA= 0.050
+    aa22cc33-20260811-223302-quality-80    base= 0.050 fixA= 0.050 fixB= 0.050 fixC= 0.050 fixA= 0.050 fixA= 0.050
+    aa33dd44-20260811-223221-quality-80    base= 0.413 fixA= 0.429 fixB= 0.443 fixC= 0.413 fixA= 0.429 fixA= 0.413  <-- expected
+    aa44ee55-20260811-120000-stop          base= 0.050 fixA= 0.050 fixB= 0.050 fixC= 0.050 fixA= 0.050 fixA= 0.050
+    aa55ff66-20260811-110000-stop          base= 0.050 fixA= 0.050 fixB= 0.050 fixC= 0.050 fixA= 0.050 fixA= 0.050
+
+## SUMMARY: does each variant pass all criteria?
+  baseline : FAIL
+      - FP<continue the retainer @pool-mixed=0.395
+      - FP<continue the retainer @pool-gambi=0.355
+      - FP<continue the clients w@pool-mixed=0.302
+      - FP<continue the clients w@pool-gambi=0.280
+      - FP<continue the competito@pool-mixed=0.329
+      - FP<continue the competito@pool-gambi=0.385
+      - FP<continue the reference@pool-mixed=0.275
+      - FP<continue the config@pool-gambi=0.294
+      - FP<continue the company b@pool-mixed=0.334
+      - FP<continue the company b@pool-gambi=0.408
+      - FP<retainer deliverables @pool-mixed=0.429
+      - FP<retainer deliverables @pool-gambi=0.418
+      - NEG<cross-client-a@pool-gambi=0.254
+  fixA     : FAIL
+      - FP<continue the competito@pool-mixed=0.385
+      - FP<continue the competito@pool-gambi=0.423
+      - FP<continue the config@pool-gambi=0.275
+      - FP<continue the company b@pool-gambi=0.437
+      - FP<retainer deliverables @pool-mixed=0.262
+      - FP<retainer deliverables @pool-gambi=0.296
+      - NEG<cross-client-a@pool-mixed=0.252
+      - NEG<cross-client-a@pool-gambi=0.272
+  fixB     : FAIL
+      - FP<continue the retainer @pool-mixed=0.417
+      - FP<continue the retainer @pool-gambi=0.371
+      - FP<continue the clients w@pool-mixed=0.314
+      - FP<continue the clients w@pool-gambi=0.289
+      - FP<continue the competito@pool-mixed=0.346
+      - FP<continue the competito@pool-gambi=0.407
+      - FP<continue the reference@pool-mixed=0.257
+      - FP<continue the config@pool-gambi=0.307
+      - FP<continue the company b@pool-mixed=0.338
+      - FP<continue the company b@pool-gambi=0.432
+      - FP<retainer deliverables @pool-mixed=0.458
+      - FP<retainer deliverables @pool-gambi=0.445
+      - NEG<cross-client-a@pool-gambi=0.265
+  fixC     : FAIL
+      - FP<continue the retainer @pool-mixed=0.395
+      - FP<continue the clients w@pool-mixed=0.302
+      - FP<continue the competito@pool-mixed=0.329
+      - FP<continue the competito@pool-gambi=0.385
+      - FP<continue the company b@pool-mixed=0.334
+      - FP<continue the company b@pool-gambi=0.408
+      - FP<retainer deliverables @pool-mixed=0.429
+      - FP<retainer deliverables @pool-gambi=0.418
+      - NEG<cross-client-a@pool-gambi=0.254
+  fixAC    : FAIL
+      - FP<continue the competito@pool-mixed=0.385
+      - FP<continue the competito@pool-gambi=0.423
+      - FP<continue the company b@pool-gambi=0.437
+      - FP<retainer deliverables @pool-mixed=0.262
+      - FP<retainer deliverables @pool-gambi=0.296
+      - NEG<cross-client-a@pool-mixed=0.252
+      - NEG<cross-client-a@pool-gambi=0.272
+  fixAC2   : FAIL
+      - FP<continue the competito@pool-mixed=0.329
+      - FP<continue the competito@pool-gambi=0.385
+      - FP<continue the company b@pool-gambi=0.322
+      - FP<retainer deliverables @pool-gambi=0.281
+      - NEG<cross-client-a@pool-gambi=0.254

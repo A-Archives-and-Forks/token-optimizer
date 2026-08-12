@@ -1,0 +1,463 @@
+========================================================================================
+POOL: GAMBIT-ONLY (single-client)  (10 checkpoints)   threshold=0.25
+========================================================================================
+
+PROMPT: 'continue the retainer deliverables'
+  cue=True  best=aa10-20260811-133000 score=0.4236  verdict=FP
+  per-checkpoint:
+    0.4236  aa10-20260811-133000 *** CLEARS <== BEST
+    0.4222  aa05-20260811-124000 *** CLEARS
+    0.4215  aa04-20260811-123000 *** CLEARS
+    0.4128  aa08-20260811-131000 *** CLEARS
+    0.3931  aa03-20260811-122000 *** CLEARS
+    0.3816  aa02-20260811-121000 *** CLEARS
+    0.3787  aa09-20260811-132000 *** CLEARS
+    0.3539  aa01-20260811-120000 *** CLEARS
+    0.0500  aa06-20260811-125000
+    0.0500  aa07-20260811-130000
+
+PROMPT: 'continue the clients work'
+  cue=True  best=aa06-20260811-125000 score=0.3210  verdict=FP
+  per-checkpoint:
+    0.3210  aa06-20260811-125000 *** CLEARS <== BEST
+    0.3069  aa07-20260811-130000 *** CLEARS
+    0.2996  aa10-20260811-133000 *** CLEARS
+    0.2989  aa05-20260811-124000 *** CLEARS
+    0.2986  aa04-20260811-123000 *** CLEARS
+    0.2945  aa08-20260811-131000 *** CLEARS
+    0.2852  aa03-20260811-122000 *** CLEARS
+    0.2799  aa02-20260811-121000 *** CLEARS
+    0.2785  aa09-20260811-132000 *** CLEARS
+    0.2671  aa01-20260811-120000 *** CLEARS
+
+PROMPT: 'continue the competitor monitor for beta client'
+  cue=True  best=aa02-20260811-121000 score=0.4230  verdict=FP
+  per-checkpoint:
+    0.4230  aa02-20260811-121000 *** CLEARS <== BEST
+    0.3909  aa01-20260811-120000 *** CLEARS
+    0.0500  aa03-20260811-122000
+    0.0500  aa04-20260811-123000
+    0.0500  aa05-20260811-124000
+    0.0500  aa06-20260811-125000
+    0.0500  aa07-20260811-130000
+    0.0500  aa08-20260811-131000
+    0.0500  aa09-20260811-132000
+    0.0500  aa10-20260811-133000
+
+PROMPT: 'continue the reports'
+  cue=True  best=aa09-20260811-132000 score=0.3161  verdict=FP
+  per-checkpoint:
+    0.3161  aa09-20260811-132000 *** CLEARS <== BEST
+    0.2956  aa02-20260811-121000 *** CLEARS
+    0.2889  aa01-20260811-120000 *** CLEARS
+    0.0500  aa03-20260811-122000
+    0.0500  aa04-20260811-123000
+    0.0500  aa05-20260811-124000
+    0.0500  aa06-20260811-125000
+    0.0500  aa07-20260811-130000
+    0.0500  aa08-20260811-131000
+    0.0500  aa10-20260811-133000
+
+PROMPT: 'continue the references work'
+  cue=True  best=aa10-20260811-133000 score=0.2796  verdict=FP
+  per-checkpoint:
+    0.2796  aa10-20260811-133000 *** CLEARS <== BEST
+    0.2791  aa05-20260811-124000 *** CLEARS
+    0.2777  aa09-20260811-132000 *** CLEARS
+    0.2755  aa08-20260811-131000 *** CLEARS
+    0.2637  aa02-20260811-121000 *** CLEARS
+    0.2592  aa01-20260811-120000 *** CLEARS
+    0.2570  aa03-20260811-122000 *** CLEARS
+    0.0500  aa04-20260811-123000
+    0.0500  aa06-20260811-125000
+    0.0500  aa07-20260811-130000
+
+PROMPT: 'continue working on the deliverables'
+  cue=True  best=aa10-20260811-133000 score=0.3184  verdict=FP
+  per-checkpoint:
+    0.3184  aa10-20260811-133000 *** CLEARS <== BEST
+    0.3176  aa05-20260811-124000 *** CLEARS
+    0.3173  aa04-20260811-123000 *** CLEARS
+    0.3124  aa08-20260811-131000 *** CLEARS
+    0.3014  aa03-20260811-122000 *** CLEARS
+    0.2951  aa02-20260811-121000 *** CLEARS
+    0.2935  aa09-20260811-132000 *** CLEARS
+    0.2800  aa01-20260811-120000 *** CLEARS
+    0.0500  aa06-20260811-125000
+    0.0500  aa07-20260811-130000
+
+PROMPT: "let's resume the retainer"
+  cue=False  best=aa10-20260811-133000 score=0.1684  verdict=OK-
+  per-checkpoint:
+    0.1684  aa10-20260811-133000 <== BEST
+    0.1676  aa05-20260811-124000
+    0.1673  aa04-20260811-123000
+    0.1624  aa08-20260811-131000
+    0.1514  aa03-20260811-122000
+    0.1451  aa02-20260811-121000
+    0.1435  aa09-20260811-132000
+    0.1300  aa01-20260811-120000
+    0.0500  aa06-20260811-125000
+    0.0500  aa07-20260811-130000
+
+PROMPT: 'continue the scripts'
+  cue=True  best=aa10-20260811-133000 score=0.3065  verdict=FP
+  per-checkpoint:
+    0.3065  aa10-20260811-133000 *** CLEARS <== BEST
+    0.3058  aa05-20260811-124000 *** CLEARS
+    0.3010  aa08-20260811-131000 *** CLEARS
+    0.3008  aa03-20260811-122000 *** CLEARS
+    0.0500  aa01-20260811-120000
+    0.0500  aa02-20260811-121000
+    0.0500  aa04-20260811-123000
+    0.0500  aa06-20260811-125000
+    0.0500  aa07-20260811-130000
+    0.0500  aa09-20260811-132000
+
+PROMPT: 'continue the config'
+  cue=True  best=aa10-20260811-133000 score=0.3065  verdict=FP
+  per-checkpoint:
+    0.3065  aa10-20260811-133000 *** CLEARS <== BEST
+    0.3058  aa05-20260811-124000 *** CLEARS
+    0.2854  aa02-20260811-121000 *** CLEARS
+    0.2765  aa03-20260811-122000 *** CLEARS
+    0.0500  aa01-20260811-120000
+    0.0500  aa04-20260811-123000
+    0.0500  aa06-20260811-125000
+    0.0500  aa07-20260811-130000
+    0.0500  aa08-20260811-131000
+    0.0500  aa09-20260811-132000
+
+PROMPT: 'continue the company brain'
+  cue=True  best=aa03-20260811-122000 score=0.5880  verdict=FP
+  per-checkpoint:
+    0.5880  aa03-20260811-122000 *** CLEARS <== BEST
+    0.0500  aa01-20260811-120000
+    0.0500  aa02-20260811-121000
+    0.0500  aa04-20260811-123000
+    0.0500  aa05-20260811-124000
+    0.0500  aa06-20260811-125000
+    0.0500  aa07-20260811-130000
+    0.0500  aa08-20260811-131000
+    0.0500  aa09-20260811-132000
+    0.0500  aa10-20260811-133000
+
+PROMPT: 'retainer deliverables competitor monitor reports'
+  cue=False  best=aa02-20260811-121000 score=0.5589  verdict=FP
+  per-checkpoint:
+    0.5589  aa02-20260811-121000 *** CLEARS <== BEST
+    0.4990  aa01-20260811-120000 *** CLEARS
+    0.2909  aa09-20260811-132000 *** CLEARS
+    0.2210  aa10-20260811-133000
+    0.2202  aa05-20260811-124000
+    0.2198  aa04-20260811-123000
+    0.2146  aa08-20260811-131000
+    0.2025  aa03-20260811-122000
+    0.0500  aa06-20260811-125000
+    0.0500  aa07-20260811-130000
+
+PROMPT: 'continue working on the gambit competitor monitor'
+  cue=True  best=aa02-20260811-121000 score=0.5777  verdict=OK+
+  per-checkpoint:
+    0.5777  aa02-20260811-121000 *** CLEARS <== BEST
+    0.5254  aa01-20260811-120000 *** CLEARS
+    0.2331  aa06-20260811-125000
+    0.2242  aa07-20260811-130000
+    0.2194  aa10-20260811-133000
+    0.2190  aa05-20260811-124000
+    0.2188  aa04-20260811-123000
+    0.2160  aa08-20260811-131000
+    0.2096  aa03-20260811-122000
+    0.2049  aa09-20260811-132000
+
+PROMPT: 'continue the gambit company brain'
+  cue=True  best=aa03-20260811-122000 score=0.6438  verdict=OK+
+  per-checkpoint:
+    0.6438  aa03-20260811-122000 *** CLEARS <== BEST
+    0.2279  aa06-20260811-125000
+    0.2196  aa07-20260811-130000
+    0.2152  aa10-20260811-133000
+    0.2148  aa05-20260811-124000
+    0.2146  aa04-20260811-123000
+    0.2120  aa08-20260811-131000
+    0.2024  aa02-20260811-121000
+    0.2014  aa09-20260811-132000
+    0.1935  aa01-20260811-120000
+
+PROMPT: 'write a limerick about cats'
+  cue=False  best=aa01-20260811-120000 score=0.0500  verdict=OK-
+  per-checkpoint:
+    0.0500  aa01-20260811-120000 <== BEST
+    0.0500  aa02-20260811-121000
+    0.0500  aa03-20260811-122000
+    0.0500  aa04-20260811-123000
+    0.0500  aa05-20260811-124000
+    0.0500  aa06-20260811-125000
+    0.0500  aa07-20260811-130000
+    0.0500  aa08-20260811-131000
+    0.0500  aa09-20260811-132000
+    0.0500  aa10-20260811-133000
+
+----------------------------------------------------------------------------------------
+FALSE POSITIVES (container-word-only prompts that cleared 0.25): 10
+----------------------------------------------------------------------------------------
+
+  WORST FP #1: 'continue the company brain'
+    matched checkpoint: aa03-20260811-122000   total=0.588
+    prompt_tokens: ['brain', 'company']
+    pool size n=10
+    HIT tokens (token, idf, df, n, path_weight, path_tf):
+        brain          idf=2.705  df=1/10  path_weight=3.0   path_tf=4
+        company        idf=2.705  df=1/10  path_weight=3.0   path_tf=4
+    MISS tokens (token, idf, df):
+    precision=1.0  recall=0.2407  content=0.388
+    resume_cue=True  resume_bonus=0.15  recency_bonus=0.05
+    total=0.588  threshold=0.25  margin=+0.3380
+
+  WORST FP #2: 'retainer deliverables competitor monitor reports'
+    matched checkpoint: aa02-20260811-121000   total=0.5589
+    prompt_tokens: ['competitor', 'deliverables', 'monitor', 'reports', 'retainer']
+    pool size n=10
+    HIT tokens (token, idf, df, n, path_weight, path_tf):
+        monitor        idf=2.299  df=2/10  path_weight=2.5   path_tf=3
+        competitor     idf=2.299  df=2/10  path_weight=2.5   path_tf=3
+        reports        idf=2.012  df=3/10  path_weight=1.5   path_tf=1
+        deliverables   idf=1.201  df=8/10  path_weight=2.5   path_tf=3
+        retainer       idf=1.201  df=8/10  path_weight=2.5   path_tf=3
+    MISS tokens (token, idf, df):
+    precision=1.0  recall=0.3413  content=0.5089
+    resume_cue=False  resume_bonus=0.0  recency_bonus=0.05
+    total=0.5589  threshold=0.25  margin=+0.3089
+
+  WORST FP #3: 'continue the retainer deliverables'
+    matched checkpoint: aa10-20260811-133000   total=0.4236
+    prompt_tokens: ['deliverables', 'retainer']
+    pool size n=10
+    HIT tokens (token, idf, df, n, path_weight, path_tf):
+        retainer       idf=1.201  df=8/10  path_weight=2.5   path_tf=3
+        deliverables   idf=1.201  df=8/10  path_weight=2.5   path_tf=3
+    MISS tokens (token, idf, df):
+    precision=1.0  recall=0.1259  content=0.2236
+    resume_cue=True  resume_bonus=0.15  recency_bonus=0.05
+    total=0.4236  threshold=0.25  margin=+0.1736
+========================================================================================
+POOL: MIXED (multi-project)  (6 checkpoints)   threshold=0.25
+========================================================================================
+
+PROMPT: 'continue the retainer deliverables'
+  cue=True  best=bb02-20260811-121000 score=0.4746  verdict=FP
+  per-checkpoint:
+    0.4746  bb02-20260811-121000 *** CLEARS <== BEST
+    0.4491  bb01-20260811-120000 *** CLEARS
+    0.0500  bb03-20260811-122000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+    0.0500  bb06-20260811-125000
+
+PROMPT: 'continue the clients work'
+  cue=True  best=bb02-20260811-121000 score=0.3474  verdict=FP
+  per-checkpoint:
+    0.3474  bb02-20260811-121000 *** CLEARS <== BEST
+    0.3328  bb01-20260811-120000 *** CLEARS
+    0.0500  bb03-20260811-122000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+    0.0500  bb06-20260811-125000
+
+PROMPT: 'continue the competitor monitor for beta client'
+  cue=True  best=bb01-20260811-120000 score=0.4052  verdict=FP
+  per-checkpoint:
+    0.4052  bb01-20260811-120000 *** CLEARS <== BEST
+    0.0500  bb02-20260811-121000
+    0.0500  bb03-20260811-122000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+    0.0500  bb06-20260811-125000
+
+PROMPT: 'continue the reports'
+  cue=True  best=bb01-20260811-120000 score=0.3221  verdict=FP
+  per-checkpoint:
+    0.3221  bb01-20260811-120000 *** CLEARS <== BEST
+    0.0500  bb02-20260811-121000
+    0.0500  bb03-20260811-122000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+    0.0500  bb06-20260811-125000
+
+PROMPT: 'continue the references work'
+  cue=True  best=bb01-20260811-120000 score=0.3221  verdict=FP
+  per-checkpoint:
+    0.3221  bb01-20260811-120000 *** CLEARS <== BEST
+    0.0500  bb02-20260811-121000
+    0.0500  bb03-20260811-122000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+    0.0500  bb06-20260811-125000
+
+PROMPT: 'continue working on the deliverables'
+  cue=True  best=bb02-20260811-121000 score=0.3474  verdict=FP
+  per-checkpoint:
+    0.3474  bb02-20260811-121000 *** CLEARS <== BEST
+    0.3328  bb01-20260811-120000 *** CLEARS
+    0.0500  bb03-20260811-122000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+    0.0500  bb06-20260811-125000
+
+PROMPT: "let's resume the retainer"
+  cue=False  best=bb02-20260811-121000 score=0.1974  verdict=OK-
+  per-checkpoint:
+    0.1974  bb02-20260811-121000 <== BEST
+    0.1828  bb01-20260811-120000
+    0.0500  bb03-20260811-122000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+    0.0500  bb06-20260811-125000
+
+PROMPT: 'continue the scripts'
+  cue=True  best=bb03-20260811-122000 score=0.3546  verdict=FP
+  per-checkpoint:
+    0.3546  bb03-20260811-122000 *** CLEARS <== BEST
+    0.3475  bb06-20260811-125000 *** CLEARS
+    0.3259  bb02-20260811-121000 *** CLEARS
+    0.0500  bb01-20260811-120000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+
+PROMPT: 'continue the config'
+  cue=True  best=bb01-20260811-120000 score=0.0500  verdict=OK-
+  per-checkpoint:
+    0.0500  bb01-20260811-120000 <== BEST
+    0.0500  bb02-20260811-121000
+    0.0500  bb03-20260811-122000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+    0.0500  bb06-20260811-125000
+
+PROMPT: 'continue the company brain'
+  cue=True  best=bb02-20260811-121000 score=0.5251  verdict=FP
+  per-checkpoint:
+    0.5251  bb02-20260811-121000 *** CLEARS <== BEST
+    0.0500  bb01-20260811-120000
+    0.0500  bb03-20260811-122000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+    0.0500  bb06-20260811-125000
+
+PROMPT: 'retainer deliverables competitor monitor reports'
+  cue=False  best=bb01-20260811-120000 score=0.6015  verdict=FP
+  per-checkpoint:
+    0.6015  bb01-20260811-120000 *** CLEARS <== BEST
+    0.2695  bb02-20260811-121000 *** CLEARS
+    0.0500  bb03-20260811-122000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+    0.0500  bb06-20260811-125000
+
+PROMPT: 'continue working on the gambit competitor monitor'
+  cue=True  best=bb01-20260811-120000 score=0.5930  verdict=OK+
+  per-checkpoint:
+    0.5930  bb01-20260811-120000 *** CLEARS <== BEST
+    0.2718  bb02-20260811-121000 *** CLEARS
+    0.0500  bb03-20260811-122000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+    0.0500  bb06-20260811-125000
+
+PROMPT: 'continue the gambit company brain'
+  cue=True  best=bb02-20260811-121000 score=0.6297  verdict=OK+
+  per-checkpoint:
+    0.6297  bb02-20260811-121000 *** CLEARS <== BEST
+    0.2611  bb01-20260811-120000 *** CLEARS
+    0.0500  bb03-20260811-122000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+    0.0500  bb06-20260811-125000
+
+PROMPT: 'write a limerick about cats'
+  cue=False  best=bb01-20260811-120000 score=0.0500  verdict=OK-
+  per-checkpoint:
+    0.0500  bb01-20260811-120000 <== BEST
+    0.0500  bb02-20260811-121000
+    0.0500  bb03-20260811-122000
+    0.0500  bb04-20260811-123000
+    0.0500  bb05-20260811-124000
+    0.0500  bb06-20260811-125000
+
+----------------------------------------------------------------------------------------
+FALSE POSITIVES (container-word-only prompts that cleared 0.25): 9
+----------------------------------------------------------------------------------------
+
+  WORST FP #1: 'retainer deliverables competitor monitor reports'
+    matched checkpoint: bb01-20260811-120000   total=0.6015
+    prompt_tokens: ['competitor', 'deliverables', 'monitor', 'reports', 'retainer']
+    pool size n=6
+    HIT tokens (token, idf, df, n, path_weight, path_tf):
+        monitor        idf=2.253  df=1/6  path_weight=2.0   path_tf=2
+        competitor     idf=2.253  df=1/6  path_weight=2.0   path_tf=2
+        reports        idf=2.253  df=1/6  path_weight=1.5   path_tf=1
+        deliverables   idf=1.847  df=2/6  path_weight=2.0   path_tf=2
+        retainer       idf=1.847  df=2/6  path_weight=2.0   path_tf=2
+    MISS tokens (token, idf, df):
+    precision=1.0  recall=0.3807  content=0.5515
+    resume_cue=False  resume_bonus=0.0  recency_bonus=0.05
+    total=0.6015  threshold=0.25  margin=+0.3515
+
+  WORST FP #2: 'continue the company brain'
+    matched checkpoint: bb02-20260811-121000   total=0.5251
+    prompt_tokens: ['brain', 'company']
+    pool size n=6
+    HIT tokens (token, idf, df, n, path_weight, path_tf):
+        brain          idf=2.253  df=1/6  path_weight=1.5   path_tf=1
+        company        idf=2.253  df=1/6  path_weight=1.5   path_tf=1
+    MISS tokens (token, idf, df):
+    precision=1.0  recall=0.1941  content=0.3251
+    resume_cue=True  resume_bonus=0.15  recency_bonus=0.05
+    total=0.5251  threshold=0.25  margin=+0.2751
+
+  WORST FP #3: 'continue the retainer deliverables'
+    matched checkpoint: bb02-20260811-121000   total=0.4746
+    prompt_tokens: ['deliverables', 'retainer']
+    pool size n=6
+    HIT tokens (token, idf, df, n, path_weight, path_tf):
+        retainer       idf=1.847  df=2/6  path_weight=1.5   path_tf=1
+        deliverables   idf=1.847  df=2/6  path_weight=1.5   path_tf=1
+    MISS tokens (token, idf, df):
+    precision=1.0  recall=0.1591  content=0.2746
+    resume_cue=True  resume_bonus=0.15  recency_bonus=0.05
+    total=0.4746  threshold=0.25  margin=+0.2246
+
+########################################################################################
+SUMMARY: prompt -> best checkpoint -> score -> verdict
+########################################################################################
+
+PROMPT                                               POOL         BEST       SCORE    VERDICT
+----------------------------------------------------------------------------------------------------
+continue the retainer deliverables                   gambit       aa10-20260811-133000 0.4236   FP
+                                                     mixed        bb02-20260811-121000 0.4746   FP
+continue the clients work                            gambit       aa06-20260811-125000 0.3210   FP
+                                                     mixed        bb02-20260811-121000 0.3474   FP
+continue the competitor monitor for beta client      gambit       aa02-20260811-121000 0.4230   FP
+                                                     mixed        bb01-20260811-120000 0.4052   FP
+continue the reports                                 gambit       aa09-20260811-132000 0.3161   FP
+                                                     mixed        bb01-20260811-120000 0.3221   FP
+continue the references work                         gambit       aa10-20260811-133000 0.2796   FP
+                                                     mixed        bb01-20260811-120000 0.3221   FP
+continue working on the deliverables                 gambit       aa10-20260811-133000 0.3184   FP
+                                                     mixed        bb02-20260811-121000 0.3474   FP
+let's resume the retainer                            gambit       aa10-20260811-133000 0.1684   OK-
+                                                     mixed        bb02-20260811-121000 0.1974   OK-
+continue the scripts                                 gambit       aa10-20260811-133000 0.3065   FP
+                                                     mixed        bb03-20260811-122000 0.3546   FP
+continue the config                                  gambit       aa10-20260811-133000 0.3065   FP
+                                                     mixed        bb01-20260811-120000 0.0500   OK-
+continue the company brain                           gambit       aa03-20260811-122000 0.5880   FP
+                                                     mixed        bb02-20260811-121000 0.5251   FP
+retainer deliverables competitor monitor reports     gambit       aa02-20260811-121000 0.5589   FP
+                                                     mixed        bb01-20260811-120000 0.6015   FP
+continue working on the gambit competitor monitor    gambit       aa02-20260811-121000 0.5777   OK+
+                                                     mixed        bb01-20260811-120000 0.5930   OK+
+continue the gambit company brain                    gambit       aa03-20260811-122000 0.6438   OK+
+                                                     mixed        bb02-20260811-121000 0.6297   OK+
+write a limerick about cats                          gambit       aa01-20260811-120000 0.0500   OK-
+                                                     mixed        bb01-20260811-120000 0.0500   OK-
