@@ -1,10 +1,10 @@
 {
-  "_comment": "REAL-checkpoint fixtures for U6/U7 (R6/R7), rebuilt 2026-08-11 from ~/.claude/token-optimizer/checkpoints/*.md (50 real files). REPLACES the earlier synthetic set whose checkpoints carried clean project-named active_task fields -- that fantasy is exactly what hid the path-identity bug (GATE-real-data.md): real checkpoints store project identity in the DIRECTORY segments of modified_files/recent_reads paths (clients/acme/.../acme-competitor-monitor, PROJECTS/attention-span, PROJECTS/token-optimizer + the alexgreensh-token-optimizer plugin tree), while active_task is messy voice-transcript prose that does NOT name the project. The scorer must recover identity from paths, not active_task. active_task/decisions here are lightly paraphrased from the real files (PII/secrets stripped, kept distinct per checkpoint so the replay winner-mapping is deterministic); the file PATHS are the real ones. Incidents are labeled by their GitHub issue number.",
+  "_comment": "REAL-checkpoint fixtures for U6/U7 (R6/R7), rebuilt 2026-08-11 from ~/.claude/token-optimizer/checkpoints/*.md (50 real files). REPLACES the earlier synthetic set whose checkpoints carried clean project-named active_task fields -- that fantasy is exactly what hid the path-identity bug (GATE-real-data.md): real checkpoints store project identity in the DIRECTORY segments of modified_files/recent_reads paths (clients/northwind/.../northwind-competitor-monitor, PROJECTS/focus-tracker, PROJECTS/token-optimizer + the alexgreensh-token-optimizer plugin tree), while active_task is messy voice-transcript prose that does NOT name the project. The scorer must recover identity from paths, not active_task. active_task/decisions here are lightly paraphrased from the real files (PII/secrets stripped, kept distinct per checkpoint so the replay winner-mapping is deterministic); the file PATHS are the real ones. Incidents are labeled by their GitHub issue number.",
   "resume_openings": [
     {
-      "id": "resume-acme-monitor",
-      "prompt": "continue working on the acme competitor monitor",
-      "expected_checkpoint_id": "cp-acme"
+      "id": "resume-northwind-monitor",
+      "prompt": "continue working on the northwind competitor monitor",
+      "expected_checkpoint_id": "cp-northwind"
     },
     {
       "id": "resume-token-optimizer",
@@ -12,19 +12,19 @@
       "expected_checkpoint_id": "cp-token-optimizer"
     },
     {
-      "id": "resume-attention-span",
-      "prompt": "continue the attention span project",
-      "expected_checkpoint_id": "cp-attention-span"
+      "id": "resume-focus-tracker",
+      "prompt": "continue the focus tracker project",
+      "expected_checkpoint_id": "cp-focus-tracker"
     },
     {
-      "id": "resume-acme-market-sweep",
-      "prompt": "let's resume the acme competitor monitor, grab the latest market sweep",
-      "expected_checkpoint_id": "cp-acme"
+      "id": "resume-northwind-market-sweep",
+      "prompt": "let's resume the northwind competitor monitor, grab the latest market sweep",
+      "expected_checkpoint_id": "cp-northwind"
     },
     {
       "id": "resume-attention-benchmarks",
-      "prompt": "continue where we left off on the attention span benchmarks",
-      "expected_checkpoint_id": "cp-attention-span"
+      "prompt": "continue where we left off on the focus tracker benchmarks",
+      "expected_checkpoint_id": "cp-focus-tracker"
     },
     {
       "id": "resume-token-optimizer-parity",
@@ -60,7 +60,7 @@
   ],
   "checkpoints": [
     {
-      "id": "cp-acme",
+      "id": "cp-northwind",
       "filename": "aa11bb22-20260811-221941-milestone-edit-batch.md",
       "active_task": "let's finalize the connectors and make the scale environments adapted, i'll do the rest of the stuff",
       "decisions": [
@@ -68,15 +68,15 @@
         "draft a self-contained scan prompt so everything is connected"
       ],
       "modified_files": [
-        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/references/07-market-sweep.md",
-        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-company-brain/competitor-monitor/reports/2026-08-11__BRIEF.html",
-        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/scripts/build_cloud_prompt.py",
-        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/references/09-environments.md"
+        "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-competitor-monitor/references/07-market-sweep.md",
+        "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-company-brain/competitor-monitor/reports/2026-08-11__BRIEF.html",
+        "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-competitor-monitor/scripts/build_cloud_prompt.py",
+        "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-competitor-monitor/references/09-environments.md"
       ],
       "recent_reads": [
-        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/SKILL.md",
-        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/references/06-scheduling.md",
-        "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/config/competitors.json"
+        "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-competitor-monitor/SKILL.md",
+        "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-competitor-monitor/references/06-scheduling.md",
+        "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-competitor-monitor/config/competitors.json"
       ],
       "trigger": "milestone-edit-batch",
       "age_seconds": 600
@@ -90,19 +90,19 @@
         "the tests are green because they test the function in isolation"
       ],
       "modified_files": [
-        "/Users/dev/work",
-        "/Users/alexgreenshpun/.claude/plugins/marketplaces/alexgreensh-token-optimizer/REVIEW-DEFECTS.md",
-        "/Users/alexgreenshpun/.claude/plugins/marketplaces/alexgreensh-token-optimizer/plugins/token-optimizer/skills/token-optimizer/scripts/measure.py"
+        "/Users/dev/work/os/PROJECTS/token-optimizer/sessions/2026-08-11_negative-savings-review/build/plans/2026-08-11-001-fix-checkpoint-injection-and-verbosity-plan.md",
+        "/Users/dev/.claude/plugins/marketplaces/token-optimizer/REVIEW-DEFECTS.md",
+        "/Users/dev/.claude/plugins/marketplaces/token-optimizer/plugins/token-optimizer/skills/token-optimizer/scripts/measure.py"
       ],
       "recent_reads": [
-        "/Users/dev/work",
-        "/Users/dev/work"
+        "/Users/dev/work/os/PROJECTS/token-optimizer/sessions/2026-08-11_negative-savings-review/build/GATE-real-data.md",
+        "/Users/dev/work/os/PROJECTS/token-optimizer/sessions/2026-08-11_negative-savings-review/build/CRITICAL-DEFECT-real-data.md"
       ],
       "trigger": "quality-80",
       "age_seconds": 1200
     },
     {
-      "id": "cp-attention-span",
+      "id": "cp-focus-tracker",
       "filename": "aa33dd44-20260811-223221-quality-80.md",
       "active_task": "just show me what changes in the readme, badges etc",
       "decisions": [
@@ -110,48 +110,48 @@
         "option A, measuring this well is actually the point"
       ],
       "modified_files": [
-        "/Users/dev/work",
-        "/Users/dev/work",
-        "/Users/dev/work",
-        "/Users/dev/work"
+        "/Users/dev/work/os/PROJECTS/focus-tracker/benchmarks/harness/scannability.py",
+        "/Users/dev/work/os/PROJECTS/focus-tracker/.notes/decisions.md",
+        "/Users/dev/work/os/PROJECTS/focus-tracker/candidates/spartan-v2.md",
+        "/Users/dev/work/os/PROJECTS/focus-tracker/candidates/rundown-v2.md"
       ],
       "recent_reads": [
-        "/Users/dev/work",
-        "/Users/dev/work",
-        "/Users/dev/work"
+        "/Users/dev/work/os/PROJECTS/focus-tracker/output-styles/spartan.md",
+        "/Users/dev/work/os/PROJECTS/focus-tracker/output-styles/rundown.md",
+        "/Users/dev/work/os/PROJECTS/focus-tracker/README.md"
       ],
       "trigger": "quality-80",
       "age_seconds": 900
     },
     {
-      "id": "cp-total-recall",
+      "id": "cp-memory-store",
       "filename": "aa44ee55-20260811-120000-stop.md",
       "active_task": "rerun the retrieval benchmark and diff each question against the committed baseline",
       "decisions": [
         "keep locomo as the primary eval, longmemeval as secondary"
       ],
       "modified_files": [
-        "/Users/dev/work",
-        "/Users/dev/work"
+        "/Users/dev/work/os/PROJECTS/memory-store/core/retrieval.py",
+        "/Users/dev/work/os/PROJECTS/memory-store/benchmarks/locomo/runner.py"
       ],
       "recent_reads": [
-        "/Users/dev/work"
+        "/Users/dev/work/os/PROJECTS/memory-store/core/recall.py"
       ],
       "trigger": "stop",
       "age_seconds": 1800
     },
     {
-      "id": "cp-miss-chief",
+      "id": "cp-taskbot",
       "filename": "aa55ff66-20260811-110000-stop.md",
       "active_task": "the telegram guardrail made her inept when i tag her in chats with other people",
       "decisions": [
         "scope the guardrail to outbound sends only, not tagged-in reads"
       ],
       "modified_files": [
-        "/Users/dev/work"
+        "/Users/dev/work/os/PROJECTS/taskbot/heartbeat/goals.py"
       ],
       "recent_reads": [
-        "/Users/dev/work"
+        "/Users/dev/work/os/SYSTEM/references/personality.md"
       ],
       "trigger": "stop",
       "age_seconds": 2400
@@ -170,7 +170,7 @@
           "active_task": "just show me what changes in the readme, badges etc",
           "decisions": [],
           "modified_files": [
-            "/Users/dev/work"
+            "/Users/dev/work/os/PROJECTS/focus-tracker/benchmarks/harness/scannability.py"
           ],
           "recent_reads": [],
           "trigger": "stop",
@@ -184,7 +184,7 @@
       "issue": 61,
       "description": "Cross-project leak: a token-optimizer checkpoint must not surface in an unrelated marketing session. The cwd is a different project so the same-work bonus must not fire, and there is no topical overlap, so no pointer.",
       "prompt": "help me write a linkedin post about our marketing services",
-      "cwd": "/Users/dev/work Company/clients/marketing-agency",
+      "cwd": "/Users/dev/work/agency/clients/marketing-agency",
       "checkpoints": [
         {
           "id": "cp-token-optimizer-unrelated",
@@ -192,7 +192,7 @@
           "active_task": "ok so what about the eval, we reran it, it now doesn't cost extra?",
           "decisions": [],
           "modified_files": [
-            "/Users/alexgreenshpun/.claude/plugins/marketplaces/alexgreensh-token-optimizer/plugins/token-optimizer/skills/token-optimizer/scripts/measure.py"
+            "/Users/dev/.claude/plugins/marketplaces/token-optimizer/plugins/token-optimizer/skills/token-optimizer/scripts/measure.py"
           ],
           "recent_reads": [],
           "trigger": "stop",
@@ -214,7 +214,7 @@
           "active_task": "ok so what about the eval, we reran it, it now doesn't cost extra?",
           "decisions": [],
           "modified_files": [
-            "/Users/alexgreenshpun/.claude/plugins/marketplaces/alexgreensh-token-optimizer/plugins/token-optimizer/skills/token-optimizer/scripts/measure.py"
+            "/Users/dev/.claude/plugins/marketplaces/token-optimizer/plugins/token-optimizer/skills/token-optimizer/scripts/measure.py"
           ],
           "recent_reads": [],
           "trigger": "quality-80",
@@ -256,7 +256,7 @@
           "active_task": "결제 모듈 리팩터링 및 테스트",
           "decisions": [],
           "modified_files": [
-            "/Users/dev/work"
+            "/Users/dev/work/os/PROJECTS/payment/module.py"
           ],
           "recent_reads": [],
           "trigger": "stop",
@@ -268,12 +268,12 @@
     {
       "id": "incident-cross-client-false-positive",
       "issue": null,
-      "description": "Cross-client false positive: a resume-phrased prompt naming a DIFFERENT client ('competitor analysis for acme corp') grazes acme's competitor-monitor checkpoint on the shared word 'competitor' only. Unmatched high-IDF tokens (acme, corp, analysis) are negative evidence -- the resume-intent bonus is scaled by precision (with a floor), so an incidental one-word overlap cannot ride the flat cue over threshold. Guards the multi-client regime where two clients share the clients/<x>/Retainer-Deliverables/ path shape.",
+      "description": "Cross-client false positive: a resume-phrased prompt naming a DIFFERENT client ('competitor analysis for acme corp') grazes northwind's competitor-monitor checkpoint on the shared word 'competitor' only. Unmatched high-IDF tokens (acme, corp, analysis) are negative evidence -- the resume-intent bonus is scaled by precision (with a floor), so an incidental one-word overlap cannot ride the flat cue over threshold. Guards the multi-client regime where two clients share the clients/<x>/Retainer-Deliverables/ path shape.",
       "prompt": "continue working on the competitor analysis for acme corp",
       "expected": "no_match",
       "checkpoints": [
         {
-          "id": "cp-acme-acme-guard",
+          "id": "cp-northwind-acme-guard",
           "filename": "ff99ee88-20260811-221941-milestone-edit-batch.md",
           "active_task": "let's finalize the connectors and make the scale environments adapted, i'll do the rest of the stuff",
           "decisions": [
@@ -281,15 +281,15 @@
             "draft a self-contained scan prompt so everything is connected"
           ],
           "modified_files": [
-            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/references/07-market-sweep.md",
-            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-company-brain/competitor-monitor/reports/2026-08-11__BRIEF.html",
-            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/scripts/build_cloud_prompt.py",
-            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/references/09-environments.md"
+            "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-competitor-monitor/references/07-market-sweep.md",
+            "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-company-brain/competitor-monitor/reports/2026-08-11__BRIEF.html",
+            "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-competitor-monitor/scripts/build_cloud_prompt.py",
+            "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-competitor-monitor/references/09-environments.md"
           ],
           "recent_reads": [
-            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/SKILL.md",
-            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/references/06-scheduling.md",
-            "/Users/dev/work Company/clients/acme/Retainer-Deliverables/acme-competitor-monitor/config/competitors.json"
+            "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-competitor-monitor/SKILL.md",
+            "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-competitor-monitor/references/06-scheduling.md",
+            "/Users/dev/work/agency/clients/northwind/Retainer-Deliverables/northwind-competitor-monitor/config/competitors.json"
           ],
           "trigger": "milestone-edit-batch",
           "age_seconds": 600
