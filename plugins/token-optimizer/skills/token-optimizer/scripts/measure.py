@@ -28293,6 +28293,88 @@ def _neutralize_recovered_body(text, limit=4000):
     return text
 
 
+def _opening_context_text(cwd):
+    """Derive a short content signal for the current opening from ``cwd``.
+
+    At SessionStart there is no user prompt yet, so the only available opening
+    signal is the project implied by cwd. Returns the cwd's project dir name
+    with hyphens/underscores split into words so it tokenizes against sidecar
+    topics ("token-optimizer" -> "token optimizer"). Returns '' for a home /
+    generic cwd so the relevance fallback has no signal and stays silent (R4:
+    many users do not open a clean project folder). Never raises.
+    """
+    if not cwd:
+        return ""
+    try:
+        name = Path(str(cwd)).name
+    except Exception:
+        return ""
+    if not name:
+        return ""
+    generic = {"Users", "home",
+               ".claude", "projects", "src", "tests", "test", "scripts", "memory",
+               "assets", "skills", "commands", "docs", "node_modules", "dist", "lib",
+               Path.home().name, cwd_to_project_dir_name().lstrip("-")}
+    if name in generic or name.startswith(".") or name.startswith("-"):
+        return ""
+    return name.replace("-", " ").replace("_", " ")
+
+
+# --- U3: near-zero-cost statusline existence signal for a resumable checkpoint ---
+#
+# When an eligible checkpoint exists for a new session (D4: age + own-session
+# filtered, whether or not the billed pointer clears the relevance bar), write a
+# per-session flag file beside the quality cache. The Claude statusline
+# (statusline.js) reads it and shows a compact ``⤸resumable`` token in the
+# terminal UI ONLY -- never in any hook ``additionalContext`` payload, so it
+# costs zero billed tokens (R2). Codex has no non-billed render surface for this
+# (its native status_line is a static item list), so it carries no equivalent
+# signal -- see codex_statusline.py. The flag is ts-gated (30 min) so the signal
+# does not outlive the resumable window.
+_RESUMABLE_FLAG_TTL_MS = 30 * 60 * 1000
+
+
+def _resumable_flag_path(sid):
+    """Per-session resumable flag file path, or None when no usable sid."""
+    if not sid:
+        return None
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "", str(sid))
+    if not safe:
+        return None
+    return QUALITY_CACHE_DIR / f"resumable-{safe}.json"
+
+
+def _write_resumable_flag(sid, checkpoint_path):
+    """Record that a relevance-cleared checkpoint exists for this session.
+
+    Best-effort, never raises: the flag is a UI nicety, not a correctness gate.
+    """
+    p = _resumable_flag_path(sid)
+    if p is None:
+        return
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        import time as _t
+        payload = json.dumps({"checkpoint": str(checkpoint_path),
+                              "ts": int(_t.time() * 1000)})
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def _clear_resumable_flag(sid):
+    """Remove a stale resumable flag for this session (no relevance-cleared cp)."""
+    p = _resumable_flag_path(sid)
+    if p is None:
+        return
+    try:
+        p.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _emit_codex_session_start(text):
     """Emit SessionStart context as Codex-valid stdout (issue #81, marketplace path).
 
@@ -28404,27 +28486,87 @@ def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_onl
         # Prefer one whose work lives under the CURRENT cwd, so a home-dir / catch-all
         # cwd does not surface an unrelated project's checkpoint (e.g. a token-optimizer
         # checkpoint leaking into an unrelated tool's session run from the same home dir).
-        # When cwd cannot disambiguate, fall back to the most recent but LABEL it with its
-        # project + branch so an irrelevant pointer is self-evidently ignorable, not a
-        # mystery the next session investigates.
+        #
+        # U1 (R1): the old blind fallback surfaced ``checkpoints[0]`` (most recent
+        # from ANY project) whenever no cwd-prefix match existed, so an unrelated/
+        # fresh session got pointed at an irrelevant checkpoint and sometimes read
+        # it (~1,500 tokens wasted). Now: when no cwd-prefix match exists, score
+        # the candidates with the U2 relevance scorer against the cwd-derived
+        # opening context and fire ONLY if the best score clears
+        # CHECKPOINT_RELEVANCE_THRESHOLD. A home-dir / generic cwd yields no
+        # opening context -> no score -> no pointer. The cross-session label,
+        # the "NOT your own prior work" framing, the filename-format warning path,
+        # the 30-min age gate, and own-session exclusion are all preserved.
         try:
             cur = Path(cwd) if cwd else Path.cwd()
         except Exception:
             cur = None
+        # Filter candidates once: own-session excluded, 30-min age gate applied.
+        # The age gate and own-session exclusion are evaluated here (before
+        # selection) so a stale or own-session checkpoint can never be the
+        # relevance winner either.
+        candidates = []
+        for cp in checkpoints:
+            if sid_safe and sid_safe in cp["filename"]:
+                continue
+            try:
+                age_seconds = (datetime.now() - cp["created"]).total_seconds()
+            except Exception:
+                continue
+            if age_seconds > 1800:
+                continue
+            candidates.append(cp)
+        if not candidates:
+            _clear_resumable_flag(sid_safe)
+            return
+        # Strong same-work signal: a checkpoint whose working set lives under
+        # the current cwd. Fires directly (parallel sessions in the same project
+        # are relevant, and the cross-session label disambiguates them).
         chosen = None
         if cur is not None and str(cur) != str(Path.home()):
             cur_prefix = str(cur) + os.sep
-            for cp in checkpoints:
-                if sid_safe and sid_safe in cp["filename"]:
-                    continue
+            for cp in candidates:
                 if any(str(p).startswith(cur_prefix) for p in _checkpoint_work_paths(cp["path"])):
                     chosen = cp
                     break
-        latest = chosen or checkpoints[0]
-        age_seconds = (datetime.now() - latest["created"]).total_seconds()
-        if age_seconds > 1800:
-            return
-        if sid_safe and sid_safe in latest["filename"]:
+        # Relevance-gate the candidates once (content-based, cwd-free per R4).
+        # The result drives BOTH the statusline flag target and the billed-pointer
+        # decision below. No blind recency fallback -- silence is correct for the
+        # BILLED pointer when nothing is relevant.
+        best = None
+        best_score = 0.0
+        if chosen is None:
+            opening_ctx = _opening_context_text(cur)
+            for cp in candidates:
+                try:
+                    s = checkpoint_relevance_score(
+                        opening_ctx, cp["path"], pool=candidates, cwd=str(cur) if cur else None)
+                except Exception:
+                    s = 0.0
+                if s > best_score:
+                    best_score = s
+                    best = cp
+
+        # D4: the statusline resumable signal fires whenever an ELIGIBLE (age +
+        # own-session filtered) candidate exists -- NOT only when the billed
+        # pointer clears the relevance bar. This is the missed-genuine-resume
+        # case (R2): the billed pointer stays silent to save tokens, but the
+        # near-zero-cost statusline still tells the user a resumable checkpoint is
+        # available. Only the BILLED pointer is gated on relevance. The flag
+        # points at the strongest eligible candidate we can identify (cwd match >
+        # relevance winner > most-recent eligible; candidates are recent-first).
+        flag_target = chosen or best or candidates[0]
+        _write_resumable_flag(sid_safe, flag_target["path"])
+
+        # Billed pointer: fire only on a strong same-work (cwd) signal or when the
+        # relevance winner clears the threshold. Otherwise stay silent -- the
+        # statusline already carries the zero-cost signal for this eligible
+        # candidate.
+        if chosen is not None:
+            latest = chosen
+        elif best is not None and best_score >= CHECKPOINT_RELEVANCE_THRESHOLD:
+            latest = best
+        else:
             return
         desc = _checkpoint_descriptor(latest["path"])
         about = f" (prior work on {desc})" if desc else ""
@@ -28577,7 +28719,11 @@ def _read_checkpoint_sidecar(checkpoint_path):
         if sidecar_path.exists():
             data = json.loads(sidecar_path.read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError, TypeError):
+    # L2: a sidecar written in a non-UTF-8 encoding (cp1252 export, stray byte)
+    # raises UnicodeDecodeError from read_text before json ever sees it; without
+    # it in the tuple the whole candidate loop aborts. ValueError also covers
+    # json.JSONDecodeError, but both are listed for intent.
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError, OSError, TypeError):
         pass
     return {}
 
@@ -28585,6 +28731,17 @@ def _read_checkpoint_sidecar(checkpoint_path):
 def _safe_recovered_scalar(value, limit=160):
     text = " ".join(str(value or "").split())
     text = re.sub(r"[\x00-\x1f\x7f]", " ", text)
+    # D5: defang forged RECOVERED-DATA sentinels and instruction-like role
+    # prefixes the SAME way the body scrubber (_neutralize_recovered_body) does.
+    # Sidecar scalars (active_task / decisions) originate from prior-session
+    # content and are prompt-injectable; without this a forged "[/RECOVERED]" in
+    # active_task could close the fenced pull block and smuggle the following text
+    # in as live instructions. Scalars are single-line after the whitespace
+    # collapse above, so the body's line-structure handling is not needed.
+    text = re.sub(r"\[(\s*/?\s*RECOVERED\b)", r"(\1", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?i)^(\s*)(system|assistant|user|human|developer|tool|instructions?)(\s*:)",
+        r"\1[\2]\3", text)
     return text[: max(0, limit)]
 
 
@@ -28628,6 +28785,461 @@ def _checkpoint_topic_score(prompt_text, checkpoint, cwd=None):
     return min(score, 1.0), sidecar
 
 
+# --- U2: content-based, cwd-free, IDF-weighted checkpoint relevance scorer ---
+#
+# Defensible relevance of an opening prompt (or any opening-context text) against
+# a checkpoint's SIDECAR fields, without folder/path-prefix matching (R4). Overlap
+# is weighted by inverse document frequency across the checkpoint pool so generic
+# glue ("the", "run", "fix", "build") that appears in every checkpoint cannot
+# dominate. Recency is only a weak prior; cwd is an OPTIONAL same-work bonus and
+# is never required. Sanitizes harness markup out of sidecar fields first so a
+# polluted ``active_task`` (e.g. ``<task-notification>`` noise) cannot skew the
+# score. Never raises: a non-UTF-8 / unreadable checkpoint scores 0.0 for itself
+# and never aborts the candidate loop.
+#
+# Calibration source for the threshold: the U7 replay benchmark over the real
+# resume/fresh first-prompt mix (tests/baselines/replay-metrics.json). Tuned so
+# genuine resumes clear it and fresh/unrelated openings stay below it.
+def _clamp(value, lo, hi):
+    """Clamp a numeric knob into [lo, hi]. A mis-set env knob (typo, fuzz, a
+    hostile TOKEN_OPTIMIZER_* export) must never be able to force the relevance
+    score to a constant or flip the F1 sign -- every relevance knob is clamped at
+    definition to a safe range. Never raises; a non-numeric value returns lo."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return lo
+    if v != v:  # NaN
+        return lo
+    return max(lo, min(hi, v))
+
+
+CHECKPOINT_RELEVANCE_THRESHOLD = _clamp(
+    _float_env("TOKEN_OPTIMIZER_CHECKPOINT_RELEVANCE_THRESHOLD", 0.25), 0.1, 0.9
+)
+
+# Recency prior: a small, weak bonus for a fresh checkpoint, never enough on its
+# own to clear the threshold (a bare "continue" with no topical or same-work
+# signal must stay below the bar -- #129). Window matches the legacy scorer.
+_RELEVANCE_RECENCY_BONUS = 0.05
+_RELEVANCE_RECENCY_WINDOW_MIN = 180
+# Optional same-work bonus when a caller hands a cwd and the checkpoint's
+# working set lives under it. Small enough that content overlap still governs;
+# the scorer works WITHOUT it (R4).
+_RELEVANCE_CWD_BONUS = 0.10
+# Resume-intent bonus (U6 calibration): when the prompt carries a resume cue
+# ("continue working on...", "resume the...", "pick up where...") AND there is
+# SOME content overlap (content_score > 0), add this bonus. Real resume prompts
+# are often long and verbose, so pure precision under-scores them; the bonus
+# lifts genuine resume prompts over the threshold while fresh prompts that
+# happen to mention a topic (no resume cue) stay below. A bare "continue" with
+# no topical tokens has content_score = 0.0, so it gets NO bonus and stays
+# below the bar (#129).
+_RELEVANCE_RESUME_INTENT_BONUS = 0.15
+# The resume-intent bonus is scaled by precision so a prompt that names a
+# DIFFERENT project and only grazes a shared container word cannot ride the flat
+# cue over the threshold (cross-client false positive). A FLOOR keeps genuine but
+# verbose resumes -- which name the right project yet pad with unmatched words
+# ("...for full parity of the recent changes") -- from being over-penalized:
+# effective factor = FLOOR + (1-FLOOR)*precision, so precision only modulates the
+# top (1-FLOOR) of the bonus. Env-tunable.
+_RELEVANCE_RESUME_BONUS_PRECISION_FLOOR = _clamp(
+    _float_env("TOKEN_OPTIMIZER_RELEVANCE_RESUME_BONUS_PRECISION_FLOOR", 0.5), 0.0, 0.99
+)
+
+# D3 (stuffing defense): cap each term's IDF contribution so a single ultra-rare
+# token cannot spike the score, and length-normalize the overlap (see
+# checkpoint_relevance_score) so an opening that pads itself with many keywords
+# cannot reach 1.0 by precision alone. Calibrated so genuine resumes still clear.
+_RELEVANCE_IDF_CAP = _clamp(_float_env("TOKEN_OPTIMIZER_RELEVANCE_IDF_CAP", 3.0), 1.0, 100.0)
+
+# Path-identity weighting (root-cause fix): a checkpoint's project identity lives
+# in its file PATHS, not its prose. A word that recurs across many of a
+# checkpoint's modified_files / recent_reads paths (gambit x10, attention x10,
+# optimizer x10) is a strong identity signal; the SAME word appearing once in an
+# active_task/decision sentence is incidental. Because the doc token set is
+# frequency-blind, an unrelated review/handoff checkpoint that merely QUOTES a
+# project name in prose scored identically to the real project checkpoint. So we
+# weight each doc-side token by how often it appears in the checkpoint's PATHS
+# (capped, D3-style, so one mega-repeated word cannot dominate). Prose-only
+# tokens keep weight 1.0, honoring "use active_task as a weak secondary signal at
+# most". Query side and IDF are untouched, so the #129 bare-continue guard (empty
+# topical set -> content 0.0 -> no bonus) and the fresh-precision negatives are
+# unaffected: this only re-ranks checkpoints that ALREADY share topical tokens.
+_RELEVANCE_PATH_TF_WEIGHT = _clamp(
+    _float_env("TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_WEIGHT", 0.5), 0.0, 2.0)
+_RELEVANCE_PATH_TF_CAP = int(_clamp(
+    _int_env("TOKEN_OPTIMIZER_RELEVANCE_PATH_TF_CAP", 8), 1, 50))
+
+# H3 (fixAC2): FILESYSTEM-SCAFFOLDING words. A single-client checkpoint pool has
+# uniform IDF, so structural container words (retainer, deliverables, clients,
+# reports) weigh the same as true project-identity words. These are NOT project
+# names; they name the folder skeleton every project shares. They are EXCLUDED
+# from the hit set (so they grant no path-TF boost and a resume that only grazes
+# them fires no bonus) but KEPT in the doc denominator (so the cross-client recall
+# guard keeps its teeth). A genuine resume must still hit >=1 non-scaffolding
+# identity token for content to score. Proven necessary: compound-segment-only
+# (no lexical stoplist) FAILS in a diverse multi-client pool.
+_CHECKPOINT_SCAFFOLD_STOPWORDS = frozenset({
+    # folder-skeleton container words
+    "retainer", "deliverables", "deliverable", "clients", "client",
+    "reports", "report", "references", "reference", "scripts", "script",
+    # NOTE: only UNIVERSAL filesystem/dev-scaffolding words belong here -- never a
+    # word that can be part of a real project slug. "company"/"brain" were removed
+    # (2026-08-12): they name a real sub-project (gambit-company-brain), and listing
+    # them made "continue working on the company brain" score 0.0 on a genuine
+    # resume (a curated-against-one-tree false negative, flagged by Fable review).
+    "config", "configs", "src", "lib", "libs",
+    "app", "apps", "data", "notes", "note", "file", "files", "docs", "doc",
+    "projects", "project", "sessions", "session", "build", "builds",
+    # file-extension + doc-type basename noise: a dated brief filename like
+    # ``2026-08-11__BRIEF.html`` splits into {brief, html} -- shared by EVERY
+    # client's reports folder, so it is scaffolding, not project identity. Without
+    # these a pasted path false-matched a different client on the shared basename.
+    # (Only len>=4 Latin tokens survive _topic_token_kept, so 2-3 char extensions
+    # like md/py/js/yml are already dropped; these are the >=4 ones.)
+    "html", "htm", "json", "yaml", "toml", "xml", "csv", "jpeg", "text",
+    "brief", "draft", "readme", "index", "summary", "main", "tests", "test",
+    "utils", "util", "dist", "temp", "tmp", "cache",
+})
+
+# Harness / task-notification markup that can pollute ``active_task``. Stripped
+# before tokenizing so forged sentinels and scheduler noise do not masquerade as
+# topical content. Tags are removed wholesale; the residual text is then passed
+# through _safe_recovered_scalar for control-char / whitespace normalization.
+_SIDECAR_MARKUP_TAG_RE = re.compile(r"<[A-Za-z/][^<>]*>")
+_SIDECAR_MARKUP_SENTINELS = (
+    "task-notification", "system:", "scheduled task", "[token optimizer]",
+)
+
+
+def _sanitize_sidecar_text(value, limit=400):
+    """Strip harness markup + control chars from a sidecar scalar before scoring.
+
+    A polluted ``active_task`` like ``<task-notification>system: scheduled task
+    #7 fired</task-notification> fix checkpoint injection`` must be reduced to
+    its real content so the markup tokens do not inflate relevance. Never
+    raises; returns '' on any error.
+    """
+    try:
+        text = str(value or "")
+    except Exception:
+        return ""
+    text = _SIDECAR_MARKUP_TAG_RE.sub(" ", text)
+    # Drop standalone sentinel phrases the tags leave behind.
+    for sent in _SIDECAR_MARKUP_SENTINELS:
+        text = text.replace(sent, " ")
+    return _safe_recovered_scalar(text, limit=limit)
+
+
+# File-path words carry a checkpoint's project identity. Real checkpoints store
+# identity in the DIRECTORY segments of their file paths, e.g.
+# .../clients/gambit/.../gambit-competitor-monitor/reports/2026-08-11__BRIEF.html
+# -- the distinctive words (gambit, competitor, monitor) live in the dirs, not the
+# basename. Split the WHOLE path (dirs AND basename) on / \ - _ . : and whitespace
+# so that path -> {clients, gambit, competitor, monitor, reports, ...} and a
+# natural spoken prompt ("the gambit competitor monitor") can overlap it. Pool IDF
+# then down-weights the generic containers (users, clients, projects, reports,
+# retainer, deliverables) that appear in most checkpoints, so no hand-kept
+# stoplist is needed. Kept separate from _TOPIC_TOKEN_RE (which deliberately KEEPS
+# separators inside a token, #127 parity) so non-path fields are untouched.
+_PATH_WORD_SPLIT_RE = re.compile(r"[\\/\-_.:\s]+")
+
+
+def _path_topic_words(path_str):
+    """Separator-split topic words from a full file path (dirs + basename).
+
+    C1: pure-numeric segments (a 4-digit year like ``2026`` from a dated brief
+    filename ``2026-08-11__BRIEF.html``) carry no project identity and are
+    dropped, so a prompt that merely mentions the date ("the report from
+    2026-08-11") cannot false-match on the year.
+    """
+    return {
+        w
+        for w in _PATH_WORD_SPLIT_RE.split(str(path_str or "").lower())
+        if w and _topic_token_kept(w) and not w.isdigit()
+    }
+
+
+def _checkpoint_path_tf(checkpoint_path):
+    """Frequency of each path-identity word across a checkpoint's file paths.
+
+    Counts, per word, how many of the checkpoint's modified_files + recent_reads
+    paths that word appears in (set-per-path so a single path with a repeated
+    segment counts once for that path, but a project name recurring across many
+    files accumulates). This is the strength of the path-identity signal used by
+    ``checkpoint_relevance_score`` to out-rank incidental prose mentions. Returns
+    an empty Counter on any error.
+    """
+    from collections import Counter as _Counter
+    tf = _Counter()
+    try:
+        sc = _read_checkpoint_sidecar(checkpoint_path) or {}
+    except Exception:
+        return tf
+    for mf in (sc.get("modified_files") or []):
+        p = mf.get("path") if isinstance(mf, dict) else mf
+        if p:
+            tf.update(_path_topic_words(p))
+    for r in (sc.get("recent_reads") or []):
+        if r:
+            tf.update(_path_topic_words(r))
+    return tf
+
+
+def _checkpoint_sidecar_doc_tokens(checkpoint_path):
+    """Distinctive topic tokens drawn from a checkpoint's sidecar fields.
+
+    Builds a single ``document`` from the sanitized sidecar fields that actually
+    carry topic signal: ``active_task``, ``topic``, ``decisions``, and
+    ``active_plan`` (via the shared non-English tokenizer so CJK sidecars score
+    correctly), UNIONED with separator-split path WORDS from ``modified_files``
+    and ``recent_reads`` (dirs AND basename -- see ``_path_topic_words``). The
+    path words are where a checkpoint's project identity actually lives; keeping
+    only the basename discarded the identity words held in the directory
+    segments. Returns a set of lowercase topic tokens, or an empty set on any
+    error / when the sidecar is absent-or-empty -- the scorer then falls back to
+    0.0 for content.
+    """
+    try:
+        sc = _read_checkpoint_sidecar(checkpoint_path) or {}
+    except Exception:
+        return set()
+    parts = [_sanitize_sidecar_text(sc.get("active_task")),
+             _sanitize_sidecar_text(sc.get("topic")),
+             _sanitize_sidecar_text(sc.get("active_plan"))]
+    for d in (sc.get("decisions") or []):
+        parts.append(_sanitize_sidecar_text(d))
+    doc = "\n".join(p for p in parts if p)
+    tokens = _topic_tokens(doc) if doc.strip() else set()
+    # Union separator-split WORDS from the full modified_files / recent_reads
+    # paths (dirs carry the project identity: gambit, attention, optimizer, ...).
+    for mf in (sc.get("modified_files") or []):
+        p = mf.get("path") if isinstance(mf, dict) else mf
+        if p:
+            tokens |= _path_topic_words(p)
+    for r in (sc.get("recent_reads") or []):
+        if r:
+            tokens |= _path_topic_words(r)
+    return tokens
+
+
+def checkpoint_relevance_score(text, checkpoint_path, pool=None, cwd=None):
+    """IDF-weighted content-overlap relevance of ``text`` vs a checkpoint sidecar.
+
+    Tokenizes ``text`` and the checkpoint's sanitized sidecar fields, weights
+    overlap by inverse document frequency across ``pool`` (a list of checkpoint
+    paths; when None or a single element, IDF is uniform and this reduces to
+    precision), adds a weak recency prior, and an OPTIONAL ``cwd`` same-work
+    bonus. Returns 0.0-1.0. Never raises: non-UTF-8 / unreadable checkpoints
+    score 0.0 for themselves without aborting a caller's candidate loop.
+
+    A bare "continue"/"resume" with no topical tokens yields 0.0 from content,
+    so it stays below ``CHECKPOINT_RELEVANCE_THRESHOLD`` unless a strong same-
+    work signal (cwd bonus) lifts it -- the #129 guard.
+    """
+    # L4: a bytes ``text`` (mis-typed caller / raw stdin) must be decoded, never
+    # str()'d -- str(b"...") leaks a b'...' repr whose "b" and quote chars would
+    # tokenize as junk topic words.
+    if isinstance(text, (bytes, bytearray)):
+        try:
+            text = bytes(text).decode("utf-8", "replace")
+        except Exception:
+            text = ""
+    # H1: a checkpoint whose body file has been deleted is DEAD even if its sidecar
+    # JSON lingers. Score it 0.0 up front so an orphan sidecar can never be
+    # resurrected as a match. Guarded so a bad path type still degrades to 0.0.
+    try:
+        if not Path(str(checkpoint_path)).is_file():
+            return 0.0
+    except Exception:
+        return 0.0
+    # Doc tokens first: H2 needs them to decide which query-split sub-words count.
+    try:
+        doc_tokens = _checkpoint_sidecar_doc_tokens(checkpoint_path)
+    except Exception:
+        doc_tokens = set()
+    # Strip resume-cue glue ("continue"/"resume"/"session"/"work"/...) from the
+    # prompt so a bare "continue" has NO topical tokens and scores on recency +
+    # work-path only (U2.4 / #129). Reuses the shared non-English tokenizer so
+    # CJK prompts tokenize correctly (#127).
+    try:
+        base_tokens = _topic_tokens(str(text or ""), _RESUME_TOPIC_STOPWORDS)
+        # Query-side path handling (mirror of the doc side): a prompt that names a
+        # project with separators ("gambit-competitor-monitor", "measure.py") or
+        # PASTES a full path tokenizes as ONE blob under _TOPIC_TOKEN_RE. Split it
+        # into sub-words and keep every DISTINCTIVE one (non-stopword, non-digit,
+        # non-scaffold) whether or not it hits the doc -- see the loop below for why
+        # non-hitting words must stay (they dilute precision so a foreign pasted path
+        # cannot false-match). C1: pure-numeric date/year segments are junk, dropped.
+        # Scaffolding words (H3) are excluded here too so a pasted path's shared
+        # container segments do not enter the prompt weight. A plain space-separated
+        # prompt has no separator-bearing token, so its set is unchanged -- the #129
+        # bare-continue guard (empty topical set) still holds.
+        prompt_tokens = set()
+        for _t in base_tokens:
+            if any(_c in _t for _c in "\\/-_.:"):
+                for _w in _PATH_WORD_SPLIT_RE.split(_t):
+                    # Keep every distinctive (non-stopword, non-digit, non-scaffold)
+                    # sub-word, whether or not it hits the doc. A hitting sub-word
+                    # helps precision; a NON-hitting distinctive one (e.g. a foreign
+                    # client name "acme" in a pasted path) must stay in the prompt
+                    # set so it dilutes precision -- otherwise dropping it makes
+                    # precision 1.0 by construction and a foreign path grazing one
+                    # shared word false-matches the wrong client (H2 regression).
+                    # Scaffolding/generic segments (users/reports/...) and pure
+                    # digits are still excluded so they neither help nor dilute.
+                    if (_w and _w not in _RESUME_TOPIC_STOPWORDS
+                            and _topic_token_kept(_w) and not _w.isdigit()
+                            and _w not in _CHECKPOINT_SCAFFOLD_STOPWORDS):
+                        prompt_tokens.add(_w)
+            else:
+                prompt_tokens.add(_t)
+    except Exception:
+        return 0.0
+
+    content_score = 0.0
+    precision = 0.0
+    if prompt_tokens and doc_tokens:
+        # IDF across the pool: df(t) = # pool checkpoints whose doc contains t.
+        pool_paths = []
+        # L4: only iterate a genuine sequence pool. A stray string pool would
+        # otherwise iterate its characters as "paths".
+        if pool and isinstance(pool, (list, tuple)):
+            for item in pool:
+                p = item.get("path") if isinstance(item, dict) else item
+                if p:
+                    pool_paths.append(p)
+        if not pool_paths:
+            pool_paths = [checkpoint_path]
+        df = {}
+        pool_docs = []
+        for pp in pool_paths:
+            try:
+                pdoc = _checkpoint_sidecar_doc_tokens(pp)
+            except Exception:
+                pdoc = set()
+            pool_docs.append(pdoc)
+        for pdoc in pool_docs:
+            for t in pdoc:
+                df[t] = df.get(t, 0) + 1
+        n = len(pool_docs)
+        import math as _math
+
+        def _idf(t):
+            # IDF over the pool, CAPPED (D3) so one ultra-rare term cannot
+            # dominate the sum. df(t) = # pool checkpoints whose doc contains t.
+            d = df.get(t, 0)
+            return min(_math.log((n + 1) / (d + 1)) + 1.0, _RELEVANCE_IDF_CAP)
+
+        hits_all = prompt_tokens & doc_tokens
+        # H3 (fixAC2): drop filesystem-scaffolding words from the HIT set. They are
+        # structural container words shared by every project (retainer, clients,
+        # reports, ...), not identity. Excluding them from hits means they give no
+        # path-TF boost and a resume that only grazes them cannot fire the bonus,
+        # yet they stay in ``doc_tokens`` below so the recall denominator (the
+        # cross-client guard) keeps its teeth. content_score can only be > 0 when a
+        # NON-scaffolding identity token is hit -- the identity-hit gate.
+        hits = hits_all - _CHECKPOINT_SCAFFOLD_STOPWORDS
+        # Length-normalized overlap via IDF-weighted F1, NOT precision (D3).
+        # Bare precision (hits_weight / prompt_weight) tops out at 1.0 whenever
+        # EVERY prompt token happens to appear in the doc, so an opening
+        # keyword-stuffed from a checkpoint's own vocabulary scored a perfect 1.0
+        # and sailed past the threshold with no resume cue at all. F1 folds in
+        # RECALL (how much of the checkpoint's distinctive content the opening
+        # actually covers), so a stuffed opening that reproduces only a small
+        # fraction of a large checkpoint is dragged down by low recall and cannot
+        # clear the bar, while a genuine resume that covers the checkpoint's real
+        # topic still scores well regardless of incidental padding.
+        #
+        # PRECISION is the prompt's view (plain IDF): how much of what the user
+        # named is covered. RECALL is the DOC's view, weighted by path-identity
+        # frequency (``_path_weight``): a matched word that recurs across the
+        # checkpoint's file paths counts for more of the doc's identity than the
+        # same word buried once in prose. This is what lets the real gambit
+        # checkpoint (gambit x10 in paths) out-rank a review checkpoint that only
+        # quotes "gambit competitor monitor" in a decision sentence.
+        try:
+            path_tf = _checkpoint_path_tf(checkpoint_path)
+        except Exception:
+            path_tf = {}
+
+        def _path_weight(t):
+            tf = path_tf.get(t, 0)
+            if tf <= 0:
+                return 1.0
+            return 1.0 + _RELEVANCE_PATH_TF_WEIGHT * min(tf, _RELEVANCE_PATH_TF_CAP)
+
+        # M2: PRECISION counts every token symmetrically in BOTH the numerator and
+        # the denominator (no CJK special-casing). An earlier attempt excluded CJK
+        # from the denominator only, which let CJK hits push precision past 1.0 and a
+        # pure-CJK one-word graze false-match the WRONG checkpoint (0.52). Excluding
+        # CJK from both sides instead zeroed out LEGITIMATE pure-CJK resumes (no Latin
+        # basis -> precision 0). Symmetric inclusion is correct on all three: precision
+        # is bounded at 1.0; a genuine CJK resume that covers its checkpoint's CJK
+        # topic scores high; a CJK graze that shares one word of several is diluted by
+        # the unmatched CJK words in prompt_weight and stays below the bar.
+        matched_plain = sum(_idf(t) for t in hits)
+        prompt_weight = sum(_idf(t) for t in prompt_tokens) or 1.0
+        matched_doc_weight = sum(_idf(t) * _path_weight(t) for t in hits)
+        doc_weight = sum(_idf(t) * _path_weight(t) for t in doc_tokens) or 1.0
+        precision = matched_plain / prompt_weight
+        recall = matched_doc_weight / doc_weight
+        if precision + recall > 0:
+            content_score = 2 * precision * recall / (precision + recall)
+        else:
+            content_score = 0.0
+
+    score = content_score
+    # U6 resume-intent bonus: when the prompt carries a resume cue AND there is
+    # some content overlap, add a bonus. Real resume prompts are often long and
+    # verbose, so pure precision under-scores them; the bonus lifts genuine
+    # resume prompts over the threshold while fresh prompts that happen to
+    # mention a topic (no resume cue) stay below. A bare "continue" with no
+    # topical tokens has content_score = 0.0, so it gets NO bonus (#129).
+    if content_score > 0.0:
+        try:
+            if _resume_intent(str(text or "")):
+                # Scale the bonus by PRECISION (IDF-weighted fraction of the
+                # prompt's distinctive tokens the checkpoint actually contains).
+                # A genuine resume names the project -> most tokens match ->
+                # near-full bonus. A prompt that names a DIFFERENT thing and only
+                # grazes a shared container word ("competitor analysis for acme
+                # corp" overlapping gambit's competitor-monitor on just
+                # "competitor") has high unmatched high-IDF mass -> low precision
+                # -> little bonus, so it cannot ride the flat cue over the bar and
+                # false-match the wrong client. Unmatched distinctive tokens are
+                # treated as negative evidence. #129 still holds: a bare "continue"
+                # has content_score 0.0 and never reaches here. The FLOOR protects
+                # genuine verbose resumes (see the constant's comment).
+                _f = _RELEVANCE_RESUME_BONUS_PRECISION_FLOOR
+                score += _RELEVANCE_RESUME_INTENT_BONUS * (_f + (1.0 - _f) * precision)
+        except Exception:
+            pass
+    # Weak recency prior (never enough alone to clear the threshold). L1: gate on
+    # content_score > 0, NOT merely doc_tokens -- an empty / separator-only prompt
+    # (or one whose only overlap is a scaffolding word) has content_score 0.0 and
+    # must score a clean 0.0, not 0.0 + a recency tip that leaks it onto the board.
+    if content_score > 0.0:
+        try:
+            cp_path = Path(str(checkpoint_path))
+            if cp_path.exists():
+                age_min = (datetime.now().timestamp() - cp_path.stat().st_mtime) / 60
+                if 0 <= age_min < _RELEVANCE_RECENCY_WINDOW_MIN:
+                    score += _RELEVANCE_RECENCY_BONUS
+        except Exception:
+            pass
+    # Optional same-work bonus (R4: the scorer works without cwd).
+    if cwd:
+        try:
+            sc = _read_checkpoint_sidecar(checkpoint_path) or {}
+            if _checkpoint_in_project(sc, cwd):
+                score += _RELEVANCE_CWD_BONUS
+        except Exception:
+            pass
+    return min(score, 1.0)
+
+
 def codex_prompt_hints(prompt_text="", session_id=None, cwd=None, max_age_minutes=60 * 24 * 7):
     """Return short topic-relevant continuity hints for Codex UserPromptSubmit.
 
@@ -28646,11 +29258,20 @@ def codex_prompt_hints(prompt_text="", session_id=None, cwd=None, max_age_minute
 # continuity hook upgrades from a one-line hint to a FULL lean reconstruction,
 # scoped to the same project. Kept tight to avoid firing on incidental "continue".
 _RESUME_INTENT_RE = re.compile(
+    # H2: "continue <path>" -- a bare "continue" followed by a pasted absolute or
+    # relative path ("continue /Users/.../gambit-competitor-monitor",
+    # "continue \\srv\\share\\...") is a resume cue: the path IS the topic. Matched
+    # without a trailing \b so it fires on the leading slash/backslash/tilde/dot.
+    r"(?:continue\s+[\\/~.])|"
     r"\b(last session|previous session|prior session|earlier session|last time|"
     r"where we left off|pick(?:ing)? up where|"
     # "from" added so "continue from checkpoint" / "continue from where we left off"
     # is recognized; the cue is the verb "continue from", NOT a bare "from
     # checkpoint" (which would false-match "import data from checkpoint file").
+    # "to" is deliberately EXCLUDED (D2): "continue to <verb>" ("continue to
+    # refactor", "continue to write the tests") means keep doing the CURRENT task,
+    # not resume a prior session -- matching it re-opened fresh-session lean
+    # injection on Codex for any such prompt in a project with recent checkpoints.
     r"continue (?:working|where|on|our|the|with|that|this|from)|"
     r"carry on (?:with|where)|what we (?:discussed|talked about|were (?:doing|working))|"
     r"resume (?:our|that|this|work|the (?:work|session|project|task|conversation|thread|discussion))|"
@@ -28698,9 +29319,19 @@ def _extract_session_id_from_prompt(text):
     return (m.group(1) or m.group(2)).lower()
 
 
+# M2: CJK / non-Latin resume cues (继续 zh, 이어서 / 계속 ko, 続ける ja). Kept in a
+# SEPARATE regex, consulted only for intent DETECTION -- deliberately NOT part of
+# _RESUME_INTENT_RE, whose .sub() strips cues from a prompt residual. CJK scripts
+# have no word boundaries, so a glued Han run ("继续数据库迁移工作") is ONE token;
+# stripping "继续" from the prompt but not the checkpoint would break the identical-
+# run match the #127 parity fixture pins. Detection-only avoids that.
+_CJK_RESUME_CUE_RE = re.compile(r"继续|이어서|계속|続ける")
+
+
 def _resume_intent(text):
-    """True when the prompt asks to continue/recall prior work."""
-    return bool(_RESUME_INTENT_RE.search(text or ""))
+    """True when the prompt asks to continue/recall prior work (Latin or CJK cue)."""
+    t = text or ""
+    return bool(_RESUME_INTENT_RE.search(t) or _CJK_RESUME_CUE_RE.search(t))
 
 
 # Generic glue words that carry no topic once the resume cue is removed; keeping
@@ -28726,8 +29357,13 @@ _TOPIC_TOKEN_RE = re.compile(r"[a-zA-Z0-9_.:À-ÖØ-öø-ÿĀ-ɏ/-]+|[^\x00-\x7F
 _CJK_MIN = 0x3000
 
 
+def _has_cjk(w):
+    """True when a token contains any CJK / non-Latin-script char (ord >= U+3000)."""
+    return any(ord(ch) >= _CJK_MIN for ch in w)
+
+
 def _topic_token_kept(w):
-    if any(ord(ch) >= _CJK_MIN for ch in w):
+    if _has_cjk(w):
         return len(w) >= 2
     return len(w) > 3
 
@@ -37941,6 +38577,134 @@ def _format_window_note(cached):
     return f" ({size} window, source: {source})" if source else f" ({size} window)"
 
 
+def _verbosity_measured_savings(baseline_avg, post_nudge_outputs):
+    """Measured output-token savings from a verbosity nudge (U5, R5).
+
+    Computes the REAL saving from post-nudge output: max(0, baseline_avg -
+    actual_post_nudge_avg) x turns. Never an estimate, never a negative
+    saving. ``baseline_avg`` is the session's pre-nudge average output tokens
+    (recorded in the nudge event detail). ``post_nudge_outputs`` is the list of
+    output_tokens for the turns AFTER the nudge. Returns 0 when there is no
+    post-nudge data yet (no counterfactual to measure against).
+    """
+    try:
+        baseline = int(baseline_avg) if baseline_avg is not None else 0
+    except (TypeError, ValueError):
+        return 0
+    try:
+        outs = [int(o) for o in (post_nudge_outputs or []) if int(o) > 0]
+    except (TypeError, ValueError):
+        return 0
+    if not outs:
+        return 0
+    post_avg = sum(outs) / len(outs)
+    delta = baseline - post_avg
+    if delta <= 0:
+        return 0
+    return int(delta * len(outs))
+
+
+def _calibrate_prior_verbosity_nudges(session_id, filepath):
+    """Book the MEASURED saving of a prior verbosity nudge (U5, R5, D1).
+
+    The nudge event itself books 0 -- there is no counterfactual at fire time.
+    This pass runs on a later UserPromptSubmit turn: it finds the most recent
+    ``verbosity_steer`` event for this session, reads how many pre-nudge turns
+    and what pre-nudge average output it recorded, then measures the ACTUAL
+    post-nudge output from the live transcript and books
+    ``max(0, baseline - post_avg) x post_turns`` as a ``verbosity_steer_measured``
+    event via :func:`_verbosity_measured_savings`. Without this wiring the
+    measurement was dead code -- nothing in the real path ever computed the
+    counterfactual, so a nudge's saving was never actually credited (D1).
+
+    Idempotent per source nudge: a measured row records ``calibrates_ts=<ts>`` of
+    the nudge it settled, and calibrated timestamps are skipped, so it never
+    double-credits. When there are no post-nudge turns yet the nudge is left
+    uncalibrated for a later turn to measure. Returns the measured tokens booked
+    (0 if none). Best-effort: never raises into the caller.
+    """
+    try:
+        if not filepath or not Path(filepath).exists():
+            return 0
+        sid = str(session_id or "").strip()
+        if not sid:
+            return 0
+        session_uuid, _ = _extract_session_uuid(sid)
+        conn = _init_trends_db()
+        try:
+            rows = conn.execute(
+                "SELECT timestamp, detail FROM savings_events "
+                "WHERE event_type='verbosity_steer' "
+                "AND (session_id = ? OR session_uuid = ?) "
+                "AND detail LIKE '%pre_turns=%' "
+                "ORDER BY timestamp DESC LIMIT 5",
+                (sid, session_uuid),
+            ).fetchall()
+            done = conn.execute(
+                "SELECT detail FROM savings_events "
+                "WHERE event_type='verbosity_steer_measured' "
+                "AND (session_id = ? OR session_uuid = ?)",
+                (sid, session_uuid),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        calibrated_ts = set()
+        for (d,) in done:
+            match = re.search(r"calibrates_ts=(\S+)", d or "")
+            if match:
+                calibrated_ts.add(match.group(1))
+
+        source = None
+        for ts, detail in rows:
+            if ts in calibrated_ts:
+                continue
+            source = (ts, detail or "")
+            break
+        if not source:
+            return 0
+        src_ts, src_detail = source
+        m_turns = re.search(r"pre_turns=(\d+)", src_detail)
+        m_avg = re.search(r"pre_avg_out=(\d+)", src_detail)
+        if not m_turns or not m_avg:
+            return 0
+        pre_turns = int(m_turns.group(1))
+        pre_avg = int(m_avg.group(1))
+
+        # Collect assistant output_tokens in transcript order.
+        outputs = []
+        for line in Path(filepath).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if entry.get("type") == "assistant" and "message" in entry:
+                out = int(entry["message"].get("usage", {}).get("output_tokens", 0) or 0)
+                if out > 0:
+                    outputs.append(out)
+
+        post_outputs = outputs[pre_turns:]
+        if not post_outputs:
+            # No post-nudge turns yet: nothing to measure. Leave the nudge
+            # uncalibrated so a later turn settles it.
+            return 0
+
+        measured = _verbosity_measured_savings(pre_avg, post_outputs)
+        _log_savings_event(
+            "verbosity_steer_measured",
+            measured,
+            session_id=sid,
+            detail=(f"calibrates_ts={src_ts} post_turns={len(post_outputs)} "
+                    f"pre_avg_out={pre_avg}"),
+        )
+        return measured
+    except Exception:
+        return 0
+
+
 def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
     """Tiered conciseness nudge for UserPromptSubmit.
 
@@ -38034,6 +38798,18 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
                 )
             return ""
 
+        # U5/D1: before deciding on a new nudge, settle any prior nudge in this
+        # session whose post-nudge output we can now observe. The nudge event
+        # books 0 at fire time; THIS is where the real counterfactual
+        # (_verbosity_measured_savings) is computed and credited. Runs before the
+        # cooldown/fill early-returns so a settled nudge is measured even on a
+        # turn that does not itself nudge. Best-effort; never blocks the nudge.
+        try:
+            _calibrate_prior_verbosity_nudges(
+                session_id or os.environ.get("CLAUDE_SESSION_ID", ""), filepath)
+        except Exception:
+            pass
+
         window_note = _format_window_note(cached)
 
         # The window is provably wrong: more tokens were observed than it can
@@ -38118,19 +38894,20 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
             },
         })
 
-        # Log estimated output token savings (best-effort, non-blocking).
-        # The 10-15% reduction is an ASSUMPTION — we can't measure the counterfactual
-        # (what the model would have output without the nudge). But we CAN record the
-        # session's prior average output tokens so a follow-through calibration can
-        # compare the actual post-nudge output against the pre-nudge baseline.
+        # U5 (R5): book 0 at nudge time. The old code booked a hardcoded
+        # 10-15% x 800 ASSUMED saving the moment the nudge fired, without
+        # measuring the counterfactual. In the competitor's data output actually
+        # ROSE after the nudge, so the assumed figure was actively wrong. Now:
+        # the nudge event books 0 (no counterfactual yet), and we record the
+        # session's pre-nudge avg output so a later calibration pass can compute
+        # the real measured saving via _verbosity_measured_savings (max(0,
+        # baseline_avg - actual_post_nudge_avg) x turns). Never an estimate,
+        # never a negative saving.
         try:
             _session_id = session_id or os.environ.get("CLAUDE_SESSION_ID", "")
-            _est_output_reduction = 0.10 if fill_pct < 75 else 0.15
-            _avg_response_tokens = 800
-            _est_saved = int(_avg_response_tokens * _est_output_reduction)
 
             # Empirical calibration: record the session's pre-nudge avg output
-            # so we can later compare against the actual post-nudge output.
+            # so a later pass can compare against the actual post-nudge output.
             _pre_nudge_avg_output = 0
             _pre_nudge_turns = 0
             try:
@@ -38161,7 +38938,7 @@ def run_verbosity_steer(transcript_path=None, quiet=True, session_id=None):
                        f" pre_avg_out={_pre_nudge_avg_output} pre_turns={_pre_nudge_turns}")
             _log_savings_event(
                 "verbosity_steer",
-                _est_saved,
+                0,
                 session_id=_session_id,
                 detail=_detail,
             )
