@@ -75,11 +75,34 @@ _IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store")
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    """Walk up to the plugin root -- the dir that holds .claude-plugin/plugin.json.
+
+    From the canonical tree (skills/token-optimizer/scripts/) that is parents[3];
+    but from the Codex-marketplace MIRROR
+    (plugins/token-optimizer/skills/token-optimizer/scripts/) parents[3] is
+    plugins/token-optimizer, which has no .claude-plugin/ -- so the old hardcoded
+    index made _plugin_version() traceback with FileNotFoundError even on
+    --dry-run for any Codex-marketplace user (finding 7). Walking up for the
+    marker resolves to the real repo root in both trees, and falls back to the
+    legacy parents[3] (bounded) if no marker is found so a stripped/relocated
+    checkout degrades instead of crashing.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / ".claude-plugin" / "plugin.json").exists():
+            return parent
+    parents = here.parents
+    return parents[3] if len(parents) > 3 else here.parent
 
 
 def _plugin_version(root: Path) -> str:
-    manifest = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    # Guarded read (finding 7): a missing/unreadable manifest must degrade to a
+    # placeholder version, never a raw traceback -- _repo_root() may fall back to
+    # a tree without .claude-plugin/plugin.json.
+    try:
+        manifest = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "0.0.0"
     return str(manifest.get("version", "0.0.0"))
 
 
