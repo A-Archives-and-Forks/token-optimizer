@@ -51,4 +51,8 @@ Everything is fail-open: bash-only (no python dependency inside the VM),
 - **Nothing anywhere** → the install path is wrong (not org-pushed), the
   build doesn't fire hooks, or the allowlist blocked the POST *and* disk
   wasn't readable. Check `cowork_doctor.py` output and the org console
-  state before concluding hooks are dead.
+  state before concluding hooks are dead. One more suspect: a build that
+  strictly validates event names could reject the whole hooks.json over
+  the exotic entries (`CwdChanged`, `StopFailure`, …) — retry with
+  hooks.json trimmed to just SessionStart/UserPromptSubmit/PreToolUse/Stop
+  before giving up.
