@@ -264,6 +264,34 @@ PYCHECK
     exit 0
 }
 
+# ── Cowork plugin packaging ───────────────────────────────────
+# `install.sh --cowork` builds the org-console plugin payload under
+# dist/cowork/ (main plugin + to-hook-probe). It never edits local config:
+# Cowork does not read ~/.claude — plugins reach Cowork sessions only via
+# the Anthropic org admin plugin console push. Extra args (--dry-run,
+# --no-zip, --probe-only, --json) are forwarded to cowork_install.py.
+install_cowork() {
+    command -v python3 &>/dev/null || fail "python3 not found. Token Optimizer for Cowork needs Python 3."
+
+    local script_dir installer
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    installer="${script_dir}/skills/token-optimizer/scripts/cowork_install.py"
+
+    if [ ! -f "$installer" ] && [ -d "${script_dir}/.git" ]; then
+        warn "skills/ not in this checkout. Adding it to sparse-checkout..."
+        git -C "$script_dir" sparse-checkout add skills/ cowork/ 2>/dev/null || true
+        git -C "$script_dir" pull --ff-only 2>/dev/null || true
+    fi
+    [ -f "$installer" ] || fail "$(printf 'Run install.sh from inside a token-optimizer checkout, not on its own. From any folder:\n    git clone --depth 1 %s\n    cd token-optimizer\n    bash install.sh --cowork' "$REPO_HTTPS")"
+
+    # Forward any extra flags after --cowork.
+    local extra=()
+    for a in "$@"; do [ "$a" = "--cowork" ] || extra+=("$a"); done
+
+    python3 "$installer" "${extra[@]+"${extra[@]}"}" || fail "Cowork payload build failed."
+    exit 0
+}
+
 # ── Hermes plugin install ─────────────────────────────────────
 # `install.sh --hermes` installs the Token Optimizer plugin into
 # ~/.hermes/plugins/token-optimizer/, which NousResearch Hermes auto-loads.
@@ -685,9 +713,9 @@ install_copilot() {
     exit 0
 }
 
-# Route --opencode / --hermes / --copilot before the Claude Code prerequisite
-# checks (OpenCode needs bun; Hermes and Copilot need python3, not the Claude
-# Code plugin env).
+# Route --opencode / --hermes / --copilot / --cowork before the Claude Code
+# prerequisite checks (OpenCode needs bun; Hermes, Copilot, and the Cowork
+# packager need python3, not the Claude Code plugin env).
 
 # Allow tests to source this script for function unit-testing (e.g.
 # _copilot_wsl_root_warning) without triggering the install flow or
@@ -707,6 +735,7 @@ for arg in "$@"; do
             ;;
         --hermes) install_hermes "$@" ;;
         --copilot) install_copilot "$@" ;;
+        --cowork) install_cowork "$@" ;;
     esac
 done
 
