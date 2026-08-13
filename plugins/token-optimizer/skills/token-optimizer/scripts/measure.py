@@ -28385,8 +28385,13 @@ def _once_per_session_marker(tag, session_id):
     """
     if not session_id:
         return None
-    safe_sid = re.sub(r"[^a-zA-Z0-9_-]", "", str(session_id))
-    if not safe_sid:
+    # Reuse the shared session-id sanitizer (finding 22): it enforces a >=6
+    # char floor so degenerate sids ("a!" and "a?" both strip to "a") cannot
+    # collide and fail-CLOSED (a collision would silently skip the later
+    # session's run-once work). "unknown" is its no-usable-id sentinel -> map
+    # back to None so the caller fails OPEN and runs unguarded.
+    safe_sid = sanitize_session_id(str(session_id))
+    if safe_sid == "unknown":
         return None
     safe_tag = re.sub(r"[^a-zA-Z0-9_-]", "", str(tag)) or "run"
     return QUALITY_CACHE_DIR / f"once-{safe_tag}-{safe_sid}.json"
@@ -28414,17 +28419,55 @@ def _ran_once_this_session(tag, session_id):
     if p is None:
         return False
     try:
-        if p.exists():
-            return True
+        p.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         return False
+    import time as _t
+    try:
+        # Atomic claim (finding 17): O_CREAT|O_EXCL means exactly one caller
+        # creates the marker (returns "go"/False) and every racing caller sees
+        # FileExistsError (returns "already ran"/True). This closes the
+        # exists()-then-write TOCTOU window where a prompt submitted in the
+        # sub-second before an async first-run wrote its marker could double-run.
+        # The marker is still written BEFORE the work, preserving run-once even
+        # if that single run later times out.
+        fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return True
+    except OSError:
+        # Any other filesystem error -> fail open (run unguarded), never latch.
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as _fh:
+            _fh.write(json.dumps({"ts": int(_t.time() * 1000)}))
+    except OSError:
+        pass
+    return False
+
+
+def _mark_ran_this_session(tag, session_id):
+    """Record (or refresh) the per-session run-once marker for ``tag`` WITHOUT
+    checking it first -- the SessionStart ``--once-mark`` path.
+
+    SessionStart is inherently once-per-fire, so its work should ALWAYS run; the
+    marker exists only so the UserPromptSubmit ``--once-per-session`` copies
+    no-op on native Claude Code. Writing (not checking) here is the fix for the
+    latch regression (finding 8): resume/compact keep the same session_id, so a
+    check-then-skip guard would suppress the SECOND SessionStart of a session
+    (quality-cache --force stops re-warming after auto-compaction; the resume
+    checkpoint pointer + forced warm are suppressed). Refreshing the marker on
+    every SessionStart keeps the UserPromptSubmit copies latched while letting
+    SessionStart itself run each time. Fail-open: never raises, never blocks.
+    """
+    p = _once_per_session_marker(tag, session_id)
+    if p is None:
+        return
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         import time as _t
         p.write_text(json.dumps({"ts": int(_t.time() * 1000)}), encoding="utf-8")
     except OSError:
         pass
-    return False
 
 
 def _emit_codex_session_start(text):
@@ -31091,12 +31134,16 @@ def _cleanup_quality_cache():
         if not cache_dir.is_dir():
             return
         cutoff = time.time() - (_QUALITY_CACHE_RETENTION_DAYS * 86400)
-        for f in cache_dir.glob("quality-cache-*.json"):
-            try:
-                if f.stat().st_mtime < cutoff:
-                    f.unlink()
-            except OSError:
-                pass
+        # `once-*.json` are the per-session run-once guard markers (finding 21):
+        # three per session, never otherwise cleaned, so age them out here on the
+        # same retention window as the quality-cache snapshots.
+        for pattern in ("quality-cache-*.json", "once-*.json"):
+            for f in cache_dir.glob(pattern):
+                try:
+                    if f.stat().st_mtime < cutoff:
+                        f.unlink()
+                except OSError:
+                    pass
     except Exception:
         pass
 
@@ -40315,12 +40362,16 @@ if __name__ == "__main__":
         source = str(hook_input.get("source") or hook_input.get("hook_event_name") or "").lower()
         is_compact = bool(hook_input.get("is_compact", False)) or source == "compact" or "--compact" in args
         # Cowork parity: the --new-session-only pointer is wired onto both
-        # SessionStart (native) and UserPromptSubmit (Cowork). Guard it so it
-        # fires at most once per session; without this it would re-inject the
-        # billed checkpoint pointer on every prompt in Cowork. Only the
-        # new-session pointer is guarded -- the --compact restore must run on
-        # each compaction.
-        if ("--once-per-session" in args and new_session_only
+        # SessionStart (native, --once-mark) and UserPromptSubmit (Cowork,
+        # --once-per-session). SessionStart always runs and (re)writes the
+        # marker so a resume/compact re-fire is NOT latched out (finding 8);
+        # only the UserPromptSubmit copy checks-then-skips, so it does not
+        # re-inject the billed checkpoint pointer on every prompt in Cowork.
+        # Only the new-session pointer is guarded -- the --compact restore must
+        # run on each compaction.
+        if new_session_only and "--once-mark" in args:
+            _mark_ran_this_session("compact-restore-new-session", sid)
+        elif ("--once-per-session" in args and new_session_only
                 and _ran_once_this_session("compact-restore-new-session", sid)):
             sys.exit(0)
 
@@ -40539,10 +40590,15 @@ if __name__ == "__main__":
             # Cowork parity: the SessionStart cache-warm (quality-cache --force)
             # is wired onto UserPromptSubmit too, where it fires every prompt.
             # --force bypasses the throttle, so unguarded it would recompute the
-            # full quality snapshot on every prompt. Guard the forced warm to
-            # once per session; the throttled --warn / --throttle-only ticks keep
-            # maintaining the cache thereafter.
-            if "--once-per-session" in args and _ran_once_this_session(
+            # full quality snapshot on every prompt. SessionStart (--once-mark)
+            # always re-warms and refreshes the marker so post-compaction /
+            # resume re-warms are NOT latched out (finding 8); only the
+            # UserPromptSubmit copy (--once-per-session) checks-then-skips, so the
+            # throttled --warn / --throttle-only ticks keep maintaining the cache
+            # thereafter.
+            if "--once-mark" in args:
+                _mark_ran_this_session("quality-cache-force", session_id_from_hook)
+            elif "--once-per-session" in args and _ran_once_this_session(
                 "quality-cache-force", session_id_from_hook
             ):
                 _clear_hook_budget(_tok_hook_deadline)
@@ -40912,9 +40968,14 @@ if __name__ == "__main__":
         # but re-running its filesystem scan on every prompt is wasteful, so the
         # UserPromptSubmit copy carries --once-per-session and no-ops after the
         # first fire of the session. On native Claude Code the SessionStart copy
-        # (also flagged) sets the marker first, so the UserPromptSubmit copy is a
-        # single stat no-op -- zero behaviour change for existing users.
-        if "--once-per-session" in args:
+        # carries --once-mark: it always runs and (re)writes the marker so the
+        # UserPromptSubmit copy is a single stat no-op -- zero behaviour change
+        # for existing users -- while a resume/compact SessionStart still runs
+        # (finding 8).
+        if "--once-mark" in args:
+            _eh_sid = _read_stdin_hook_input().get("session_id")
+            _mark_ran_this_session("ensure-health", _eh_sid)
+        elif "--once-per-session" in args:
             _eh_sid = _read_stdin_hook_input().get("session_id")
             if _ran_once_this_session("ensure-health", _eh_sid):
                 sys.exit(0)

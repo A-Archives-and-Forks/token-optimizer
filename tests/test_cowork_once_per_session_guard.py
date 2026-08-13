@@ -80,3 +80,30 @@ def test_session_id_is_sanitized(cache_dir):
     markers = list(cache_dir.glob("once-ensure-health-*.json"))
     assert len(markers) == 1
     assert markers[0].parent == cache_dir
+
+
+def test_once_mark_always_runs_and_latches_ups(cache_dir):
+    # Finding 8: SessionStart carries --once-mark, which RUNS the work and
+    # (re)writes the marker but NEVER reports "already ran". So a second
+    # SessionStart of the same session (resume/compact keep the session_id) still
+    # runs -- quality-cache --force re-warms after auto-compaction, the resume
+    # checkpoint pointer + forced warm are no longer suppressed. The marker it
+    # writes still latches the UserPromptSubmit (--once-per-session) copies so
+    # native Claude Code sees zero double-fire.
+    measure._mark_ran_this_session("quality-cache-force", "sess-A")
+    # Second SessionStart of the SAME session: the mark path never skips.
+    measure._mark_ran_this_session("quality-cache-force", "sess-A")
+    # ...and the UserPromptSubmit copy is latched out by the marker.
+    assert measure._ran_once_this_session("quality-cache-force", "sess-A") is True
+    # Exactly one marker file exists (refresh overwrites, never accumulates).
+    markers = list(cache_dir.glob("once-quality-cache-force-*.json"))
+    assert len(markers) == 1
+
+
+def test_once_mark_missing_session_id_is_safe(cache_dir):
+    # No usable session_id -> mark is a no-op, never raises, never latches, so a
+    # later UserPromptSubmit check still fails open (runs).
+    measure._mark_ran_this_session("ensure-health", None)
+    measure._mark_ran_this_session("ensure-health", "")
+    assert not list(cache_dir.glob("once-ensure-health-*.json"))
+    assert measure._ran_once_this_session("ensure-health", None) is False
