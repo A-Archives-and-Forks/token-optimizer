@@ -190,7 +190,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -n \"$CLAUDE_CODE_CONTAINER_ID\" ] || case \"$AI_AGENT$CLAUDE_PLUGIN_ROOT\" in *harness*|*/plugins/synced/*) ;; *) exit 0;; esac; for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/python-launcher.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/run.py\" skills/token-optimizer/scripts/measure.py ensure-health --once-per-session; done; exit 0",
+            "command": "[ -n \"$CLAUDE_CODE_CONTAINER_ID$CLAUDE_CODE_REMOTE\" ] || case \"$AI_AGENT$CLAUDE_PLUGIN_ROOT\" in *harness*|*/plugins/synced/*) ;; *) exit 0;; esac; for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/python-launcher.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/run.py\" skills/token-optimizer/scripts/measure.py ensure-health --once-per-session; done; exit 0",
             "timeout": 15
           }
         ]
@@ -199,7 +199,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -n \"$CLAUDE_CODE_CONTAINER_ID\" ] || case \"$AI_AGENT$CLAUDE_PLUGIN_ROOT\" in *harness*|*/plugins/synced/*) ;; *) exit 0;; esac; for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/python-launcher.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/run.py\" skills/token-optimizer/scripts/measure.py quality-cache --force --quiet --once-per-session; done; exit 0",
+            "command": "[ -n \"$CLAUDE_CODE_CONTAINER_ID$CLAUDE_CODE_REMOTE\" ] || case \"$AI_AGENT$CLAUDE_PLUGIN_ROOT\" in *harness*|*/plugins/synced/*) ;; *) exit 0;; esac; for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/python-launcher.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/run.py\" skills/token-optimizer/scripts/measure.py quality-cache --force --quiet --once-per-session; done; exit 0",
             "timeout": 20
           }
         ]
@@ -208,7 +208,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -n \"$CLAUDE_CODE_CONTAINER_ID\" ] || case \"$AI_AGENT$CLAUDE_PLUGIN_ROOT\" in *harness*|*/plugins/synced/*) ;; *) exit 0;; esac; for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/python-launcher.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/run.py\" skills/token-optimizer/scripts/measure.py compact-restore --new-session-only --once-per-session; done; exit 0",
+            "command": "[ -n \"$CLAUDE_CODE_CONTAINER_ID$CLAUDE_CODE_REMOTE\" ] || case \"$AI_AGENT$CLAUDE_PLUGIN_ROOT\" in *harness*|*/plugins/synced/*) ;; *) exit 0;; esac; for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/python-launcher.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/run.py\" skills/token-optimizer/scripts/measure.py compact-restore --new-session-only --once-per-session; done; exit 0",
             "timeout": 20
           }
         ]

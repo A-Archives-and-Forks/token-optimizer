@@ -27691,9 +27691,11 @@ def _security_report(as_json=False):
         except OSError:
             return {"exists": True, "size_bytes": 0, "permissions": "???", "mtime": None}
 
-    checkpoint_dir = RUNTIME_DIR / "token-optimizer" / "checkpoints"
-    quality_cache_dir = RUNTIME_DIR / "token-optimizer"
-    events_file = RUNTIME_DIR / "token-optimizer" / "checkpoint-events.jsonl"
+    # FIX A (Fable #2): report the unified state base so the inventory reflects the real
+    # Cowork locations (these globals == RUNTIME_DIR/token-optimizer on desktop).
+    checkpoint_dir = CHECKPOINT_DIR
+    quality_cache_dir = QUALITY_CACHE_DIR
+    events_file = CHECKPOINT_EVENT_LOG
     config_file = CONFIG_DIR / "config.json"
 
     stores = {
@@ -31243,7 +31245,11 @@ def _cleanup_quality_cache():
     if _QUALITY_CACHE_RETENTION_DAYS <= 0:
         return
     try:
-        cache_dir = RUNTIME_DIR / "token-optimizer"
+        # FIX A (Fable #2): follow the unified state base. On desktop QUALITY_CACHE_DIR
+        # == RUNTIME_DIR/token-optimizer (unchanged); in Cowork it is the resolved
+        # plugin-data base where FIX 2 routes quality-cache-*.json / once-*.json, so the
+        # retention sweep must target it or those files never age out (slow accumulation).
+        cache_dir = QUALITY_CACHE_DIR
         if not cache_dir.is_dir():
             return
         cutoff = time.time() - (_QUALITY_CACHE_RETENTION_DAYS * 86400)
@@ -40566,6 +40572,12 @@ if __name__ == "__main__":
                 _buf = _io.StringIO()
                 with _redirect_stdout(_buf):
                     _run_compact_restore()
+                # Fable #1 follow-up (future-proof, no live impact today): the emitted
+                # event is chosen statically because Cowork fires this only from the
+                # UserPromptSubmit-registered entry and desktop/codex only from
+                # SessionStart. If #40495 is ever fixed and SessionStart starts firing in
+                # Cowork, derive the event from stdin hook_event_name instead so the
+                # envelope hookEventName always matches the firing hook.
                 _emit_additional_context(
                     _buf.getvalue(), event="UserPromptSubmit" if _cw else "SessionStart")
             else:
