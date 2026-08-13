@@ -1,0 +1,147 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh\" SessionStart; done; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh\" UserPromptSubmit; done; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh\" PreToolUse; done; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh\" PostToolUse; done; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh\" Stop; done; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh\" SessionEnd; done; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh\" PreCompact; done; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh\" PostCompact; done; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh\" StopFailure; done; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh\" SubagentStart; done; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh\" SubagentStop; done; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh\" Notification; done; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for b in bash /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" \"${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh\" CwdChanged; done; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
