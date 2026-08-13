@@ -17917,9 +17917,9 @@ def _scan_project_jsonl_stats():
     the long-lived daemon fresh without re-walking on every call.
     """
     global _PROJECT_JSONL_STAT_CACHE, _PROJECT_JSONL_STAT_CACHE_TS
-    now = time.time()
+    # monotonic() so NTP skew can't stretch or collapse the TTL window.
     if (_PROJECT_JSONL_STAT_CACHE is not None
-            and (now - _PROJECT_JSONL_STAT_CACHE_TS) < _PROJECT_JSONL_STAT_TTL):
+            and (time.monotonic() - _PROJECT_JSONL_STAT_CACHE_TS) < _PROJECT_JSONL_STAT_TTL):
         return _PROJECT_JSONL_STAT_CACHE
     out = []
     projects_base = CLAUDE_DIR / "projects"
@@ -17935,7 +17935,11 @@ def _scan_project_jsonl_stats():
                 except (PermissionError, OSError):
                     continue
     _PROJECT_JSONL_STAT_CACHE = out
-    _PROJECT_JSONL_STAT_CACHE_TS = now
+    # Stamp AFTER the walk finishes, not before: on a large cold history the walk
+    # itself can exceed the TTL. Stamping the pre-walk time would make the cache
+    # born already-expired, so the very next per-PID call re-walks and the memoization
+    # is a no-op in exactly the cold-cache case this exists to fix. (Caught by Kimi K3.)
+    _PROJECT_JSONL_STAT_CACHE_TS = time.monotonic()
     return out
 
 
