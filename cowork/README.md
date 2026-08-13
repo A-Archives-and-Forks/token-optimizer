@@ -102,6 +102,14 @@ allowlist — when enforcement is on — is still org-controlled, so the
 phone-home leg of a personal test rides on enforcement being off (check
 with `cowork_doctor.py`).
 
+## License note
+
+Token Optimizer is **PolyForm-Noncommercial-1.0.0**. An org-wide rollout
+at a company (IV, Nostik, any customer) is commercial use, so that step is
+a **terms decision** — commercial license or separate agreement — before
+any org-console push, not just a technical one. Personal-upload testing
+and evaluation are what the noncommercial license covers.
+
 ## What this cut deliberately is not
 
 - No MCP server / companion menubar / statusline replacement — the v3
