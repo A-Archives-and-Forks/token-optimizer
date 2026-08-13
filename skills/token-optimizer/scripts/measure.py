@@ -40557,28 +40557,17 @@ if __name__ == "__main__":
             # Codex marketplace plugin the shared hooks.json calls this directly (not
             # via codex_hook_bridge), so capture the raw text and wrap it (issue #81).
             # Claude keeps the raw-text stream unchanged.
-            if detect_runtime() == "codex":
+            # FIX 1: wrap in the documented additionalContext envelope for Codex
+            # (#81) and Cowork (docs-grounding.md §1). See _emit_additional_context.
+            _cw = is_cowork()
+            if detect_runtime() == "codex" or _cw:
                 import io as _io
                 from contextlib import redirect_stdout as _redirect_stdout
                 _buf = _io.StringIO()
                 with _redirect_stdout(_buf):
                     _run_compact_restore()
-                _emit_codex_session_start(_buf.getvalue())
-            elif is_cowork():
-                # FIX 1 (Cowork injection shape): in Cowork the --new-session-only
-                # pointer is wired onto UserPromptSubmit (Cowork never fires
-                # SessionStart). Raw-text stdout injection is undocumented for the
-                # cloud host -- only the JSON additionalContext field is
-                # (docs-grounding.md §1) -- so capture the raw pointer text and
-                # wrap it in the documented envelope with the FIRING event
-                # (UserPromptSubmit) so it reliably reaches the model. Desktop
-                # Claude keeps the raw-text SessionStart stream below.
-                import io as _io
-                from contextlib import redirect_stdout as _redirect_stdout
-                _cw_buf = _io.StringIO()
-                with _redirect_stdout(_cw_buf):
-                    _run_compact_restore()
-                _emit_additional_context(_cw_buf.getvalue(), event="UserPromptSubmit")
+                _emit_additional_context(
+                    _buf.getvalue(), event="UserPromptSubmit" if _cw else "SessionStart")
             else:
                 _run_compact_restore()
         except _HookTimeout:
