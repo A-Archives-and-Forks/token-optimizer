@@ -28375,6 +28375,58 @@ def _clear_resumable_flag(sid):
         pass
 
 
+def _once_per_session_marker(tag, session_id):
+    """Path of the per-session run-once marker for ``tag``, or None.
+
+    Lives beside the quality cache (``QUALITY_CACHE_DIR`` == the engine's
+    existing per-session state dir, home of ``resumable-<sid>.json``) so no new
+    top-level location is invented. Returns None when there is no usable
+    session_id (caller then fails open and runs unguarded).
+    """
+    if not session_id:
+        return None
+    safe_sid = re.sub(r"[^a-zA-Z0-9_-]", "", str(session_id))
+    if not safe_sid:
+        return None
+    safe_tag = re.sub(r"[^a-zA-Z0-9_-]", "", str(tag)) or "run"
+    return QUALITY_CACHE_DIR / f"once-{safe_tag}-{safe_sid}.json"
+
+
+def _ran_once_this_session(tag, session_id):
+    """Run-once-per-session guard. Returns True if ``tag`` already ran this
+    session; otherwise records the marker and returns False (i.e. "go ahead").
+
+    This is the Cowork-parity guard: the run-once SessionStart features
+    (ensure-health, quality-cache --force, compact-restore --new-session-only)
+    are ALSO wired onto UserPromptSubmit (Cowork never fires SessionStart), and
+    UserPromptSubmit fires every prompt. Keying a marker on the sanitized
+    session_id makes the first fire in a session -- whichever event that is,
+    SessionStart on native Claude Code or the first UserPromptSubmit in Cowork --
+    the only one that does the work; every later fire in the same session
+    no-ops on a single ``exists()`` stat.
+
+    Fail-open: no session_id, or any filesystem error, returns False so the
+    feature still runs. The marker is written BEFORE the work so a slow/timed-out
+    first run cannot re-trigger the (potentially expensive) command on every
+    subsequent prompt -- run-once is guaranteed even if that single run degrades.
+    """
+    p = _once_per_session_marker(tag, session_id)
+    if p is None:
+        return False
+    try:
+        if p.exists():
+            return True
+    except OSError:
+        return False
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        import time as _t
+        p.write_text(json.dumps({"ts": int(_t.time() * 1000)}), encoding="utf-8")
+    except OSError:
+        pass
+    return False
+
+
 def _emit_codex_session_start(text):
     """Emit SessionStart context as Codex-valid stdout (issue #81, marketplace path).
 
@@ -40262,6 +40314,15 @@ if __name__ == "__main__":
         new_session_only = "--new-session-only" in args
         source = str(hook_input.get("source") or hook_input.get("hook_event_name") or "").lower()
         is_compact = bool(hook_input.get("is_compact", False)) or source == "compact" or "--compact" in args
+        # Cowork parity: the --new-session-only pointer is wired onto both
+        # SessionStart (native) and UserPromptSubmit (Cowork). Guard it so it
+        # fires at most once per session; without this it would re-inject the
+        # billed checkpoint pointer on every prompt in Cowork. Only the
+        # new-session pointer is guarded -- the --compact restore must run on
+        # each compaction.
+        if ("--once-per-session" in args and new_session_only
+                and _ran_once_this_session("compact-restore-new-session", sid)):
+            sys.exit(0)
 
         def _run_compact_restore():
             if new_session_only:
@@ -40475,6 +40536,17 @@ if __name__ == "__main__":
                     session_id_from_hook = payload.get("session_id")
                 except (json.JSONDecodeError, OSError):
                     pass
+            # Cowork parity: the SessionStart cache-warm (quality-cache --force)
+            # is wired onto UserPromptSubmit too, where it fires every prompt.
+            # --force bypasses the throttle, so unguarded it would recompute the
+            # full quality snapshot on every prompt. Guard the forced warm to
+            # once per session; the throttled --warn / --throttle-only ticks keep
+            # maintaining the cache thereafter.
+            if "--once-per-session" in args and _ran_once_this_session(
+                "quality-cache-force", session_id_from_hook
+            ):
+                _clear_hook_budget(_tok_hook_deadline)
+                sys.exit(0)
             # The --warn print itself now happens inside quality_cache() (gated by
             # _maybe_quality_warn: session cap + cooldown + band-drop), so it can
             # reuse the already-resolved filepath/cache_path/result instead of
@@ -40835,6 +40907,17 @@ if __name__ == "__main__":
         # the 24h throttle on internal self-heal paths means the next
         # SessionStart is typically a no-op anyway.
         #
+        # Cowork parity: ensure-health is wired onto UserPromptSubmit too (Cowork
+        # never fires SessionStart). It is idempotent + 24h-throttled internally,
+        # but re-running its filesystem scan on every prompt is wasteful, so the
+        # UserPromptSubmit copy carries --once-per-session and no-ops after the
+        # first fire of the session. On native Claude Code the SessionStart copy
+        # (also flagged) sets the marker first, so the UserPromptSubmit copy is a
+        # single stat no-op -- zero behaviour change for existing users.
+        if "--once-per-session" in args:
+            _eh_sid = _read_stdin_hook_input().get("session_id")
+            if _ran_once_this_session("ensure-health", _eh_sid):
+                sys.exit(0)
         # FIX C: the dashboard-daemon ensure/revive runs FIRST, under its own
         # short independent guard, BEFORE the 8s health budget is armed. A slow
         # health scan that later trips the 8s watchdog can therefore never skip
