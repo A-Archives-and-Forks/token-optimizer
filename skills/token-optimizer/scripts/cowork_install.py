@@ -71,6 +71,18 @@ PAYLOAD_INCLUDE = (
     "README.md",
 )
 
+# The committed self-contained Cowork plugin (cowork/token-optimizer/) carries a
+# Cowork-specific manifest: a distinct plugin name so Cowork's marketplace lists
+# it separately from the desktop token-optimizer entry (whose source is the whole
+# repo and does NOT render in Cowork), plus a description that names Cowork.
+COMMITTED_PLUGIN_NAME = "token-optimizer-cowork"
+COMMITTED_PLUGIN_DESCRIPTION = (
+    "Token Optimizer for Claude Cowork: self-contained plugin with full skills "
+    "and Cowork-native hooks (UserPromptSubmit, PreToolUse, PostToolUse, Stop). "
+    "Install THIS in Cowork; the standard token-optimizer entry is for desktop "
+    "Claude Code."
+)
+
 _IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store")
 
 
@@ -149,12 +161,11 @@ def build_cowork_hooks(template: dict[str, Any]) -> dict[str, Any]:
     return {"hooks": trimmed}
 
 
-def build_plugin_payload(root: Path, dist: Path) -> Path:
-    version = _plugin_version(root)
-    payload = dist / f"token-optimizer-cowork-{version}"
-    if payload.exists():
-        shutil.rmtree(payload)
-    payload.mkdir(parents=True)
+def _copy_runtime_payload(root: Path, payload: Path) -> None:
+    """Copy the PAYLOAD_INCLUDE runtime set into ``payload`` and overwrite
+    hooks/hooks.json with the Cowork-trimmed variant. Shared by the versioned
+    dist payload (build_plugin_payload) and the committed stable-path payload
+    (build_committed_plugin) so both stay byte-for-byte in step."""
     for rel in PAYLOAD_INCLUDE:
         src = root / rel
         if not src.exists():
@@ -168,8 +179,57 @@ def build_plugin_payload(root: Path, dist: Path) -> Path:
     (payload / "hooks" / "hooks.json").write_text(
         json.dumps(cowork_hooks, indent=2) + "\n", encoding="utf-8"
     )
+
+
+def build_plugin_payload(root: Path, dist: Path) -> Path:
+    version = _plugin_version(root)
+    payload = dist / f"token-optimizer-cowork-{version}"
+    if payload.exists():
+        shutil.rmtree(payload)
+    payload.mkdir(parents=True)
+    _copy_runtime_payload(root, payload)
     _add_hooks_pointer(payload / ".claude-plugin" / "plugin.json")
     return payload
+
+
+def committed_plugin_dir(root: Path) -> Path:
+    """The STABLE committed path for the self-contained Cowork plugin.
+
+    No version in the dirname so the marketplace source (./cowork/token-optimizer)
+    is stable across releases and an anti-drift test can rebuild + diff in place."""
+    return root / "cowork" / "token-optimizer"
+
+
+def build_committed_plugin(root: Path) -> Path:
+    """Build the self-contained Cowork plugin into the committed stable path
+    ``cowork/token-optimizer/`` (no version in the dirname).
+
+    Same shape as the dist payload (Cowork-trimmed hooks + PAYLOAD_INCLUDE +
+    hooks pointer), but with a Cowork-specific manifest: name
+    ``token-optimizer-cowork``, version pinned to the root plugin.json, a
+    description that names Cowork, and the ``./hooks/hooks.json`` pointer.
+
+    Idempotent: wipes and rewrites the target so re-runs overwrite cleanly and
+    leave ``git status`` clean when nothing upstream changed."""
+    payload = committed_plugin_dir(root)
+    if payload.exists():
+        shutil.rmtree(payload)
+    payload.mkdir(parents=True)
+    _copy_runtime_payload(root, payload)
+    _finalize_committed_manifest(payload / ".claude-plugin" / "plugin.json", _plugin_version(root))
+    return payload
+
+
+def _finalize_committed_manifest(manifest_path: Path, version: str) -> None:
+    """Rewrite the copied root manifest into the Cowork plugin manifest: distinct
+    name, pinned version, Cowork-naming description, and the hooks pointer (added
+    via the shared _add_hooks_pointer helper)."""
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["name"] = COMMITTED_PLUGIN_NAME
+    manifest["version"] = version
+    manifest["description"] = COMMITTED_PLUGIN_DESCRIPTION
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    _add_hooks_pointer(manifest_path)
 
 
 def _add_hooks_pointer(manifest_path: Path) -> None:
@@ -222,11 +282,44 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-zip", action="store_true", help="Build payload dirs only, skip zips")
     parser.add_argument("--plugin-only", action="store_true", help="Skip the to-hook-probe payload")
     parser.add_argument("--probe-only", action="store_true", help="Build only the to-hook-probe payload")
+    parser.add_argument(
+        "--emit-committed",
+        action="store_true",
+        help=(
+            "Build the self-contained Cowork plugin into the committed stable path "
+            "cowork/token-optimizer/ (no version in dirname, name token-optimizer-cowork). "
+            "Idempotent; used by the marketplace source and the anti-drift test."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print intended outputs without writing")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable output")
     args = parser.parse_args(argv)
 
     root = _repo_root()
+
+    if args.emit_committed:
+        target = committed_plugin_dir(root)
+        committed_result: dict[str, Any] = {
+            "mode": "emit-committed",
+            "version": _plugin_version(root),
+            "events": list(COWORK_EVENTS),
+            "dry_run": args.dry_run,
+            "artifacts": [str(target)],
+        }
+        if not args.dry_run:
+            build_committed_plugin(root)
+        if args.json:
+            print(json.dumps(committed_result, indent=2))
+        else:
+            verb = "Would emit" if args.dry_run else "Emitted"
+            print(
+                f"[Token Optimizer] {verb} committed Cowork plugin "
+                f"'{COMMITTED_PLUGIN_NAME}' v{committed_result['version']} "
+                f"(hooks: {', '.join(COWORK_EVENTS)}):"
+            )
+            print(f"  {target}")
+        return 0
+
     dist = Path(args.out).expanduser() if args.out else root / "dist" / "cowork"
     try:
         _guard_out_dir(dist)
