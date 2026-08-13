@@ -20,6 +20,15 @@ This module keeps runtime integration deliberately simple:
   running under GitHub Copilot. COPILOT_HOME is Copilot's OWN variable — TO
   reads it but never asks users to set it (issue #78); TOKEN_OPTIMIZER_COPILOT_HOME
   is TO's own collision-free override.
+- Cowork is NOT a separate runtime: Claude Cowork runs the same Claude Code
+  engine inside a cloud/local VM, reads ~/.claude, and uses the Claude model
+  ladder. So ``detect_runtime()`` still returns ``"claude"`` inside Cowork.
+  ``is_cowork()`` is a REFINEMENT signal exposed alongside it (mirroring how the
+  runtime lattice layers signals rather than adding runtimes) — true when the
+  Cowork host markers are present: ``CLAUDE_CODE_CONTAINER_ID`` (primary), a
+  synced-plugin ``CLAUDE_PLUGIN_ROOT`` under ``/plugins/synced/``, or ``AI_AGENT``
+  carrying the harness marker. Callers that need Cowork-specific behaviour read
+  ``is_cowork()``; nothing about the existing ``detect_runtime()`` returns changes.
 - Callers can keep legacy variable names while resolving to the correct home.
 
 The goal is to let Token Optimizer share one Python core while platform
@@ -44,6 +53,19 @@ _VALID_RUNTIMES = frozenset(
     {_RUNTIME_CLAUDE, _RUNTIME_CODEX, _RUNTIME_HERMES, _RUNTIME_OPENCODE, _RUNTIME_COPILOT}
 )
 _CLAUDE_PLUGIN_ENVS = ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA")
+# Claude Cowork host markers. Cowork is Claude Code running in a cloud/local VM,
+# so these REFINE the claude runtime (via is_cowork()) rather than name a new one.
+#   - CLAUDE_CODE_CONTAINER_ID: set inside every Cowork VM (primary signal).
+#   - AI_AGENT: the Cowork VM sets the "_harness" variant
+#     ("claude-code_2-1-231_harness"); the LOCAL Claude Code CLI sets the
+#     "_agent" variant ("claude-code_2-1-229_agent"). So the distinguishing
+#     token is "harness", NOT the bare "claude-code" prefix (which both share).
+#   - CLAUDE_PLUGIN_ROOT under /plugins/synced/: Cowork plugins arrive via the
+#     org admin console account-sync, landing under a synced-plugin path.
+_COWORK_CONTAINER_ENV = "CLAUDE_CODE_CONTAINER_ID"
+_COWORK_AI_AGENT_ENV = "AI_AGENT"
+_COWORK_AI_AGENT_MARKERS = ("claude-code", "harness")
+_COWORK_SYNCED_PLUGIN_MARKER = "/plugins/synced/"
 # Claude Code's own process-env signals. CLAUDECODE is inherited by every
 # subprocess Claude Code spawns, so a genuine Codex/OpenCode/Copilot launched
 # from a CC Bash tool inherits CLAUDECODE=1. This tier therefore sits BELOW the
@@ -813,6 +835,34 @@ def detect_runtime() -> str:
     return _RUNTIME_CLAUDE
 
 
+@functools.lru_cache(maxsize=None)
+def is_cowork() -> bool:
+    """True when running inside Claude Cowork (a Claude Code VM host).
+
+    A REFINEMENT of the claude runtime, not a new runtime: ``detect_runtime()``
+    still returns ``"claude"`` inside Cowork. Signals, any of which suffices:
+
+      1. ``CLAUDE_CODE_CONTAINER_ID`` is set (primary — present in every Cowork VM).
+      2. ``AI_AGENT`` carries the Claude Code VM harness marker
+         (``claude-code`` + ``harness``, e.g. ``claude-code_2-1-231_harness``);
+         the local CLI's ``..._agent`` value is deliberately NOT a match.
+      3. ``CLAUDE_PLUGIN_ROOT``/``CLAUDE_PLUGIN_DATA`` points under
+         ``/plugins/synced/`` — where org-console account-synced plugins land.
+
+    Never raises; a missing/blank env just contributes no signal.
+    """
+    if os.environ.get(_COWORK_CONTAINER_ENV, "").strip():
+        return True
+    ai_agent = os.environ.get(_COWORK_AI_AGENT_ENV, "").lower()
+    if all(marker in ai_agent for marker in _COWORK_AI_AGENT_MARKERS):
+        return True
+    for env_var in _CLAUDE_PLUGIN_ENVS:
+        val = os.environ.get(env_var, "")
+        if val and _COWORK_SYNCED_PLUGIN_MARKER in val.replace("\\", "/"):
+            return True
+    return False
+
+
 def claude_home() -> Path:
     """Return Claude Code's home directory.
 
@@ -971,4 +1021,8 @@ def runtime_name_for_humans() -> str:
         return "OpenCode"
     if runtime == _RUNTIME_COPILOT:
         return "GitHub Copilot"
+    # Cowork is the claude runtime in a VM; label the refinement without changing
+    # the runtime it resolves to.
+    if runtime == _RUNTIME_CLAUDE and is_cowork():
+        return "Claude Code (Cowork)"
     return "Claude Code"
