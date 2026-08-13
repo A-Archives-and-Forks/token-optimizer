@@ -2,6 +2,8 @@
 
 This report shows what Token Optimizer saved, how every number was measured, and how you reproduce each one on your own data. The figures are one user's 30 days (snapshot ending 2026-06-15); yours will differ, and every tool to regenerate them ships in the repo.
 
+> This is the **real-world** report — actual usage over 30 days. For a **controlled experiment** that isolates each compression mechanism (the same task run with the plugin on vs off), see [`CONTROLLED-A-B-BENCHMARK.md`](./CONTROLLED-A-B-BENCHMARK.md). Two different lenses, not competing numbers.
+
 ---
 
 ## What it saved (30 days)

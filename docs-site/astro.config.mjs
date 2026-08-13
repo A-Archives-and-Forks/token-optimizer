@@ -185,6 +185,7 @@ export default defineConfig({
             { label: "Health and diagnostics", slug: "reference/diagnostics" },
             { label: "Your data and privacy", slug: "reference/data-and-privacy" },
             { label: "Benchmarks", slug: "reference/benchmarks" },
+            { label: "Controlled A/B benchmark", slug: "reference/controlled-a-b-benchmark" },
             { label: "How it compares", slug: "reference/comparison" },
             { label: "License and pricing", slug: "reference/license" },
           ],
