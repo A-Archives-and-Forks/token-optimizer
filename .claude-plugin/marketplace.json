@@ -30,6 +30,26 @@
         "coach"
       ],
       "category": "productivity"
+    },
+    {
+      "name": "to-hook-probe",
+      "source": "./cowork/to-hook-probe",
+      "description": "[BETA] Token Optimizer Cowork hook-firing diagnostic. Install this FIRST in Claude Cowork to see which hooks actually fire on your build. Writes a marker + env dump you can read in-session. Part of the beta Cowork adapter.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Alex Greenshpun",
+        "url": "https://linkedin.com/in/alexgreensh"
+      },
+      "homepage": "https://github.com/alexgreensh/token-optimizer",
+      "repository": "https://github.com/alexgreensh/token-optimizer",
+      "license": "PolyForm-Noncommercial-1.0.0",
+      "keywords": [
+        "cowork",
+        "beta",
+        "diagnostic",
+        "hooks"
+      ],
+      "category": "productivity"
     }
   ]
 }

@@ -1,6 +1,6 @@
 {
   "name": "to-hook-probe",
-  "description": "Token Optimizer diagnostic probe: proves which hook events fire in a Claude Cowork session (env dump + marker files + optional phone-home).",
+  "description": "[BETA] Token Optimizer diagnostic probe: proves which hook events fire in a Claude Cowork session (env dump + marker files + optional phone-home).",
   "author": {
     "name": "Alex Greenshpun",
     "url": "https://linkedin.com/in/alexgreensh"
