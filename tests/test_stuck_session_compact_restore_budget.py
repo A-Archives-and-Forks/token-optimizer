@@ -65,8 +65,13 @@ def test_compact_restore_dispatch_installs_a_budget(src):
     text = src.read_text(encoding="utf-8")
     idx = text.find('args[0] == "compact-restore"')
     assert idx != -1, "compact-restore dispatch not found"
-    # look within the dispatch branch (before the next elif arg handler)
-    branch = text[idx: idx + 3200]
+    # Bound to exactly the compact-restore branch: slice up to the NEXT dispatch
+    # handler (`elif args[0]`), not a fixed byte window. The branch grew when the
+    # Cowork additionalContext-wrap landed (FIX 1), so a magic offset would false-
+    # fail; slicing to the real boundary keeps the guard precise regardless of
+    # branch size and still catches a removed budget install/clear.
+    nxt = text.find("elif args[0]", idx + 10)
+    branch = text[idx:nxt] if nxt != -1 else text[idx: idx + 3600]
     assert "_install_hook_budget(" in branch, "compact-restore is not budgeted"
     assert "TOKEN_OPTIMIZER_COMPACT_RESTORE_BUDGET" in branch
     assert "_clear_hook_budget(" in branch
