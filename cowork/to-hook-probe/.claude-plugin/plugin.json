@@ -8,6 +8,7 @@
   "homepage": "https://github.com/alexgreensh/token-optimizer",
   "repository": "https://github.com/alexgreensh/token-optimizer",
   "version": "0.1.0",
+  "hooks": "./hooks/hooks.json",
   "license": "PolyForm-Noncommercial-1.0.0",
   "keywords": [
     "diagnostic",

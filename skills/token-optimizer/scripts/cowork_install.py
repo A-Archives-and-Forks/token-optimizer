@@ -116,7 +116,18 @@ def build_plugin_payload(root: Path, dist: Path) -> Path:
     (payload / "hooks" / "hooks.json").write_text(
         json.dumps(cowork_hooks, indent=2) + "\n", encoding="utf-8"
     )
+    _add_hooks_pointer(payload / ".claude-plugin" / "plugin.json")
     return payload
+
+
+def _add_hooks_pointer(manifest_path: Path) -> None:
+    """Point the manifest at hooks/hooks.json explicitly. Per issue #16288,
+    some Cowork builds only load plugin hooks when the manifest declares
+    them; Claude Code defaults to the same path, so the field is harmless
+    everywhere else."""
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["hooks"] = "./hooks/hooks.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
 def build_probe_payload(root: Path, dist: Path) -> Path | None:
