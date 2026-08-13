@@ -17900,6 +17900,45 @@ def _format_elapsed(seconds):
     return f"{d}d {h}h"
 
 
+_PROJECT_JSONL_STAT_CACHE = None
+_PROJECT_JSONL_STAT_CACHE_TS = 0.0
+_PROJECT_JSONL_STAT_TTL = 30.0
+
+
+def _scan_project_jsonl_stats():
+    """Return [(path, birth_time, mtime), ...] for every project JSONL, cached.
+
+    The full-tree stat walk of ~/.claude/projects is the dominant cost of version
+    detection on a large history (tens of thousands of transcripts): a cold stat
+    of every file. _find_session_version_for_pid runs once per live Claude process,
+    so a dashboard gen with several running sessions repeated the identical walk N
+    times -- an N-file stat storm that blows past the 45s regen-step budget on a
+    cold cache. Compute it once and share it across those calls. A 30s TTL keeps
+    the long-lived daemon fresh without re-walking on every call.
+    """
+    global _PROJECT_JSONL_STAT_CACHE, _PROJECT_JSONL_STAT_CACHE_TS
+    now = time.time()
+    if (_PROJECT_JSONL_STAT_CACHE is not None
+            and (now - _PROJECT_JSONL_STAT_CACHE_TS) < _PROJECT_JSONL_STAT_TTL):
+        return _PROJECT_JSONL_STAT_CACHE
+    out = []
+    projects_base = CLAUDE_DIR / "projects"
+    if projects_base.exists():
+        for project_dir in projects_base.iterdir():
+            if not project_dir.is_dir():
+                continue
+            for jf in project_dir.glob("*.jsonl"):
+                try:
+                    st = jf.stat()
+                    birth = getattr(st, "st_birthtime", st.st_ctime)
+                    out.append((jf, birth, st.st_mtime))
+                except (PermissionError, OSError):
+                    continue
+    _PROJECT_JSONL_STAT_CACHE = out
+    _PROJECT_JSONL_STAT_CACHE_TS = now
+    return out
+
+
 def _find_session_version_for_pid(pid):
     """Try to find the Claude Code version for a running process by matching its session JSONL.
 
@@ -17933,48 +17972,42 @@ def _find_session_version_for_pid(pid):
     best_match = None
     best_diff = float("inf")
 
-    for project_dir in projects_base.iterdir():
-        if not project_dir.is_dir():
-            continue
-        for jf in project_dir.glob("*.jsonl"):
-            try:
-                stat = jf.stat()
-                # Use birth time on macOS, fallback to ctime
-                birth_time = getattr(stat, "st_birthtime", stat.st_ctime)
-                # Skip files created well before or well after the process
-                if birth_time < proc_start_ts - 60 and stat.st_mtime < proc_start_ts - 60:
-                    continue
-
-                # Read first 10 lines for version and timestamp
-                version_found = None
-                with open(jf, "r", encoding="utf-8", errors="replace") as f:
-                    for line_num, line in enumerate(f):
-                        if line_num > 10:
-                            break
-                        try:
-                            record = json.loads(line)
-                            v = record.get("version")
-                            if v and not version_found:
-                                version_found = v
-                            ts_str = record.get("timestamp")
-                            if not ts_str:
-                                continue
-                            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).replace(tzinfo=None)
-                            diff = abs((ts - proc_start).total_seconds())
-                            if diff < best_diff and version_found:
-                                best_diff = diff
-                                best_match = version_found
-                        except (json.JSONDecodeError, ValueError):
-                            continue
-
-                # Also try correlating birth time to process start
-                birth_diff = abs(birth_time - proc_start_ts)
-                if birth_diff < best_diff and version_found:
-                    best_diff = birth_diff
-                    best_match = version_found
-
-            except (PermissionError, OSError):
+    for jf, birth_time, mtime in _scan_project_jsonl_stats():
+        try:
+            # Skip files created well before or well after the process
+            if birth_time < proc_start_ts - 60 and mtime < proc_start_ts - 60:
                 continue
+
+            # Read first 10 lines for version and timestamp
+            version_found = None
+            with open(jf, "r", encoding="utf-8", errors="replace") as f:
+                for line_num, line in enumerate(f):
+                    if line_num > 10:
+                        break
+                    try:
+                        record = json.loads(line)
+                        v = record.get("version")
+                        if v and not version_found:
+                            version_found = v
+                        ts_str = record.get("timestamp")
+                        if not ts_str:
+                            continue
+                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).replace(tzinfo=None)
+                        diff = abs((ts - proc_start).total_seconds())
+                        if diff < best_diff and version_found:
+                            best_diff = diff
+                            best_match = version_found
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+
+            # Also try correlating birth time to process start
+            birth_diff = abs(birth_time - proc_start_ts)
+            if birth_diff < best_diff and version_found:
+                best_diff = birth_diff
+                best_match = version_found
+
+        except (PermissionError, OSError):
+            continue
 
     # Return if we found a reasonable match (within 10 minutes of start)
     if best_match and best_diff < 600:
@@ -36058,7 +36091,20 @@ def _mix_from_session_rows(cutoff):
 # dedup, so a cold scan is the only cost we are amortizing.
 _subagent_pool_memo = {"key": None, "ts": 0.0, "payload": None}
 _SUBAGENT_POOL_TTL = 900.0  # 15 min, matches the cache-health sidecar cadence
+# Long windows (the since-install pool, days >> 30) change slowly and cost the
+# most to recompute; give them a longer sidecar life so a dashboard regen never
+# pays the full-history scan more than a few times a day.
+_SUBAGENT_POOL_TTL_LONG = 21600.0  # 6h
 _SUBAGENT_SCAN_MAX_FILES = 4000  # bound the scan so the dashboard never stalls
+
+
+def _subagent_pool_ttl(days):
+    """Cache TTL for a subagent-pool window: 15 min for dashboard-fresh short
+    windows, 6h for long (since-install) windows whose totals barely move."""
+    try:
+        return _SUBAGENT_POOL_TTL if float(days) <= 31 else _SUBAGENT_POOL_TTL_LONG
+    except (TypeError, ValueError):
+        return _SUBAGENT_POOL_TTL
 
 # Cross-process L2 cache for the subagent-pool scan. The module memo above is
 # per-process only, but every deferred SessionEnd/Stop flush spawns a NEW python
@@ -36078,9 +36124,9 @@ def _subagent_pool_key_str(key):
     return "|".join(str(part) for part in key)
 
 
-def _read_subagent_pool_sidecar(key):
+def _read_subagent_pool_sidecar(key, ttl=_SUBAGENT_POOL_TTL):
     """Return the persisted subagent-pool payload for `key` (days, share, runtime)
-    if present AND younger than _SUBAGENT_POOL_TTL, else None. The sidecar holds a
+    if present AND younger than `ttl`, else None. The sidecar holds a
     DICT of {key_str: payload} so distinct windows (e.g. days=30 and days=since-
     install) coexist instead of overwriting one another. Fail-open."""
     global _subagent_pool_sidecar_memo
@@ -36101,7 +36147,7 @@ def _read_subagent_pool_sidecar(key):
         entry = store.get(_subagent_pool_key_str(key))
         if (isinstance(entry, dict)
                 and (time.time() - float(entry.get("_cached_ts", 0)))
-                < _SUBAGENT_POOL_TTL):
+                < ttl):
             return {k: v for k, v in entry.items() if not str(k).startswith("_")}
     except (json.JSONDecodeError, OSError, ValueError, TypeError):
         return None
@@ -36129,11 +36175,13 @@ def _write_subagent_pool_sidecar(key, payload):
                     store = loaded
         except (json.JSONDecodeError, OSError, ValueError, TypeError):
             store = {}
-        # Prune stale entries so the store never grows unbounded.
+        # Prune stale entries so the store never grows unbounded. Prune at the
+        # LONG ttl so long-window (since-install) entries survive between their
+        # 6h refreshes; short-window staleness is enforced at read time.
         store = {
             k: v for k, v in store.items()
             if isinstance(v, dict)
-            and (now - float(v.get("_cached_ts", 0))) < _SUBAGENT_POOL_TTL
+            and (now - float(v.get("_cached_ts", 0))) < _SUBAGENT_POOL_TTL_LONG
         }
         entry = dict(payload)
         entry["_cached_ts"] = now
@@ -36248,15 +36296,16 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
         key = (round(float(days), 3), round(float(baseline_opus_share), 4),
                detect_runtime(), str(tier), bool(baseline_mix_available))
         now = time.time()
+        ttl = _subagent_pool_ttl(days)
         if (not fresh and _subagent_pool_memo["payload"] is not None
                 and _subagent_pool_memo["key"] == key
-                and (now - _subagent_pool_memo["ts"]) < _SUBAGENT_POOL_TTL):
+                and (now - _subagent_pool_memo["ts"]) < ttl):
             return _subagent_pool_memo["payload"]
 
         # L2: cross-process sidecar. A fresh flush worker (new process, empty module
-        # memo) reads the 15-min result here instead of cold-scanning transcripts.
+        # memo) reads the cached result here instead of cold-scanning transcripts.
         if not fresh:
-            _sidecar = _read_subagent_pool_sidecar(key)
+            _sidecar = _read_subagent_pool_sidecar(key, ttl)
             if _sidecar is not None:
                 _subagent_pool_memo.update(key=key, ts=now, payload=_sidecar)
                 return _sidecar
@@ -36268,6 +36317,10 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
 
         # Gather candidate transcripts: top-level project JSONL + nested subagents/.
         # A sidechain can appear either as its own file or under {uuid}/subagents/.
+        # Collect ALL in-window files first, then sort newest-first and cap: the
+        # old first-N-encountered cap kept whatever directory-iteration order
+        # happened to yield, so the kept subset (and the priced dollars) changed
+        # between runs whenever the window held more than the cap.
         candidates = []
         for project_dir in projects_base.iterdir():
             if not project_dir.is_dir():
@@ -36275,21 +36328,31 @@ def _subagent_pool_savings(days=30, baseline_opus_share=0.95, tier=None, fresh=F
             try:
                 for jf in project_dir.rglob("*.jsonl"):
                     try:
-                        if jf.stat().st_mtime >= cutoff_ts:
-                            candidates.append(jf)
+                        m = jf.stat().st_mtime
                     except OSError:
                         continue
-                    if len(candidates) >= _SUBAGENT_SCAN_MAX_FILES:
-                        break
+                    if m >= cutoff_ts:
+                        candidates.append((m, jf))
             except OSError:
                 continue
-            if len(candidates) >= _SUBAGENT_SCAN_MAX_FILES:
-                break
+        candidates.sort(key=lambda t: t[0], reverse=True)
+        candidates = [jf for _, jf in candidates[:_SUBAGENT_SCAN_MAX_FILES]]
 
         # Aggregate per-model billed token classes across sidechain sessions only.
         by_model = {}  # model -> {"fi","cw","cr","out"}
         n_side = 0
         for jf in candidates:
+            # Classify BEFORE parsing. Fully parsing every main transcript just
+            # to read its is_sidechain flag was the dashboard's cold-regen 45s+
+            # (GBs of JSON decoded for a boolean per file). Nested subagents/
+            # transcripts are sidechains by construction; everything else gets
+            # the SAME bounded head-scan the session_log backfill uses, so this
+            # pool and the DB agree on what counts as a sidechain. (The old
+            # full-file scan also flagged ORCHESTRATOR sessions whose tool calls
+            # merely quoted the OSRC marker mid-file — pricing main-session
+            # spend into this pool a second time.)
+            if jf.parent.name != "subagents" and not _scan_jsonl_is_sidechain(jf):
+                continue
             parsed = _parse_session_jsonl(jf)
             if not parsed or not parsed.get("is_sidechain"):
                 continue
