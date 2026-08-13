@@ -88,6 +88,20 @@ What rides in per event:
    Zero FAIL and an empty NEEDS-LIVE tail = parity confirmed for the
    pushed event set.
 
+## Testing today without an org (personal upload)
+
+Cowork also accepts a **custom plugin uploaded by an individual user** —
+Claude desktop → Settings → Plugins → upload custom plugin (exact menu
+wording varies by build). The upload account-syncs into your own sessions
+only, which is enough to run the whole to-hook-probe experiment **today**
+with zero org-admin involvement: same zips from `install.sh --cowork`,
+same verification steps, with the console pushes in steps 2 and 4 replaced
+by a personal upload. Two caveats: availability tiers
+(available/default/required) are org-console-only, and the domain
+allowlist — when enforcement is on — is still org-controlled, so the
+phone-home leg of a personal test rides on enforcement being off (check
+with `cowork_doctor.py`).
+
 ## What this cut deliberately is not
 
 - No MCP server / companion menubar / statusline replacement — the v3
