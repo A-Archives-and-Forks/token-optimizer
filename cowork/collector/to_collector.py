@@ -231,6 +231,7 @@ def parse_cowork_sessions(data_dir: Path) -> tuple[dict[str, dict[str, Any]], di
             "api_calls": 0,
             "breakdown": {},   # model -> {fresh_input, cache_read, cache_create, output}
             "tool_calls": {},  # tool_name -> count
+            "model_events": {},  # model -> api_request event count
             "reported_cost_usd": 0.0,
             "first_ts": None,
             "last_ts": None,
@@ -248,6 +249,7 @@ def parse_cowork_sessions(data_dir: Path) -> tuple[dict[str, dict[str, Any]], di
             bd = s["breakdown"].setdefault(
                 model, {"fresh_input": 0, "cache_read": 0, "cache_create": 0, "output": 0}
             )
+            s["model_events"][model] = s["model_events"].get(model, 0) + 1
             bd["fresh_input"] += _int(merged.get("input_tokens"))
             bd["output"] += _int(merged.get("output_tokens"))
             bd["cache_read"] += _int(merged.get("cache_read_tokens"))
@@ -271,14 +273,14 @@ def summarize(data_dir: Path) -> dict[str, Any]:
     sessions, stats = parse_cowork_sessions(data_dir)
     totals = {"api_request_events": stats["api_request_events"], "input_tokens": 0,
               "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0}
-    models: dict[str, int] = {}
+    models: dict[str, int] = {}  # model -> api_request event count
     for s in sessions.values():
         for model, bd in s["breakdown"].items():
             totals["input_tokens"] += bd["fresh_input"]
             totals["output_tokens"] += bd["output"]
             totals["cache_read_tokens"] += bd["cache_read"]
             totals["cache_creation_tokens"] += bd["cache_create"]
-            models[model] = models.get(model, 0) + 1
+            models[model] = models.get(model, 0) + s["model_events"].get(model, 0)
     probe = data_dir / "probe.jsonl"
     probe_posts = sum(1 for _ in probe.open(encoding="utf-8")) if probe.exists() else 0
     return {"data_dir": str(data_dir), "otlp_files": stats.get("files", []),
