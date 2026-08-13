@@ -68,6 +68,14 @@ EXPECTED_ASYNC = {
     ("UserPromptSubmit", None, "quality-cache --warn"): False,
     ("UserPromptSubmit", None, "prompt-continuity"): False,
     ("UserPromptSubmit", None, "verbosity-steer"): False,
+    # Cowork parity: the run-once SessionStart features are ALSO wired onto
+    # UserPromptSubmit (Cowork never fires SessionStart) behind the
+    # --once-per-session guard. Sync (not async): compact-restore must inject its
+    # pointer synchronously, and keeping all three sync leaves the async count at
+    # seven. The guard makes them a single stat no-op after the first prompt.
+    ("UserPromptSubmit", None, "ensure-health --once-per-session"): False,
+    ("UserPromptSubmit", None, "quality-cache --force --quiet --once-per-session"): False,
+    ("UserPromptSubmit", None, "compact-restore --new-session-only --once-per-session"): False,
     ("PostToolUse", "mcp__.*", "archive_result.py"): True,
     ("PostToolUse", "Bash|Read|Glob|Grep|Agent", "archive_result.py"): True,
     ("PostToolUse", "Bash|Read|Grep|Glob|mcp__.*", "context_intel.py"): True,
