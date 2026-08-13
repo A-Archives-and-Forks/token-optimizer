@@ -57,7 +57,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-MAX_BODY = 5 * 1024 * 1024  # cap a single POST at 5MB; fail-open beyond
+MAX_BODY = 5 * 1024 * 1024  # cap a single POST at 5MB; reply 413 beyond
+MAX_LINE = 8 * 1024 * 1024  # skip any single capture line larger than this (OOM guard)
+_INT64_MAX = 2**63 - 1  # SQLite INTEGER ceiling; values beyond it fail the bind
+# Reported OTel cost is trusted only within this multiple of the token-derived
+# figure. A per-request delta lands close to derived (cache-TTL slack aside); a
+# session-cumulative counter inflates ~linearly with call count, so anything
+# well above derived is rejected in favour of the derived value.
+COST_SANITY_MULTIPLE = 2.0
 
 
 def _now() -> str:
@@ -85,8 +92,23 @@ class CollectorHandler(BaseHTTPRequestHandler):
             self._reply(404, {"ok": False})
 
     def do_POST(self) -> None:  # noqa: N802 - http.server API
-        length = min(int(self.headers.get("Content-Length", 0) or 0), MAX_BODY)
-        body = self.rfile.read(length) if length else b""
+        # SECURITY TODO (finding 14): this write surface is unauthenticated —
+        # anything POSTed here becomes billing rows. Auth/allowlist is enforced
+        # at the org edge (reverse proxy / shared secret) and must stay there;
+        # do not treat this endpoint as trusted.
+        try:
+            declared = int(self.headers.get("Content-Length", 0) or 0)
+        except (TypeError, ValueError):
+            declared = 0
+        if declared > MAX_BODY:
+            # Do NOT truncate-then-200: a silently clipped batch fails json.loads,
+            # is stored as unparseable text, and every event in it is lost while
+            # the exporter believes it was delivered. Reply 413 so the OTel
+            # exporter retries or splits the batch instead.
+            self._reply(413, {"ok": False, "error": "payload too large",
+                              "max_body": MAX_BODY, "content_length": declared})
+            return
+        body = self.rfile.read(declared) if declared else b""
         content_type = self.headers.get("Content-Type", "")
         record: dict[str, Any] = {
             "ts": _now(),
@@ -149,34 +171,75 @@ def _iter_events(data_dir: Path):
     """Yield (merged_event_dict, receipt_ts_iso) for every dict node in the
     captured OTLP log bodies, with OTLP attribute lists flattened in. Tolerant
     of both flat events and nested resourceLogs/scopeLogs/logRecords shapes.
-    Counts (but skips) undecodable protobuf records via the returned tally."""
-    tally = {"binary_skipped": 0, "files": []}
+    Counts (but skips) undecodable protobuf records and unwalkable text records
+    via the returned tally."""
+    tally = {"binary_skipped": 0, "text_skipped": 0, "oversize_lines": 0,
+             "undecodable_lines": 0, "files": []}
 
     def gen():
         for path in sorted(data_dir.glob("otlp-logs*.jsonl")):
             tally["files"].append(path.name)
-            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if record.get("kind") == "binary":
-                    tally["binary_skipped"] += 1
-                    continue
-                receipt_ts = record.get("ts")
-                for node in _walk(record.get("body")):
-                    attrs = _attr_map(node.get("attributes"))
-                    merged = {**{k: v for k, v in node.items() if not isinstance(v, (dict, list))}, **attrs}
-                    yield merged, receipt_ts
+            # Stream line-by-line rather than read_text() the whole file: a
+            # multi-GB capture must not OOM the ingest (finding 14). An
+            # individual over-long line is skipped, not buffered.
+            try:
+                fh = path.open(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            with fh:
+                for line in fh:
+                    if len(line) > MAX_LINE:
+                        tally["oversize_lines"] += 1
+                        continue
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        tally["undecodable_lines"] += 1
+                        continue
+                    kind = record.get("kind")
+                    if kind == "binary":
+                        # protobuf OTLP body, base64-stored, not decoded here
+                        tally["binary_skipped"] += 1
+                        continue
+                    if kind == "text" or record.get("body") is None:
+                        # body failed JSON decode at capture time (e.g. a POST
+                        # the exporter truncated before 413 landed): never
+                        # walkable, so tally it instead of silently dropping.
+                        tally["text_skipped"] += 1
+                        continue
+                    receipt_ts = record.get("ts")
+                    for node in _walk(record.get("body")):
+                        attrs = _attr_map(node.get("attributes"))
+                        merged = {**{k: v for k, v in node.items() if not isinstance(v, (dict, list))}, **attrs}
+                        yield merged, receipt_ts
 
     return gen(), tally
 
 
 def _int(value: Any) -> int:
+    """Coerce to a SQLite-safe int. int(float('inf')) raises OverflowError and a
+    value >= 2**63 dies at the bind — both are treated as a bad field and
+    dropped to 0 (fail-open), never allowed to reach SQLite."""
     try:
-        return int(float(value))
-    except (TypeError, ValueError):
+        n = int(float(value))
+    except (TypeError, ValueError, OverflowError):
         return 0
+    if n > _INT64_MAX or n < -_INT64_MAX:
+        return 0
+    return n
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Force a datetime to aware UTC. `fromisoformat` on a zoneless string
+    yields a naive datetime; comparing it against the aware UTC datetimes from
+    timeUnixNano raises TypeError and kills the run (finding 13). Naive input is
+    assumed UTC (the exporter emits UTC); aware input is converted."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _event_time(merged: dict[str, Any], receipt_ts: Any) -> datetime | None:
@@ -185,7 +248,7 @@ def _event_time(merged: dict[str, Any], receipt_ts: Any) -> datetime | None:
     iso = merged.get("event.timestamp") or merged.get("timestamp")
     if iso:
         try:
-            return datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+            return _as_utc(datetime.fromisoformat(str(iso).replace("Z", "+00:00")))
         except ValueError:
             pass
     for key in ("timeUnixNano", "time_unix_nano", "observedTimeUnixNano", "observed_time_unix_nano"):
@@ -199,7 +262,7 @@ def _event_time(merged: dict[str, Any], receipt_ts: Any) -> datetime | None:
                 pass
     if receipt_ts:
         try:
-            return datetime.fromisoformat(str(receipt_ts).replace("Z", "+00:00"))
+            return _as_utc(datetime.fromisoformat(str(receipt_ts).replace("Z", "+00:00")))
         except ValueError:
             pass
     return None
@@ -213,7 +276,14 @@ def parse_cowork_sessions(data_dir: Path) -> tuple[dict[str, dict[str, Any]], di
     """
     events, tally = _iter_events(data_dir)
     sessions: dict[str, dict[str, Any]] = {}
-    stats = {"api_request_events": 0, "tool_result_events": 0, "no_session_id": 0}
+    stats = {"api_request_events": 0, "tool_result_events": 0, "no_session_id": 0,
+             "duplicate_events": 0}
+    # Event-level dedup for one ingest run: the per-session upsert dedups on the
+    # session key, not on individual events, so an OTLP client retry after a
+    # slow-but-200 reply, log rotation, or a second otlp-logs* file would union
+    # identical events into the sum and inflate tokens/cost. A
+    # (session, time, model, tokens) seen-set collapses replays (finding 9).
+    seen_events: set = set()
 
     for merged, receipt_ts in events:
         name = str(merged.get("event.name") or merged.get("name") or "")
@@ -226,6 +296,11 @@ def parse_cowork_sessions(data_dir: Path) -> tuple[dict[str, dict[str, Any]], di
             stats["no_session_id"] += 1
             continue
         sid = str(sid)
+        time_key = str(
+            merged.get("timeUnixNano") or merged.get("time_unix_nano")
+            or merged.get("observedTimeUnixNano") or merged.get("observed_time_unix_nano")
+            or merged.get("event.timestamp") or merged.get("timestamp") or ""
+        )
         s = sessions.setdefault(sid, {
             "session_id": sid,
             "api_calls": 0,
@@ -243,24 +318,38 @@ def parse_cowork_sessions(data_dir: Path) -> tuple[dict[str, dict[str, Any]], di
             if s["last_ts"] is None or ts > s["last_ts"]:
                 s["last_ts"] = ts
         if is_api:
+            model = str(merged.get("model") or "unknown")
+            in_tok = _int(merged.get("input_tokens"))
+            out_tok = _int(merged.get("output_tokens"))
+            cr_tok = _int(merged.get("cache_read_tokens"))
+            cc_tok = _int(merged.get("cache_creation_tokens"))
+            ekey = (sid, time_key, "api", model, in_tok, out_tok, cr_tok, cc_tok)
+            if ekey in seen_events:
+                stats["duplicate_events"] += 1
+                continue
+            seen_events.add(ekey)
             stats["api_request_events"] += 1
             s["api_calls"] += 1
-            model = str(merged.get("model") or "unknown")
             bd = s["breakdown"].setdefault(
                 model, {"fresh_input": 0, "cache_read": 0, "cache_create": 0, "output": 0}
             )
             s["model_events"][model] = s["model_events"].get(model, 0) + 1
-            bd["fresh_input"] += _int(merged.get("input_tokens"))
-            bd["output"] += _int(merged.get("output_tokens"))
-            bd["cache_read"] += _int(merged.get("cache_read_tokens"))
-            bd["cache_create"] += _int(merged.get("cache_creation_tokens"))
+            bd["fresh_input"] += in_tok
+            bd["output"] += out_tok
+            bd["cache_read"] += cr_tok
+            bd["cache_create"] += cc_tok
             try:
                 s["reported_cost_usd"] += float(merged.get("cost_usd") or 0)
             except (TypeError, ValueError):
                 pass
         else:
-            stats["tool_result_events"] += 1
             tool = str(merged.get("tool_name") or merged.get("name") or "unknown")
+            ekey = (sid, time_key, "tool", tool)
+            if ekey in seen_events:
+                stats["duplicate_events"] += 1
+                continue
+            seen_events.add(ekey)
+            stats["tool_result_events"] += 1
             s["tool_calls"][tool] = s["tool_calls"].get(tool, 0) + 1
 
     stats.update(tally)
@@ -286,6 +375,10 @@ def summarize(data_dir: Path) -> dict[str, Any]:
     return {"data_dir": str(data_dir), "otlp_files": stats.get("files", []),
             "probe_posts": probe_posts,
             "binary_records_skipped": stats.get("binary_skipped", 0),
+            "text_records_skipped": stats.get("text_skipped", 0),
+            "oversize_lines_skipped": stats.get("oversize_lines", 0),
+            "undecodable_lines": stats.get("undecodable_lines", 0),
+            "duplicate_events_skipped": stats.get("duplicate_events", 0),
             "events_without_session_id": stats["no_session_id"],
             "totals": totals, "models": models, "sessions": len(sessions)}
 
@@ -374,8 +467,32 @@ def ingest(data_dir: Path, measure_path: str | None = None, db_override: str | N
 
     conn = measure._init_trends_db()
     written = 0
+    written_paths: list[str] = []
+    row_errors = 0
+    cross_platform_skipped = 0
+    unpriced_models: set[str] = set()
     try:
         for sid, s in sorted(sessions.items()):
+            jsonl_path = f"cowork:{sid}"
+            # Cross-source double-count guard (finding 6): TO's own Stop hook
+            # fires inside Cowork and writes a platform='claude' row keyed by the
+            # in-VM transcript path but carrying this same session_uuid. If such a
+            # row already exists under a non-cowork platform, ingesting the OTel
+            # copy would count the session twice in --cost-view. idx_session_log_uuid
+            # is non-unique, so query it and skip the cowork row when a sibling
+            # under another platform is present.
+            dup = conn.execute(
+                "SELECT platform, jsonl_path FROM session_log "
+                "WHERE session_uuid = ? AND COALESCE(platform, '') != 'cowork' LIMIT 1",
+                (sid,),
+            ).fetchone()
+            if dup:
+                cross_platform_skipped += 1
+                if not quiet:
+                    print(f"[to-collector] skip cowork session {sid}: already counted "
+                          f"under platform={dup[0]!r} ({dup[1]})", file=sys.stderr)
+                continue
+
             bd = s["breakdown"]
             fresh = sum(m["fresh_input"] for m in bd.values())
             cache_read = sum(m["cache_read"] for m in bd.values())
@@ -387,75 +504,150 @@ def ingest(data_dir: Path, measure_path: str | None = None, db_override: str | N
             model_usage = {m: v["fresh_input"] + v["cache_create"] + v["output"]
                            for m, v in bd.items()}
             first, last = s["first_ts"], s["last_ts"]
-            date = (first or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+            # Bucket to the LOCAL calendar day, like every other collector
+            # (measure.py uses local mtime; the copilot path converts explicitly).
+            # first_ts is aware UTC; a 19:30 PDT session must file under today,
+            # not tomorrow-UTC. collected_at stays local for the same reason.
+            local_first = first.astimezone() if first else datetime.now().astimezone()
+            date = local_first.strftime("%Y-%m-%d")
             duration_minutes = max(0.0, (last - first).total_seconds() / 60) if first and last else 0.0
-            # Event-reported cost is exact; derived cost prices cache_create at
-            # the 5m rate (no TTL split in OTel) and slightly understates Cowork's
-            # 1h-cache writes.
-            if s["reported_cost_usd"] > 0:
-                cost_usd, cost_source = s["reported_cost_usd"], "otel_reported"
-            else:
-                cost_usd, cost_source = measure._cost_from_model_breakdown(bd), "otel_derived"
 
-            cur = conn.execute(
-                """INSERT INTO session_log
-                     (jsonl_path, date, project, duration_minutes, input_tokens,
-                      output_tokens, message_count, api_calls, cache_hit_rate,
-                      cache_create_1h_tokens, cache_create_5m_tokens, cache_ttl_scanned,
-                      skills_json, subagents_json, tool_calls_json, model_usage_json,
-                      all_model_usage_json, model_usage_breakdown_json, version, slug,
-                      topic, collected_at, stale_waste_tokens, session_uuid,
-                      is_sidechain, cost_usd, cost_source, platform)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, '{}', '{}', ?, ?, ?, ?,
-                           NULL, ?, NULL, ?, 0, ?, 0, ?, ?, 'cowork')
-                   ON CONFLICT(jsonl_path) DO UPDATE SET
-                     date = excluded.date,
-                     duration_minutes = excluded.duration_minutes,
-                     input_tokens = excluded.input_tokens,
-                     output_tokens = excluded.output_tokens,
-                     message_count = excluded.message_count,
-                     api_calls = excluded.api_calls,
-                     cache_hit_rate = excluded.cache_hit_rate,
-                     tool_calls_json = excluded.tool_calls_json,
-                     model_usage_json = excluded.model_usage_json,
-                     all_model_usage_json = excluded.all_model_usage_json,
-                     model_usage_breakdown_json = excluded.model_usage_breakdown_json,
-                     collected_at = excluded.collected_at,
-                     cost_usd = excluded.cost_usd,
-                     cost_source = excluded.cost_source""",
-                (
-                    f"cowork:{sid}", date, "cowork", duration_minutes, full_input,
-                    output, s["api_calls"], s["api_calls"], cache_hit_rate,
-                    json.dumps(s["tool_calls"]), json.dumps(model_usage),
-                    json.dumps(model_usage), json.dumps(bd),
-                    f"cowork-{sid[:8]}", datetime.now().isoformat(), sid,
-                    round(cost_usd, 6), cost_source,
-                ),
-            )
+            # Cost: prefer the token-derived figure. Cowork's OTel cost counter
+            # may be session-cumulative rather than a per-request delta, which
+            # would inflate the sum ~linearly with call count; until a captured
+            # payload proves per-request deltas, accept the reported value only
+            # when it lands within a sane multiple of derived, and never accept a
+            # negative (findings 12, 15a).
+            derived = measure._cost_from_model_breakdown(bd)
+            reported = s["reported_cost_usd"]
+            row_unpriced = [m for m in bd if not measure._is_priced_model(m)]
+            unpriced_models.update(row_unpriced)
+            if reported < 0:
+                reported = 0.0
+            if derived > 0 and reported > 0 and reported <= derived * COST_SANITY_MULTIPLE:
+                cost_usd, cost_source = reported, "otel_reported"
+            elif derived > 0:
+                cost_usd = derived
+                # Flag rather than silently ship $0-priced models inside a
+                # "derived" figure the reader would trust as complete.
+                cost_source = "otel_derived_partial" if row_unpriced else "otel_derived"
+            elif reported > 0 and not row_unpriced:
+                cost_usd, cost_source = reported, "otel_reported"
+            elif reported > 0:
+                # No priced models to derive from — reported is the only signal.
+                cost_usd, cost_source = reported, "otel_reported_unverified"
+            else:
+                cost_usd = 0.0
+                cost_source = "otel_derived_partial" if row_unpriced else "otel_derived"
+
+            # OTel carries no cache-TTL split; attribute all cache_create to the
+            # 5m column (the derived-cost path prices it at the 5m rate) instead
+            # of hardcoding both TTL columns to 0 (finding 23b).
+            try:
+                cur = conn.execute(
+                    """INSERT INTO session_log
+                         (jsonl_path, date, project, duration_minutes, input_tokens,
+                          output_tokens, message_count, api_calls, cache_hit_rate,
+                          cache_create_1h_tokens, cache_create_5m_tokens, cache_ttl_scanned,
+                          skills_json, subagents_json, tool_calls_json, model_usage_json,
+                          all_model_usage_json, model_usage_breakdown_json, version, slug,
+                          topic, collected_at, quality_score, quality_grade,
+                          stale_waste_tokens, session_uuid,
+                          is_sidechain, cost_usd, cost_source, platform)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, '{}', '{}', ?, ?, ?, ?,
+                               NULL, ?, NULL, ?, 0, 'F', 0, ?, 0, ?, ?, 'cowork')
+                       ON CONFLICT(jsonl_path) DO UPDATE SET
+                         date = excluded.date,
+                         duration_minutes = excluded.duration_minutes,
+                         input_tokens = excluded.input_tokens,
+                         output_tokens = excluded.output_tokens,
+                         message_count = excluded.message_count,
+                         api_calls = excluded.api_calls,
+                         cache_hit_rate = excluded.cache_hit_rate,
+                         cache_create_5m_tokens = excluded.cache_create_5m_tokens,
+                         tool_calls_json = excluded.tool_calls_json,
+                         model_usage_json = excluded.model_usage_json,
+                         all_model_usage_json = excluded.all_model_usage_json,
+                         model_usage_breakdown_json = excluded.model_usage_breakdown_json,
+                         collected_at = excluded.collected_at,
+                         session_uuid = excluded.session_uuid,
+                         cost_usd = excluded.cost_usd,
+                         cost_source = excluded.cost_source""",
+                    (
+                        jsonl_path, date, "cowork", duration_minutes, full_input,
+                        output, s["api_calls"], s["api_calls"], cache_hit_rate,
+                        cache_create,
+                        json.dumps(s["tool_calls"]), json.dumps(model_usage),
+                        json.dumps(model_usage), json.dumps(bd),
+                        f"cowork-{sid[:8]}", datetime.now().isoformat(), sid,
+                        round(cost_usd, 6), cost_source,
+                    ),
+                )
+            except (sqlite3.Error, OverflowError, ValueError) as exc:
+                # One malformed field (e.g. an out-of-range int that survived
+                # _int, a bad bind) must never abort the whole ingest — mirror
+                # the copilot rollup's per-row skip-and-tally.
+                row_errors += 1
+                if not quiet:
+                    print(f"[to-collector] skipped cowork session {sid}: {exc}",
+                          file=sys.stderr)
+                continue
             if cur.rowcount > 0:
                 written += 1
+            written_paths.append(jsonl_path)
         if written > 0:
             measure._rebuild_aggregate_tables(conn)
         conn.commit()
-        # Read back: never report a DB write without confirming the rows exist.
-        check = conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), "
-            "COALESCE(SUM(cost_usd),0) FROM session_log WHERE platform='cowork'"
-        ).fetchone()
+        # Match hermes/copilot: stamp the schema version so a DB first created by
+        # an ingest run doesn't trip the next Claude collect into a full rebuild
+        # (finding 15c).
+        try:
+            conn.execute("PRAGMA user_version = 3")
+            conn.commit()
+        except sqlite3.Error:
+            pass
+        # Read back the SPECIFIC rows written this run, not every cowork row ever
+        # (finding 15b) — the latter passes even when this run wrote nothing.
+        if written_paths:
+            placeholders = ",".join("?" for _ in written_paths)
+            check = conn.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(input_tokens),0), "
+                f"COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_usd),0) "
+                f"FROM session_log WHERE jsonl_path IN ({placeholders})",
+                written_paths,
+            ).fetchone()
+        else:
+            check = (0, 0, 0, 0.0)
     finally:
         conn.close()
 
+    stats["cross_platform_skipped"] = cross_platform_skipped
+    stats["row_errors"] = row_errors
     if not quiet:
         print(f"[to-collector] upserted {written} Cowork session(s) into {measure.TRENDS_DB}")
-        print(f"[to-collector] verified in DB: {check[0]} cowork rows, "
+        print(f"[to-collector] verified in DB (this run): {check[0]} rows, "
               f"input={check[1]:,} output={check[2]:,} cost=${check[3]:.4f}")
         skipped_bits = []
         if stats.get("binary_skipped"):
             skipped_bits.append(f"{stats['binary_skipped']} protobuf records (undecoded)")
+        if stats.get("text_skipped"):
+            skipped_bits.append(f"{stats['text_skipped']} unwalkable text records")
+        if stats.get("oversize_lines"):
+            skipped_bits.append(f"{stats['oversize_lines']} over-{MAX_LINE // (1024 * 1024)}MB lines")
+        if stats.get("duplicate_events"):
+            skipped_bits.append(f"{stats['duplicate_events']} duplicate events")
         if stats["no_session_id"]:
             skipped_bits.append(f"{stats['no_session_id']} events without session.id")
+        if cross_platform_skipped:
+            skipped_bits.append(f"{cross_platform_skipped} sessions already counted under another platform")
+        if row_errors:
+            skipped_bits.append(f"{row_errors} rows failed to write")
         if skipped_bits:
             print(f"[to-collector] skipped: {', '.join(skipped_bits)}")
+        if unpriced_models:
+            print(f"[to-collector] warning: unpriced model(s) contributed $0 to derived cost: "
+                  f"{', '.join(sorted(unpriced_models))}")
+    # Exit non-zero only when rows we tried to write did not land.
     return 0 if check[0] >= written else 1
 
 
@@ -499,7 +691,11 @@ def cost_view(measure_path: str | None = None, db_override: str | None = None,
     if days > 0:
         cutoff = datetime.fromtimestamp(time.time() - days * 86400).strftime("%Y-%m-%d")
 
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    # Build the read-only URI with Path.as_uri() so a db path containing spaces,
+    # '?', '#', or other URI-significant characters is escaped correctly instead
+    # of string-interpolated (finding 23g).
+    ro_uri = f"{Path(db).resolve().as_uri()}?mode=ro"
+    conn = sqlite3.connect(ro_uri, uri=True)
     try:
         query = ("SELECT platform, jsonl_path, input_tokens, output_tokens, cost_usd, "
                  "model_usage_breakdown_json FROM session_log")
