@@ -22,7 +22,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-COWORK_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "Stop")
+# ONE source of truth (finding 1): import the event tuple the packager actually
+# emits instead of duplicating it. The doctor previously hardcoded
+# ("SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"), so it FAILed a
+# correctly built payload -- SessionStart does NOT fire in Cowork and PostToolUse
+# does -- and told the operator not to ship. cowork_doctor.py ships beside
+# cowork_install.py in the same scripts dir, so this import always resolves.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from cowork_install import COWORK_EVENTS  # noqa: E402
 
 
 def _check(status: str, name: str, detail: str) -> dict[str, str]:
@@ -30,7 +37,19 @@ def _check(status: str, name: str, detail: str) -> dict[str, str]:
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    """Walk up to the plugin root (holds .claude-plugin/plugin.json).
+
+    Mirrors cowork_install._repo_root (finding 7): parents[3] is wrong from the
+    Codex-marketplace mirror tree, so walk up for the marker and fall back to the
+    legacy index if none is found. Keeps the doctor from reading payload/version
+    off the wrong root in the mirror.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / ".claude-plugin" / "plugin.json").exists():
+            return parent
+    parents = here.parents
+    return parents[3] if len(parents) > 3 else here.parent
 
 
 def _desktop_support_dir() -> Path:
