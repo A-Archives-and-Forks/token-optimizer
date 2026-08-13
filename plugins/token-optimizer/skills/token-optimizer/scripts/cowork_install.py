@@ -174,6 +174,11 @@ def _copy_runtime_payload(root: Path, payload: Path) -> None:
             shutil.copytree(src, payload / rel, ignore=_IGNORE)
         else:
             shutil.copy2(src, payload / rel)
+    # A plugin payload is a PLUGIN, not a marketplace: strip the repo-root
+    # marketplace.json that rides along inside .claude-plugin/. The loader reads
+    # only plugin.json, and the proven-working probe carries plugin.json alone --
+    # matching that shape avoids confusing Cowork's marketplace scanner.
+    (payload / ".claude-plugin" / "marketplace.json").unlink(missing_ok=True)
     template = json.loads((root / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     cowork_hooks = build_cowork_hooks(template)
     (payload / "hooks" / "hooks.json").write_text(
