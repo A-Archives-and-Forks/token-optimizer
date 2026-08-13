@@ -109,7 +109,7 @@ from plugin_env import (
     snapshot_dir_candidates,
 )
 from utf8_io import enforce_utf8_io, reexec_in_utf8_mode
-from runtime_env import claude_home, detect_runtime, runtime_home, runtime_name_for_humans
+from runtime_env import claude_home, detect_runtime, is_cowork, runtime_home, runtime_name_for_humans
 from spawn_utils import spawn_detached
 
 # issue #107: every console-attached child we spawn on Windows flashes a cmd
@@ -352,6 +352,28 @@ elif _RESOLVED_PLUGIN_DATA is not None:
 else:
     SNAPSHOT_DIR = RUNTIME_DIR / "_backups" / "token-optimizer"
     _CONFIG_BASE = None  # resolved below after constants
+
+# FIX 2 (Cowork dual-write): the per-session state dirs -- QUALITY_CACHE_DIR
+# (quality-cache-*.json, resumable-*.json, run-once markers) and CHECKPOINT_DIR
+# -- default to RUNTIME_DIR (~/.claude/token-optimizer). But SNAPSHOT_DIR
+# resolves to the plugin-data dir (~/.claude/plugins/data/<id>/data) whenever
+# CLAUDE_PLUGIN_DATA is set. On desktop CLAUDE_PLUGIN_DATA is usually absent from
+# the hook env so both live under ~/.claude and coincide; inside Cowork it IS set
+# (docs-grounding.md §2: ${CLAUDE_PLUGIN_DATA} = ~/.claude/plugins/data/{id}/ is
+# the canonical persistent dir), so the two bases DIVERGE -- state double-writes
+# to ~/.claude/token-optimizer AND the plugin-data tree, and the once-per-session
+# guard fires once per base. Route ALL per-session state to the SAME base as
+# SNAPSHOT_DIR when running in Cowork with a resolved plugin-data dir. Desktop is
+# untouched (stays on RUNTIME_DIR), and the snapshot-override sandbox path is
+# untouched so existing test isolation is preserved. Gated on is_cowork().
+if (
+    not _SNAPSHOT_DIR_OVERRIDE
+    and _RESOLVED_PLUGIN_DATA is not None
+    and is_cowork()
+):
+    _STATE_BASE = _RESOLVED_PLUGIN_DATA
+else:
+    _STATE_BASE = RUNTIME_DIR
 
 DASHBOARD_PATH = SNAPSHOT_DIR / "dashboard.html"
 # Headline-shape marker for the current dashboard data contract. Bumped only when the data
@@ -3653,14 +3675,39 @@ def print_snapshot_summary(snapshot):
 
     # Core
     core = c.get("core_system", {})
-    print(f"  {'Core system (fixed)':<35s} {core.get('tokens', 0):>6,} tokens")
+    # FIX 5: core_system is a desktop-measured constant (12,900 = system prompt +
+    # built-in tools, measure.py's _measure_components). In Cowork the real fixed
+    # overhead (platform system prompt + deferred MCP tool catalog + ~40 platform
+    # skills) is far larger and INVISIBLE to a hook -- there is NO documented way
+    # to read the session's own token usage from inside a Cowork session
+    # (docs-grounding.md §5: only the external Sessions/Compliance API or opt-in
+    # OTel expose it). So we do NOT fabricate a Cowork figure; we label the one we
+    # print as desktop-scoped and add an explicit caveat below.
+    _cowork = is_cowork()
+    core_label = "Core system (desktop est.)" if _cowork else "Core system (fixed)"
+    print(f"  {core_label:<35s} {core.get('tokens', 0):>6,} tokens")
 
     print(f"  {'=' * 53}")
-    print(f"  {'ESTIMATED TOTAL':<35s} {t['estimated_total']:>6,} tokens")
+    total_label = "LOCAL FOOTPRINT (measurable)" if _cowork else "ESTIMATED TOTAL"
+    print(f"  {total_label:<35s} {t['estimated_total']:>6,} tokens")
     ctx_window, ctx_source = detect_context_window()
     ctx_label = _fmt_context_window(ctx_window)
     pct_of_ctx = t['estimated_total'] / ctx_window * 100
-    print(f"  {'Context used before typing':<35s} {pct_of_ctx:>5.1f}% of {ctx_label} window")
+    if _cowork:
+        # The denominator (context window) is real, but the numerator is ONLY the
+        # locally-controllable slice: platform overhead is not counted, so this %
+        # is a floor, not the whole picture. Say so plainly rather than present
+        # "1.3% of window" as if TO could see everything.
+        print(f"  {'Local footprint':<35s} {pct_of_ctx:>5.1f}% of {ctx_label} window (controllable slice only)")
+        print("  NOTE (Cowork): platform overhead -- the Cowork system prompt, the")
+        print("  deferred MCP tool catalog, and the ~40 platform skills -- is NOT")
+        print("  measurable from inside a Cowork session, so the real context used")
+        print("  is HIGHER than the local footprint above. Token Optimizer reports")
+        print("  and optimizes only the slice it can see and control (CLAUDE.md,")
+        print("  your skills/commands/MCP config); the platform-managed remainder")
+        print("  is not readable by a hook (Sessions/Compliance API or OTel only).")
+    else:
+        print(f"  {'Context used before typing':<35s} {pct_of_ctx:>5.1f}% of {ctx_label} window")
 
     # Session baselines
     baselines = snapshot.get("session_baselines", [])
@@ -18805,17 +18852,23 @@ def _is_plugin_installed():
     installed, we don't need to check settings.json for individual hooks.
     """
     registry = CLAUDE_DIR / "plugins" / "installed_plugins.json"
-    if not registry.exists():
-        return False
-    try:
-        with open(registry, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        plugins = data.get("plugins", {})
-        for key in plugins:
-            if "token-optimizer" in key.lower():
-                return True
-    except (json.JSONDecodeError, PermissionError, OSError):
-        pass
+    if registry.exists():
+        try:
+            with open(registry, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            plugins = data.get("plugins", {})
+            for key in plugins:
+                if "token-optimizer" in key.lower():
+                    return True
+        except (json.JSONDecodeError, PermissionError, OSError):
+            pass
+    # FIX 4: Cowork search-path fallback. When installed_plugins.json is absent or
+    # doesn't list us (account-synced installs may not register the same way), but
+    # THIS script is running from the synced-plugin tree, we ARE plugin-installed.
+    # Additive: desktop hosts have no /plugins/synced/ segment so this never
+    # changes desktop behavior.
+    if _is_running_from_synced_plugin():
+        return True
     return False
 
 
@@ -24120,8 +24173,12 @@ def _apply_daemon_restart_outcome(restart_status):
 # Measures content QUALITY inside a session, not just quantity.
 # Pure JSONL analysis, no model calls, no hooks required.
 
-CHECKPOINT_DIR = RUNTIME_DIR / "token-optimizer" / "checkpoints"
-CHECKPOINT_EVENT_LOG = RUNTIME_DIR / "token-optimizer" / "checkpoint-events.jsonl"
+# FIX 2: unified per-session state base (see _STATE_BASE near SNAPSHOT_DIR).
+# In Cowork this is the resolved plugin-data dir so checkpoints no longer
+# double-write under both ~/.claude/token-optimizer and the plugin-data tree;
+# on desktop it is RUNTIME_DIR, byte-identical to the previous behavior.
+CHECKPOINT_DIR = _STATE_BASE / "token-optimizer" / "checkpoints"
+CHECKPOINT_EVENT_LOG = _STATE_BASE / "token-optimizer" / "checkpoint-events.jsonl"
 
 # v6 dual-score architecture: ResourceHealth (monotonic warning) + SessionEfficiency (behavioral).
 # ResourceHealth can only worsen within a session (no rolling-window signals).
@@ -28507,17 +28564,30 @@ def _mark_ran_this_session(tag, session_id):
         pass
 
 
-def _emit_codex_session_start(text):
-    """Emit SessionStart context as Codex-valid stdout (issue #81, marketplace path).
+def _emit_additional_context(text, event="SessionStart"):
+    """Emit hook stdout as the documented ``additionalContext`` JSON envelope.
 
-    Codex requires SessionStart hook stdout to be EMPTY or valid JSON. When the
-    Codex marketplace plugin runs the shared ``hooks/hooks.json`` it calls
-    ``measure.py compact-restore`` directly (NOT via ``codex_hook_bridge``), and
-    ``compact_restore`` prints a raw ``[Token Optimizer] …`` text block — which
-    Codex rejects as invalid SessionStart JSON. This wraps that text in the Codex
-    envelope. Empty -> nothing; text already carrying a ``hookSpecificOutput``
-    envelope -> passthrough; otherwise -> wrap as ``additionalContext``.
-    Claude never calls this (it accepts the raw text as additionalContext).
+    The documented context-injection contract (docs-grounding.md §1;
+    code.claude.com/docs/en/hooks.md) is a single JSON object::
+
+        {"hookSpecificOutput": {"hookEventName": <event>, "additionalContext": <text>}}
+
+    Both ``UserPromptSubmit`` and ``SessionStart`` inject their
+    ``additionalContext`` into the model's context. Two callers need the wrapped
+    form rather than raw text:
+
+      * Codex SessionStart (issue #81): Codex REQUIRES empty-or-valid-JSON stdout,
+        so a raw ``[Token Optimizer] …`` block is rejected.
+      * Cowork UserPromptSubmit (FIX 1): raw-text stdout injection is tolerated on
+        native desktop Claude Code but is NOT documented for the Cowork cloud
+        host -- only the JSON ``additionalContext`` field is -- so wrap TO's
+        UserPromptSubmit-path context there to guarantee it reaches the model.
+
+    Empty text -> nothing. Text ALREADY carrying a ``hookSpecificOutput`` envelope
+    -> passthrough (a caller like ``prompt-continuity``/``verbosity-steer``
+    already emitted the contract shape). Otherwise -> wrap as ``additionalContext``.
+    Native desktop Claude keeps its raw-text stream unchanged (it tolerates raw
+    text); this is only invoked on the Codex and Cowork paths.
     """
     text = (text or "").strip()
     if not text:
@@ -28532,10 +28602,16 @@ def _emit_codex_session_start(text):
     print(json.dumps({
         "continue": True,
         "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
+            "hookEventName": event,
             "additionalContext": text,
         },
     }))
+
+
+def _emit_codex_session_start(text):
+    """Codex SessionStart wrapper (issue #81). Thin alias over the shared emitter
+    ``_emit_additional_context`` so the Codex and Cowork paths cannot diverge."""
+    _emit_additional_context(text, event="SessionStart")
 
 
 def compact_restore(session_id=None, cwd=None, is_compact=False, new_session_only=False):
@@ -31262,14 +31338,30 @@ def _is_running_from_plugin_cache():
     return "/plugins/cache/" in resolved
 
 
+def _is_running_from_synced_plugin():
+    """Check if this script is running from a Cowork account-synced plugin dir.
+
+    FIX 4: Cowork installs land under ``~/.claude/plugins/synced/<...>/`` (issue
+    audit: "the resolver's search paths didn't include the synced plugins
+    location"), NOT under ``/plugins/cache/``. That path segment is the reliable
+    self-location marker in Cowork -- ``${CLAUDE_PLUGIN_ROOT}`` is not always
+    injected into the hook env (issues #24529/#66557), so we recognize the synced
+    tree by our own resolved location. Desktop paths never contain it.
+    """
+    resolved = str(Path(__file__).resolve())
+    if os.name == "nt":
+        resolved = resolved.replace("\\", "/")
+    return "/plugins/synced/" in resolved
+
+
 def _get_measure_py_path():
     """Get the path to this measure.py script.
 
-    When running from a plugin cache, returns a ${CLAUDE_PLUGIN_ROOT}-based
-    path so that settings.json hooks survive version upgrades. Otherwise
-    returns the resolved absolute path.
+    When running from a plugin cache OR a Cowork synced-plugin dir, returns a
+    ${CLAUDE_PLUGIN_ROOT}-based path so that settings.json hooks survive version
+    upgrades / account re-syncs. Otherwise returns the resolved absolute path.
     """
-    if _is_running_from_plugin_cache():
+    if _is_running_from_plugin_cache() or _is_running_from_synced_plugin():
         # Use the variable that Claude Code resolves dynamically per version
         return "${CLAUDE_PLUGIN_ROOT}/skills/token-optimizer/scripts/measure.py"
     return str(Path(__file__).resolve())
@@ -31529,7 +31621,11 @@ def setup_smart_compact(dry_run=False, uninstall=False, status_only=False):
     print("  To remove: python3 measure.py setup-smart-compact --uninstall")
 
 
-QUALITY_CACHE_DIR = RUNTIME_DIR / "token-optimizer"
+# FIX 2: same unified base as CHECKPOINT_DIR/SNAPSHOT_DIR. RUNTIME_DIR on desktop
+# (unchanged); the resolved plugin-data dir in Cowork, so quality-cache,
+# resumable-*.json, and once-*.json run-once markers stop double-writing to two
+# bases and the once-per-session guard fires exactly once.
+QUALITY_CACHE_DIR = _STATE_BASE / "token-optimizer"
 QUALITY_CACHE_PATH = QUALITY_CACHE_DIR / "quality-cache.json"  # legacy global fallback
 
 
@@ -40468,6 +40564,21 @@ if __name__ == "__main__":
                 with _redirect_stdout(_buf):
                     _run_compact_restore()
                 _emit_codex_session_start(_buf.getvalue())
+            elif is_cowork():
+                # FIX 1 (Cowork injection shape): in Cowork the --new-session-only
+                # pointer is wired onto UserPromptSubmit (Cowork never fires
+                # SessionStart). Raw-text stdout injection is undocumented for the
+                # cloud host -- only the JSON additionalContext field is
+                # (docs-grounding.md §1) -- so capture the raw pointer text and
+                # wrap it in the documented envelope with the FIRING event
+                # (UserPromptSubmit) so it reliably reaches the model. Desktop
+                # Claude keeps the raw-text SessionStart stream below.
+                import io as _io
+                from contextlib import redirect_stdout as _redirect_stdout
+                _cw_buf = _io.StringIO()
+                with _redirect_stdout(_cw_buf):
+                    _run_compact_restore()
+                _emit_additional_context(_cw_buf.getvalue(), event="UserPromptSubmit")
             else:
                 _run_compact_restore()
         except _HookTimeout:
