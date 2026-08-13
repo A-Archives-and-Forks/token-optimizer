@@ -1,5 +1,10 @@
 # Token Optimizer for Claude Cowork
 
+> **⚠️ BETA.** This Cowork adapter is experimental and unverified on a live
+> Cowork build. Install the `to-hook-probe` first to confirm which hooks fire
+> before relying on any automatic feature. Cloud-only Cowork accounts require
+> account/marketplace-level install (not local); see the personal + org paths below.
+
 First-cut Cowork adapter. Core insight: TO is **already a plugin in the
 shared Claude Code/Cowork format**, so Cowork parity is packaging +
 distribution + the hook subset that fires in Cowork + a domain allowlist
