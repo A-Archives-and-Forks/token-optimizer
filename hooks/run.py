@@ -296,6 +296,15 @@ def main() -> int:
     script_rel = sys.argv[1]
     script_args = sys.argv[2:]
 
+    # Issue #139: whole-UserPromptSubmit-path opt-out. Checked BEFORE the
+    # module_runner command is built (no stdin read, no imports, no fs access)
+    # so a user who sets TOKEN_OPTIMIZER_HOOKS_USERPROMPTSUBMIT=0 pays zero
+    # per-prompt cost. The consolidated dispatcher lives at this relative path;
+    # the gate is exact-target so it never silences any other hook script.
+    if script_rel == "hooks/userpromptsubmit_runner.py":
+        if os.environ.get("TOKEN_OPTIMIZER_HOOKS_USERPROMPTSUBMIT", "").strip() == "0":
+            return 0
+
     rel_path = Path(script_rel)
     if rel_path.is_absolute() or ".." in rel_path.parts:
         return 0

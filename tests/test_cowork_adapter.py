@@ -120,18 +120,34 @@ def test_build_cowork_hooks_drops_sessionstart_and_non_cowork_events():
 
 @_needs_cowork_events
 def test_userpromptsubmit_carries_remapped_runonce_plus_originals():
-    # Spec item 2: run-once features remapped off SessionStart land on
-    # UserPromptSubmit, IN ADDITION to its original commands.
+    # Issue #139: the six UserPromptSubmit subcommands (the three originals
+    # -- quality-cache --warn, prompt-continuity, verbosity-steer -- plus the
+    # three run-once features remapped off SessionStart: ensure-health,
+    # quality-cache --force, compact-restore --new-session-only) are consolidated
+    # into ONE dispatcher entry, hooks/userpromptsubmit_runner.py, which imports
+    # measure.py once and runs all six in-process. The Cowork payload is a pure
+    # trim of the master, so its UserPromptSubmit is that single dispatcher.
     hooks = cowork_install.build_cowork_hooks(MASTER_TEMPLATE)["hooks"]
     ups = _commands_for(hooks, "UserPromptSubmit")
 
-    for needle in ("ensure-health", "quality-cache --force", "compact-restore --new-session-only"):
-        assert any(needle in command for command in ups), (
-            f"remapped run-once command missing from UserPromptSubmit: {needle!r}"
-        )
-    for needle in ("quality-cache --warn", "prompt-continuity", "verbosity-steer"):
-        assert any(needle in command for command in ups), (
-            f"original UserPromptSubmit command missing: {needle!r}"
+    assert ups, "UserPromptSubmit must have at least one command"
+    assert any("userpromptsubmit_runner.py" in command for command in ups), (
+        "consolidated UserPromptSubmit dispatcher (userpromptsubmit_runner.py) "
+        "missing from Cowork payload"
+    )
+    # The six former per-subcommand entries must NOT survive as separate
+    # commands -- they are now internal to the runner.
+    for former in (
+        "quality-cache --warn",
+        "prompt-continuity",
+        "verbosity-steer",
+        "ensure-health",
+        "quality-cache --force",
+        "compact-restore --new-session-only",
+    ):
+        assert not any(former in command for command in ups), (
+            f"former UserPromptSubmit subcommand {former!r} should be inside the "
+            "runner, not a separate Cowork command"
         )
 
 

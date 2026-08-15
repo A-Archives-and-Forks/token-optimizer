@@ -364,6 +364,12 @@ Catches the AI getting stuck on a retry loop. Compares the last 4 user messages 
 
 Disable: `TOKEN_OPTIMIZER_LOOP_DETECTION=0`
 
+### UserPromptSubmit Hook
+
+Every prompt fires the `UserPromptSubmit` hook, which runs the per-turn work: quality-cache warn tick, prompt-continuity hint, verbosity steer, and (in harness/container/Cowork contexts) the once-per-session ensure-health, forced cache warm, and compact-restore pointer. These six subcommands share one `measure.py` import inside a single dispatcher (`hooks/userpromptsubmit_runner.py`), so one prompt spawns three processes, not eighteen.
+
+Disable the entire `UserPromptSubmit` path: `TOKEN_OPTIMIZER_HOOKS_USERPROMPTSUBMIT=0`. Checked before `measure.py` is imported, so the opt-out costs zero per prompt. The other hook events (PreToolUse, PostToolUse, SessionStart, Stop, etc.) are unaffected.
+
 ### Activity Mode Detection
 
 Classifies your session into one of five modes (code, debug, review, infra, general) using the last 10 tool calls. The mode feeds into compaction guidance so PRESERVE/DROP priorities adapt to what you're doing.

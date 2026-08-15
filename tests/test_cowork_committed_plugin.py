@@ -89,14 +89,30 @@ def test_committed_hooks_drop_keepwarm_and_carry_runonce_on_userpromptsubmit():
     all_cmds = [c for evt in hooks for c in _commands(hooks, evt)]
     assert [c for c in all_cmds if "keepwarm" in c] == [], "keepwarm must be dropped"
 
+    # Issue #139: the run-once features (ensure-health, quality-cache --force,
+    # compact-restore --new-session-only) and the original UserPromptSubmit
+    # subcommands are consolidated into ONE dispatcher entry,
+    # hooks/userpromptsubmit_runner.py, which imports measure.py once and runs
+    # all six in-process with the --once-per-session marker guard replicated
+    # internally. The committed Cowork payload is a pure trim of the master, so
+    # its UserPromptSubmit is that single dispatcher.
     ups = _commands(hooks, "UserPromptSubmit")
-    for needle in ("ensure-health", "quality-cache --force", "compact-restore --new-session-only"):
-        assert any(needle in c for c in ups), (
-            f"run-once command missing from committed UserPromptSubmit: {needle!r}"
-        )
-    assert any("--once-per-session" in c for c in ups), (
-        "run-once guard (--once-per-session) missing from committed UserPromptSubmit"
+    assert ups, "committed UserPromptSubmit must have at least one command"
+    assert any("userpromptsubmit_runner.py" in c for c in ups), (
+        "consolidated UserPromptSubmit dispatcher (userpromptsubmit_runner.py) "
+        "missing from committed plugin"
     )
+    # The former per-subcommand commands must NOT survive as separate entries.
+    for former in (
+        "ensure-health",
+        "quality-cache --force",
+        "compact-restore --new-session-only",
+        "--once-per-session",
+    ):
+        assert not any(former in c for c in ups), (
+            f"former UserPromptSubmit subcommand/guard {former!r} should be inside "
+            "the runner, not a separate committed command"
+        )
 
 
 def test_every_committed_command_uses_plugin_root_resolver():
