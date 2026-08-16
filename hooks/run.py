@@ -110,19 +110,50 @@ def _forward_and_exit(signum, frame):
     os._exit(0)
 
 
-def _check_consent() -> bool:
+def _check_consent(plugin_root: Path | None) -> bool:
     """Return True if consent is given or assumed. Fail-open on any error."""
     try:
         home = Path.home()
 
         # Resolve config path from env (set by Claude Code before hook invocation)
         plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA", "")
+        config_path = None
         if plugin_data:
             pd = Path(plugin_data).resolve()
             if not str(pd).startswith(str(home)):
                 return True  # Path outside home = skip (fail-open)
-            config_path = pd / "config" / "config.json"
-        else:
+            # In-home CLAUDE_PLUGIN_DATA must still be a declared identity of
+            # THIS plugin, not a foreign plugin's leaked value sharing the same
+            # shared plugins/data root (issue #140 sibling site). Reuse the
+            # SAME identity-checked resolver plugin_env.py uses for every other
+            # hook script instead of trusting pd raw. If the resolver truly
+            # can't be imported (unusual/non-standard plugin layout), fall back
+            # to trusting pd -- matching pre-#140 behavior -- so a missing
+            # import never blocks the consent check. If it CAN be imported but
+            # rejects pd as foreign, fall through to the identical legacy chain
+            # a session with no CLAUDE_PLUGIN_DATA at all would use below --
+            # never re-trust the raw (possibly leaked) value.
+            resolver_ran = False
+            identity_checked = None
+            if plugin_root is not None:
+                try:
+                    scripts_dir = plugin_root / "skills" / "token-optimizer" / "scripts"
+                    scripts_str = str(scripts_dir)
+                    if scripts_str not in sys.path:
+                        sys.path.insert(0, scripts_str)
+                    from plugin_env import resolve_claude_plugin_data_env
+                    resolver_ran = True
+                    identity_checked = resolve_claude_plugin_data_env()
+                except Exception:
+                    resolver_ran = False
+            if identity_checked is not None:
+                config_path = identity_checked / "config" / "config.json"
+            elif not resolver_ran:
+                config_path = pd / "config" / "config.json"
+            # else: resolver ran and rejected pd as a foreign identity --
+            # config_path stays None and falls through to the legacy chain.
+
+        if config_path is None:
             # Legacy / Codex fallback
             codex_home = os.environ.get("CODEX_HOME", "")
             if codex_home:
@@ -360,7 +391,7 @@ def main() -> int:
     # out-of-band), FATAL on Cowork (no SessionStart hook).
     if script_rel == "hooks/userpromptsubmit_runner.py":
         is_exempt = True
-    if not is_exempt and not _check_consent():
+    if not is_exempt and not _check_consent(root_resolved):
         return 0
 
     # Force UTF-8 in every dispatched script regardless of the host locale, so

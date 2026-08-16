@@ -657,7 +657,7 @@ def test_run_py_spawn_nt_uses_create_no_window(monkeypatch, tmp_path):
     root = _make_plugin_root(tmp_path)
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(root / "_data"))
-    monkeypatch.setattr(mod, "_check_consent", lambda: True)
+    monkeypatch.setattr(mod, "_check_consent", lambda *_a, **_k: True)
     class _PipeStream:
         def fileno(self):
             return 1
@@ -695,7 +695,7 @@ def test_run_py_spawn_posix_uses_start_new_session(monkeypatch, tmp_path):
     root = _make_plugin_root(tmp_path)
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(root / "_data"))
-    monkeypatch.setattr(mod, "_check_consent", lambda: True)
+    monkeypatch.setattr(mod, "_check_consent", lambda *_a, **_k: True)
     cap = {}
     def fake_popen(cmd, **k):
         cap.update(k)
@@ -726,7 +726,7 @@ def test_run_py_timeout_reap_nt_uses_proc_kill(monkeypatch, tmp_path):
     root = _make_plugin_root(tmp_path)
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(root / "_data"))
-    monkeypatch.setattr(mod, "_check_consent", lambda: True)
+    monkeypatch.setattr(mod, "_check_consent", lambda *_a, **_k: True)
     # P2-4: guard against pass-on-revert. Patch os.killpg to raise if called
     # on nt (it must never be), and drop signal.SIGKILL so a reverted run.py
     # that references signal.SIGKILL directly (P1-A) blows up here too.
@@ -771,7 +771,7 @@ def test_run_py_timeout_reap_posix_uses_killpg(monkeypatch, tmp_path):
     root = _make_plugin_root(tmp_path)
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(root / "_data"))
-    monkeypatch.setattr(mod, "_check_consent", lambda: True)
+    monkeypatch.setattr(mod, "_check_consent", lambda *_a, **_k: True)
     killpg_calls = []
     class _FakeProc:
         pid = 54321
