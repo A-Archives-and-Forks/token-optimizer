@@ -126,7 +126,14 @@ def test_userpromptsubmit_env_opt_out_is_exact_target(monkeypatch):
 
 
 def _stub_budget(monkeypatch, runner):
-    """Replace the wall-clock budget with no-ops so tests don't arm watchdog threads."""
+    """Replace the wall-clock budget with no-ops so tests don't arm watchdog threads.
+
+    Also pin consent True: these tests exercise dispatch / failure-isolation /
+    gating logic, NOT the consent gate (which has its own dedicated
+    consent=False tests below). Pinning here keeps them deterministic and
+    independent of the host's real ~/.claude config.
+    """
+    monkeypatch.setattr(runner, "_check_consent", lambda: True)
     monkeypatch.setattr(runner.measure, "_install_hook_budget", lambda seconds=8: object())
     monkeypatch.setattr(runner.measure, "_clear_hook_budget", lambda deadline: None)
 
@@ -316,3 +323,452 @@ def test_userpromptsubmit_runner_harness_guard_skips_gated(monkeypatch, tmp_path
     assert calls["ensure_health"] == []
     assert calls["quality_cache_force"] == []
     assert calls["compact_restore"] == []
+
+
+# --------------------------------------------------------------------------- #
+# (e) P0 consent-gate deadlock: consent=False must still bootstrap, then flip.
+#     These tests do NOT bypass consent -- they drive the REAL run._check_consent
+#     against a tmp config.json (flags unset => consent False) and prove the
+#     consolidated runner does not deadlock the way the pre-fix run.py gate did.
+# --------------------------------------------------------------------------- #
+
+
+def _load_runner_real_consent(monkeypatch, tmp_path, config_json="{}"):
+    """Load the runner with HOOKS on sys.path (so its ``import run`` resolves to
+    hooks/run.py) and a tmp CLAUDE_CONFIG_DIR holding ``config_json``.
+
+    Returns ``(runner_module, config_path)``. Does NOT monkeypatch consent: the
+    runner's ``_check_consent`` calls the real ``run._check_consent``, which
+    reads the tmp config. measure.CONFIG_PATH / CONFIG_DIR / _CONFIG_LOCK_PATH
+    are repointed at the same tmp config so the real ``_write_config_flag`` /
+    ``_read_config_flag`` primitives (used by the ensure-health bootstrap stub)
+    land in the tmp file the consent gate reads -- proving the bootstrap
+    actually flips consent, with no host ~/.claude touched.
+    """
+    # `import run` inside the runner must find hooks/run.py, not some other
+    # `run` on sys.path. Prepend HOOKS and drop any stale cached `run` module.
+    monkeypatch.syspath_prepend(str(HOOKS))
+    sys.modules.pop("run", None)
+
+    claude_dir = tmp_path / "claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    cfg_dir = claude_dir / "token-optimizer"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    cfg_path = cfg_dir / "config.json"
+    cfg_path.write_text(config_json, encoding="utf-8")
+
+    # run._check_consent honors CLAUDE_CONFIG_DIR (absolute, existing, non-symlink).
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+    # Ensure run._check_consent does not fall through to CLAUDE_PLUGIN_DATA /
+    # CODEX_HOME / the legacy ~/.claude path.
+    monkeypatch.delenv("CLAUDE_PLUGIN_DATA", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("TOKEN_OPTIMIZER_SNAPSHOT_DIR", raising=False)
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(REPO))
+
+    spec = importlib.util.spec_from_file_location("ups_runner_consent_under_test", RUNNER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # Repoint measure's import-time config globals at the tmp config so the real
+    # _write_config_flag / _read_config_flag / _config_lock primitives stay
+    # inside tmp (measure may be a cached module from a prior test with a
+    # different CONFIG_PATH frozen at import time).
+    monkeypatch.setattr(mod.measure, "CONFIG_DIR", cfg_dir)
+    monkeypatch.setattr(mod.measure, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(mod.measure, "_CONFIG_LOCK_PATH", cfg_dir / ".config.lock")
+    return mod, cfg_path
+
+
+def _read_tmp_config(runner, cfg_path):
+    import json as _json
+    if not cfg_path.exists():
+        return {}
+    try:
+        return _json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {}
+
+
+def _install_consent_recorder(monkeypatch, runner, write_flags_on_health):
+    """Like _install_call_recorder but the ensure-health entrypoint either writes
+    the real consent flags (the bootstrap) or is a plain recorder. Budget is
+    stubbed inline (NOT via _stub_budget, which pins consent True)."""
+    calls = {
+        "quality_cache_warn": [], "prompt_continuity": [], "verbosity_steer": [],
+        "ensure_health": [], "quality_cache_force": [], "compact_restore": [],
+    }
+
+    def _quality_cache(**kw):
+        if kw.get("warn") and not kw.get("force"):
+            calls["quality_cache_warn"].append(kw)
+        elif kw.get("force"):
+            calls["quality_cache_force"].append(kw)
+
+    def _continuity(**kw):
+        calls["prompt_continuity"].append(kw)
+        return ""
+
+    def _verbosity(**kw):
+        calls["verbosity_steer"].append(kw)
+        return None
+
+    def _ensure_health():
+        calls["ensure_health"].append({})
+        if write_flags_on_health:
+            # Mirror run_ensure_health's consent-bootstrap tail (measure.py
+            # L38486-38488: _show_v5_welcome writes enterprise_consent_shown,
+            # then v5_welcome_shown is written). Use the REAL _write_config_flag
+            # so the test proves the flag-write primitive lands in config.json
+            # and flips the real consent gate on the next prompt.
+            runner.measure._write_config_flag("enterprise_consent_shown", True)
+            runner.measure._write_config_flag("v5_welcome_shown", True)
+
+    def _compact_restore(**kw):
+        calls["compact_restore"].append(kw)
+
+    monkeypatch.setattr(runner.measure, "quality_cache", _quality_cache)
+    monkeypatch.setattr(runner.measure, "_continuity_prompt_hint", _continuity)
+    monkeypatch.setattr(runner.measure, "run_verbosity_steer", _verbosity)
+    monkeypatch.setattr(runner.measure, "run_ensure_health", _ensure_health)
+    monkeypatch.setattr(runner.measure, "compact_restore", _compact_restore)
+    monkeypatch.setattr(runner.measure, "_daemon_midsession_pulse", lambda: None)
+    monkeypatch.setattr(runner.measure, "_ensure_health_daemon_revive_first", lambda: None)
+    monkeypatch.setattr(runner.measure, "_is_running_from_plugin_cache", lambda: True)
+    monkeypatch.setattr(runner.measure, "_is_plugin_installed", lambda: True)
+    # Never latch: the second prompt must be allowed to run the gated work too.
+    monkeypatch.setattr(runner.measure, "_ran_once_this_session", lambda tag, sid: False)
+    # Keep compact-restore on the raw-stdout path (envelope wrapping is covered
+    # elsewhere); the Cowork-ness under test here is the harness guard, not the
+    # additionalContext envelope.
+    monkeypatch.setattr(runner.measure, "is_cowork", lambda: False)
+    monkeypatch.setattr(runner.measure, "detect_runtime", lambda: "claude")
+    # Stub the wall-clock budget inline (no consent pin).
+    monkeypatch.setattr(runner.measure, "_install_hook_budget", lambda seconds=8: object())
+    monkeypatch.setattr(runner.measure, "_clear_hook_budget", lambda deadline: None)
+    return calls
+
+
+def test_consent_false_cowork_bootstraps_then_flips(monkeypatch, tmp_path):
+    """P0 regression (the Cowork-fatal path). With consent False (config.json
+    exists, flags unset) and the Cowork harness guard active (CLAUDE_CODE_REMOTE
+    set, no SessionStart to bootstrap out-of-band), the runner MUST still run
+    ensure-health (the bootstrap) and skip the other five; ensure-health writes
+    the consent flags; a subsequent prompt then sees consent True and runs all
+    six. Does NOT bypass consent -- run._check_consent is real."""
+    runner, cfg_path = _load_runner_real_consent(monkeypatch, tmp_path, config_json="{}")
+    # Cowork harness guard (real _harness_only_context path): CLAUDE_CODE_REMOTE.
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "1")
+    calls = _install_consent_recorder(monkeypatch, runner, write_flags_on_health=True)
+    monkeypatch.setattr(runner, "_read_hook_input",
+                        lambda: {"session_id": "sess-p0-cowork-139", "prompt": "x"})
+
+    # Sanity: consent really is False against the tmp config before we start.
+    assert runner._check_consent() is False, (
+        "fixture error: tmp config must read consent=False (flags unset)"
+    )
+
+    # First prompt: consent False. Only ensure-health (the bootstrap) runs.
+    rc = runner.main()
+    assert rc == 0
+    assert len(calls["ensure_health"]) == 1, "ensure-health bootstrap must run when consent is False"
+    assert calls["quality_cache_warn"] == [], "quality-cache --warn must skip when consent is False"
+    assert calls["prompt_continuity"] == [], "prompt-continuity must skip when consent is False"
+    assert calls["verbosity_steer"] == [], "verbosity-steer must skip when consent is False"
+    assert calls["quality_cache_force"] == [], "quality-cache --force must skip when consent is False"
+    assert calls["compact_restore"] == [], "compact-restore must skip when consent is False"
+
+    # The bootstrap wrote the consent flags to the tmp config (real primitive).
+    cfg = _read_tmp_config(runner, cfg_path)
+    assert cfg.get("v5_welcome_shown") is True, "ensure-health must write v5_welcome_shown"
+    assert cfg.get("enterprise_consent_shown") is True, "ensure-health must write enterprise_consent_shown"
+
+    # Consent has now flipped (real gate re-reads the tmp config).
+    assert runner._check_consent() is True, "bootstrap must flip consent to True"
+
+    # Second prompt: consent True. All six subcommands run (deadlock broken).
+    rc = runner.main()
+    assert rc == 0
+    assert len(calls["ensure_health"]) == 2
+    assert len(calls["quality_cache_warn"]) == 1
+    assert len(calls["prompt_continuity"]) == 1
+    assert len(calls["verbosity_steer"]) == 1
+    assert len(calls["quality_cache_force"]) == 1
+    assert len(calls["compact_restore"]) == 1
+
+
+def test_consent_false_non_harness_skips_all_and_stays_false(monkeypatch, tmp_path):
+    """consent False on a NON-harness host (no CLAUDE_CODE_REMOTE/CONTAINER_ID):
+    ensure-health is harness-gated, so it skips too, and consent stays False.
+    This is the native-Claude-Code edge: SessionStart is the out-of-band
+    bootstrap, so UserPromptSubmit correctly does nothing when consent is False
+    and there is no harness guard. Preserves the pre-consolidation semantics
+    (ensure-health was a harness-gated, consent-exempt entry)."""
+    runner, cfg_path = _load_runner_real_consent(monkeypatch, tmp_path, config_json="{}")
+    # No CLAUDE_CODE_REMOTE / CONTAINER_ID / harness markers => guard False.
+    monkeypatch.delenv("CLAUDE_CODE_REMOTE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_CONTAINER_ID", raising=False)
+    monkeypatch.delenv("AI_AGENT", raising=False)
+    calls = _install_consent_recorder(monkeypatch, runner, write_flags_on_health=True)
+    monkeypatch.setattr(runner, "_read_hook_input",
+                        lambda: {"session_id": "sess-p0-native-139", "prompt": "x"})
+
+    assert runner._check_consent() is False
+    assert runner._harness_only_context() is False
+
+    rc = runner.main()
+    assert rc == 0
+    # Nothing runs: ensure-health is harness-gated, the other five are consent-gated.
+    assert calls["ensure_health"] == []
+    assert calls["quality_cache_warn"] == []
+    assert calls["prompt_continuity"] == []
+    assert calls["verbosity_steer"] == []
+    assert calls["quality_cache_force"] == []
+    assert calls["compact_restore"] == []
+
+    # Consent unchanged (no bootstrap fired).
+    cfg = _read_tmp_config(runner, cfg_path)
+    assert cfg.get("enterprise_consent_shown") in (None, False)
+    assert cfg.get("v5_welcome_shown") in (None, False)
+    assert runner._check_consent() is False
+
+
+def test_consent_true_cowork_runs_all_six(monkeypatch, tmp_path):
+    """consent True (flags pre-set in config) on Cowork: the real consent gate
+    returns True and all six subcommands run. Covers the Cowork consent=True
+    path with a real (non-bypassed) consent read."""
+    runner, _cfg_path = _load_runner_real_consent(
+        monkeypatch, tmp_path,
+        config_json='{"enterprise_consent_shown": true, "v5_welcome_shown": true}',
+    )
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "1")
+    calls = _install_consent_recorder(monkeypatch, runner, write_flags_on_health=False)
+    monkeypatch.setattr(runner, "_read_hook_input",
+                        lambda: {"session_id": "sess-p0-cowork-true-139", "prompt": "x"})
+
+    assert runner._check_consent() is True, "pre-set flags must read consent=True"
+    assert runner._harness_only_context() is True
+
+    rc = runner.main()
+    assert rc == 0
+    assert len(calls["quality_cache_warn"]) == 1
+    assert len(calls["prompt_continuity"]) == 1
+    assert len(calls["verbosity_steer"]) == 1
+    assert len(calls["ensure_health"]) == 1
+    assert len(calls["quality_cache_force"]) == 1
+    assert len(calls["compact_restore"]) == 1
+
+
+def test_run_py_exempts_runner_path_from_consent_gate(monkeypatch, tmp_path):
+    """run.py must let hooks/userpromptsubmit_runner.py through its consent gate
+    even when consent is False (the runner does its own per-subcommand gating).
+    A non-runner script with consent False still gets gated (returns 0 before
+    Popen). This pins the run.py half of the P0 fix."""
+    run = _load_run_py()
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(REPO))
+    # Make consent deterministically False via a tmp config with no flags.
+    claude_dir = tmp_path / "claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "token-optimizer").mkdir(parents=True, exist_ok=True)
+    (claude_dir / "token-optimizer" / "config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+    monkeypatch.delenv("CLAUDE_PLUGIN_DATA", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(run, "_plugin_disabled_by_host", lambda: False)
+    assert run._check_consent() is False, "fixture error: consent must be False"
+
+    spawned = {"count": 0}
+
+    class _FakeProc:
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            pass
+
+    def _popen(*a, **k):
+        spawned["count"] += 1
+        return _FakeProc()
+
+    monkeypatch.setattr(run.subprocess, "Popen", _popen)
+    monkeypatch.setattr(run.signal, "signal", lambda *_a, **_k: None)
+
+    # The runner path is exempted => it MUST proceed to Popen despite consent False.
+    monkeypatch.setattr(sys, "argv", ["run.py", "hooks/userpromptsubmit_runner.py"])
+    run.main()
+    assert spawned["count"] == 1, (
+        "run.py must dispatch the runner even when consent is False (P0 fix)"
+    )
+
+    # A non-runner script is still consent-gated => returns 0 before Popen.
+    spawned["count"] = 0
+    monkeypatch.setattr(
+        sys, "argv",
+        ["run.py", "skills/token-optimizer/scripts/measure.py", "quality-cache", "--warn", "--quiet"],
+    )
+    run.main()
+    assert spawned["count"] == 0, (
+        "non-runner scripts must still be consent-gated (only the runner is exempt)"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# (f) Signature-drift guard: call each _sub_* handler end-to-end against the
+#     REAL measure.py (NO monkeypatching of measure.*). A future kwarg/param
+#     rename in measure.py raises TypeError out of the handler (handlers only
+#     catch measure._HookTimeout, a BaseException) and fails RED here, instead
+#     of being silently swallowed by _run_safely in production.
+# --------------------------------------------------------------------------- #
+
+
+# Modules whose import-time path globals (CONFIG_PATH, SETTINGS_PATH,
+# CLAUDE_DIR, QUALITY_CACHE_DIR, _STATE_BASE, ...) must re-resolve under the
+# tmp env so the real measure functions read/write inside tmp, never the host.
+_FRESH_MEASURE_MODULES = (
+    "measure", "runtime_env", "plugin_env", "hook_io", "hook_runtime",
+    "codex_session",
+)
+
+
+def _load_runner_fresh_measure(monkeypatch, tmp_path):
+    """Load the runner against a FRESHLY imported measure.py so every
+    import-time path global resolves under the tmp env. Returns
+    ``(runner, restore_fn, transcript_path)``.
+
+    No measure.* attribute is monkeypatched: the domain functions the runner
+    calls (quality_cache, _continuity_prompt_hint, run_verbosity_steer,
+    run_ensure_health, compact_restore, _ran_once_this_session,
+    _ensure_health_daemon_revive_first, _daemon_midsession_pulse, is_cowork,
+    detect_runtime, ...) stay 100% real. Only sys.modules entries are
+    saved/popped so measure re-imports under the tmp env; restore_fn puts the
+    originals back so later tests are unaffected.
+    """
+    saved = {k: sys.modules.get(k) for k in _FRESH_MEASURE_MODULES}
+    for k in _FRESH_MEASURE_MODULES:
+        sys.modules.pop(k, None)
+
+    claude_dir = tmp_path / "claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    cfg_dir = claude_dir / "token-optimizer"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    # daemon_disabled=true + foreign runtime => every daemon spawn/revive
+    # no-ops at the cheapest gate (detect_runtime != "claude"), so the
+    # integration test never installs/revives a real dashboard daemon.
+    (cfg_dir / "config.json").write_text(
+        '{"daemon_disabled": true, "enterprise_consent_shown": true, '
+        '"v5_welcome_shown": true}',
+        encoding="utf-8",
+    )
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("", encoding="utf-8")
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(REPO))
+    # Foreign runtime: run_ensure_health returns early (_is_foreign_runtime),
+    # _daemon_midsession_pulse returns "noop-foreign", and the detached
+    # daemon-revive child returns "noop-foreign" -- all at the detect_runtime
+    # gate, before any settings/launchd work.
+    monkeypatch.setenv("TOKEN_OPTIMIZER_RUNTIME", "opencode")
+    monkeypatch.delenv("CLAUDE_PLUGIN_DATA", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_REMOTE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_CONTAINER_ID", raising=False)
+
+    spec = importlib.util.spec_from_file_location(
+        "ups_runner_integration_under_test", RUNNER
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    def _restore():
+        for k in _FRESH_MEASURE_MODULES:
+            if saved[k] is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = saved[k]
+
+    return mod, _restore, transcript
+
+
+def test_sub_handlers_call_real_measure_without_signature_error(monkeypatch, tmp_path, capsys):
+    """Each _sub_* handler calls the REAL measure.py functions with the exact
+    kwargs the runner uses. A kwarg/param rename in measure.py raises
+    TypeError (not _HookTimeout), which the handlers do NOT catch, so this test
+    fails RED on drift instead of the failure being silently swallowed by
+    _run_safely in production. Calls the handlers directly (NOT via main()/
+    _run_safely) precisely so the TypeError is visible."""
+    runner, restore, transcript = _load_runner_fresh_measure(monkeypatch, tmp_path)
+    try:
+        sid = "sess-integration-139"
+        hook_input = {
+            "session_id": sid,
+            "transcript_path": str(transcript),
+            "cwd": str(tmp_path),
+            "prompt": "integration probe",
+        }
+
+        # Each handler must run to completion without raising. The real
+        # _install_hook_budget arms an 8s HookDeadline watchdog; the handlers
+        # no-op fast on the empty transcript + foreign runtime, so the finally
+        # _clear_hook_budget cancels it well before it could fire.
+        try:
+            runner._sub_prompt_continuity(hook_input)
+            runner._sub_verbosity_steer(hook_input)
+            runner._sub_quality_cache_warn(hook_input)
+            runner._sub_ensure_health(hook_input)
+            runner._sub_quality_cache_force(hook_input)
+            runner._sub_compact_restore(hook_input)
+        except TypeError as e:
+            pytest.fail(
+                f"signature drift: a _sub_* handler called measure with a "
+                f"renamed/removed kwarg: {type(e).__name__}: {e}"
+            )
+
+        # Positive proof the handlers reached the REAL measure functions (not a
+        # silent no-op): the three gated subcommands each wrote their real
+        # run-once marker via measure._ran_once_this_session / _once_per_session_marker.
+        m = runner.measure
+        for tag in ("ensure-health", "quality-cache-force", "compact-restore-new-session"):
+            marker = m._once_per_session_marker(tag, sid)
+            assert marker is not None and marker.exists(), (
+                f"real measure run-once marker for {tag!r} was not written; "
+                f"the handler did not reach measure._ran_once_this_session"
+            )
+    finally:
+        restore()
+
+
+def test_sub_handlers_signature_drift_fails_red(monkeypatch, tmp_path):
+    """Mutation guard for the guard: if a measure kwarg the runner uses is
+    renamed, the integration test above must fail RED. We simulate drift by
+    injecting a wrapper that rejects the runner's kwargs on quality_cache and
+    confirm the handler raises TypeError (not silently swallowed). This pins
+    that the end-to-end test is actually wired to the real call shapes."""
+    runner, restore, transcript = _load_runner_fresh_measure(monkeypatch, tmp_path)
+    try:
+        # Simulate a rename of `warn_threshold` -> `warn_thresh` in measure.py:
+        # the real quality_cache still accepts warn_threshold, so wrap it to
+        # raise TypeError on the runner's exact kwargs, proving the handler
+        # propagates the error instead of swallowing it.
+        real_qc = runner.measure.quality_cache
+
+        def _drifted_qc(**kw):
+            if "warn_threshold" in kw:
+                raise TypeError("simulated drift: warn_threshold renamed")
+            return real_qc(**kw)
+
+        runner.measure.quality_cache = _drifted_qc
+        hook_input = {
+            "session_id": "sess-drift-139",
+            "transcript_path": str(transcript),
+            "cwd": str(tmp_path),
+            "prompt": "x",
+        }
+        with pytest.raises(TypeError, match="warn_threshold"):
+            runner._sub_quality_cache_warn(hook_input)
+    finally:
+        restore()

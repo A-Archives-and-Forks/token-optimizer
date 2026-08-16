@@ -372,13 +372,62 @@ def _quality_cache_self_heal() -> None:
         pass
 
 
+def _check_consent() -> bool:
+    """Consent gate for the consolidated runner, mirroring ``run._check_consent``.
+
+    run.py exempts this script from its own consent gate (issue #139 P0 fix:
+    the runner is dispatched with no distinguishing args, so the
+    ``ensure-health`` exempt-command match never fires there; the runner
+    contains the ensure-health bootstrap itself). The per-subcommand consent
+    decision therefore lives HERE.
+
+    Imports ``run._check_consent`` (the canonical check) so the logic never
+    drifts between the two files. Fails open (True) if ``run.py`` cannot be
+    imported -- matching run.py's own fail-open philosophy -- so a host where
+    the hooks dir is not on ``sys.path`` never silently disables the plugin.
+    """
+    try:
+        import run as _run_mod  # noqa: E402  (sibling hooks/run.py)
+        return _run_mod._check_consent()
+    except Exception:
+        return True
+
+
 def main() -> int:
     hook_input = _read_hook_input()
 
-    # 1-3: always-on subcommands. Ordering matches the original hooks.json.
-    _run_safely("quality-cache --warn", _sub_quality_cache_warn, hook_input)
+    # Consent gate (issue #139 P0 fix). Pre-consolidation, the six
+    # UserPromptSubmit hooks.json entries each passed distinguishing args, so
+    # the ensure-health entry was consent-exempt (it bootstraps the
+    # v5_welcome_shown / enterprise_consent_shown flags) and the other five
+    # were consent-gated (returned 0 when consent was False). The consolidated
+    # runner is dispatched with no args, so run.py exempts the whole runner
+    # path and delegates the per-subcommand decision here.
+    #
+    # When consent is False: ONLY ensure-health runs (it writes the consent
+    # flags via _show_v5_welcome + the v5_welcome_shown write, the bootstrap),
+    # and only when the harness guard passes. On Cowork (the no-SessionStart
+    # host where this deadlock is fatal) the harness guard is True, so
+    # ensure-health bootstraps. On native Claude Code, SessionStart already
+    # bootstraps consent, so consent is True before UserPromptSubmit fires and
+    # this branch is not reached. The other five subcommands skip, preserving
+    # the original consent-gated semantics exactly. When consent is True: all
+    # six run per their existing gates.
+    if not _check_consent():
+        if _harness_only_context():
+            _run_safely("ensure-health", _sub_ensure_health, hook_input)
+        return 0
+
+    # 1-3: always-on subcommands. Ordering (issue #139 P2): the cheap,
+    # user-visible subcommands (prompt-continuity, verbosity-steer) run BEFORE
+    # the heavier quality-cache --warn. HookDeadline's os._exit(0) kills the
+    # whole process uncatchably, so a hang in an early subcommand skips all
+    # later ones; running the cheap user-visible work first minimizes what a
+    # quality-cache hang can suppress. The harness-only 4-6 still run after the
+    # gate (gating-order semantics preserved).
     _run_safely("prompt-continuity", _sub_prompt_continuity, hook_input)
     _run_safely("verbosity-steer", _sub_verbosity_steer, hook_input)
+    _run_safely("quality-cache --warn", _sub_quality_cache_warn, hook_input)
 
     # 4-6: harness-only subcommands. The shell guard that used to prefix
     # hooks.json entries 4/5/6 is evaluated once here; when it fails, all three

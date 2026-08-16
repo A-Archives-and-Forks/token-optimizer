@@ -346,6 +346,20 @@ def main() -> int:
     # can't run -> flags never written -> plugin permanently inert).
     exempt_commands = {"ensure-health", "consent", "v5"}
     is_exempt = any(arg in exempt_commands for arg in script_args[:2])
+    # Issue #139 P0: the consolidated UserPromptSubmit runner is dispatched as
+    # `run.py hooks/userpromptsubmit_runner.py` with NO trailing args, so
+    # script_args=[] and the exempt_commands check above never matches it. The
+    # runner contains the ensure-health bootstrap itself, so it MUST be let
+    # through this consent gate even when consent is False; the runner then
+    # makes the per-subcommand consent decision internally (ensure-health
+    # bootstraps the flags, the other five skip until consent is True). Without
+    # this exemption the runner is never dispatched when consent is False ->
+    # ensure-health never fires -> v5_welcome_shown / enterprise_consent_shown
+    # never written -> consent False FOREVER -> all six subcommands permanently
+    # dead. Latent on native Claude Code (SessionStart bootstraps consent
+    # out-of-band), FATAL on Cowork (no SessionStart hook).
+    if script_rel == "hooks/userpromptsubmit_runner.py":
+        is_exempt = True
     if not is_exempt and not _check_consent():
         return 0
 
