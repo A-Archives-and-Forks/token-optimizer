@@ -39,6 +39,11 @@ except Exception:
 
 _STDIN_MAX_BYTES = 1_048_576  # 1MB: tool_input is small; cap defensively.
 _MANIFEST_MAX_LINES = 5000    # keep the NEWEST N manifest entries (append-only file).
+# archive_result.py's _ARCHIVE_MAX_SIZE caps a legitimate entry's response at
+# 5MB; add generous headroom for the surrounding JSON/metadata so no real
+# entry is ever truncated mid-parse, while still bounding this hot PreToolUse
+# read against a pathological/corrupt file pulling unbounded bytes into memory.
+_ENTRY_RENDER_MAX_BYTES = 8 * 1024 * 1024
 _DEBUG = os.environ.get("TOKEN_OPTIMIZER_DEBUG", "").strip().lower() not in ("", "0", "false", "no")
 
 
@@ -94,7 +99,7 @@ def _entry_is_renderable(archive_dir: Path, tool_use_id: str) -> bool:
         if not entry_path.is_file() or entry_path.is_symlink():
             return False
         with entry_path.open("rb") as fh:
-            raw = fh.read()
+            raw = fh.read(_ENTRY_RENDER_MAX_BYTES)
         if not raw:
             return False
         payload = json.loads(raw)

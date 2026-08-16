@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import os
 import time
@@ -13,6 +14,15 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "skills" / "token-optimizer" / "scripts"
+HOOKS = REPO / "hooks"
+
+
+def _load_run_py():
+    """Load hooks/run.py as an isolated module (it is a script, not a package)."""
+    spec = importlib.util.spec_from_file_location("run_py_under_test_140", HOOKS / "run.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +130,295 @@ def test_legitimate_claude_plugin_data_still_accepted(monkeypatch, tmp_path):
     result = module.resolve_plugin_data_dir()
     assert result == registered, (
         f"Legitimate registered CLAUDE_PLUGIN_DATA should be accepted, got {result}"
+    )
+
+
+def test_dedicated_var_wins_over_valid_claude_plugin_data(monkeypatch, tmp_path):
+    """#140 review follow-up: TOKEN_OPTIMIZER_PLUGIN_DATA must win even when
+    CLAUDE_PLUGIN_DATA ALSO resolves to a valid REGISTERED identity (the
+    common in-plugin hook case). Pre-fix, the single for-loop iterated
+    CLAUDE_PLUGIN_DATA first and returned on the first match, so a valid
+    CLAUDE_PLUGIN_DATA silently shadowed the dedicated override."""
+    data_base = tmp_path / "data"
+    registered = data_base / "token-optimizer-registered"
+    dedicated = data_base / "token-optimizer-dedicated"
+    registered.mkdir(parents=True)
+    dedicated.mkdir(parents=True)
+
+    # Both identities are registered -- CLAUDE_PLUGIN_DATA is NOT foreign here.
+    (data_base.parent / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {
+            "token-optimizer@registered": [],
+            "token-optimizer@dedicated": [],
+        }}), encoding="utf-8"
+    )
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(registered))
+    monkeypatch.setenv("TOKEN_OPTIMIZER_PLUGIN_DATA", str(dedicated))
+
+    module = _load_plugin_env(monkeypatch, data_base)
+    module._PLUGIN_DATA_ENV_VARS = ("CLAUDE_PLUGIN_DATA", "TOKEN_OPTIMIZER_PLUGIN_DATA")
+
+    result = module.resolve_plugin_data_dir()
+    assert result == dedicated, (
+        f"Expected dedicated {dedicated} to win over valid registered "
+        f"CLAUDE_PLUGIN_DATA {registered}, got {result}"
+    )
+
+
+def test_dedicated_var_rejects_shared_base_root(monkeypatch, tmp_path):
+    """#140 review follow-up: TOKEN_OPTIMIZER_PLUGIN_DATA pointed straight at
+    the shared plugins/data ROOT (not a real per-plugin subdir) must be
+    rejected. is_relative_to() returns True on equal paths, so without an
+    explicit inequality check the root itself would pass confinement --
+    granting access to every plugin's data, not just this one's."""
+    data_base = tmp_path / "data"
+    other_identity = data_base / "token-optimizer-other"
+    other_identity.mkdir(parents=True)
+    # data_base itself already exists (tmp_path / "data") -- point the
+    # dedicated var directly at the shared root.
+
+    (data_base.parent / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {"token-optimizer@other": []}}), encoding="utf-8"
+    )
+
+    monkeypatch.setenv("TOKEN_OPTIMIZER_PLUGIN_DATA", str(data_base))
+    monkeypatch.delenv("CLAUDE_PLUGIN_DATA", raising=False)
+
+    module = _load_plugin_env(monkeypatch, data_base)
+    module._PLUGIN_DATA_ENV_VARS = ("CLAUDE_PLUGIN_DATA", "TOKEN_OPTIMIZER_PLUGIN_DATA")
+
+    result = module.resolve_plugin_data_dir()
+    assert result != data_base, (
+        f"Dedicated var pointed at the shared root was NOT rejected: {result}"
+    )
+    # Rejected -> falls through to the registered-identity lookup.
+    assert result == other_identity, f"Expected fallback to {other_identity}, got {result}"
+
+
+def test_is_safe_subdir_rejects_exact_base_match(monkeypatch, tmp_path):
+    """Direct unit test of the confinement primitive: a candidate that
+    resolves to exactly `base` must be rejected, not merely a candidate
+    that happens to share a name prefix with base."""
+    module = _load_plugin_env(monkeypatch, tmp_path / "data")
+    base = tmp_path / "data"
+    base.mkdir(parents=True)
+    assert module._is_safe_subdir(base, base) is False
+    real_subdir = base / "token-optimizer-x"
+    real_subdir.mkdir()
+    assert module._is_safe_subdir(real_subdir, base) is True
+
+
+def test_resolve_claude_plugin_data_env_rejects_foreign(monkeypatch, tmp_path):
+    """The centralized resolver used by hooks/run.py and
+    detectors/cache_instability.py: a foreign (unregistered) CLAUDE_PLUGIN_DATA
+    resolves to None, never to the foreign path."""
+    data_base = tmp_path / "data"
+    our_identity = data_base / "token-optimizer-us"
+    foreign = data_base / "token-optimizer-foreign"
+    our_identity.mkdir(parents=True)
+    foreign.mkdir(parents=True)
+
+    (data_base.parent / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {"token-optimizer@us": []}}), encoding="utf-8"
+    )
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(foreign))
+    module = _load_plugin_env(monkeypatch, data_base)
+
+    assert module.resolve_claude_plugin_data_env() is None, (
+        "Foreign CLAUDE_PLUGIN_DATA was not rejected by the centralized resolver"
+    )
+
+
+def test_resolve_claude_plugin_data_env_accepts_registered(monkeypatch, tmp_path):
+    """The centralized resolver accepts a genuinely registered identity."""
+    data_base = tmp_path / "data"
+    identity = data_base / "token-optimizer-main"
+    identity.mkdir(parents=True)
+
+    (data_base.parent / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {"token-optimizer@main": []}}), encoding="utf-8"
+    )
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(identity))
+    module = _load_plugin_env(monkeypatch, data_base)
+
+    assert module.resolve_claude_plugin_data_env() == identity
+
+
+def test_run_py_consent_rejects_foreign_claude_plugin_data(monkeypatch, tmp_path):
+    """#140 sibling site: hooks/run.py's consent read (hooks/run.py:119) used
+    to trust raw CLAUDE_PLUGIN_DATA with no identity check. A foreign
+    plugin's CLAUDE_PLUGIN_DATA -- same shared plugins/data root, but an
+    UNREGISTERED identity -- must not misdirect the consent read into that
+    foreign config.json. Proven by making the foreign config claim consent
+    (True) while the legitimate fallback path has none (empty): the leak bug
+    would read the foreign True; the fix must not.
+    """
+    data_base = tmp_path / "data"
+    foreign = data_base / "token-optimizer-foreign"
+    (foreign / "config").mkdir(parents=True)
+    # Foreign plugin's config claims consent -- if the leak bug were present,
+    # _check_consent would read THIS file and wrongly return True.
+    (foreign / "config" / "config.json").write_text(
+        json.dumps({"enterprise_consent_shown": True}), encoding="utf-8"
+    )
+
+    # installed_plugins.json registers a DIFFERENT identity than `foreign`,
+    # so CLAUDE_PLUGIN_DATA=foreign is unambiguously the leaked-in case.
+    (data_base.parent / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {"token-optimizer@ours": []}}), encoding="utf-8"
+    )
+
+    module = _load_plugin_env(monkeypatch, data_base)
+    module._PLUGIN_DATA_ENV_VARS = ("CLAUDE_PLUGIN_DATA", "TOKEN_OPTIMIZER_PLUGIN_DATA")
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(foreign))
+    monkeypatch.delenv("TOKEN_OPTIMIZER_PLUGIN_DATA", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    # Legacy path (what a rejected/absent CLAUDE_PLUGIN_DATA falls through to)
+    # has NO consent flags -- the real, honest answer is "no consent yet".
+    legacy_config = tmp_path / ".claude" / "token-optimizer" / "config.json"
+    legacy_config.parent.mkdir(parents=True)
+    legacy_config.write_text(json.dumps({}), encoding="utf-8")
+
+    run_mod = _load_run_py()
+    result = run_mod._check_consent(tmp_path / "plugin-root")
+
+    assert result is False, (
+        "consent read was misdirected into the foreign plugin's config.json "
+        "(a leaked CLAUDE_PLUGIN_DATA must not bypass the real consent state)"
+    )
+
+
+def test_run_py_consent_accepts_registered_claude_plugin_data(monkeypatch, tmp_path):
+    """Companion regression guard: a genuinely REGISTERED CLAUDE_PLUGIN_DATA
+    must still be read normally through the identity-checked resolver."""
+    data_base = tmp_path / "data"
+    ours = data_base / "token-optimizer-ours"
+    (ours / "config").mkdir(parents=True)
+    (ours / "config" / "config.json").write_text(
+        json.dumps({"enterprise_consent_shown": True}), encoding="utf-8"
+    )
+
+    (data_base.parent / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {"token-optimizer@ours": []}}), encoding="utf-8"
+    )
+
+    module = _load_plugin_env(monkeypatch, data_base)
+    module._PLUGIN_DATA_ENV_VARS = ("CLAUDE_PLUGIN_DATA", "TOKEN_OPTIMIZER_PLUGIN_DATA")
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(ours))
+    monkeypatch.delenv("TOKEN_OPTIMIZER_PLUGIN_DATA", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    run_mod = _load_run_py()
+    result = run_mod._check_consent(tmp_path / "plugin-root")
+
+    assert result is True, (
+        "a genuinely registered CLAUDE_PLUGIN_DATA's consent config was not honored"
+    )
+
+
+def test_cache_instability_state_dir_rejects_foreign_claude_plugin_data(monkeypatch, tmp_path):
+    """#140 sibling site: detectors/cache_instability.py's _state_dir()
+    (line ~93) WRITES detector state -- the worst of the sibling sites, since
+    a leaked CLAUDE_PLUGIN_DATA there doesn't just misread, it misdirects a
+    WRITE into another plugin's directory. A foreign, unregistered
+    CLAUDE_PLUGIN_DATA must not be used as the state dir; the detector must
+    fall back to the legacy ~/.claude/token-optimizer/data location instead.
+    """
+    data_base = tmp_path / "data"
+    foreign = data_base / "token-optimizer-foreign"
+    foreign.mkdir(parents=True)
+
+    (data_base.parent / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {"token-optimizer@ours": []}}), encoding="utf-8"
+    )
+
+    module = _load_plugin_env(monkeypatch, data_base)
+    module._PLUGIN_DATA_ENV_VARS = ("CLAUDE_PLUGIN_DATA", "TOKEN_OPTIMIZER_PLUGIN_DATA")
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(foreign))
+    monkeypatch.delenv("TOKEN_OPTIMIZER_PLUGIN_DATA", raising=False)
+    monkeypatch.delenv("TOKEN_OPTIMIZER_SNAPSHOT_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    monkeypatch.syspath_prepend(str(SCRIPTS))
+    ci = importlib.import_module("detectors.cache_instability")
+
+    result = ci._state_dir()
+    assert result != foreign / "data", (
+        f"cache_instability._state_dir() was misdirected into the foreign "
+        f"plugin's data dir: {result}"
+    )
+    assert result == tmp_path / ".claude" / "token-optimizer" / "data", (
+        f"expected fallback to the legacy default, got {result}"
+    )
+
+
+def test_cache_instability_state_dir_accepts_registered_claude_plugin_data(monkeypatch, tmp_path):
+    """Companion regression guard: a genuinely registered CLAUDE_PLUGIN_DATA
+    must still be used as the detector's state dir."""
+    data_base = tmp_path / "data"
+    ours = data_base / "token-optimizer-ours"
+    ours.mkdir(parents=True)
+
+    (data_base.parent / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {"token-optimizer@ours": []}}), encoding="utf-8"
+    )
+
+    module = _load_plugin_env(monkeypatch, data_base)
+    module._PLUGIN_DATA_ENV_VARS = ("CLAUDE_PLUGIN_DATA", "TOKEN_OPTIMIZER_PLUGIN_DATA")
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(ours))
+    monkeypatch.delenv("TOKEN_OPTIMIZER_PLUGIN_DATA", raising=False)
+    monkeypatch.delenv("TOKEN_OPTIMIZER_SNAPSHOT_DIR", raising=False)
+
+    monkeypatch.syspath_prepend(str(SCRIPTS))
+    ci = importlib.import_module("detectors.cache_instability")
+
+    result = ci._state_dir()
+    assert result == ours / "data"
+
+
+def test_refetch_guard_renderability_read_is_capped(monkeypatch, tmp_path):
+    """#140 review P2: _entry_is_renderable() used to fh.read() the WHOLE
+    archive entry file (up to ~5MB, the archive_result.py entry ceiling)
+    before json.loads -- uncapped on this hot PreToolUse path. Proves the cap
+    is applied BEFORE parsing: with the cap patched down to a small value, an
+    entry file larger than the cap is read truncated and therefore correctly
+    treated as not-renderable (fail-open, same as any other corrupt/oversized
+    file), while an entry within the cap still renders normally.
+    """
+    monkeypatch.syspath_prepend(str(SCRIPTS))
+    rg = importlib.import_module("refetch_guard")
+
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir(parents=True)
+
+    # Shrink the cap so a small, well-formed entry becomes "too large" without
+    # needing a multi-MB fixture file.
+    monkeypatch.setattr(rg, "_ENTRY_RENDER_MAX_BYTES", 40)
+
+    big_payload = json.dumps({"response": "x" * 500})
+    assert len(big_payload) > 40
+    (archive_dir / "big-entry.json").write_text(big_payload, encoding="utf-8")
+
+    assert rg._entry_is_renderable(archive_dir, "big-entry") is False, (
+        "renderability read was not capped -- a truncated read should fail "
+        "json.loads and report not-renderable, not silently read past the cap"
+    )
+
+    small_payload = json.dumps({"response": "ok"})
+    assert len(small_payload) <= 40
+    (archive_dir / "small-entry.json").write_text(small_payload, encoding="utf-8")
+    assert rg._entry_is_renderable(archive_dir, "small-entry") is True, (
+        "the cap must not be so aggressive it breaks a normal small entry"
     )
 
 
@@ -341,6 +640,97 @@ def test_archive_result_post_prune_serves_full_result(monkeypatch, tmp_path):
     # Should NOT emit the expand instruction.
     assert "expand" not in output.lower(), (
         f"expand instruction emitted after entry was pruned: {output[:200]}"
+    )
+
+
+def test_bash_compress_post_prune_serves_full_result_not_lossy(monkeypatch, tmp_path, capsys):
+    """#140 review P0 (data loss): when the archived Bash entry is pruned by a
+    concurrent retention pass right after write, bash_compress.py's main()
+    fallback used to clear the archive key but keep serving the LOSSY
+    `compressed` preview -- the untouched full raw command output was in
+    scope the whole time. This repros with a real 1-byte retention ceiling
+    (TOKEN_OPTIMIZER_ARCHIVE_RETENTION_MAX_BYTES=1, same mechanism
+    test_archive_result_post_prune_serves_full_result uses below) and asserts
+    the FULL command output reaches stdout, not the compressed preview.
+
+    Calls the REAL bash_compress.main() (not a hand-rolled mirror of its
+    fallback logic) so a regression in the actual fixed lines is caught.
+    subprocess.run is stubbed to avoid depending on any real OS command or
+    platform (mirrors test_bash_compress_main_passes_creationflags in
+    test_107_hook_scripts_no_window.py) -- consent/env/prune are NOT stubbed:
+    the prune is a real cleanup_old_archives() call that really deletes the
+    just-written entry file from disk, only its TIMING (landing between the
+    real archive_original() write and main()'s post-write existence re-check)
+    is test-orchestrated to make an inherently racy concurrent-process
+    scenario deterministic.
+    """
+    monkeypatch.syspath_prepend(str(SCRIPTS))
+    bc = importlib.import_module("bash_compress")
+    ar = importlib.import_module("archive_result")
+
+    snapshot_dir = tmp_path / "snapshots"
+    snapshot_dir.mkdir(parents=True)
+    monkeypatch.setenv("TOKEN_OPTIMIZER_SNAPSHOT_DIR", str(snapshot_dir))
+    monkeypatch.setattr(ar, "SNAPSHOT_DIR", snapshot_dir)
+    monkeypatch.setattr(ar, "TRENDS_DB", snapshot_dir / "trends.db")
+    # Force the retention ceiling so cleanup_old_archives() really prunes
+    # everything, including the entry main() is about to write.
+    monkeypatch.setenv("TOKEN_OPTIMIZER_ARCHIVE_RETENTION_MAX_BYTES", "1")
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "test-session-bash-prune")
+
+    # Fake command output: > 2000 chars (clears the GENERIC compressor's
+    # floor) with a unique marker line in the MIDDLE, which the head+tail
+    # generic compressor drops -- present in raw_output, absent from the
+    # lossy `compressed` preview. That makes a regression (serving
+    # `compressed`) and the fix (serving raw_output) trivially distinguishable.
+    body_lines = [f"line {i:04d} of unique filler content padded out further" for i in range(150)]
+    body_lines[75] = "MIDDLE_MARKER_UNIQUE_LINE_NOT_IN_HEAD_OR_TAIL"
+    raw_stdout = "\n".join(body_lines) + "\n"
+    assert len(raw_stdout) > 2000
+
+    # Sanity: confirm this fixture really compresses lossily via the same
+    # compress() main() calls, so the test doesn't pass vacuously.
+    compressed_preview = bc.compress("someunknowncmd", raw_stdout, returncode=0, stderr="")
+    assert compressed_preview != raw_stdout
+    assert "MIDDLE_MARKER_UNIQUE_LINE_NOT_IN_HEAD_OR_TAIL" not in compressed_preview, (
+        "test fixture's compressed preview unexpectedly kept the marker line"
+    )
+
+    class _FakeResult:
+        stdout = raw_stdout
+        stderr = ""
+        returncode = 0
+
+    monkeypatch.setattr(bc.subprocess, "run", lambda *a, **k: _FakeResult())
+    monkeypatch.setattr(bc.sys, "argv", ["bash_compress.py", "someunknowncmd"])
+
+    # Real prune, timed to land between archive_original()'s write and
+    # main()'s post-write archive_entry_exists() re-check -- simulates a
+    # concurrent PostToolUse hook's retention pass racing this one, without
+    # relying on actual OS-level concurrency (which would be flaky).
+    real_entry_exists = ar.archive_entry_exists
+    pruned = {"done": False}
+
+    def _prune_then_check(session_id, key):
+        if not pruned["done"]:
+            pruned["done"] = True
+            ar.cleanup_old_archives()  # real deletion, real retention ceiling
+        return real_entry_exists(session_id, key)
+
+    monkeypatch.setattr(ar, "archive_entry_exists", _prune_then_check)
+
+    with pytest.raises(SystemExit) as exc_info:
+        bc.main()
+    assert exc_info.value.code == 0
+
+    out = capsys.readouterr().out
+    assert pruned["done"], "test setup never triggered the prune path"
+    assert "MIDDLE_MARKER_UNIQUE_LINE_NOT_IN_HEAD_OR_TAIL" in out, (
+        "post-prune fallback served the lossy compressed preview instead of "
+        "the full raw command output -- silent, unrecoverable data loss"
+    )
+    assert out == raw_stdout, (
+        f"expected the exact raw command output on stdout, got: {out[:200]!r}"
     )
 
 

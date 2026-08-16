@@ -1710,6 +1710,14 @@ def main():
                     if archive_entry_exists(_session_id, _archive_key):
                         compressed = build_archive_pointer(compressed, len(raw_output), _archive_key)
                     else:
+                        # Entry was pruned before we could point to it. The lossy
+                        # `compressed` preview has no recovery path once the archive
+                        # copy is gone, so serving it here would be silent, permanent
+                        # data loss. raw_output is still in scope untouched -- serve
+                        # that instead, matching the guarantee archive_result.py /
+                        # read_cache.py already give on the same post-prune re-check
+                        # (they fall back to the full original rather than a preview).
+                        compressed = raw_output
                         _archive_key = None
                 else:
                     _archive_key = None
