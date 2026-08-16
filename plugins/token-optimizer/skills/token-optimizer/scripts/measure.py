@@ -6374,9 +6374,10 @@ def _dispatch_collect(args):
     # ensure-health SessionStart hook, so run_ensure_health never reaches it.
     # The fossil's OWN hook-path run reconciles settings.json here, removing
     # the fossil going forward. Runs AFTER the flush and its 20s budget are
-    # cleared (never delays/blocks the flush), throttled to 24h, fail-open,
-    # non-blocking -- a reconcile error must not affect the hook. Gated on
-    # the hook path so an interactive terminal `collect` never triggers it.
+    # cleared, so it never delays the flush itself; the self-heal carries its
+    # OWN short deadline (see the helper) so a stalled settings write can't
+    # hold the hook pipe open. Throttled to 24h, fail-open. Gated on the hook
+    # path so an interactive terminal `collect` never triggers it.
     if _running_under_hook():
         try:
             _maybe_self_heal_sessionend_fossils_on_hook()
@@ -19590,8 +19591,10 @@ def _maybe_self_heal_sessionend_fossils_on_hook():
 
     Throttled to once per 24h via the shared ``last_hook_heal_check`` config
     flag (the same flag run_ensure_health uses), so it does not run on every
-    hook fire. Fail-open and non-blocking: any error is swallowed so a
-    reconcile failure can never affect the hook flush. A lease miss
+    hook fire. Fail-open and time-bounded: any error is swallowed so a
+    reconcile failure can never affect the hook flush, and the reconcile runs
+    under its own 10s HookDeadline so a stalled settings write cannot hold the
+    hook's stdout pipe open (os._exit(0) on expiry EOFs the pipe). A lease miss
     (``reason == "write_skipped"``) leaves the flag untouched so the next
     hook fire retries; any other outcome (healed, nothing-to-do,
     unreadable) advances the flag to suppress redundant retries for 24h.
@@ -19604,7 +19607,18 @@ def _maybe_self_heal_sessionend_fossils_on_hook():
         now = int(time.time())
         if now - int(last_check or 0) <= 86400:  # 24h
             return
-        fossil = _reconcile_sessionend_fossils()
+        # Bound the self-heal with its own short deadline. The reconcile does
+        # synchronous settings.json read/backup/write; on a stalled filesystem
+        # that could otherwise hold the hook's stdout pipe open unbounded and
+        # re-wedge the very hang #114 fixes (the collect budget was already
+        # cleared by the caller). HookDeadline os._exit(0)s on expiry -> the
+        # process exits and the pipe EOFs; the flag stays unadvanced so the
+        # heal retries on the next hook fire.
+        deadline = _install_hook_budget(10)
+        try:
+            fossil = _reconcile_sessionend_fossils()
+        finally:
+            _clear_hook_budget(deadline)
         # write_skipped = lease denied or fresh read failed -> retry next fire.
         if fossil.get("reason", "ok") != "write_skipped":
             _write_config_flag("last_hook_heal_check", now)

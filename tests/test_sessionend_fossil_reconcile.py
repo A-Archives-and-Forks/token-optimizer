@@ -396,3 +396,62 @@ def test_reconcile_reads_and_writes_under_the_lease(measure_mod, tmp_path, monke
     data = json.loads(settings_path.read_text(encoding="utf-8"))
     se_cmds = [h.get("command", "") for g in data["hooks"]["SessionEnd"] for h in g.get("hooks", []) if isinstance(h, dict)]
     assert not any("collect --quiet &&" in c for c in se_cmds), se_cmds
+
+
+# ---------------------------------------------------------------------------
+# Round 4 (Sol recheck follow-up): the self-heal must be reached via the real
+# dispatch AND be time-bounded so a stalled settings write can't hold the pipe.
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_collect_on_hook_path_self_heals_fossil(measure_mod, tmp_path, monkeypatch):
+    """Integration: the REAL _dispatch_collect hook path (not the private
+    helper) reconciles an existing script install's fossil. Proves FIX A is
+    wired into the dispatch, not just callable in isolation."""
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps(_settings([_hook(FOSSIL)])), encoding="utf-8")
+    monkeypatch.setattr(measure_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(measure_mod, "CLAUDE_DIR", tmp_path)
+    monkeypatch.setattr(measure_mod, "_running_under_hook", lambda: True)
+    monkeypatch.setattr(measure_mod, "collect_sessions", lambda **kw: None)
+    monkeypatch.setattr(measure_mod, "_read_config_flag", lambda key, default=0: 0)
+    monkeypatch.setattr(measure_mod, "_write_config_flag", lambda key, value: None)
+
+    measure_mod._dispatch_collect(["collect", "--quiet"])
+
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+    se_cmds = [h.get("command", "") for g in data["hooks"]["SessionEnd"] for h in g.get("hooks", []) if isinstance(h, dict)]
+    assert not any("collect --quiet &&" in c for c in se_cmds), (
+        f"_dispatch_collect hook path did not self-heal the fossil: {se_cmds}"
+    )
+    assert any("session-end-flush" in c for c in se_cmds), se_cmds
+
+
+def test_self_heal_reconcile_runs_under_a_deadline(measure_mod, tmp_path, monkeypatch):
+    """Boundedness: the self-heal wraps the reconcile in a HookDeadline budget,
+    so a stalled settings write self-terminates instead of holding the hook
+    pipe open (the exact re-wedge Sol flagged). Proven structurally: the budget
+    is installed around the reconcile and cleared after."""
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps(_settings([_hook(FOSSIL)])), encoding="utf-8")
+    monkeypatch.setattr(measure_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(measure_mod, "CLAUDE_DIR", tmp_path)
+    monkeypatch.setattr(measure_mod, "_read_config_flag", lambda key, default=0: 0)
+    monkeypatch.setattr(measure_mod, "_write_config_flag", lambda key, value: None)
+
+    events = []
+    sentinel = object()
+    monkeypatch.setattr(measure_mod, "_install_hook_budget", lambda n: events.append(("install", n)) or sentinel)
+    monkeypatch.setattr(measure_mod, "_clear_hook_budget", lambda d: events.append(("clear", d is sentinel)))
+    # reconcile must be called WHILE a budget is armed
+    def spy_reconcile():
+        assert events and events[-1][0] == "install" and events[-1][1] > 0, (
+            "reconcile ran without a hook budget armed -> unbounded, can re-wedge"
+        )
+        return {"reason": "ok", "rewritten": 1, "removed": 0, "stop_removed": 0}
+    monkeypatch.setattr(measure_mod, "_reconcile_sessionend_fossils", spy_reconcile)
+
+    measure_mod._maybe_self_heal_sessionend_fossils_on_hook()
+
+    assert ("install", 10) in events, f"self-heal did not arm a 10s budget: {events}"
+    assert events[-1] == ("clear", True), f"self-heal did not clear its budget: {events}"
