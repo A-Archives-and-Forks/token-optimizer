@@ -289,7 +289,8 @@ def test_claude_windows_hook_command_constant_is_bash_safe():
     assert "\\" not in command, "backslash path leaks into a bash command"
     # Space in the path must be single-quoted (POSIX), not list2cmdline-quoted.
     assert "'C:/Users/Test User/.claude/token-optimizer/scripts/measure.py'" in command
-    assert "collect --quiet" in command and "dashboard --quiet" in command
+    assert "session-end-flush --trigger end" in command
+    assert "collect --quiet" not in command and "dashboard --quiet" not in command
 
 
 def test_claude_windows_hook_command_constant_parses_under_bash():
@@ -366,19 +367,25 @@ def test_windows_legacy_nul_sessionend_hook_reads_as_not_current(monkeypatch):
     )
     legacy_settings = {"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": legacy}]}]}}
     assert measure._is_hook_current(legacy_settings) is False
-    # The bash-safe replacement IS current (no rewrite loop).
-    good = legacy.replace(">NUL 2>&1", ">/dev/null 2>&1")
-    good_settings = {"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": good}]}]}}
-    assert measure._is_hook_current(good_settings) is True
+    # The collect/dashboard shape is never current, even with bash-safe redirect.
+    good_fossil = legacy.replace(">NUL 2>&1", ">/dev/null 2>&1")
+    good_fossil_settings = {"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": good_fossil}]}]}}
+    assert measure._is_hook_current(good_fossil_settings) is False
+    flush = "python.exe C:/p/measure.py session-end-flush --trigger end >/dev/null 2>&1"
+    flush_settings = {"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": flush}]}]}}
+    assert measure._is_hook_current(flush_settings) is True
 
 
 def test_posix_nul_sessionend_hook_is_win32_gated(monkeypatch):
     """The >NUL staleness heuristic is win32-only; POSIX never emits >NUL."""
     measure = _load_full_measure()
     monkeypatch.setattr(measure.sys, "platform", "linux")
-    cmd = "python3 /p/measure.py collect --quiet && python3 /p/measure.py dashboard --quiet >NUL 2>&1"
-    settings = {"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": cmd}]}]}}
-    assert measure._is_hook_current(settings) is True
+    fossil = "python3 /p/measure.py collect --quiet && python3 /p/measure.py dashboard --quiet >NUL 2>&1"
+    fossil_settings = {"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": fossil}]}]}}
+    assert measure._is_hook_current(fossil_settings) is False
+    flush = "python3 /p/measure.py session-end-flush --trigger end >NUL 2>&1"
+    flush_settings = {"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": flush}]}]}}
+    assert measure._is_hook_current(flush_settings) is True
 
 
 def test_windows_resolved_command_matches_native_root_after_normalization():

@@ -80,7 +80,26 @@ def main() -> int:
     sys.path.insert(0, scripts_dir)
     sys.argv = [module_name, *script_args]
 
-    runpy.run_module(module_name, run_name="__main__", alter_sys=True)
+    # #114 Fix 3: last-resort wall-clock bound a few seconds under run.py's
+    # 120s wait. On Windows the host TerminateProcess-es run.py and bypasses
+    # its SIGTERM handler, orphaning this in-process grandchild while it
+    # still holds the hook stdout pipe. HookDeadline's daemon thread calls
+    # os._exit(0) so the pipe EOFs even when no parent is left to reap us.
+    # Fail-open if hook_runtime is missing (unit-test dummy plugin trees).
+    deadline = None
+    try:
+        from hook_runtime import HookDeadline
+        deadline = HookDeadline(110).start()
+    except Exception:
+        deadline = None
+    try:
+        runpy.run_module(module_name, run_name="__main__", alter_sys=True)
+    finally:
+        if deadline is not None:
+            try:
+                deadline.cancel()
+            except Exception:
+                pass
     return 0
 
 

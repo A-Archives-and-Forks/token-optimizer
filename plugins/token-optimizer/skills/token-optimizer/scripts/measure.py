@@ -6334,6 +6334,89 @@ def _dispatch_session_end_flush(args):
     return "deferred"
 
 
+def _dispatch_collect(args):
+    """CLI ``collect`` entry. Always bounded (#114 Fix 3).
+
+    A fossilized SessionEnd hook that chains the ``collect`` and ``dashboard``
+    subcommands never reaches ``session-end-flush``. The 20s HookDeadline is
+    the last line of defense so an escaped fossil still closes the hook pipe
+    on Windows.
+    """
+    days = 90
+    quiet = "--quiet" in args or "-q" in args
+    for i, a in enumerate(args):
+        if a == "--days" and i + 1 < len(args):
+            try:
+                days = int(args[i + 1])
+            except ValueError:
+                pass
+    rebuild = "--rebuild" in args
+    deadline = _install_hook_budget(20)
+    try:
+        collect_sessions(days=days, quiet=quiet, rebuild=rebuild)
+    except _HookTimeout:
+        pass
+    finally:
+        _clear_hook_budget(deadline)
+
+
+def _dispatch_dashboard(args):
+    """CLI ``dashboard`` entry. Standalone generation is bounded (#114 Fix 3).
+
+    Interactive ``--serve`` is unbounded on purpose: a user watching the
+    dashboard must not have the process killed after 20s.
+    """
+    cp = None
+    serve = False
+    serve_port = 8080
+    serve_host = "127.0.0.1"
+    for i, a in enumerate(args):
+        if a == "--coord-path" and i + 1 < len(args):
+            cp = args[i + 1]
+        elif a == "--serve":
+            serve = True
+        elif a == "--host" and i + 1 < len(args):
+            serve_host = args[i + 1]
+            serve = True
+        elif a == "--port" and i + 1 < len(args):
+            try:
+                serve_port = int(args[i + 1])
+            except ValueError:
+                print(f"[Error] Invalid --port value: {args[i + 1]}")
+                sys.exit(1)
+            serve = True
+    if not cp:
+        days = 30
+        quiet = "--quiet" in args or "-q" in args
+        for i, a in enumerate(args):
+            if a == "--days" and i + 1 < len(args):
+                try:
+                    days = int(args[i + 1])
+                except ValueError:
+                    pass
+        deadline = None if serve else _install_hook_budget(20)
+        try:
+            out = generate_standalone_dashboard(days=days, quiet=quiet)
+        except _HookTimeout:
+            out = None
+        finally:
+            _clear_hook_budget(deadline)
+        if out and serve:
+            _serve_dashboard(out, port=serve_port, host=serve_host)
+        elif out and not quiet:
+            _open_dashboard(fallback_filepath=out)
+        sys.exit(0 if out else 1)
+    deadline = None if serve else _install_hook_budget(20)
+    try:
+        out = generate_dashboard(cp)
+    except _HookTimeout:
+        out = None
+    finally:
+        _clear_hook_budget(deadline)
+    if serve and out:
+        _serve_dashboard(out, port=serve_port, host=serve_host)
+
+
 def _generate_codex_auto_recommendations(components, trends=None, days=30):
     """Generate Codex-native recommendations.
 
@@ -18823,11 +18906,11 @@ if sys.platform == "win32":
     _py = shlex.quote(str(sys.executable).replace("\\", "/"))
     _mp = shlex.quote(str(MEASURE_PY_PATH).replace("\\", "/"))
     HOOK_COMMAND = (
-        f"{_py} {_mp} collect --quiet && {_py} {_mp} dashboard --quiet"
+        f"{_py} {_mp} session-end-flush --trigger end"
         f" >/dev/null 2>&1"
     )
 else:
-    HOOK_COMMAND = f"python3 '{MEASURE_PY_PATH}' collect --quiet && python3 '{MEASURE_PY_PATH}' dashboard --quiet"
+    HOOK_COMMAND = f"python3 '{MEASURE_PY_PATH}' session-end-flush --trigger end"
 # Recognizes Token Optimizer's SessionEnd hook command: a script named
 # ``measure.py`` invoked with the ``collect`` or ``session-end-flush``
 # subcommand as its first positional argument. The path may be single-quoted
@@ -18922,11 +19005,33 @@ def _is_hook_installed(settings=None):
     return False
 
 
-def _is_hook_current(settings=None):
-    """Check if the installed hook includes dashboard regeneration (new format).
+def _sessionend_cmd_is_flush(cmd) -> bool:
+    """True when ``cmd`` is the current SessionEnd shape (session-end-flush)."""
+    if not isinstance(cmd, str) or not cmd:
+        return False
+    return bool(re.search(r"\bmeasure\.py['\"]?\s+session-end-flush\b", cmd))
 
-    Returns True if hook has both 'collect' and 'dashboard' in the command.
-    Returns False if only collect-only (old format) or not installed at all.
+
+def _sessionend_cmd_is_collect_fossil(cmd) -> bool:
+    """True when ``cmd`` is the #114 collect/dashboard SessionEnd fossil.
+
+    ``_TO_SESSION_END_CMD_RE`` matches both ``collect`` and ``session-end-flush``.
+    Anything that matches and is not the flush shape is the inline heavy fossil.
+    """
+    if not isinstance(cmd, str) or not cmd:
+        return False
+    if _sessionend_cmd_is_flush(cmd):
+        return False
+    return bool(_TO_SESSION_END_CMD_RE.search(cmd))
+
+
+def _is_hook_current(settings=None):
+    """True when the installed SessionEnd hook is the session-end-flush shape.
+
+    The collect-then-dashboard fossil (#114) is never current: it runs the
+    heavy flush inline and unbounded. The pre-#118 win32 cmd-null-redirect
+    form is also never current. setup_hook's upgrade branch rewrites anything
+    that returns False.
     """
     if settings is None:
         if not SETTINGS_PATH.exists():
@@ -18945,14 +19050,13 @@ def _is_hook_current(settings=None):
         hook_list = entry.get("hooks", []) if isinstance(entry, dict) else []
         for hook in hook_list:
             cmd = hook.get("command", "") if isinstance(hook, dict) else ""
-            if "measure.py" in cmd and "collect" in cmd and "dashboard" in cmd:
-                # #118: the pre-fix win32 SessionEnd command matched all three
-                # substrings but used a cmd.exe NUL-device redirect that breaks
-                # under Git Bash (literal NUL file + silent failure). Treat that
-                # legacy form as NOT current so setup_hook's upgrade branch
-                # rewrites it to the bash-safe >/dev/null form. Existing broken
-                # installs are the whole reported #118 population, so this is the
-                # only path that heals them.
+            if not isinstance(cmd, str):
+                continue
+            if _sessionend_cmd_is_collect_fossil(cmd):
+                return False
+            if _sessionend_cmd_is_flush(cmd):
+                # #118: a flush-shaped command that still uses the cmd.exe
+                # NUL-device redirect is not current on win32.
                 if sys.platform == "win32" and re.search(r">\s*NUL\b", cmd):
                     return False
                 return True
@@ -18974,7 +19078,7 @@ def _settings_lock():
     Prevents concurrent writes from silently overwriting each other.
     Contenders skip the mutation after 75ms rather than blocking a hook.
     """
-    lease_path = _SETTINGS_LOCK_PATH.with_suffix(".lease")
+    lease_path = SETTINGS_PATH.parent / ".settings.lease"
     with lease_lock(
         lease_path,
         deadline=current_deadline(),
@@ -19135,6 +19239,191 @@ def _remove_token_optimizer_session_end_hooks(settings: dict) -> int:
     return removed
 
 
+def _sessionend_has_current_flush(settings: dict) -> bool:
+    """True when settings.json already has a session-end-flush SessionEnd hook."""
+    hooks = settings.get("hooks") if isinstance(settings, dict) else None
+    if not isinstance(hooks, dict):
+        return False
+    session_end = hooks.get("SessionEnd")
+    if not isinstance(session_end, list):
+        return False
+    for group in session_end:
+        if not isinstance(group, dict):
+            continue
+        for hook in group.get("hooks", []) or []:
+            if isinstance(hook, dict) and _sessionend_cmd_is_flush(hook.get("command", "")):
+                return True
+    return False
+
+
+def _rewrite_collect_fossil_hook(hook: dict) -> dict:
+    """Rewrite a collect/dashboard fossil in place to HOOK_COMMAND.
+
+    Preserves type/async/timeout when present. Fossils written before
+    d1b0b53 lack async — add it so the host does not wait synchronously.
+    """
+    rewritten = dict(hook)
+    rewritten["type"] = hook.get("type") or "command"
+    rewritten["command"] = HOOK_COMMAND
+    if "async" not in rewritten:
+        rewritten["async"] = True
+    return rewritten
+
+
+def _reconcile_sessionend_fossils():
+    """Rename-aware heal for the #114 collect && dashboard settings.json fossil.
+
+    Called from run_ensure_health for BOTH plugin and script installs. If a
+    current-shape session-end-flush SessionEnd hook already exists, fossils
+    are removed. Otherwise each fossil is rewritten in place to HOOK_COMMAND
+    (preserving async/timeout; adding async:true when absent). Also drops
+    Stop-event collect / bare session-end-flush duplicates when the plugin
+    already provides Stop. Atomic, backed up, fail-open. Returns a result
+    dict so tests can assert the decision.
+    """
+    result = {"rewritten": 0, "removed": 0, "stop_removed": 0, "reason": "ok"}
+    try:
+        settings, _, ok = _read_settings_json_checked()
+        if not ok:
+            result["reason"] = "settings_unreadable"
+            return result
+        if not settings:
+            result["reason"] = "no_settings"
+            return result
+        hooks = settings.get("hooks")
+        if not isinstance(hooks, dict):
+            result["reason"] = "no_hooks"
+            return result
+
+        has_current = _sessionend_has_current_flush(settings)
+        mutated = False
+
+        session_end = hooks.get("SessionEnd")
+        if isinstance(session_end, list) and session_end:
+            new_groups = []
+            for group in session_end:
+                if not isinstance(group, dict):
+                    new_groups.append(group)
+                    continue
+                hook_list = group.get("hooks")
+                if not isinstance(hook_list, list):
+                    new_groups.append(group)
+                    continue
+                kept = []
+                for hook in hook_list:
+                    if not isinstance(hook, dict):
+                        kept.append(hook)
+                        continue
+                    cmd = hook.get("command", "")
+                    if not _sessionend_cmd_is_collect_fossil(cmd):
+                        kept.append(hook)
+                        continue
+                    if has_current:
+                        result["removed"] += 1
+                        mutated = True
+                        continue
+                    kept.append(_rewrite_collect_fossil_hook(hook))
+                    result["rewritten"] += 1
+                    mutated = True
+                    has_current = True
+                if kept:
+                    group = dict(group)
+                    group["hooks"] = kept
+                    new_groups.append(group)
+            if mutated:
+                if new_groups:
+                    hooks["SessionEnd"] = new_groups
+                else:
+                    hooks.pop("SessionEnd", None)
+
+        # Stop event: drop collect fossils and extra session-end-flush entries
+        # when a plugin-provided (or already-present) Stop flush exists. The
+        # first flush-shaped Stop hook is kept; extras and collect fossils go.
+        stop = hooks.get("Stop")
+        if isinstance(stop, list) and stop:
+            plugin_provides_stop_flush = False
+            try:
+                if _is_plugin_installed():
+                    plugin_hooks_path = _find_plugin_hooks_json()
+                    if plugin_hooks_path:
+                        plugin_hooks = json.loads(plugin_hooks_path.read_text(encoding="utf-8"))
+                        for group in (plugin_hooks.get("hooks") or {}).get("Stop") or []:
+                            if not isinstance(group, dict):
+                                continue
+                            for hook in group.get("hooks") or []:
+                                if isinstance(hook, dict) and _sessionend_cmd_is_flush(
+                                    hook.get("command", "")
+                                ):
+                                    plugin_provides_stop_flush = True
+                                    break
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                plugin_provides_stop_flush = False
+
+            saw_stop_flush = False
+            new_stop_groups = []
+            stop_mutated = False
+            for group in stop:
+                if not isinstance(group, dict):
+                    new_stop_groups.append(group)
+                    continue
+                hook_list = group.get("hooks")
+                if not isinstance(hook_list, list):
+                    new_stop_groups.append(group)
+                    continue
+                kept = []
+                for hook in hook_list:
+                    if not isinstance(hook, dict):
+                        kept.append(hook)
+                        continue
+                    cmd = hook.get("command", "")
+                    is_collect = _sessionend_cmd_is_collect_fossil(cmd)
+                    is_flush = _sessionend_cmd_is_flush(cmd)
+                    if is_collect:
+                        result["stop_removed"] += 1
+                        stop_mutated = True
+                        continue
+                    if is_flush:
+                        if plugin_provides_stop_flush or saw_stop_flush:
+                            result["stop_removed"] += 1
+                            stop_mutated = True
+                            continue
+                        saw_stop_flush = True
+                    kept.append(hook)
+                if kept:
+                    group = dict(group)
+                    group["hooks"] = kept
+                    new_stop_groups.append(group)
+            if stop_mutated:
+                mutated = True
+                if new_stop_groups:
+                    hooks["Stop"] = new_stop_groups
+                else:
+                    hooks.pop("Stop", None)
+
+        if not mutated:
+            result["reason"] = "nothing_to_do"
+            return result
+
+        backup_dir = CLAUDE_DIR / "_backups" / "token-optimizer"
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_path = backup_dir / f"settings.json.pre-fossil-reconcile-{ts}"
+            if SETTINGS_PATH.exists():
+                import shutil
+                shutil.copy2(str(SETTINGS_PATH), str(backup_path))
+        except OSError:
+            pass
+
+        if not _write_settings_atomic(settings):
+            result["reason"] = "write_skipped"
+            return result
+        return result
+    except Exception:
+        result["reason"] = "fail_open"
+        return result
+
+
 def setup_hook(dry_run=False, uninstall=False):
     """Install or uninstall the SessionEnd hook for automatic usage collection.
 
@@ -19224,14 +19513,16 @@ def setup_hook(dry_run=False, uninstall=False):
     hooks = settings["hooks"]
 
     if upgrading:
-        # Replace old collect-only hook with new collect+dashboard hook
+        # Replace the collect/dashboard fossil (#114) with session-end-flush.
         session_end = hooks.get("SessionEnd", [])
         if isinstance(session_end, list):
             for entry in session_end:
                 hook_list = entry.get("hooks", []) if isinstance(entry, dict) else []
                 for i, hook in enumerate(hook_list):
                     cmd = hook.get("command", "") if isinstance(hook, dict) else ""
-                    if "measure.py" in cmd and "collect" in cmd:
+                    if _sessionend_cmd_is_collect_fossil(cmd) or (
+                        "measure.py" in cmd and "collect" in cmd
+                    ):
                         hook_list[i] = new_hook
                         break
     elif "SessionEnd" not in hooks:
@@ -38466,6 +38757,21 @@ def run_ensure_health():
             last_check = _read_config_flag("last_hook_heal_check", 0)
             now = int(time.time())
             if now - int(last_check or 0) > 86400:  # 24h
+                # #114 Layer 2: rewrite/remove the collect&&dashboard fossil in
+                # BOTH install modes. Exact-identity dedup cannot match the
+                # renamed shape, and setup_all_hooks is additive-only.
+                try:
+                    fossil = _reconcile_sessionend_fossils()
+                    rewritten = fossil.get("rewritten", 0)
+                    removed_fossils = fossil.get("removed", 0) + fossil.get("stop_removed", 0)
+                    if rewritten or removed_fossils:
+                        print(
+                            "  [Token Optimizer] Reconciled SessionEnd fossil hook(s) in "
+                            f"settings.json (rewritten={rewritten}, removed={removed_fossils}). "
+                            "Restart Claude Code to fully apply."
+                        )
+                except Exception:
+                    pass
                 if _is_plugin_installed():
                     cleanup_result = _cleanup_duplicate_plugin_hooks_from_settings(dry_run=False)
                     removed = cleanup_result.get("removed", 0)
@@ -39468,47 +39774,7 @@ if __name__ == "__main__":
     elif args[0] == "compare":
         compare_snapshots()
     elif args[0] == "dashboard":
-        cp = None
-        serve = False
-        serve_port = 8080
-        serve_host = "127.0.0.1"
-        for i, a in enumerate(args):
-            if a == "--coord-path" and i + 1 < len(args):
-                cp = args[i + 1]
-            elif a == "--serve":
-                serve = True
-            elif a == "--host" and i + 1 < len(args):
-                serve_host = args[i + 1]
-                serve = True
-            elif a == "--port" and i + 1 < len(args):
-                try:
-                    serve_port = int(args[i + 1])
-                except ValueError:
-                    print(f"[Error] Invalid --port value: {args[i + 1]}")
-                    sys.exit(1)
-                serve = True
-        if not cp:
-            # Standalone mode: Trends + Health only
-            days = 30
-            quiet = "--quiet" in args or "-q" in args
-            for i, a in enumerate(args):
-                if a == "--days" and i + 1 < len(args):
-                    try:
-                        days = int(args[i + 1])
-                    except ValueError:
-                        pass
-            out = generate_standalone_dashboard(days=days, quiet=quiet)
-            if out and serve:
-                _serve_dashboard(out, port=serve_port, host=serve_host)
-            elif out and not quiet:
-                # v5.3.6: prefer the live bookmarkable URL over file://
-                # so /token-dashboard lands on the same address the user
-                # already bookmarked.
-                _open_dashboard(fallback_filepath=out)
-            sys.exit(0 if out else 1)
-        out = generate_dashboard(cp)
-        if serve:
-            _serve_dashboard(out, port=serve_port, host=serve_host)
+        _dispatch_dashboard(args)
     elif args[0] == "conversation":
         # Per-turn token breakdown for a session
         output_json = "--json" in args
@@ -39565,16 +39831,7 @@ if __name__ == "__main__":
             print("\n  Set with: measure.py pricing-tier <tier-name>")
             print()
     elif args[0] == "collect":
-        days = 90
-        quiet = "--quiet" in args or "-q" in args
-        for i, a in enumerate(args):
-            if a == "--days" and i + 1 < len(args):
-                try:
-                    days = int(args[i + 1])
-                except ValueError:
-                    pass
-        rebuild = "--rebuild" in args
-        collect_sessions(days=days, quiet=quiet, rebuild=rebuild)
+        _dispatch_collect(args)
     elif args[0] == "health":
         session_health()
     elif args[0] == "health-selfcheck":
