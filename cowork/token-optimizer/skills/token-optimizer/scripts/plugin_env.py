@@ -113,24 +113,44 @@ def resolve_plugin_data_dir() -> Path | None:
     """Return the active plugin-data directory.
 
     Priority:
-      1. Runtime-appropriate plugin data env var
-      2. installed_plugins.json lookup for the active marketplace install
-      3. Stable lexical glob fallback across token-optimizer-* data dirs
-      4. None (caller falls back to the legacy _backups/ path)
+      1. TOKEN_OPTIMIZER_PLUGIN_DATA (dedicated, unconditional).
+      2. CLAUDE_PLUGIN_DATA — accepted ONLY when the resolved path is a
+         declared identity of THIS plugin (present in installed_plugins.json
+         via _registered_plugin_data_dirs). A name merely starting with
+         "token-optimizer" is NOT proof.
+      3. installed_plugins.json lookup for the active marketplace install
+      4. Stable lexical glob fallback across token-optimizer-* data dirs
+      5. None (caller falls back to the legacy _backups/ path)
 
     All discovered paths are confined under the active runtime's plugin-data
     tree and reject symlinks. The env-var path must resolve under that runtime
     home.
     """
-    env_val = _plugin_data_env_value()
-    if env_val:
+    # Iterate env vars ourselves so a rejected CLAUDE_PLUGIN_DATA still lets
+    # TOKEN_OPTIMIZER_PLUGIN_DATA through (the old _plugin_data_env_value()
+    # stopped at the first non-empty var and would never see the dedicated one).
+    registered = None  # lazy
+    for env_var in _PLUGIN_DATA_ENV_VARS:
+        env_val = os.environ.get(env_var)
+        if not env_val:
+            continue
         try:
             env_path = Path(env_val)
             resolved = env_path.resolve(strict=False)
-            if _is_safe_subdir(resolved, _PLUGIN_DATA_BASE):
-                return resolved
         except (OSError, ValueError):
-            pass
+            continue
+        if not _is_safe_subdir(resolved, _PLUGIN_DATA_BASE):
+            continue
+        if env_var == "TOKEN_OPTIMIZER_PLUGIN_DATA":
+            return resolved  # dedicated — unconditional
+        # CLAUDE_PLUGIN_DATA: accept only when it is a declared identity.
+        if registered is None:
+            registered = {
+                r.resolve(strict=False) for r in _registered_plugin_data_dirs()
+            }
+        if resolved in registered:
+            return resolved
+        # Foreign plugin's CLAUDE_PLUGIN_DATA leaked in — skip to next env var.
 
     candidates = _registered_plugin_data_dirs()
 
