@@ -6369,6 +6369,20 @@ def _dispatch_collect(args):
     finally:
         _clear_hook_budget(deadline)
 
+    # #114 round 3 FIX A: existing-script-install self-heal. An old script
+    # install has the collect&&dashboard fossil in settings.json and NO
+    # ensure-health SessionStart hook, so run_ensure_health never reaches it.
+    # The fossil's OWN hook-path run reconciles settings.json here, removing
+    # the fossil going forward. Runs AFTER the flush and its 20s budget are
+    # cleared (never delays/blocks the flush), throttled to 24h, fail-open,
+    # non-blocking -- a reconcile error must not affect the hook. Gated on
+    # the hook path so an interactive terminal `collect` never triggers it.
+    if _running_under_hook():
+        try:
+            _maybe_self_heal_sessionend_fossils_on_hook()
+        except Exception:
+            pass
+
 
 def _dispatch_dashboard(args):
     """CLI ``dashboard`` entry. Bounded ONLY on the hook path (#114 Fix 3/4).
@@ -19112,12 +19126,67 @@ def _settings_lock():
         yield acquired
 
 
+def _write_settings_atomic_locked(settings_data):
+    """Atomic settings.json write assuming the settings lease is ALREADY held.
+
+    This is the lock-free body of ``_write_settings_atomic``, extracted so
+    ``_reconcile_sessionend_fossils`` can hold ``_settings_lock()`` across
+    fresh-read + re-apply + write as ONE critical section (#114 Fix 6, round 3).
+    Calling ``_write_settings_atomic`` from inside a held ``_settings_lock()``
+    would re-acquire the non-reentrant lease and deadlock, so callers that
+    already hold the lease MUST use this primitive instead.
+
+    Never call this without already holding ``_settings_lock()``; it provides
+    no serialization of its own. Same tempfile + os.replace + mode/symlink
+    semantics as ``_write_settings_atomic`` (see #106). Returns True iff the
+    write landed.
+    """
+    # #106: write THROUGH a symlink and preserve the mode.
+    # os.replace onto the link path detaches it, turning a dotfiles-managed
+    # symlink into a regular file (the user's repo silently stops tracking
+    # their settings) and dropping 0644 to mkstemp's 0600. Resolve the link
+    # first so the temp file lands in the real target's directory, and copy
+    # the destination's existing mode onto it.
+    try:
+        dest = SETTINGS_PATH.resolve(strict=False)
+    except (OSError, ValueError):
+        dest = SETTINGS_PATH
+    try:
+        dest_mode = stat.S_IMODE(os.stat(dest).st_mode)
+    except OSError:
+        dest_mode = None
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=str(dest.parent),
+        prefix=".settings-",
+        suffix=".json",
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(settings_data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        if dest_mode is not None:
+            try:
+                os.chmod(tmp_path, dest_mode)
+            except OSError:
+                pass
+        os.replace(tmp_path, str(dest))
+        tmp_path = None  # successfully replaced; do not unlink the destination
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    return True
+
+
 def _write_settings_atomic(settings_data):
     """Write settings.json atomically using tempfile + os.replace().
 
-    Acquires an advisory file lock to prevent concurrent writes from
-    clobbering each other (e.g., during SessionStart when multiple hooks
-    may modify settings.json).
+    Acquires the advisory ``_settings_lock()`` lease to prevent concurrent
+    writes from clobbering each other (e.g., during SessionStart when
+    multiple hooks may modify settings.json), then delegates the actual
+    tempfile + os.replace to ``_write_settings_atomic_locked``.
 
     Uses try/finally (not try/except Exception) so cleanup also runs when
     _HookTimeout (a BaseException) fires mid-write. Setting tmp_path to
@@ -19132,47 +19201,16 @@ def _write_settings_atomic(settings_data):
     write that never happened, leaving the dangling statusLine #106 exists to
     fix. Existing fire-and-forget callers can ignore the return value; the
     previous behavior was an implicit None, which is falsey either way.
+
+    Callers that already hold ``_settings_lock()`` (e.g.
+    ``_reconcile_sessionend_fossils``) MUST call
+    ``_write_settings_atomic_locked`` instead -- this primitive would
+    re-acquire the non-reentrant lease and deadlock.
     """
     with _settings_lock() as acquired:
         if not acquired:
             return False
-        # #106: write THROUGH a symlink and preserve the mode.
-        # os.replace onto the link path detaches it, turning a dotfiles-managed
-        # symlink into a regular file (the user's repo silently stops tracking
-        # their settings) and dropping 0644 to mkstemp's 0600. Resolve the link
-        # first so the temp file lands in the real target's directory, and copy
-        # the destination's existing mode onto it.
-        try:
-            dest = SETTINGS_PATH.resolve(strict=False)
-        except (OSError, ValueError):
-            dest = SETTINGS_PATH
-        try:
-            dest_mode = stat.S_IMODE(os.stat(dest).st_mode)
-        except OSError:
-            dest_mode = None
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            dir=str(dest.parent),
-            prefix=".settings-",
-            suffix=".json",
-        )
-        try:
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                json.dump(settings_data, f, indent=2, ensure_ascii=False)
-                f.write("\n")
-            if dest_mode is not None:
-                try:
-                    os.chmod(tmp_path, dest_mode)
-                except OSError:
-                    pass
-            os.replace(tmp_path, str(dest))
-            tmp_path = None  # successfully replaced; do not unlink the destination
-        finally:
-            if tmp_path is not None:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-    return True
+        return _write_settings_atomic_locked(settings_data)
 
 
 # Env vars that should be auto-removed from settings.json.
@@ -19427,11 +19465,19 @@ def _apply_sessionend_fossil_reconcile(settings, result):
 def _reconcile_sessionend_fossils():
     """Rename-aware heal for the #114 collect && dashboard settings.json fossil.
 
-    Called from run_ensure_health, which the ``ensure-health`` SessionStart
-    hook runs for BOTH plugin installs (hooks/hooks.json) and script installs
-    (examples/hooks-starter.json SessionStart, wired in #114 Fix 2). Script
-    installs are historically the fossil-producing population, so the heal
-    must reach them too.
+    Reachability (#114 round 3, honest):
+      * Plugin installs: the SessionStart ``ensure-health`` hook
+        (hooks/hooks.json) calls run_ensure_health, which calls this.
+      * NEW script installs: the updated examples/hooks-starter.json
+        SessionStart command runs ensure-health, which calls this.
+      * EXISTING script installs: their old settings.json has the fossil and
+        NO ensure-health hook, so run_ensure_health never runs for them. They
+        are reached by the FIX A self-heal in _dispatch_collect: when their
+        fossil invokes post-fix measure.py ``collect`` on the hook path, that
+        run calls this once (throttled, fail-open) and removes/rewrites the
+        fossil going forward. A separate pre-fix measure.py copy on disk is
+        NOT reached until the user updates -- no code path can reach a copy
+        that never runs this module.
 
     If a current-shape session-end-flush SessionEnd hook already exists,
     fossils are removed. Otherwise each fossil is rewritten in place to
@@ -19440,15 +19486,18 @@ def _reconcile_sessionend_fossils():
     the plugin already provides Stop. Atomic, backed up, fail-open. Returns a
     result dict so tests can assert the decision.
 
-    #114 Fix 6: the initial read is unlocked (a cheap probe to decide whether
-    any heal work exists, avoiding lease/backup churn when there is none).
-    The mutation is then re-applied to a FRESH read taken under the lease
-    right before the write, so a concurrent writer (another hook, the user, a
-    settings sync) landing between the probe and the lease cannot be clobbered
-    -- mirrors the sibling re-read-under-lease pattern in cleanup (~line
-    23457). A failed re-read or denied lease is a silent no-op (fail-open):
-    the fossil persists, which is recoverable; an overwritten settings.json
-    is not.
+    #114 Fix 6 (round 3): the initial read is unlocked (a cheap probe to
+    decide whether any heal work exists, avoiding lease/backup churn when
+    there is none). Once work is found, ``_settings_lock()`` is held across
+    fresh-read + re-apply + atomic-write as ONE critical section, so a
+    concurrent writer (another hook, the user, a settings sync) cannot land
+    between the fresh read and the write and be clobbered -- the previous
+    code re-read OUTSIDE the lease and only _write_settings_atomic acquired
+    it internally, leaving a lost-update window. The write uses
+    ``_write_settings_atomic_locked``, which does NOT reacquire the lease
+    (the lease is non-reentrant; reacquiring it here would deadlock). A
+    denied lease or a bad re-read is a silent no-op (fail-open): the fossil
+    persists, which is recoverable; an overwritten settings.json is not.
     """
     result = {"rewritten": 0, "removed": 0, "stop_removed": 0, "reason": "ok"}
     try:
@@ -19466,46 +19515,101 @@ def _reconcile_sessionend_fossils():
         # Unlocked probe: decide whether any heal work exists without taking
         # the lease or writing a backup. `settings` is mutated in place here
         # but discarded after the decision -- the authoritative mutation is
-        # re-applied to a fresh read below.
+        # re-applied to a fresh read under the lease below.
         if not _apply_sessionend_fossil_reconcile(settings, result):
             result["reason"] = "nothing_to_do"
             return result
 
-        backup_dir = CLAUDE_DIR / "_backups" / "token-optimizer"
-        try:
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-            backup_path = backup_dir / f"settings.json.pre-fossil-reconcile-{ts}"
-            if SETTINGS_PATH.exists():
-                import shutil
-                shutil.copy2(str(SETTINGS_PATH), str(backup_path))
-        except OSError:
-            pass
+        # #114 Fix 6 (round 3): hold _settings_lock() across fresh-read +
+        # re-apply + atomic-write as ONE critical section. The previous code
+        # re-read OUTSIDE the lease and only _write_settings_atomic acquired
+        # it internally, so a concurrent writer could land between the fresh
+        # read and the lease acquisition and be clobbered. The write uses
+        # _write_settings_atomic_locked, which performs the tempfile+replace
+        # WITHOUT reacquiring _settings_lock() (the lease is non-reentrant;
+        # reacquiring it here would deadlock). A denied lease or bad re-read
+        # is fail-open (the fossil stays; recoverable) and retries on the
+        # next hook fire.
+        with _settings_lock() as acquired:
+            if not acquired:
+                result["reason"] = "write_skipped"
+                return result
 
-        # #114 Fix 6: re-read fresh under the lease and re-apply the mutation
-        # right before writing. Reset the counters so they reflect only the
-        # fresh re-application, not the unlocked probe. A bad re-read or a
-        # denied lease is fail-open (the fossil stays; recoverable).
-        fresh, _, read_ok = _read_settings_json_checked()
-        result["rewritten"] = 0
-        result["removed"] = 0
-        result["stop_removed"] = 0
-        if not read_ok or not fresh:
-            result["reason"] = "write_skipped"
-            return result
-        if not isinstance(fresh.get("hooks"), dict):
-            result["reason"] = "no_hooks"
-            return result
-        if not _apply_sessionend_fossil_reconcile(fresh, result):
-            result["reason"] = "nothing_to_do"
-            return result
-        if not _write_settings_atomic(fresh):
-            result["reason"] = "write_skipped"
-            return result
+            # Backup the on-disk state we are about to overwrite, taken UNDER
+            # the lease so it reflects exactly the pre-mutation file (a
+            # backup taken outside the lease could capture a state a
+            # concurrent writer already superseded).
+            backup_dir = CLAUDE_DIR / "_backups" / "token-optimizer"
+            try:
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                backup_path = backup_dir / f"settings.json.pre-fossil-reconcile-{ts}"
+                if SETTINGS_PATH.exists():
+                    import shutil
+                    shutil.copy2(str(SETTINGS_PATH), str(backup_path))
+            except OSError:
+                pass
+
+            # Fresh read UNDER the lease; reset counters so they reflect only
+            # this re-application, not the unlocked probe.
+            fresh, _, read_ok = _read_settings_json_checked()
+            result["rewritten"] = 0
+            result["removed"] = 0
+            result["stop_removed"] = 0
+            if not read_ok or not fresh:
+                result["reason"] = "write_skipped"
+                return result
+            if not isinstance(fresh.get("hooks"), dict):
+                result["reason"] = "no_hooks"
+                return result
+            if not _apply_sessionend_fossil_reconcile(fresh, result):
+                result["reason"] = "nothing_to_do"
+                return result
+            if not _write_settings_atomic_locked(fresh):
+                result["reason"] = "write_skipped"
+                return result
         return result
     except Exception:
         result["reason"] = "fail_open"
         return result
+
+
+def _maybe_self_heal_sessionend_fossils_on_hook():
+    """Hook-path self-heal for the #114 fossil (#114 round 3, FIX A).
+
+    The SessionStart ``ensure-health`` hook reaches plugin installs and NEW
+    script installs (via the updated examples/hooks-starter.json). An EXISTING
+    script install has an old settings.json with the ``collect && dashboard``
+    fossil and NO ``ensure-health`` hook, so ``run_ensure_health`` never runs
+    for it and ``_reconcile_sessionend_fossils`` is unreachable from there.
+    The fossil's OWN run closes that gap: when post-fix measure.py runs
+    ``collect`` on the hook path, this opportunistically calls
+    ``_reconcile_sessionend_fossils`` once, so the fossil's own execution
+    removes/rewrites it in settings.json going forward -- reaching the
+    population the SessionStart hook cannot.
+
+    Throttled to once per 24h via the shared ``last_hook_heal_check`` config
+    flag (the same flag run_ensure_health uses), so it does not run on every
+    hook fire. Fail-open and non-blocking: any error is swallowed so a
+    reconcile failure can never affect the hook flush. A lease miss
+    (``reason == "write_skipped"``) leaves the flag untouched so the next
+    hook fire retries; any other outcome (healed, nothing-to-do,
+    unreadable) advances the flag to suppress redundant retries for 24h.
+
+    Never raises. Called from ``_dispatch_collect`` AFTER the collect flush
+    and its 20s budget are cleared, so it never delays or blocks the flush.
+    """
+    try:
+        last_check = _read_config_flag("last_hook_heal_check", 0)
+        now = int(time.time())
+        if now - int(last_check or 0) <= 86400:  # 24h
+            return
+        fossil = _reconcile_sessionend_fossils()
+        # write_skipped = lease denied or fresh read failed -> retry next fire.
+        if fossil.get("reason", "ok") != "write_skipped":
+            _write_config_flag("last_hook_heal_check", now)
+    except Exception:
+        pass
 
 
 def setup_hook(dry_run=False, uninstall=False):

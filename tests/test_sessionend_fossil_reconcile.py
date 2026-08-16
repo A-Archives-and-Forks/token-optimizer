@@ -283,3 +283,116 @@ def test_reconcile_preserves_unrelated_hook_when_removing_fossil(measure_mod, tm
     assert UNRELATED in cmds, f"unrelated same-group hook was dropped on remove: {cmds}"
     assert not any("collect --quiet &&" in c for c in cmds), cmds
     assert any(c == CURRENT for c in cmds), cmds
+
+
+# ---------------------------------------------------------------------------
+# Round 3 (Sol review follow-up): the two gaps Sol found were STILL-OPEN.
+# ---------------------------------------------------------------------------
+
+
+def test_existing_script_install_self_heals_on_hook_collect(measure_mod, tmp_path, monkeypatch):
+    """FIX A: an EXISTING script install (fossil in settings.json, NO
+    ensure-health hook) heals itself when its own fossil runs collect on the
+    hook path. This is the population the SessionStart ensure-health hook
+    cannot reach; the SessionStart hook is deliberately absent from the fixture.
+    """
+    settings_path = tmp_path / "settings.json"
+    # An old script install: only the fossil SessionEnd hook, no SessionStart
+    # ensure-health hook anywhere.
+    payload = _settings([_hook(FOSSIL)])
+    assert "SessionStart" not in payload["hooks"]  # fixture sanity: no ensure-health
+    settings_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(measure_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(measure_mod, "CLAUDE_DIR", tmp_path)
+    # Force the 24h throttle open (pretend it never ran) and swallow the flag write.
+    monkeypatch.setattr(measure_mod, "_read_config_flag", lambda key, default=0: 0)
+    written = {}
+    monkeypatch.setattr(measure_mod, "_write_config_flag", lambda key, value: written.__setitem__(key, value))
+
+    measure_mod._maybe_self_heal_sessionend_fossils_on_hook()
+
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+    se_cmds = [
+        h.get("command", "")
+        for g in data["hooks"]["SessionEnd"]
+        for h in g.get("hooks", [])
+        if isinstance(h, dict)
+    ]
+    assert not any("collect --quiet &&" in c for c in se_cmds), (
+        f"self-heal did not remove the fossil for an existing script install: {se_cmds}"
+    )
+    assert any("session-end-flush" in c for c in se_cmds), se_cmds
+    # throttle flag advanced so it does not re-run every hook fire
+    assert written.get("last_hook_heal_check")
+
+
+def test_self_heal_throttled_within_24h(measure_mod, tmp_path, monkeypatch):
+    """The self-heal must NOT reconcile when the 24h throttle is fresh."""
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps(_settings([_hook(FOSSIL)])), encoding="utf-8")
+    monkeypatch.setattr(measure_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(measure_mod, "CLAUDE_DIR", tmp_path)
+    import time as _t
+    monkeypatch.setattr(measure_mod, "_read_config_flag", lambda key, default=0: int(_t.time()))
+    called = {"n": 0}
+    orig = measure_mod._reconcile_sessionend_fossils
+    monkeypatch.setattr(measure_mod, "_reconcile_sessionend_fossils",
+                        lambda: (called.__setitem__("n", called["n"] + 1), orig())[1])
+    measure_mod._maybe_self_heal_sessionend_fossils_on_hook()
+    assert called["n"] == 0, "self-heal ran despite a fresh 24h throttle"
+
+
+def test_reconcile_reads_and_writes_under_the_lease(measure_mod, tmp_path, monkeypatch):
+    """FIX B: the fresh read + re-apply + atomic write must all happen INSIDE
+    the held _settings_lock() (one critical section), so a concurrent writer
+    cannot land between the fresh read and the write. Proven by recording
+    whether the lease is held at the moment of the fresh read and the write
+    (safe: no nested acquire, which could block on the non-reentrant lease).
+    """
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps(_settings([_hook(FOSSIL)])), encoding="utf-8")
+    monkeypatch.setattr(measure_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(measure_mod, "CLAUDE_DIR", tmp_path)
+
+    import contextlib
+    state = {"held": False, "read_held": [], "write_held": None}
+
+    orig_lock = measure_mod._settings_lock
+
+    @contextlib.contextmanager
+    def spy_lock():
+        with orig_lock() as acquired:
+            state["held"] = True
+            try:
+                yield acquired
+            finally:
+                state["held"] = False
+
+    orig_read = measure_mod._read_settings_json_checked
+    def spy_read():
+        state["read_held"].append(state["held"])
+        return orig_read()
+
+    orig_write = measure_mod._write_settings_atomic_locked
+    def spy_write(data):
+        state["write_held"] = state["held"]
+        return orig_write(data)
+
+    monkeypatch.setattr(measure_mod, "_settings_lock", spy_lock)
+    monkeypatch.setattr(measure_mod, "_read_settings_json_checked", spy_read)
+    monkeypatch.setattr(measure_mod, "_write_settings_atomic_locked", spy_write)
+
+    result = measure_mod._reconcile_sessionend_fossils()
+
+    # The unlocked probe read is first (held=False); the authoritative fresh
+    # read is the LAST read and must be under the lease; the write too.
+    assert state["read_held"], "no reads happened"
+    assert state["read_held"][0] is False, "probe read should be the unlocked cheap check"
+    assert state["read_held"][-1] is True, (
+        f"fresh read was NOT under the lease (lost-update window still open): {state['read_held']}"
+    )
+    assert state["write_held"] is True, "write was not under the lease"
+    # and the reconcile still did its job
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+    se_cmds = [h.get("command", "") for g in data["hooks"]["SessionEnd"] for h in g.get("hooks", []) if isinstance(h, dict)]
+    assert not any("collect --quiet &&" in c for c in se_cmds), se_cmds
