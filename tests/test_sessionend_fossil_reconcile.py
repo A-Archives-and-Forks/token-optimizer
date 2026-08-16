@@ -427,31 +427,30 @@ def test_dispatch_collect_on_hook_path_self_heals_fossil(measure_mod, tmp_path, 
     assert any("session-end-flush" in c for c in se_cmds), se_cmds
 
 
-def test_self_heal_reconcile_runs_under_a_deadline(measure_mod, tmp_path, monkeypatch):
-    """Boundedness: the self-heal wraps the reconcile in a HookDeadline budget,
-    so a stalled settings write self-terminates instead of holding the hook
-    pipe open (the exact re-wedge Sol flagged). Proven structurally: the budget
-    is installed around the reconcile and cleared after."""
-    settings_path = tmp_path / "settings.json"
-    settings_path.write_text(json.dumps(_settings([_hook(FOSSIL)])), encoding="utf-8")
-    monkeypatch.setattr(measure_mod, "SETTINGS_PATH", settings_path)
-    monkeypatch.setattr(measure_mod, "CLAUDE_DIR", tmp_path)
-    monkeypatch.setattr(measure_mod, "_read_config_flag", lambda key, default=0: 0)
-    monkeypatch.setattr(measure_mod, "_write_config_flag", lambda key, value: None)
-
+def test_self_heal_whole_tail_runs_under_a_deadline(measure_mod, tmp_path, monkeypatch):
+    """Boundedness: the deadline must cover the ENTIRE self-heal tail -- the
+    throttle read, the reconcile, AND the throttle write -- because each does
+    synchronous filesystem I/O that could stall and hold the hook pipe open
+    (the re-wedge Sol flagged, incl. _write_config_flag's dir-create/lease/
+    temp-write/os.replace). Records the exact order and asserts install is
+    FIRST, clear is LAST, and every I/O step happens while armed."""
     events = []
     sentinel = object()
     monkeypatch.setattr(measure_mod, "_install_hook_budget", lambda n: events.append(("install", n)) or sentinel)
     monkeypatch.setattr(measure_mod, "_clear_hook_budget", lambda d: events.append(("clear", d is sentinel)))
-    # reconcile must be called WHILE a budget is armed
-    def spy_reconcile():
-        assert events and events[-1][0] == "install" and events[-1][1] > 0, (
-            "reconcile ran without a hook budget armed -> unbounded, can re-wedge"
-        )
-        return {"reason": "ok", "rewritten": 1, "removed": 0, "stop_removed": 0}
-    monkeypatch.setattr(measure_mod, "_reconcile_sessionend_fossils", spy_reconcile)
+    monkeypatch.setattr(measure_mod, "_read_config_flag", lambda key, default=0: events.append(("read_flag", key)) or 0)
+    monkeypatch.setattr(measure_mod, "_write_config_flag", lambda key, value: events.append(("write_flag", key)))
+    monkeypatch.setattr(measure_mod, "_reconcile_sessionend_fossils",
+                        lambda: events.append(("reconcile",)) or {"reason": "ok", "rewritten": 1})
 
     measure_mod._maybe_self_heal_sessionend_fossils_on_hook()
 
-    assert ("install", 10) in events, f"self-heal did not arm a 10s budget: {events}"
-    assert events[-1] == ("clear", True), f"self-heal did not clear its budget: {events}"
+    names = [e[0] for e in events]
+    assert names[0] == "install" and events[0][1] == 10, f"budget not armed first: {events}"
+    assert names[-1] == "clear" and events[-1][1] is True, f"budget not cleared last: {events}"
+    # every filesystem step is bracketed by install ... clear
+    for step in ("read_flag", "reconcile", "write_flag"):
+        assert step in names, f"{step} did not run: {events}"
+        assert 0 < names.index(step) < len(names) - 1, (
+            f"{step} ran OUTSIDE the deadline bracket -> unbounded, can re-wedge: {events}"
+        )

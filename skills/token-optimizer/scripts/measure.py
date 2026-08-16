@@ -19602,28 +19602,30 @@ def _maybe_self_heal_sessionend_fossils_on_hook():
     Never raises. Called from ``_dispatch_collect`` AFTER the collect flush
     and its 20s budget are cleared, so it never delays or blocks the flush.
     """
+    # Bound the ENTIRE self-heal with one short deadline, installed before the
+    # first filesystem touch (the throttle read) and cleared only after the
+    # last (the throttle write). Every step here -- _read_config_flag, the
+    # reconcile's settings read/backup/write, and _write_config_flag's own
+    # dir-create/lease/temp-write/os.replace -- is synchronous I/O that, on a
+    # stalled filesystem, would otherwise hold the hook's stdout pipe open
+    # unbounded and re-wedge the very hang #114 fixes (the collect budget was
+    # already cleared by the caller). HookDeadline os._exit(0)s on expiry, so
+    # the process exits and the pipe EOFs no matter WHICH step stalls; the flag
+    # stays unadvanced so the heal retries on the next hook fire.
+    deadline = _install_hook_budget(10)
     try:
         last_check = _read_config_flag("last_hook_heal_check", 0)
         now = int(time.time())
         if now - int(last_check or 0) <= 86400:  # 24h
             return
-        # Bound the self-heal with its own short deadline. The reconcile does
-        # synchronous settings.json read/backup/write; on a stalled filesystem
-        # that could otherwise hold the hook's stdout pipe open unbounded and
-        # re-wedge the very hang #114 fixes (the collect budget was already
-        # cleared by the caller). HookDeadline os._exit(0)s on expiry -> the
-        # process exits and the pipe EOFs; the flag stays unadvanced so the
-        # heal retries on the next hook fire.
-        deadline = _install_hook_budget(10)
-        try:
-            fossil = _reconcile_sessionend_fossils()
-        finally:
-            _clear_hook_budget(deadline)
+        fossil = _reconcile_sessionend_fossils()
         # write_skipped = lease denied or fresh read failed -> retry next fire.
         if fossil.get("reason", "ok") != "write_skipped":
             _write_config_flag("last_hook_heal_check", now)
     except Exception:
         pass
+    finally:
+        _clear_hook_budget(deadline)
 
 
 def setup_hook(dry_run=False, uninstall=False):
