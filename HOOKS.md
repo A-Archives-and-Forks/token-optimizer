@@ -38,8 +38,7 @@ Host platform tool call
 | | `measure.py session-end-flush --trigger stop --defer` | Deferred session metrics flush | Session transcript, trends.db | trends.db (session metrics) |
 | **SessionEnd** | `measure.py session-end-flush` (async, 60s) | Full session flush: metrics + dashboard + checkpoint | Session transcript, trends.db | trends.db, dashboard.html, checkpoint |
 | **StopFailure** | `measure.py compact-capture --trigger stop-failure` | Checkpoint on failure | Session transcript | Checkpoint markdown |
-| **UserPromptSubmit** (x2) | `measure.py quality-cache --warn` | Quality warning injection | quality-cache-*.json | None (stdout injection) |
-| | `measure.py prompt-continuity` | Session continuity hint | Checkpoint files, config.json | None (stdout injection) |
+| **UserPromptSubmit** (x1) | `userpromptsubmit_runner.py` | Consolidated dispatcher: prompt-continuity, verbosity steer, quality-cache warn, and (harness-gated) ensure-health, forced cache warm, compact-restore | quality-cache-*.json, checkpoint files, config.json, settings.json | None (stdout injection) |
 | **PostToolUse[Bash\|Read\|...]** | `archive_result.py --quiet` | Archive tool result for retrieval | Tool output (stdin) | tool-archive JSON (credential-redacted) |
 | | `context_intel.py --quiet` | Context intelligence scoring | Tool output (stdin) | Session store (activity log) |
 | **PostToolUse[Edit\|Write\|...]** | `read_cache.py --invalidate --quiet` | Invalidate read cache on file writes | None | Session store (entry invalidated) |

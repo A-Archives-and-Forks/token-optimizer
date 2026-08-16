@@ -366,7 +366,7 @@ Disable: `TOKEN_OPTIMIZER_LOOP_DETECTION=0`
 
 ### UserPromptSubmit Hook
 
-Every prompt fires the `UserPromptSubmit` hook, which runs the per-turn work: quality-cache warn tick, prompt-continuity hint, verbosity steer, and (in harness/container/Cowork contexts) the once-per-session ensure-health, forced cache warm, and compact-restore pointer. These six subcommands share one `measure.py` import inside a single dispatcher (`hooks/userpromptsubmit_runner.py`), so one prompt spawns three processes, not eighteen.
+Every prompt fires the `UserPromptSubmit` hook, which runs the per-turn work: prompt-continuity hint, verbosity steer, quality-cache warn tick, and (in harness/container/Cowork contexts) the once-per-session ensure-health, forced cache warm, and compact-restore pointer. These six subcommands share one `measure.py` import inside a single dispatcher (`hooks/userpromptsubmit_runner.py`), so one prompt spawns three processes, not eighteen. The dispatcher uses one shared deadline (18s, 2s margin under the 20s hooks.json timeout) with fair-share budgeting across subcommands, and buffers all stdout through a single emitter for controlled, host-consumable output.
 
 Disable the entire `UserPromptSubmit` path: `TOKEN_OPTIMIZER_HOOKS_USERPROMPTSUBMIT=0`. Checked before `measure.py` is imported, so the opt-out costs zero per prompt. The other hook events (PreToolUse, PostToolUse, SessionStart, Stop, etc.) are unaffected.
 

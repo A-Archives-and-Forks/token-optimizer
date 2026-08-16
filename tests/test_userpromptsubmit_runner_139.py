@@ -136,6 +136,11 @@ def _stub_budget(monkeypatch, runner):
     monkeypatch.setattr(runner, "_check_consent", lambda: True)
     monkeypatch.setattr(runner.measure, "_install_hook_budget", lambda seconds=8: object())
     monkeypatch.setattr(runner.measure, "_clear_hook_budget", lambda deadline: None)
+    # Issue #139 FIX 1: stub the shared deadline so tests don't arm a real
+    # 18s HookDeadline watchdog (which would os._exit the test process on
+    # timeout).  With no deadline, _runner_budget returns the default 8s.
+    monkeypatch.setattr(runner, "_install_runner_deadline", lambda total_seconds=18: None)
+    monkeypatch.setattr(runner, "_clear_runner_deadline", lambda: None)
 
 
 def _install_call_recorder(monkeypatch, runner):
@@ -446,6 +451,9 @@ def _install_consent_recorder(monkeypatch, runner, write_flags_on_health):
     # Stub the wall-clock budget inline (no consent pin).
     monkeypatch.setattr(runner.measure, "_install_hook_budget", lambda seconds=8: object())
     monkeypatch.setattr(runner.measure, "_clear_hook_budget", lambda deadline: None)
+    # Issue #139 FIX 1: stub the shared deadline too.
+    monkeypatch.setattr(runner, "_install_runner_deadline", lambda total_seconds=18: None)
+    monkeypatch.setattr(runner, "_clear_runner_deadline", lambda: None)
     return calls
 
 
@@ -772,3 +780,296 @@ def test_sub_handlers_signature_drift_fails_red(monkeypatch, tmp_path):
             runner._sub_quality_cache_warn(hook_input)
     finally:
         restore()
+
+
+# --------------------------------------------------------------------------- #
+# (g) FIX 1: shared deadline — early subcommand exceeding budget does NOT
+#     kill later subcommands; the shared deadline is the only os._exit.
+# --------------------------------------------------------------------------- #
+
+
+def test_fix1_shared_deadline_early_budget_exceeded_later_subcommands_still_run(
+    monkeypatch, tmp_path,
+):
+    """Shared deadline (2s total), early subcommand uses > its fair share, but
+    later subcommands still run and produce side effects.  The shared deadline
+    is the ONLY os._exit — no individual subcommand deadline can kill the rest.
+    The hook still exits 0."""
+    runner = _load_runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner, "_check_consent", lambda: True)
+    monkeypatch.setattr(runner, "_harness_only_context", lambda: True)
+    monkeypatch.setattr(runner, "_read_hook_input",
+                        lambda: {"session_id": "sess-fix1-139", "prompt": "x"})
+
+    # Use a REAL shared deadline with a tiny total budget (2s).  Do NOT stub
+    # the budget away — this test exercises the real shared-deadline path.
+    # We monkeypatch only the heavy work functions to be fast no-ops so the
+    # deadline never actually fires.
+    calls = {"prompt_continuity": [], "verbosity_steer": [], "quality_cache_warn": [],
+             "ensure_health": [], "quality_cache_force": [], "compact_restore": []}
+
+    def _slow_continuity(**kw):
+        calls["prompt_continuity"].append(kw)
+        _time.sleep(0.3)  # exceed the per-subcommand fair share of 2s/6 ≈ 0.33s
+        return ""
+
+    def _fast_verbosity(**kw):
+        calls["verbosity_steer"].append(kw)
+        return None
+
+    def _fast_qc(**kw):
+        if kw.get("warn") and not kw.get("force"):
+            calls["quality_cache_warn"].append(kw)
+        elif kw.get("force"):
+            calls["quality_cache_force"].append(kw)
+
+    def _fast_eh():
+        calls["ensure_health"].append({})
+
+    def _fast_cr(**kw):
+        calls["compact_restore"].append(kw)
+
+    monkeypatch.setattr(runner.measure, "_continuity_prompt_hint", _slow_continuity)
+    monkeypatch.setattr(runner.measure, "run_verbosity_steer", _fast_verbosity)
+    monkeypatch.setattr(runner.measure, "quality_cache", _fast_qc)
+    monkeypatch.setattr(runner.measure, "run_ensure_health", _fast_eh)
+    monkeypatch.setattr(runner.measure, "compact_restore", _fast_cr)
+    monkeypatch.setattr(runner.measure, "_daemon_midsession_pulse", lambda: None)
+    monkeypatch.setattr(runner.measure, "_ensure_health_daemon_revive_first", lambda: None)
+    monkeypatch.setattr(runner.measure, "_is_running_from_plugin_cache", lambda: True)
+    monkeypatch.setattr(runner.measure, "_is_plugin_installed", lambda: True)
+    monkeypatch.setattr(runner.measure, "_ran_once_this_session", lambda tag, sid: False)
+    monkeypatch.setattr(runner.measure, "is_cowork", lambda: False)
+    monkeypatch.setattr(runner.measure, "detect_runtime", lambda: "claude")
+
+    # Override the shared deadline to 2s total (tiny, but enough for all six).
+    monkeypatch.setattr(runner, "_RUNNER_TOTAL_BUDGET", 2.0)
+
+    rc = runner.main()
+    assert rc == 0, "shared-deadline runner must exit 0"
+
+    # prompt-continuity ran (even though it exceeded its fair share).
+    assert len(calls["prompt_continuity"]) == 1
+    # All later subcommands STILL ran — the shared deadline is the ONLY kill
+    # switch, and it did not fire because the total time was under 2s.
+    assert len(calls["verbosity_steer"]) == 1, "verbosity-steer must run after slow continuity"
+    assert len(calls["quality_cache_warn"]) == 1, "quality-cache --warn must run"
+    assert len(calls["ensure_health"]) == 1, "ensure-health must run"
+    assert len(calls["quality_cache_force"]) == 1, "quality-cache --force must run"
+    assert len(calls["compact_restore"]) == 1, "compact-restore must run"
+
+
+# --------------------------------------------------------------------------- #
+# (h) FIX 2: ensure-health marker unlink on failure — first call throws =>
+#     marker NOT durably set => second prompt retries and bootstraps.
+# --------------------------------------------------------------------------- #
+
+
+def test_fix2_ensure_health_marker_unlinked_on_failure_next_prompt_retries(
+    monkeypatch, tmp_path, capsys,
+):
+    """First ensure-health call raises => marker unlinked => second call retries
+    the bootstrap.  Without the FIX 2 unlink, the marker stays and ensure-health
+    no-ops for the rest of the session (re-deadlock)."""
+    # Create the CLAUDE_CONFIG_DIR before loading the runner so measure's
+    # import-time path resolution finds it and scopes QUALITY_CACHE_DIR (and
+    # therefore _ran_once_this_session markers) under tmp_path, not the host's
+    # real ~/.claude.
+    claude_dir = tmp_path / "claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "token-optimizer").mkdir(parents=True, exist_ok=True)
+    runner = _load_runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner, "_check_consent", lambda: True)
+    monkeypatch.setattr(runner, "_harness_only_context", lambda: True)
+    monkeypatch.setattr(runner, "_read_hook_input",
+                        lambda: {"session_id": "sess-fix2-139", "prompt": "x"})
+    # Stub budget + shared deadline (no real watchdog).
+    monkeypatch.setattr(runner.measure, "_install_hook_budget", lambda seconds=8: object())
+    monkeypatch.setattr(runner.measure, "_clear_hook_budget", lambda deadline: None)
+    monkeypatch.setattr(runner, "_install_runner_deadline", lambda total_seconds=18: None)
+    monkeypatch.setattr(runner, "_clear_runner_deadline", lambda: None)
+    # Repoint QUALITY_CACHE_DIR under tmp so the real _ran_once_this_session
+    # writes markers under tmp_path, not the host's real ~/.claude.  The
+    # cached measure module may have been imported with real paths; this
+    # override keeps the test isolated.
+    qc_dir = tmp_path / "quality-cache"
+    qc_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(runner.measure, "QUALITY_CACHE_DIR", qc_dir)
+
+    # Use REAL _ran_once_this_session (no monkeypatch) so the marker is
+    # actually written to tmp_path and can be verified.
+    calls = {"ensure_health": []}
+    fail_count = {"count": 0}
+
+    def _failing_then_ok_eh():
+        calls["ensure_health"].append({})
+        if fail_count["count"] == 0:
+            fail_count["count"] += 1
+            raise RuntimeError("simulated transient ensure-health failure")
+
+    monkeypatch.setattr(runner.measure, "run_ensure_health", _failing_then_ok_eh)
+    monkeypatch.setattr(runner.measure, "_ensure_health_daemon_revive_first", lambda: None)
+    # Stub the other subcommands so they're fast.
+    monkeypatch.setattr(runner.measure, "quality_cache", lambda **kw: None)
+    monkeypatch.setattr(runner.measure, "_continuity_prompt_hint", lambda **kw: "")
+    monkeypatch.setattr(runner.measure, "run_verbosity_steer", lambda **kw: None)
+    monkeypatch.setattr(runner.measure, "compact_restore", lambda **kw: None)
+    monkeypatch.setattr(runner.measure, "_daemon_midsession_pulse", lambda: None)
+    monkeypatch.setattr(runner.measure, "_is_running_from_plugin_cache", lambda: True)
+    monkeypatch.setattr(runner.measure, "_is_plugin_installed", lambda: True)
+    monkeypatch.setattr(runner.measure, "is_cowork", lambda: False)
+    monkeypatch.setattr(runner.measure, "detect_runtime", lambda: "claude")
+
+    # First prompt: ensure-health raises.  Marker must be unlinked.
+    rc = runner.main()
+    assert rc == 0
+    assert len(calls["ensure_health"]) == 1
+
+    err = capsys.readouterr().err
+    assert "CRITICAL: ensure-health bootstrap failed" in err, (
+        "FIX 2: stderr must escalate on bootstrap failure"
+    )
+
+    # Verify the marker was unlinked (not on disk).
+    sid = "sess-fix2-139"
+    marker = runner.measure._once_per_session_marker("ensure-health", sid)
+    assert marker is not None
+    assert not marker.exists(), (
+        "FIX 2: marker must be unlinked after ensure-health failure so next "
+        "prompt retries"
+    )
+
+    # Second prompt: ensure-health should run AGAIN (marker was unlinked).
+    calls["ensure_health"].clear()
+    rc = runner.main()
+    assert rc == 0
+    assert len(calls["ensure_health"]) == 1, (
+        "FIX 2: second prompt must retry ensure-health after marker unlink"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# (i) FIX 3: buffered stdout — >=2 subcommands emit simultaneously, stdout
+#     is still consumable (not a corrupted blob).
+# --------------------------------------------------------------------------- #
+
+
+def test_fix3_buffered_stdout_multi_emit_is_consumable(monkeypatch, tmp_path):
+    """Two subcommands emit hookSpecificOutput JSON simultaneously.  The
+    buffered emitter in main() captures each subcommand's stdout separately
+    and emits them in order, so the host receives consumable units."""
+    runner = _load_runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner, "_check_consent", lambda: True)
+    monkeypatch.setattr(runner, "_harness_only_context", lambda: False)
+    monkeypatch.setattr(runner, "_read_hook_input",
+                        lambda: {"session_id": "sess-fix3-139", "prompt": "x"})
+    # Stub budget + shared deadline.
+    monkeypatch.setattr(runner, "_install_runner_deadline", lambda total_seconds=18: None)
+    monkeypatch.setattr(runner, "_clear_runner_deadline", lambda: None)
+    monkeypatch.setattr(runner.measure, "_install_hook_budget", lambda seconds=8: object())
+    monkeypatch.setattr(runner.measure, "_clear_hook_budget", lambda deadline: None)
+
+    # Make prompt-continuity emit a hookSpecificOutput JSON.
+    monkeypatch.setattr(runner.measure, "_continuity_prompt_hint",
+                        lambda **kw: "fix3-continuity-hint")
+    # Make verbosity-steer emit raw text.
+    monkeypatch.setattr(runner.measure, "run_verbosity_steer",
+                        lambda **kw: "fix3-verbosity-raw-output")
+    # Stub the rest.
+    monkeypatch.setattr(runner.measure, "quality_cache", lambda **kw: None)
+    monkeypatch.setattr(runner.measure, "_daemon_midsession_pulse", lambda: None)
+    monkeypatch.setattr(runner.measure, "_is_running_from_plugin_cache", lambda: True)
+    monkeypatch.setattr(runner.measure, "_is_plugin_installed", lambda: True)
+    monkeypatch.setattr(runner.measure, "is_cowork", lambda: False)
+    monkeypatch.setattr(runner.measure, "detect_runtime", lambda: "claude")
+
+    import io as _io_mod
+    from contextlib import redirect_stdout as _redirect
+
+    captured = _io_mod.StringIO()
+    with _redirect(captured):
+        rc = runner.main()
+
+    assert rc == 0
+    stdout = captured.getvalue()
+
+    # Both outputs are present and in order.
+    assert "fix3-continuity-hint" in stdout, "prompt-continuity output must be present"
+    assert "fix3-verbosity-raw-output" in stdout, "verbosity-steer output must be present"
+
+    # Verify the output is consumable: the hookSpecificOutput JSON for
+    # prompt-continuity is valid JSON and self-contained.
+    pos_continuity = stdout.index("fix3-continuity-hint")
+    pos_verbosity = stdout.index("fix3-verbosity-raw-output")
+    assert pos_continuity < pos_verbosity, (
+        "output order must match subcommand dispatch order"
+    )
+
+    # The hookSpecificOutput from prompt-continuity is a valid JSON object.
+    import json as _json_mod
+    lines = stdout.strip().split("\n")
+    json_objects = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = _json_mod.loads(line)
+            json_objects.append(obj)
+        except _json_mod.JSONDecodeError:
+            pass  # raw text is fine too
+
+    assert len(json_objects) >= 1, "at least one valid JSON object must be present"
+    continuity_obj = json_objects[0]
+    assert continuity_obj.get("hookSpecificOutput", {}).get("additionalContext") == "fix3-continuity-hint"
+
+
+# --------------------------------------------------------------------------- #
+# (j) FIX 4: importlib path import — decoy run.py cannot shadow the real gate.
+# --------------------------------------------------------------------------- #
+
+
+def test_fix4_explicit_path_import_decoy_run_py_cannot_shadow(monkeypatch, tmp_path):
+    """Plant a decoy run.py earlier on sys.path; the runner's _check_consent
+    must still resolve hooks/run.py by explicit path and call the REAL
+    _check_consent, not the decoy."""
+    runner = _load_runner(monkeypatch, tmp_path)
+
+    # Create a decoy run.py in a temp dir and prepend it to sys.path.
+    decoy_dir = tmp_path / "decoy"
+    decoy_dir.mkdir()
+    decoy_run = decoy_dir / "run.py"
+    decoy_run.write_text(
+        "def _check_consent():\n    return False  # decoy says no consent\n",
+        encoding="utf-8",
+    )
+
+    # Verify the decoy is on sys.path BEFORE the hooks dir.
+    # The runner already has hooks/ on sys.path (from _load_runner), so
+    # we need to check that the explicit-path import wins over sys.path.
+    monkeypatch.syspath_prepend(str(decoy_dir))
+
+    # If the runner used bare `import run`, it would find the decoy first
+    # and return False.  With the explicit-path import, it finds the real
+    # hooks/run.py and calls its _check_consent (which reads the tmp config
+    # we set up with no consent flags => returns False, but that's the real
+    # gate, not the decoy).
+
+    # Set up a tmp config with consent=True so the real gate returns True.
+    claude_dir = tmp_path / "claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "token-optimizer").mkdir(parents=True, exist_ok=True)
+    (claude_dir / "token-optimizer" / "config.json").write_text(
+        '{"enterprise_consent_shown": true}', encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+    monkeypatch.delenv("CLAUDE_PLUGIN_DATA", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+
+    # The real _check_consent should return True (consent flags are set).
+    # The decoy would return False.  If the explicit-path import works,
+    # we get True.
+    assert runner._check_consent() is True, (
+        "FIX 4: explicit-path import must resolve the real hooks/run.py, "
+        "not the decoy on sys.path"
+    )

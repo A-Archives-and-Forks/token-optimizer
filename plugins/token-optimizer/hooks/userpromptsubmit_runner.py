@@ -7,23 +7,30 @@ spawned ``python-launcher.sh -> run.py -> module_runner.py -> runpy(measure.py)`
 times). This runner is invoked ONCE per prompt, imports ``measure.py`` ONCE,
 and runs all six subcommands in-process with per-subcommand failure isolation.
 
-Behavior is byte-identical to the six-entry dispatch it replaces:
+Key properties:
   - The three always-on subcommands (``quality-cache --warn --quiet``,
     ``prompt-continuity --quiet``, ``verbosity-steer --quiet``) run every prompt.
   - The three harness-only subcommands (``ensure-health --once-per-session``,
     ``quality-cache --force --quiet --once-per-session``,
     ``compact-restore --new-session-only --once-per-session``) run only when the
-    harness guard passes (replicated from the shell prefix that used to gate
-    entries 4/5/6), and each is latched by the SAME per-session marker
-    ``measure._ran_once_this_session`` uses in the ``__main__`` dispatch.
-  - Each subcommand installs/clears its own 8s wall-clock budget exactly as the
-    ``__main__`` handler does, so a pathological hang still exits 0 (the
-    ``HookDeadline`` watchdog calls ``os._exit(0)``) and never blocks the prompt.
+    harness guard passes, and each is latched by the SAME per-session marker
+    ``measure._ran_once_this_session``.
+  - ONE shared ``HookDeadline`` (18s, 2s margin under hooks.json timeout=20)
+    replaces the six independent 8s per-subcommand deadlines.  Remaining time is
+    budgeted fairly across subcommands; the shared deadline's ``os._exit(0)`` is
+    the ONLY kill switch in the process, so an early subcommand hang can never
+    preemptively kill later ones (including the ensure-health bootstrap).
+  - stdout from all six subcommands is captured through one buffered emitter and
+    emitted at the end of ``main()`` in a controlled, host-consumable way,
+    preserving the per-shape contract (hookSpecificOutput JSON, systemMessage
+    JSON, raw text).
   - One subcommand throwing/aborting never aborts the others (each is wrapped in
     ``_run_safely``); the hook always exits 0.
-  - stdout is shared across subcommands (the inherited stream Claude Code reads
-    for ``additionalContext`` injection), preserving the context-injection
-    contract.
+  - ensure-health's run-once marker is unlinked on failure (FIX 2) so a single
+    transient failure never permanently deadlocks the consent gate for the
+    session.
+  - ``run._check_consent`` is imported by explicit path (FIX 4) so a future
+    ``skills/.../run.py`` on ``sys.path`` cannot shadow the real gate.
 
 No ``measure.py`` edit: every call uses the real, verified module-level
 entrypoints the ``__main__`` dispatch itself calls (signatures confirmed against
@@ -33,10 +40,12 @@ Run: ``hooks/userpromptsubmit_runner.py`` (via run.py -> module_runner.py).
 """
 from __future__ import annotations
 
+import importlib.util as _importlib_util
 import io
 import json
 import os
 import sys
+import time as _time
 import traceback
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -134,12 +143,72 @@ def _run_safely(name: str, fn, *args, **kwargs) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Shared deadline (issue #139 FIX 1): ONE HookDeadline for the whole runner
+# replaces the six independent 8s per-subcommand deadlines.  The shared
+# deadline fires os._exit(0) only when the TOTAL time runs out, and the
+# remaining time is budgeted across subcommands so an early subcommand cannot
+# consume a later one's entire allotment.  Total budget = 18s (2s margin under
+# the hooks.json 20s HOT_PATH_CEILING).
+# --------------------------------------------------------------------------- #
+
+_RUNNER_DEADLINE = None  # type: measure.HookDeadline | None
+_RUNNER_TOTAL_BUDGET = 18.0  # seconds, with 2s margin under hooks.json timeout=20
+_SUBCOMMANDS_PENDING = 0  # decremented by _runner_budget on each call
+
+
+def _install_runner_deadline(total_seconds=_RUNNER_TOTAL_BUDGET):
+    """Arm ONE shared HookDeadline watchdog for the entire runner."""
+    global _RUNNER_DEADLINE
+    if _RUNNER_DEADLINE is not None:
+        return _RUNNER_DEADLINE
+    _RUNNER_DEADLINE = measure.HookDeadline(total_seconds)
+    _RUNNER_DEADLINE.start()
+    return _RUNNER_DEADLINE
+
+
+def _runner_budget(default_seconds, subcommand_count_hint=None):
+    """Return the fair-share budget (seconds) for one subcommand.
+
+    Divides the shared deadline's remaining time among the subcommands that
+    have not yet run.  Callers check the returned value: if it is below a
+    minimum threshold they skip the subcommand entirely so a later subcommand
+    with real work still gets a chance.
+    """
+    global _SUBCOMMANDS_PENDING
+    if subcommand_count_hint is not None:
+        _SUBCOMMANDS_PENDING = subcommand_count_hint
+    _SUBCOMMANDS_PENDING = max(0, _SUBCOMMANDS_PENDING - 1)
+    if _RUNNER_DEADLINE is None:
+        return default_seconds
+    remaining = _RUNNER_DEADLINE.remaining()
+    if remaining <= 0:
+        return 0.0
+    # Fair share: divide remaining time among the subcommands that still need
+    # to run (the one we are about to run + the ones still pending).
+    divisor = max(1, _SUBCOMMANDS_PENDING + 1)
+    fair = remaining / divisor
+    return min(default_seconds, max(0.1, fair))
+
+
+def _clear_runner_deadline():
+    """Cancel the shared deadline (normal completion)."""
+    global _RUNNER_DEADLINE
+    if _RUNNER_DEADLINE is not None:
+        _RUNNER_DEADLINE.cancel()
+        _RUNNER_DEADLINE = None
+
+
+# --------------------------------------------------------------------------- #
 # Subcommand handlers — each mirrors its measure.py __main__ dispatch block.
 # --------------------------------------------------------------------------- #
 
 
 def _sub_quality_cache_warn(hook_input: dict) -> None:
     """``quality-cache --warn --quiet`` (always runs). Mirrors __main__ L40696."""
+    budget = _runner_budget(8)
+    if budget < 0.1:
+        sys.stderr.write("[Token Optimizer] insufficient time budget; skipping quality-cache --warn\n")
+        return
     quiet = True
     warn = True
     force = False
@@ -148,34 +217,28 @@ def _sub_quality_cache_warn(hook_input: dict) -> None:
     warn_threshold = 70
     session_jsonl = hook_input.get("transcript_path")
     session_id = hook_input.get("session_id")
-    deadline = measure._install_hook_budget(8)
     try:
-        try:
-            measure._daemon_midsession_pulse()
-        except Exception:
-            pass
-        _quality_cache_self_heal()
-        measure.quality_cache(
-            throttle_seconds=throttle,
-            warn_threshold=warn_threshold,
-            quiet=quiet,
-            session_jsonl=session_jsonl,
-            force=force,
-            pure_time_throttle=throttle_only,
-            session_id=session_id,
-            warn=warn,
-        )
-    except measure._HookTimeout:
-        sys.stderr.write(
-            "[Token Optimizer] hook budget exceeded; skipping quality-cache tick "
-            "to keep session responsive\n"
-        )
-    finally:
-        measure._clear_hook_budget(deadline)
+        measure._daemon_midsession_pulse()
+    except Exception:
+        pass
+    _quality_cache_self_heal()
+    measure.quality_cache(
+        throttle_seconds=throttle,
+        warn_threshold=warn_threshold,
+        quiet=quiet,
+        session_jsonl=session_jsonl,
+        force=force,
+        pure_time_throttle=throttle_only,
+        session_id=session_id,
+        warn=warn,
+    )
 
 
 def _sub_prompt_continuity(hook_input: dict) -> None:
     """``prompt-continuity --quiet`` (always runs). Mirrors __main__ L40602."""
+    budget = _runner_budget(8)
+    if budget < 0.1:
+        return
     prompt_text = (
         hook_input.get("prompt")
         or hook_input.get("current_prompt")
@@ -190,32 +253,26 @@ def _sub_prompt_continuity(hook_input: dict) -> None:
             cwd = str(Path(transcript_path).parent)
         except TypeError:
             cwd = None
-    deadline = measure._install_hook_budget(8)
+    hint = ""
     try:
+        hint = measure._continuity_prompt_hint(
+            prompt_text=prompt_text, session_id=sid, cwd=cwd
+        )
+    except Exception:
         hint = ""
-        try:
-            hint = measure._continuity_prompt_hint(
-                prompt_text=prompt_text, session_id=sid, cwd=cwd
+    hint = (hint or "").strip()
+    if hint:
+        print(
+            json.dumps(
+                {
+                    "continue": True,
+                    "hookSpecificOutput": {
+                        "hookEventName": "UserPromptSubmit",
+                        "additionalContext": hint,
+                    },
+                }
             )
-        except Exception:
-            hint = ""
-        hint = (hint or "").strip()
-        if hint:
-            print(
-                json.dumps(
-                    {
-                        "continue": True,
-                        "hookSpecificOutput": {
-                            "hookEventName": "UserPromptSubmit",
-                            "additionalContext": hint,
-                        },
-                    }
-                )
-            )
-    except measure._HookTimeout:
-        pass
-    finally:
-        measure._clear_hook_budget(deadline)
+        )
 
 
 def _sub_verbosity_steer(hook_input: dict) -> None:
@@ -225,9 +282,11 @@ def _sub_verbosity_steer(hook_input: dict) -> None:
     flag is not parsed for this subcommand). Match the REAL call shape, not the
     flag name.
     """
+    budget = _runner_budget(8)
+    if budget < 0.1:
+        return
     transcript_path = hook_input.get("transcript_path")
     session_id = hook_input.get("session_id")
-    deadline = measure._install_hook_budget(8)
     try:
         payload = measure.run_verbosity_steer(
             transcript_path=transcript_path,
@@ -236,32 +295,59 @@ def _sub_verbosity_steer(hook_input: dict) -> None:
         )
         if payload:
             print(payload)
-    except measure._HookTimeout:
-        pass
     except Exception:
         pass
-    finally:
-        measure._clear_hook_budget(deadline)
 
 
 def _sub_ensure_health(hook_input: dict) -> None:
-    """``ensure-health --once-per-session`` (harness-gated). Mirrors __main__ L41138."""
+    """``ensure-health --once-per-session`` (harness-gated). Mirrors __main__ L41138.
+
+    FIX 2 (issue #139): the run-once marker is set BEFORE the work by
+    ``_ran_once_this_session``.  If the first call throws (caught by
+    ``_run_safely``), the marker is already on disk but the consent flags
+    were never written, so ensure-health no-ops for the rest of the session
+    and consent stays False (all six subcommands dead).  To prevent this
+    re-deadlock, we unlink the marker on any failure so the next prompt
+    retries the bootstrap.
+    """
     sid = hook_input.get("session_id")
     if measure._ran_once_this_session("ensure-health", sid):
         return
+    budget = _runner_budget(8)
+    if budget < 0.1:
+        # Unlink the marker we just set so the next prompt can retry.
+        marker = measure._once_per_session_marker("ensure-health", sid)
+        if marker is not None:
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError:
+                pass
+        sys.stderr.write(
+            "[Token Optimizer] CRITICAL: insufficient time budget for "
+            "ensure-health bootstrap; will retry next prompt\n"
+        )
+        return
     # FIX C: the daemon ensure/revive runs FIRST, under its own short guard,
-    # BEFORE the 8s health budget is armed (mirrors __main__ L41167).
+    # BEFORE any health budget is consumed (mirrors __main__ L41167).
     measure._ensure_health_daemon_revive_first()
-    deadline = measure._install_hook_budget(8)
     try:
         measure.run_ensure_health()
-    except measure._HookTimeout:
+    except Exception:
+        # Unlink the marker on failure so the next prompt retries the
+        # bootstrap.  Without this, a single transient failure (disk full,
+        # permission error, settings.json temporarily locked) permanently
+        # deadlocks the consent gate for the entire session.
+        marker = measure._once_per_session_marker("ensure-health", sid)
+        if marker is not None:
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError:
+                pass
         sys.stderr.write(
-            "[Token Optimizer] hook budget exceeded; skipping ensure-health tick "
-            "to keep session responsive\n"
+            "[Token Optimizer] CRITICAL: ensure-health bootstrap failed; "
+            "will retry next prompt.  Consent flags may not be written.\n"
         )
-    finally:
-        measure._clear_hook_budget(deadline)
+        raise
 
 
 def _sub_quality_cache_force(hook_input: dict) -> None:
@@ -271,6 +357,9 @@ def _sub_quality_cache_force(hook_input: dict) -> None:
     pulse + self-heal run unconditionally (as in the dispatch), THEN the
     once-per-session gate, THEN quality_cache() with force=True.
     """
+    budget = _runner_budget(8)
+    if budget < 0.1:
+        return
     quiet = True
     warn = False
     force = True
@@ -279,32 +368,23 @@ def _sub_quality_cache_force(hook_input: dict) -> None:
     warn_threshold = 70
     session_jsonl = hook_input.get("transcript_path")
     session_id = hook_input.get("session_id")
-    deadline = measure._install_hook_budget(8)
     try:
-        try:
-            measure._daemon_midsession_pulse()
-        except Exception:
-            pass
-        _quality_cache_self_heal()
-        if measure._ran_once_this_session("quality-cache-force", session_id):
-            return
-        measure.quality_cache(
-            throttle_seconds=throttle,
-            warn_threshold=warn_threshold,
-            quiet=quiet,
-            session_jsonl=session_jsonl,
-            force=force,
-            pure_time_throttle=throttle_only,
-            session_id=session_id,
-            warn=warn,
-        )
-    except measure._HookTimeout:
-        sys.stderr.write(
-            "[Token Optimizer] hook budget exceeded; skipping quality-cache tick "
-            "to keep session responsive\n"
-        )
-    finally:
-        measure._clear_hook_budget(deadline)
+        measure._daemon_midsession_pulse()
+    except Exception:
+        pass
+    _quality_cache_self_heal()
+    if measure._ran_once_this_session("quality-cache-force", session_id):
+        return
+    measure.quality_cache(
+        throttle_seconds=throttle,
+        warn_threshold=warn_threshold,
+        quiet=quiet,
+        session_jsonl=session_jsonl,
+        force=force,
+        pure_time_throttle=throttle_only,
+        session_id=session_id,
+        warn=warn,
+    )
 
 
 def _sub_compact_restore(hook_input: dict) -> None:
@@ -318,26 +398,19 @@ def _sub_compact_restore(hook_input: dict) -> None:
     sid = hook_input.get("session_id")
     if measure._ran_once_this_session("compact-restore-new-session", sid):
         return
-    deadline = measure._install_hook_budget(
-        measure._int_env("TOKEN_OPTIMIZER_COMPACT_RESTORE_BUDGET", 8)
-        if hasattr(measure, "_int_env")
-        else 8
-    )
-    try:
-        _cw = measure.is_cowork()
-        if measure.detect_runtime() == "codex" or _cw:
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                measure.compact_restore(session_id=sid, new_session_only=True)
-            measure._emit_additional_context(
-                buf.getvalue(), event="UserPromptSubmit" if _cw else "SessionStart"
-            )
-        else:
+    budget = _runner_budget(8)
+    if budget < 0.1:
+        return
+    _cw = measure.is_cowork()
+    if measure.detect_runtime() == "codex" or _cw:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
             measure.compact_restore(session_id=sid, new_session_only=True)
-    except measure._HookTimeout:
-        pass
-    finally:
-        measure._clear_hook_budget(deadline)
+        measure._emit_additional_context(
+            buf.getvalue(), event="UserPromptSubmit" if _cw else "SessionStart"
+        )
+    else:
+        measure.compact_restore(session_id=sid, new_session_only=True)
 
 
 def _quality_cache_self_heal() -> None:
@@ -381,13 +454,18 @@ def _check_consent() -> bool:
     contains the ensure-health bootstrap itself). The per-subcommand consent
     decision therefore lives HERE.
 
-    Imports ``run._check_consent`` (the canonical check) so the logic never
-    drifts between the two files. Fails open (True) if ``run.py`` cannot be
-    imported -- matching run.py's own fail-open philosophy -- so a host where
-    the hooks dir is not on ``sys.path`` never silently disables the plugin.
+    FIX 4 (issue #139): imports ``run._check_consent`` by explicit path via
+    ``importlib.util.spec_from_file_location`` so a future ``skills/.../run.py``
+    on ``sys.path`` cannot shadow the real ``hooks/run.py`` and silently
+    disable the consent gate (``import run`` fails-open on any AttributeError).
     """
     try:
-        import run as _run_mod  # noqa: E402  (sibling hooks/run.py)
+        run_py = Path(__file__).resolve().parent / "run.py"
+        if not run_py.is_file():
+            return True
+        spec = _importlib_util.spec_from_file_location("_to_run_consent", run_py)
+        _run_mod = _importlib_util.module_from_spec(spec)
+        spec.loader.exec_module(_run_mod)
         return _run_mod._check_consent()
     except Exception:
         return True
@@ -415,30 +493,61 @@ def main() -> int:
     # six run per their existing gates.
     if not _check_consent():
         if _harness_only_context():
+            _install_runner_deadline()
             _run_safely("ensure-health", _sub_ensure_health, hook_input)
+            _clear_runner_deadline()
         return 0
+
+    # FIX 1 (issue #139): install ONE shared HookDeadline for the entire
+    # runner (18s, 2s margin under hooks.json timeout=20).  The per-subcommand
+    # _runner_budget calls divide the remaining time fairly.  The shared
+    # deadline is the ONLY os._exit(0) in the process -- no individual
+    # subcommand deadline can kill later subcommands.
+    _install_runner_deadline()
+
+    # FIX 3 (issue #139): capture each subcommand's stdout through ONE
+    # buffered emitter, then emit at the end in a controlled, host-consumable
+    # way.  Pre-consolidation each subcommand was its own hooks.json entry and
+    # the host parsed their stdout independently; now all six share one stdout
+    # stream, so we buffer to avoid mixed JSON/raw-text corruption.
+    _stdout_bufs: list[str] = []
+
+    def _capture(name: str, fn, *args, **kwargs) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _run_safely(name, fn, *args, **kwargs)
+        captured = buf.getvalue()
+        if captured:
+            _stdout_bufs.append(captured)
 
     # 1-3: always-on subcommands. Ordering (issue #139 P2): the cheap,
     # user-visible subcommands (prompt-continuity, verbosity-steer) run BEFORE
-    # the heavier quality-cache --warn. HookDeadline's os._exit(0) kills the
-    # whole process uncatchably, so a hang in an early subcommand skips all
-    # later ones; running the cheap user-visible work first minimizes what a
-    # quality-cache hang can suppress. The harness-only 4-6 still run after the
-    # gate (gating-order semantics preserved).
-    _run_safely("prompt-continuity", _sub_prompt_continuity, hook_input)
-    _run_safely("verbosity-steer", _sub_verbosity_steer, hook_input)
-    _run_safely("quality-cache --warn", _sub_quality_cache_warn, hook_input)
+    # the heavier quality-cache --warn.  The shared deadline's os._exit(0)
+    # kills the whole process uncatchably, so a hang in an early subcommand
+    # still skips later ones; running the cheap user-visible work first
+    # minimizes what a quality-cache hang can suppress.  The harness-only 4-6
+    # still run after the gate (gating-order semantics preserved).
+    _runner_budget(8, subcommand_count_hint=6)
+    _capture("prompt-continuity", _sub_prompt_continuity, hook_input)
+    _capture("verbosity-steer", _sub_verbosity_steer, hook_input)
+    _capture("quality-cache --warn", _sub_quality_cache_warn, hook_input)
 
     # 4-6: harness-only subcommands. The shell guard that used to prefix
     # hooks.json entries 4/5/6 is evaluated once here; when it fails, all three
     # are skipped exactly as the shell `exit 0` skipped each entry.
-    if not _harness_only_context():
-        return 0
+    if _harness_only_context():
+        _capture("ensure-health", _sub_ensure_health, hook_input)
+        _capture("quality-cache --force", _sub_quality_cache_force, hook_input)
+        _capture("compact-restore", _sub_compact_restore, hook_input)
 
-    _run_safely("ensure-health", _sub_ensure_health, hook_input)
-    _run_safely("quality-cache --force", _sub_quality_cache_force, hook_input)
-    _run_safely("compact-restore", _sub_compact_restore, hook_input)
+    # Emit all buffered stdout in order (preserves per-shape contract:
+    # hookSpecificOutput JSON objects, systemMessage JSON, raw text -- each
+    # subcommand's output is a self-contained unit, emitted in the order the
+    # host expects from the consolidated dispatcher).
+    for buf in _stdout_bufs:
+        sys.stdout.write(buf)
 
+    _clear_runner_deadline()
     return 0
 
 
