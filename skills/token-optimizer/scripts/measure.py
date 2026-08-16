@@ -6335,12 +6335,20 @@ def _dispatch_session_end_flush(args):
 
 
 def _dispatch_collect(args):
-    """CLI ``collect`` entry. Always bounded (#114 Fix 3).
+    """CLI ``collect`` entry. Bounded ONLY on the hook path (#114 Fix 3/4).
 
     A fossilized SessionEnd hook that chains the ``collect`` and ``dashboard``
     subcommands never reaches ``session-end-flush``. The 20s HookDeadline is
     the last line of defense so an escaped fossil still closes the hook pipe
     on Windows.
+
+    #114 Fix 4: the budget is armed only when ``_running_under_hook()`` is
+    true (hook runner / fossil context) AND ``--rebuild`` is not present.
+    Arming it unconditionally killed interactive ``collect --rebuild`` on a
+    large history mid-transaction (os._exit(0) -> SQLite rollback -> the
+    "needs rebuild" flag stays true -> every later run wedges, exiting 0).
+    ``--rebuild`` is exempt regardless of context: it is an intentionally
+    heavy operation and bounding it mid-transaction is the wedge itself.
     """
     days = 90
     quiet = "--quiet" in args or "-q" in args
@@ -6351,7 +6359,9 @@ def _dispatch_collect(args):
             except ValueError:
                 pass
     rebuild = "--rebuild" in args
-    deadline = _install_hook_budget(20)
+    deadline = (
+        _install_hook_budget(20) if (_running_under_hook() and not rebuild) else None
+    )
     try:
         collect_sessions(days=days, quiet=quiet, rebuild=rebuild)
     except _HookTimeout:
@@ -6361,10 +6371,15 @@ def _dispatch_collect(args):
 
 
 def _dispatch_dashboard(args):
-    """CLI ``dashboard`` entry. Standalone generation is bounded (#114 Fix 3).
+    """CLI ``dashboard`` entry. Bounded ONLY on the hook path (#114 Fix 3/4).
 
     Interactive ``--serve`` is unbounded on purpose: a user watching the
-    dashboard must not have the process killed after 20s.
+    dashboard must not have the process killed after 20s. A plain interactive
+    ``dashboard`` run (no ``--serve``) from a terminal is also left unbounded
+    (#114 Fix 4): the 20s budget exists to cap the escaped fossil on the hook
+    pipe, not to kill a user-driven generation. ``--serve`` and "stdin is a
+    tty" both mark an interactive context; the budget arms only when
+    ``_running_under_hook()`` is true and ``--serve`` is absent.
     """
     cp = None
     serve = False
@@ -6394,7 +6409,9 @@ def _dispatch_dashboard(args):
                     days = int(args[i + 1])
                 except ValueError:
                     pass
-        deadline = None if serve else _install_hook_budget(20)
+        deadline = (
+            None if (serve or not _running_under_hook()) else _install_hook_budget(20)
+        )
         try:
             out = generate_standalone_dashboard(days=days, quiet=quiet)
         except _HookTimeout:
@@ -6406,7 +6423,9 @@ def _dispatch_dashboard(args):
         elif out and not quiet:
             _open_dashboard(fallback_filepath=out)
         sys.exit(0 if out else 1)
-    deadline = None if serve else _install_hook_budget(20)
+    deadline = (
+        None if (serve or not _running_under_hook()) else _install_hook_budget(20)
+    )
     try:
         out = generate_dashboard(cp)
     except _HookTimeout:
@@ -18923,8 +18942,14 @@ else:
 # (e.g. ``echo 'run measure.py to collect data'``) or glued with a dot
 # (``measure.py.collect``). Shared by _is_hook_installed and
 # _is_token_optimizer_session_end_hook so detection and removal stay in sync.
+# #114 Fix 5: the alternation is anchored with a negative lookahead
+# ``(?![\w-])`` instead of a trailing ``\b``. ``\b`` treats ``-`` as a word
+# boundary, so ``\bcollect\b`` matched the ``collect`` inside ``collect-foo``
+# (a hypothetical ``collect-*`` subcommand) and ``session-end-flush`` inside
+# ``session-end-flush-archive``. The lookahead rejects a following word char
+# OR hyphen, so only the bare subcommands match.
 _TO_SESSION_END_CMD_RE = re.compile(
-    r"\bmeasure\.py['\"]?\s+(?:collect|session-end-flush)\b"
+    r"\bmeasure\.py['\"]?\s+(?:collect|session-end-flush)(?![\w-])"
 )
 
 
@@ -19270,16 +19295,160 @@ def _rewrite_collect_fossil_hook(hook: dict) -> dict:
     return rewritten
 
 
+def _apply_sessionend_fossil_reconcile(settings, result):
+    """Apply the #114 fossil heal mutation to ``settings`` in place.
+
+    Returns True if anything changed. The ``result`` counters (``rewritten`` /
+    ``removed`` / ``stop_removed``) are incremented for the changes made in
+    THIS call only. Idempotent: a second call on an already-healed settings
+    is a no-op and returns False.
+
+    Extracted from ``_reconcile_sessionend_fossils`` so the caller can re-read
+    fresh under the lease and re-apply (#114 Fix 6) instead of writing a
+    snapshot that was read unlocked. If a current-shape session-end-flush
+    SessionEnd hook already exists, collect/dashboard fossils are removed.
+    Otherwise each fossil is rewritten in place to HOOK_COMMAND (preserving
+    async/timeout; adding async:true when absent). Also drops Stop-event
+    collect / bare session-end-flush duplicates when the plugin already
+    provides Stop.
+    """
+    hooks = settings.get("hooks") if isinstance(settings, dict) else None
+    if not isinstance(hooks, dict):
+        return False
+
+    has_current = _sessionend_has_current_flush(settings)
+    mutated = False
+
+    session_end = hooks.get("SessionEnd")
+    if isinstance(session_end, list) and session_end:
+        new_groups = []
+        for group in session_end:
+            if not isinstance(group, dict):
+                new_groups.append(group)
+                continue
+            hook_list = group.get("hooks")
+            if not isinstance(hook_list, list):
+                new_groups.append(group)
+                continue
+            kept = []
+            for hook in hook_list:
+                if not isinstance(hook, dict):
+                    kept.append(hook)
+                    continue
+                cmd = hook.get("command", "")
+                if not _sessionend_cmd_is_collect_fossil(cmd):
+                    kept.append(hook)
+                    continue
+                if has_current:
+                    result["removed"] += 1
+                    mutated = True
+                    continue
+                kept.append(_rewrite_collect_fossil_hook(hook))
+                result["rewritten"] += 1
+                mutated = True
+                has_current = True
+            if kept:
+                group = dict(group)
+                group["hooks"] = kept
+                new_groups.append(group)
+        if mutated:
+            if new_groups:
+                hooks["SessionEnd"] = new_groups
+            else:
+                hooks.pop("SessionEnd", None)
+
+    # Stop event: drop collect fossils and extra session-end-flush entries
+    # when a plugin-provided (or already-present) Stop flush exists. The
+    # first flush-shaped Stop hook is kept; extras and collect fossils go.
+    stop = hooks.get("Stop")
+    if isinstance(stop, list) and stop:
+        plugin_provides_stop_flush = False
+        try:
+            if _is_plugin_installed():
+                plugin_hooks_path = _find_plugin_hooks_json()
+                if plugin_hooks_path:
+                    plugin_hooks = json.loads(plugin_hooks_path.read_text(encoding="utf-8"))
+                    for group in (plugin_hooks.get("hooks") or {}).get("Stop") or []:
+                        if not isinstance(group, dict):
+                            continue
+                        for hook in group.get("hooks") or []:
+                            if isinstance(hook, dict) and _sessionend_cmd_is_flush(
+                                hook.get("command", "")
+                            ):
+                                plugin_provides_stop_flush = True
+                                break
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            plugin_provides_stop_flush = False
+
+        saw_stop_flush = False
+        new_stop_groups = []
+        stop_mutated = False
+        for group in stop:
+            if not isinstance(group, dict):
+                new_stop_groups.append(group)
+                continue
+            hook_list = group.get("hooks")
+            if not isinstance(hook_list, list):
+                new_stop_groups.append(group)
+                continue
+            kept = []
+            for hook in hook_list:
+                if not isinstance(hook, dict):
+                    kept.append(hook)
+                    continue
+                cmd = hook.get("command", "")
+                is_collect = _sessionend_cmd_is_collect_fossil(cmd)
+                is_flush = _sessionend_cmd_is_flush(cmd)
+                if is_collect:
+                    result["stop_removed"] += 1
+                    stop_mutated = True
+                    continue
+                if is_flush:
+                    if plugin_provides_stop_flush or saw_stop_flush:
+                        result["stop_removed"] += 1
+                        stop_mutated = True
+                        continue
+                    saw_stop_flush = True
+                kept.append(hook)
+            if kept:
+                group = dict(group)
+                group["hooks"] = kept
+                new_stop_groups.append(group)
+        if stop_mutated:
+            mutated = True
+            if new_stop_groups:
+                hooks["Stop"] = new_stop_groups
+            else:
+                hooks.pop("Stop", None)
+
+    return mutated
+
+
 def _reconcile_sessionend_fossils():
     """Rename-aware heal for the #114 collect && dashboard settings.json fossil.
 
-    Called from run_ensure_health for BOTH plugin and script installs. If a
-    current-shape session-end-flush SessionEnd hook already exists, fossils
-    are removed. Otherwise each fossil is rewritten in place to HOOK_COMMAND
-    (preserving async/timeout; adding async:true when absent). Also drops
-    Stop-event collect / bare session-end-flush duplicates when the plugin
-    already provides Stop. Atomic, backed up, fail-open. Returns a result
-    dict so tests can assert the decision.
+    Called from run_ensure_health, which the ``ensure-health`` SessionStart
+    hook runs for BOTH plugin installs (hooks/hooks.json) and script installs
+    (examples/hooks-starter.json SessionStart, wired in #114 Fix 2). Script
+    installs are historically the fossil-producing population, so the heal
+    must reach them too.
+
+    If a current-shape session-end-flush SessionEnd hook already exists,
+    fossils are removed. Otherwise each fossil is rewritten in place to
+    HOOK_COMMAND (preserving async/timeout; adding async:true when absent).
+    Also drops Stop-event collect / bare session-end-flush duplicates when
+    the plugin already provides Stop. Atomic, backed up, fail-open. Returns a
+    result dict so tests can assert the decision.
+
+    #114 Fix 6: the initial read is unlocked (a cheap probe to decide whether
+    any heal work exists, avoiding lease/backup churn when there is none).
+    The mutation is then re-applied to a FRESH read taken under the lease
+    right before the write, so a concurrent writer (another hook, the user, a
+    settings sync) landing between the probe and the lease cannot be clobbered
+    -- mirrors the sibling re-read-under-lease pattern in cleanup (~line
+    23457). A failed re-read or denied lease is a silent no-op (fail-open):
+    the fossil persists, which is recoverable; an overwritten settings.json
+    is not.
     """
     result = {"rewritten": 0, "removed": 0, "stop_removed": 0, "reason": "ok"}
     try:
@@ -19290,117 +19459,15 @@ def _reconcile_sessionend_fossils():
         if not settings:
             result["reason"] = "no_settings"
             return result
-        hooks = settings.get("hooks")
-        if not isinstance(hooks, dict):
+        if not isinstance(settings.get("hooks"), dict):
             result["reason"] = "no_hooks"
             return result
 
-        has_current = _sessionend_has_current_flush(settings)
-        mutated = False
-
-        session_end = hooks.get("SessionEnd")
-        if isinstance(session_end, list) and session_end:
-            new_groups = []
-            for group in session_end:
-                if not isinstance(group, dict):
-                    new_groups.append(group)
-                    continue
-                hook_list = group.get("hooks")
-                if not isinstance(hook_list, list):
-                    new_groups.append(group)
-                    continue
-                kept = []
-                for hook in hook_list:
-                    if not isinstance(hook, dict):
-                        kept.append(hook)
-                        continue
-                    cmd = hook.get("command", "")
-                    if not _sessionend_cmd_is_collect_fossil(cmd):
-                        kept.append(hook)
-                        continue
-                    if has_current:
-                        result["removed"] += 1
-                        mutated = True
-                        continue
-                    kept.append(_rewrite_collect_fossil_hook(hook))
-                    result["rewritten"] += 1
-                    mutated = True
-                    has_current = True
-                if kept:
-                    group = dict(group)
-                    group["hooks"] = kept
-                    new_groups.append(group)
-            if mutated:
-                if new_groups:
-                    hooks["SessionEnd"] = new_groups
-                else:
-                    hooks.pop("SessionEnd", None)
-
-        # Stop event: drop collect fossils and extra session-end-flush entries
-        # when a plugin-provided (or already-present) Stop flush exists. The
-        # first flush-shaped Stop hook is kept; extras and collect fossils go.
-        stop = hooks.get("Stop")
-        if isinstance(stop, list) and stop:
-            plugin_provides_stop_flush = False
-            try:
-                if _is_plugin_installed():
-                    plugin_hooks_path = _find_plugin_hooks_json()
-                    if plugin_hooks_path:
-                        plugin_hooks = json.loads(plugin_hooks_path.read_text(encoding="utf-8"))
-                        for group in (plugin_hooks.get("hooks") or {}).get("Stop") or []:
-                            if not isinstance(group, dict):
-                                continue
-                            for hook in group.get("hooks") or []:
-                                if isinstance(hook, dict) and _sessionend_cmd_is_flush(
-                                    hook.get("command", "")
-                                ):
-                                    plugin_provides_stop_flush = True
-                                    break
-            except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                plugin_provides_stop_flush = False
-
-            saw_stop_flush = False
-            new_stop_groups = []
-            stop_mutated = False
-            for group in stop:
-                if not isinstance(group, dict):
-                    new_stop_groups.append(group)
-                    continue
-                hook_list = group.get("hooks")
-                if not isinstance(hook_list, list):
-                    new_stop_groups.append(group)
-                    continue
-                kept = []
-                for hook in hook_list:
-                    if not isinstance(hook, dict):
-                        kept.append(hook)
-                        continue
-                    cmd = hook.get("command", "")
-                    is_collect = _sessionend_cmd_is_collect_fossil(cmd)
-                    is_flush = _sessionend_cmd_is_flush(cmd)
-                    if is_collect:
-                        result["stop_removed"] += 1
-                        stop_mutated = True
-                        continue
-                    if is_flush:
-                        if plugin_provides_stop_flush or saw_stop_flush:
-                            result["stop_removed"] += 1
-                            stop_mutated = True
-                            continue
-                        saw_stop_flush = True
-                    kept.append(hook)
-                if kept:
-                    group = dict(group)
-                    group["hooks"] = kept
-                    new_stop_groups.append(group)
-            if stop_mutated:
-                mutated = True
-                if new_stop_groups:
-                    hooks["Stop"] = new_stop_groups
-                else:
-                    hooks.pop("Stop", None)
-
-        if not mutated:
+        # Unlocked probe: decide whether any heal work exists without taking
+        # the lease or writing a backup. `settings` is mutated in place here
+        # but discarded after the decision -- the authoritative mutation is
+        # re-applied to a fresh read below.
+        if not _apply_sessionend_fossil_reconcile(settings, result):
             result["reason"] = "nothing_to_do"
             return result
 
@@ -19415,7 +19482,24 @@ def _reconcile_sessionend_fossils():
         except OSError:
             pass
 
-        if not _write_settings_atomic(settings):
+        # #114 Fix 6: re-read fresh under the lease and re-apply the mutation
+        # right before writing. Reset the counters so they reflect only the
+        # fresh re-application, not the unlocked probe. A bad re-read or a
+        # denied lease is fail-open (the fossil stays; recoverable).
+        fresh, _, read_ok = _read_settings_json_checked()
+        result["rewritten"] = 0
+        result["removed"] = 0
+        result["stop_removed"] = 0
+        if not read_ok or not fresh:
+            result["reason"] = "write_skipped"
+            return result
+        if not isinstance(fresh.get("hooks"), dict):
+            result["reason"] = "no_hooks"
+            return result
+        if not _apply_sessionend_fossil_reconcile(fresh, result):
+            result["reason"] = "nothing_to_do"
+            return result
+        if not _write_settings_atomic(fresh):
             result["reason"] = "write_skipped"
             return result
         return result
@@ -32074,6 +32158,46 @@ class _HookTimeout(BaseException):
 def _install_hook_budget(seconds=8):
     """Start the cross-platform hard wall-clock guard."""
     return HookDeadline(seconds).start()
+
+
+def _running_under_hook():
+    """True when this process was launched by a hook runner, not a CLI user.
+
+    Used by ``_dispatch_collect`` / ``_dispatch_dashboard`` to arm the 20s
+    HookDeadline ONLY on the hook/fossil path (#114 Fix 4). The regression:
+    the budget was unconditional, so an interactive ``collect --rebuild`` on a
+    large history that needs >20s got ``os._exit(0)``-ed mid-transaction ->
+    SQLite rolled back -> "needs rebuild" stayed true -> every later run
+    wedged, silently exiting 0.
+
+    Detection (any one):
+      * ``--hook`` passed explicitly on the command line (deterministic flag
+        for tests and explicit hook launches).
+      * ``TOKEN_OPTIMIZER_HOOK`` env var set (``1``/``true``/``yes``/``on``),
+        so a launcher can mark the hook context without changing argv.
+      * stdin is NOT a tty. Hook runners (Claude Code, Codex) pipe a JSON
+        payload on stdin; an interactive terminal run has a tty on stdin.
+        This is what catches the raw fossil command shape, which invokes
+        measure.py directly without ``--hook`` or the env marker.
+
+    When stdin cannot be probed (closed/redirected in ways ``isatty`` can't
+    handle), fail toward the bounded path -- the safer default for a process
+    holding a hook stdout pipe. An interactive terminal run keeps its tty and
+    is left unbounded.
+    """
+    if "--hook" in sys.argv:
+        return True
+    if os.environ.get("TOKEN_OPTIMIZER_HOOK", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return True
+    try:
+        return not sys.stdin.isatty()
+    except (ValueError, OSError, AttributeError):
+        return True
 
 
 def _clear_hook_budget(deadline):

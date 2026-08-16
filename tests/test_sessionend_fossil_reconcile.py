@@ -149,3 +149,137 @@ def test_is_hook_current_rejects_collect_shape(measure_mod):
     current_settings = {"hooks": {"SessionEnd": [{"hooks": [_hook(CURRENT)]}]}}
     assert measure_mod._is_hook_current(fossil_settings) is False
     assert measure_mod._is_hook_current(current_settings) is True
+
+
+# --- Safety branches of _reconcile_sessionend_fossils ---------------------
+# The reconcile runs unattended from a SessionStart hook, so its failure modes
+# must be fail-open and non-destructive. These cover the branches the original
+# test suite never exercised: unreadable settings, top-level exception, no-op,
+# and the false-positive guard for a non-token-optimizer hook sharing a
+# SessionEnd group with a fossil.
+
+
+def _backup_dir(tmp_path):
+    return tmp_path / "_backups" / "token-optimizer"
+
+
+def test_reconcile_malformed_settings_is_unreadable_and_does_not_write(measure_mod, tmp_path, monkeypatch):
+    """(a) A malformed settings.json -> reason 'settings_unreadable', and the
+    file is left byte-unchanged. Round-tripping an unknown-state {} would
+    destroy every key the user has, so the reconcile must refuse to write.
+    """
+    settings_path = tmp_path / "settings.json"
+    malformed = b"{ this is not ,,, valid json )))"
+    settings_path.write_bytes(malformed)
+    monkeypatch.setattr(measure_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(measure_mod, "CLAUDE_DIR", tmp_path)
+
+    result = measure_mod._reconcile_sessionend_fossils()
+
+    assert result["reason"] == "settings_unreadable", result
+    assert settings_path.read_bytes() == malformed, "malformed settings.json was mutated"
+    assert not _backup_dir(tmp_path).exists(), "no backup should be written for an unreadable file"
+
+
+def test_reconcile_top_level_exception_is_fail_open_and_never_raises(measure_mod, tmp_path, monkeypatch):
+    """(b) A top-level exception -> reason 'fail_open', and the call never
+    raises. The reconcile runs inside a hook; an unhandled exception would
+    break the SessionStart budget. Fail-open leaves the fossil in place
+    (recoverable) instead of risking a destructive write.
+    """
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps(_settings([_hook(FOSSIL)])), encoding="utf-8")
+    monkeypatch.setattr(measure_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(measure_mod, "CLAUDE_DIR", tmp_path)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("simulated read failure")
+
+    monkeypatch.setattr(measure_mod, "_read_settings_json_checked", _boom)
+
+    # Must not raise.
+    result = measure_mod._reconcile_sessionend_fossils()
+
+    assert result["reason"] == "fail_open", result
+    # The fossil file is untouched (the exception fired before any write).
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+    se_cmds = [
+        h.get("command", "")
+        for g in data["hooks"]["SessionEnd"]
+        for h in g.get("hooks", [])
+        if isinstance(h, dict)
+    ]
+    assert FOSSIL in se_cmds
+
+
+def test_reconcile_noop_when_only_current_flush_present(measure_mod, tmp_path, monkeypatch):
+    """(c) When only the current flush is present (no fossil), the reconcile is
+    a no-op: reason 'nothing_to_do', the file is byte-unchanged, and NO backup
+    is written. This avoids lease/backup churn on every healthy SessionStart.
+    """
+    settings_path = tmp_path / "settings.json"
+    payload = _settings([_hook(CURRENT, **{"async": True})])
+    settings_path.write_text(json.dumps(payload), encoding="utf-8")
+    before = settings_path.read_bytes()
+    monkeypatch.setattr(measure_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(measure_mod, "CLAUDE_DIR", tmp_path)
+
+    result = measure_mod._reconcile_sessionend_fossils()
+
+    assert result["reason"] == "nothing_to_do", result
+    assert result["rewritten"] == 0 and result["removed"] == 0 and result["stop_removed"] == 0
+    assert settings_path.read_bytes() == before, "no-op reconcile mutated the file"
+    assert not _backup_dir(tmp_path).exists(), "no backup should be written for a no-op"
+
+
+def test_reconcile_preserves_unrelated_hook_in_same_sessionend_group(measure_mod, tmp_path, monkeypatch):
+    """(d) False-positive guard inside a group: a non-token-optimizer hook in
+    the SAME SessionEnd group as a fossil must survive the rewrite untouched.
+
+    The reconcile rewrites the fossil in place and leaves every other hook in
+    the group byte-identical. A regression that matched too broadly (e.g. a
+    ``measure.py`` substring hit on an unrelated command, or a whole-group
+    wipe) would drop the user's own hook.
+    """
+    settings_path = tmp_path / "settings.json"
+    # FOSSIL and UNRELATED share the SAME SessionEnd group.
+    payload = _settings([_hook(FOSSIL), _hook(UNRELATED)])
+    settings_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(measure_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(measure_mod, "CLAUDE_DIR", tmp_path)
+
+    result = measure_mod._reconcile_sessionend_fossils()
+    assert result.get("rewritten", 0) >= 1 or result.get("removed", 0) >= 1
+
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+    group = data["hooks"]["SessionEnd"][0]
+    cmds = [h.get("command", "") for h in group.get("hooks", []) if isinstance(h, dict)]
+
+    # The fossil is gone (rewritten to the flush shape).
+    assert not any("collect --quiet &&" in c for c in cmds), cmds
+    # The unrelated hook in the SAME group survives, unchanged.
+    assert UNRELATED in cmds, f"unrelated same-group hook was dropped: {cmds}"
+    # A current flush shape is now present.
+    assert any("session-end-flush" in c and "--trigger" in c and "end" in c for c in cmds), cmds
+
+
+def test_reconcile_preserves_unrelated_hook_when_removing_fossil(measure_mod, tmp_path, monkeypatch):
+    """(d, remove path) The false-positive guard also holds on the REMOVE path:
+    when a current flush already exists so the fossil is removed (not
+    rewritten), an unrelated hook in the same group still survives.
+    """
+    settings_path = tmp_path / "settings.json"
+    payload = _settings([_hook(FOSSIL), _hook(UNRELATED), _hook(CURRENT, **{"async": True})])
+    settings_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(measure_mod, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(measure_mod, "CLAUDE_DIR", tmp_path)
+
+    result = measure_mod._reconcile_sessionend_fossils()
+    assert result.get("removed", 0) >= 1
+
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+    group = data["hooks"]["SessionEnd"][0]
+    cmds = [h.get("command", "") for h in group.get("hooks", []) if isinstance(h, dict)]
+    assert UNRELATED in cmds, f"unrelated same-group hook was dropped on remove: {cmds}"
+    assert not any("collect --quiet &&" in c for c in cmds), cmds
+    assert any(c == CURRENT for c in cmds), cmds
