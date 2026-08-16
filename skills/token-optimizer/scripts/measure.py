@@ -109,7 +109,7 @@ from plugin_env import (
     snapshot_dir_candidates,
 )
 from utf8_io import enforce_utf8_io, reexec_in_utf8_mode
-from runtime_env import claude_home, detect_runtime, is_cowork, runtime_home, runtime_name_for_humans
+from runtime_env import _safe_home, claude_home, detect_runtime, is_cowork, runtime_home, runtime_name_for_humans
 from spawn_utils import spawn_detached
 
 # issue #107: every console-attached child we spawn on Windows flashes a cmd
@@ -150,7 +150,7 @@ import hermes_session
 CHARS_PER_TOKEN = 4.0
 _SKILL_DESC_TRUNCATION_LIMIT = 1536
 
-HOME = Path.home()
+HOME = _safe_home()
 RUNTIME_DIR = runtime_home()
 CLAUDE_DIR = claude_home()
 
@@ -19828,7 +19828,7 @@ DAEMON_LABEL = (
     else "com.token-optimizer.dashboard"
 )
 DAEMON_PORT = _DAEMON_PORT_BY_RUNTIME.get(_DAEMON_RUNTIME, 24842)
-LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
+LAUNCH_AGENTS_DIR = _safe_home() / "Library" / "LaunchAgents"
 PLIST_PATH = LAUNCH_AGENTS_DIR / f"{DAEMON_LABEL}.plist"
 DAEMON_LOG_DIR = SNAPSHOT_DIR / "logs"
 DAEMON_TOKEN_PATH = SNAPSHOT_DIR / "daemon-token"  # 0600, per-install CSRF secret
