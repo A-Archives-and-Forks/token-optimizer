@@ -108,4 +108,19 @@ def test_non_worktree_cwd_still_rewrites(tmp_path: Path) -> None:
     )
     assert rewritten != _SAMPLE_COMMAND
     assert "bash_compress" in rewritten, rewritten
+
+
+@pytest.mark.parametrize("bad_cwd", [None, 42, ["x"], {"a": 1}, True])
+def test_non_string_cwd_does_not_crash_the_hook(bad_cwd, tmp_path: Path) -> None:
+    """A non-string cwd must not raise (fail-open contract): the worktree guard
+    coerces cwd with str() before the substring check. A non-string cwd is not a
+    worktree, so the rewrite still applies."""
+    proc = _run_hook(bad_cwd, tmp_path)
+    assert proc.returncode == 0, f"bash_hook crashed on cwd={bad_cwd!r}: {proc.stderr}"
+    assert "AttributeError" not in proc.stderr, proc.stderr
+    rewritten = _rewritten_command(proc)
+    assert rewritten is not None and "bash_compress" in rewritten, (
+        f"non-string cwd={bad_cwd!r} should still rewrite; got "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
     assert rewritten.startswith("for b in bash"), rewritten

@@ -54,6 +54,7 @@ Host platform tool call
 - `run.py` uses `subprocess.Popen(cmd)` with a list of arguments, never `shell=True`
 - `bash_hook.py` and `bash_compress.py` reject commands containing shell metacharacters: `;|&$(){}><\n\r\x00`
 - Only a whitelist of safe environment variables (`HOME`, `PATH`, `LANG`, `TERM`, `USER`, `SHELL`, `TMPDIR`) can be passed through command rewrites
+- **Worktree-isolated sessions skip Bash compression.** When the session cwd is under `.claude/worktrees/`, `bash_hook.py` passes commands through unrewritten. Claude Code's worktree isolation guard statically rejects the rewrite wrapper as "too complex," so rewriting there would refuse every whitelisted command; skipping compression is the correct trade-off (commands still run, they just aren't compressed).
 
 ### Path Traversal Protection
 

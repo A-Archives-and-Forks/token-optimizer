@@ -214,7 +214,7 @@ def main():
     # for-loop wrapper is refused as "too complex", so every whitelisted
     # command fails there. Skip the rewrite entirely: a rewrite is a guaranteed
     # refusal, so losing compression inside worktrees is the correct tradeoff.
-    session_cwd = (payload.get("cwd") or "").replace("\\", "/")
+    session_cwd = str(payload.get("cwd") or "").replace("\\", "/")
     if "/.claude/worktrees/" in session_cwd:
         return
 
