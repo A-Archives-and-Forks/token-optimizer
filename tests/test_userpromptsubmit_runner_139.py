@@ -112,8 +112,9 @@ def test_userpromptsubmit_env_opt_out_is_exact_target(monkeypatch):
     monkeypatch.setattr(run.subprocess, "Popen", _popen)
     monkeypatch.setattr(run.signal, "signal", lambda *_a, **_k: None)
     # Bypass consent (it may read a real ~/.claude/config.json); we only care
-    # that the env opt-out did NOT fire for a non-runner script.
-    monkeypatch.setattr(run, "_check_consent", lambda: True)
+    # that the env opt-out did NOT fire for a non-runner script. run.py now
+    # calls _check_consent(root_resolved), so the stub must accept that arg.
+    monkeypatch.setattr(run, "_check_consent", lambda *a, **k: True)
     monkeypatch.setattr(run, "_plugin_disabled_by_host", lambda: False)
 
     run.main()

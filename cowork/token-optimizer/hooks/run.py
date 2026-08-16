@@ -110,7 +110,7 @@ def _forward_and_exit(signum, frame):
     os._exit(0)
 
 
-def _check_consent(plugin_root: Path | None) -> bool:
+def _check_consent(plugin_root: Path | None = None) -> bool:
     """Return True if consent is given or assumed. Fail-open on any error."""
     try:
         home = Path.home()
