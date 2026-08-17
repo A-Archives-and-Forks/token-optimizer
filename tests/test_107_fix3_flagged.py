@@ -109,6 +109,9 @@ def _run_find_interpreter(store: Path, probe_log: Path):
     Returns (accepted_path_or_None, probe_log_lines)."""
     driver = _launcher_defs() + (
         "\n_is_safe_prefix() { return 0; }\n"
+        # Shim `timeout` (absent on macOS) so the probe's fail-closed no-timeout
+        # guard does not short-circuit; strips `--kill-after=1s 2s`, runs unbounded.
+        'timeout() { shift 2; "$@"; }\n'
         f'PATH="{store}:$PATH"\n'
         "set +e\n"
         'found=$(find_interpreter "python")\n'

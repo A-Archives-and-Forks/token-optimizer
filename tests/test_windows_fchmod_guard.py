@@ -34,18 +34,24 @@ MEASURE = SCRIPTS / "measure.py"
 # --- Layer 1: source guard over every fchmod site (bug-class tripwire) ---
 
 def test_every_fchmod_call_is_guarded():
-    lines = MEASURE.read_text(encoding="utf-8").splitlines()
+    # Scan EVERY shipped copy of measure.py, not just the canonical one: the repo
+    # keeps three byte-identical mirrors (skills/, plugins/, cowork/), and an
+    # unguarded os.fchmod in any of them crashes Windows just the same (issue #144).
+    measures = sorted(REPO.glob("**/token-optimizer/scripts/measure.py"))
+    assert measures, "no measure.py copies found to scan"
     unguarded = []
-    for i, line in enumerate(lines):
-        if re.search(r"\bos\.fchmod\s*\(", line):
-            # The guard is `if hasattr(os, "fchmod"):` on one of the few lines
-            # immediately above (allowing for an intervening comment line).
-            window = "\n".join(lines[max(0, i - 3):i])
-            if 'hasattr(os, "fchmod")' not in window and "hasattr(os, 'fchmod')" not in window:
-                unguarded.append(i + 1)  # 1-indexed for humans
+    for mp in measures:
+        lines = mp.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            if re.search(r"\bos\.fchmod\s*\(", line):
+                # The guard is `if hasattr(os, "fchmod"):` on one of the few lines
+                # immediately above (allowing for an intervening comment line).
+                window = "\n".join(lines[max(0, i - 3):i])
+                if 'hasattr(os, "fchmod")' not in window and "hasattr(os, 'fchmod')" not in window:
+                    unguarded.append(f"{mp.relative_to(REPO)}:{i + 1}")
     assert not unguarded, (
-        f"unguarded os.fchmod() call(s) at line(s) {unguarded} -- os.fchmod does not "
-        "exist on Windows; wrap with `if hasattr(os, \"fchmod\"):` (issue #144)"
+        f"unguarded os.fchmod() call(s) at {unguarded} -- os.fchmod does not exist on "
+        "Windows; wrap with `if hasattr(os, \"fchmod\"):` (issue #144)"
     )
 
 

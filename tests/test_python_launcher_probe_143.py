@@ -88,6 +88,11 @@ def _run_probe(candidate: Path, *, break_mktemp: bool = False) -> int:
         # Override the safe-prefix gate so the probe logic (not path policy) is
         # what this test exercises.
         + "_is_safe_prefix() { return 0; }\n"
+        # Shim `timeout` (absent on macOS) so `command -v timeout` passes and the
+        # probe's fail-closed no-timeout guard does not short-circuit the test. The
+        # shim strips `--kill-after=1s 2s` and runs the command unbounded (fakes
+        # exit immediately, so no real timeout is needed).
+        + 'timeout() { shift 2; "$@"; }\n'
         + pre
         + f'_probe_windowsapps_candidate "{candidate}"\n'
         + 'echo "RC=$?"\n'

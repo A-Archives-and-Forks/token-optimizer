@@ -178,7 +178,15 @@ _setup_interpreter_cache() {
         { [ -n "$cache_dir" ] && _cache_dir_ready "$cache_dir"; } || return 0
     fi
 
-    _PY_CACHE_FILE="${cache_dir%/}/interpreter-${plugin_hash}-${path_hash}.cache"
+    # Cache key includes a PROBE-LOGIC EPOCH (#143). The key is otherwise
+    # plugin-dir + PATH checksums, neither of which changes when the launcher's
+    # interpreter-liveness logic changes -- so a user already bitten by #143 has a
+    # cache record naming the DEAD WindowsApps stub, and the fixed probe never runs
+    # on a cache HIT (only on a miss). Bumping this epoch renames the cache file, so
+    # every stale record is ignored once on upgrade: discovery re-runs, the new
+    # probe rejects the dead stub, and a healthy interpreter is cached under the new
+    # key. Bump `e2` on any future change to interpreter-liveness probing.
+    _PY_CACHE_FILE="${cache_dir%/}/interpreter-e2-${plugin_hash}-${path_hash}.cache"
 }
 
 # On Windows (Git Bash/MSYS), python.exe is a console-subsystem binary: each
@@ -403,48 +411,48 @@ _probe_windowsapps_candidate() {
     # dead stub got cached and exec'd on every hook. Only the candidate's own
     # liveness may decide.
     #
+    # Safe-prefix and a working `timeout` gate the WHOLE function, so both tiers sit
+    # under the same guards: never exec an untrusted path, and never run the
+    # candidate UNBOUNDED (a blocking/half-broken stub would otherwise hang every
+    # hook forever). Without `timeout` we fail closed -- return 1 so discovery
+    # advances to the next candidate -- rather than risk an unbounded spawn.
+    _is_safe_prefix "$binpath" || return 1
+    command -v timeout >/dev/null 2>&1 || return 1
     # Tier 1 (fast positive): the candidate writes a proof-of-life marker via -c. A
     # live interpreter writes "ok"; a dead redirector ignores -c and writes nothing.
-    if _is_safe_prefix "$binpath"; then
-        probe_tmp=$(mktemp "${TMPDIR:-/tmp}/token-optimizer-pyprobe.XXXXXX" 2>/dev/null) || probe_tmp=""
-        if [ -n "$probe_tmp" ]; then
-            probe_arg=$(cygpath -w "$probe_tmp" 2>/dev/null) || probe_arg=""
-            [ -n "$probe_arg" ] || probe_arg="$probe_tmp"
-            : > "$probe_tmp" 2>/dev/null || :   # start empty so a stale/leftover marker can't false-pass
-            if command -v timeout >/dev/null 2>&1; then
-                timeout --kill-after=1s 2s "$binpath" -c \
-                    'import sys; open(sys.argv[1], "w").write("ok")' \
-                    "$probe_arg" </dev/null >/dev/null 2>&1 || :
-            else
-                "$binpath" -c 'import sys; open(sys.argv[1], "w").write("ok")' \
-                    "$probe_arg" </dev/null >/dev/null 2>&1 || :
-            fi
-            out=$(cat "$probe_tmp" 2>/dev/null) || out=""
-            rm -f "$probe_tmp" 2>/dev/null || :
-            if [ "$out" = "ok" ]; then
-                return 0   # definitive: the candidate itself is a live interpreter
-            fi
+    # mktemp already creates a fresh empty 0600 file, so no pre-truncation is needed.
+    probe_tmp=$(mktemp "${TMPDIR:-/tmp}/token-optimizer-pyprobe.XXXXXX" 2>/dev/null) || probe_tmp=""
+    if [ -n "$probe_tmp" ]; then
+        probe_arg=$(cygpath -w "$probe_tmp" 2>/dev/null) || probe_arg=""
+        [ -n "$probe_arg" ] || probe_arg="$probe_tmp"
+        timeout --kill-after=1s 2s "$binpath" -c \
+            'import sys; open(sys.argv[1], "w").write("ok")' \
+            "$probe_arg" </dev/null >/dev/null 2>&1 || :
+        out=$(cat "$probe_tmp" 2>/dev/null) || out=""
+        rm -f "$probe_tmp" 2>/dev/null || :
+        if [ "$out" = "ok" ]; then
+            return 0   # definitive: the candidate itself is a live interpreter
         fi
     fi
     # Tier 2 (discriminating fallback): trust the candidate's --version OUTPUT, never
     # its exit code. A dead Store redirector exits 0 (the old false pass) but prints a
-    # localized "not found / install from Store" message with NO version number; a
-    # live interpreter prints "Python X.Y.Z". Matching the version string -- not the
-    # exit code -- closes BOTH failure modes the marker probe alone left open:
+    # "not found / install from Store" banner; a live interpreter LEADS with
+    # "Python X.Y.Z". Matching the version string -- not the exit code -- closes BOTH
+    # failure modes the marker probe alone left open:
     #   * a LIVE interpreter that merely could not write the marker (AV/DLP-blocked
     #     temp, cold start over budget, cygpath path mismatch, no writable temp) is
     #     still accepted here instead of being wrongly rejected; and
     #   * a DEAD stub reached because Tier 1 could not run (no writable temp) is
     #     rejected here instead of false-passing on a bare exit-0.
-    # Bounded identically to Tier 1 (2s budget, --kill-after escalation, stdin from
-    # /dev/null). 2>&1 because CPython has historically printed --version to stderr.
-    if command -v timeout >/dev/null 2>&1; then
-        ver=$(timeout --kill-after=1s 2s "$binpath" --version </dev/null 2>&1) || :
-    else
-        ver=$("$binpath" --version </dev/null 2>&1) || :
-    fi
+    # Discriminator is hardened against a LOCALIZED banner that names a version to
+    # install (e.g. "Python 3 was not found; install from the Microsoft Store"):
+    # reject the banner tokens FIRST, then require the version to LEAD the output
+    # (head-anchored, no leading '*'), so a version buried in a sentence cannot pass.
+    # 2>&1 because CPython has historically printed --version to stderr.
+    ver=$(timeout --kill-after=1s 2s "$binpath" --version </dev/null 2>&1) || :
     case "$ver" in
-        *[Pp]ython\ [0-9]*) return 0 ;;   # a real "Python X.Y" version string
+        *[Nn]ot' '[Ff]ound*|*[Ii]nstall*|*[Ss]tore*|*Microsoft*) return 1 ;;
+        [Pp]ython' '[0-9]*) return 0 ;;   # version string LEADS the output
         *) return 1 ;;
     esac
 }
