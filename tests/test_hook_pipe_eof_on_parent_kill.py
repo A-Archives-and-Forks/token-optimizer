@@ -237,3 +237,58 @@ def test_collect_without_budget_hangs_past_window(tmp_path):
                     s.close()
                 except OSError:
                     pass
+
+
+# ---------------------------------------------------------------------------
+# Windows-native #114 proof. The tests above block collect with a FIFO and use
+# SIGKILL -> both POSIX-only (skipped on win32). This one exercises the exact
+# load-bearing #114 mechanism -- HookDeadline's os._exit(0) releasing an
+# inherited stdout pipe when a hook process stalls -- with NO mkfifo and NO
+# SIGKILL, so it runs on NATIVE WINDOWS in CI. It is the real-Windows evidence
+# that a wedged, budget-bounded hook can never hold the host's pipe open.
+# ---------------------------------------------------------------------------
+
+_SCRIPTS = REPO / "skills" / "token-optimizer" / "scripts"
+_DEADLINE_SECONDS = 2.0
+
+
+def test_hookdeadline_closes_inherited_stdout_pipe_crossplatform():
+    """A child that arms HookDeadline(2) and then blocks forever must have its
+    inherited stdout pipe EOF at ~2s (the deadline's os._exit(0)) on EVERY OS,
+    Windows included. Proves the #114 pipe-closure mechanism natively on Windows
+    where the FIFO/SIGKILL harness above cannot run."""
+    child = (
+        "import sys, time\n"
+        f"sys.path.insert(0, r'{_SCRIPTS}')\n"
+        "from hook_runtime import HookDeadline\n"
+        "HookDeadline(%r).start()\n" % _DEADLINE_SECONDS
+        + "time.sleep(600)\n"  # block far past the deadline; only os._exit ends it
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,  # the diagnostic goes to fd 2; we watch stdout EOF
+    )
+    start = time.monotonic()
+    try:
+        data = proc.stdout.read()  # blocks until the child's stdout pipe EOFs
+        elapsed = time.monotonic() - start
+    finally:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise AssertionError(
+                "child did not exit after its stdout EOF'd; HookDeadline os._exit "
+                "did not terminate the process"
+            )
+    # EOF must arrive from the deadline firing (~2s), not instantly (which would
+    # mean the child exited on its own, proving nothing) and not unbounded.
+    assert data == b"", f"expected empty stdout (child writes nothing), got {data!r}"
+    assert _DEADLINE_SECONDS - 0.5 < elapsed < _DEADLINE_SECONDS + 6.0, (
+        f"stdout pipe EOF'd at {elapsed:.2f}s, outside the HookDeadline window "
+        f"(~{_DEADLINE_SECONDS}s). A sub-{_DEADLINE_SECONDS}s EOF means the child "
+        f"exited without the deadline; a >{_DEADLINE_SECONDS + 6:.0f}s EOF means "
+        "os._exit never fired and the pipe was held open (the #114 wedge)."
+    )
+    assert proc.returncode == 0, f"HookDeadline must os._exit(0); got {proc.returncode}"
