@@ -39,6 +39,12 @@ def _node_available() -> bool:
 def _run_statusline(script_path: Path, payload: dict, home: Path) -> subprocess.CompletedProcess:
     env = dict(subprocess.os.environ)
     env["HOME"] = str(home)
+    # Windows resolves the home dir via USERPROFILE (and HOMEDRIVE+HOMEPATH),
+    # not HOME, so point those at the tmp home too or node reads the real
+    # profile and never finds the test flag file.
+    env["USERPROFILE"] = str(home)
+    env["HOMEDRIVE"] = home.drive or env.get("HOMEDRIVE", "")
+    env["HOMEPATH"] = str(home)[len(home.drive):] if home.drive else str(home)
     return subprocess.run(
         ["node", str(script_path)],
         input=json.dumps(payload),

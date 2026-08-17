@@ -76,6 +76,13 @@ def _digest(path: Path) -> str:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="sync-codex-marketplace-plugin.sh is a bash release-gate step run on "
+    "POSIX CI + dev machines; under Windows git-bash it emits UTF-16/exits non-zero. "
+    "Windows users consume the pre-built committed mirror, they never regenerate it, "
+    "so mirror reproducibility is verified on POSIX, not here.",
+)
 def test_rebuild_codex_marketplace_leaves_git_clean():
     """Regenerating plugins/token-optimizer/ via the sync script must produce
     no git diff -- the committed mirror is reproducible from the canonical

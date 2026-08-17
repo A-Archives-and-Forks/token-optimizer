@@ -39,7 +39,9 @@ def _run(payload, cols=None):
         [NODE, str(STATUSLINE)], input=json.dumps(payload),
         capture_output=True, text=True, env=env, timeout=15,
     )
-    return p.stdout
+    # Normalize CRLF: node on Windows emits \r\n, which would leave a stray \r
+    # on every line after split("\n") and skew the width/line-count assertions.
+    return p.stdout.replace("\r\n", "\n")
 
 
 PAYLOAD = {
