@@ -279,3 +279,24 @@ def test_report_desktop_path_unchanged(monkeypatch, capsys):
     assert "Context used before typing" in out
     assert "NOTE (Cowork)" not in out
     assert "Core system (fixed)" in out
+
+
+def test_compact_restore_envelope_event_derives_from_hook_event_name():
+    """PR #142 (@danikdanik): the compact-restore dispatch must choose the emitted
+    envelope's hookEventName from the firing hook's stdin `hook_event_name`, NOT
+    from is_cowork(). is_cowork() false-positives on the local CLI (hook
+    subprocesses inherit the harness AI_AGENT marker), so the old static
+    `event="UserPromptSubmit" if _cw else "SessionStart"` made a SessionStart:compact
+    hook emit a UserPromptSubmit envelope that Claude Code rejects, discarding the
+    post-compaction recovery context. Source-pin the fix so it cannot silently
+    revert to the runtime-detection choice.
+    """
+    src = (SCRIPTS / "measure.py").read_text(encoding="utf-8")
+    # The compact-restore dispatch must read the event from stdin.
+    assert 'event=str(hook_input.get("hook_event_name") or "SessionStart")' in src, (
+        "compact-restore must derive the envelope event from stdin hook_event_name"
+    )
+    # And must NOT reinstate the is_cowork-based static choice at the emit site.
+    assert '_buf.getvalue(), event="UserPromptSubmit" if _cw else "SessionStart"' not in src, (
+        "compact-restore reverted to the is_cowork static event choice (PR #142 regression)"
+    )
