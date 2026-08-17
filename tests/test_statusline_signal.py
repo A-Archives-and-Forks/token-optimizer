@@ -48,7 +48,7 @@ def _run_statusline(script_path: Path, payload: dict, home: Path) -> subprocess.
     return subprocess.run(
         ["node", str(script_path)],
         input=json.dumps(payload),
-        capture_output=True, text=True, timeout=10, env=env,
+        capture_output=True, text=True, encoding="utf-8", timeout=10, env=env,
     )
 
 
