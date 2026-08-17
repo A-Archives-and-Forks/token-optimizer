@@ -118,35 +118,35 @@ def test_none_when_reading_older_than_all_windows(m, tmp_path, monkeypatch):
     assert m.runway_snapshot(days=30) is None
 
 
-def test_period_days_exposed_for_honest_label(m, tmp_path, monkeypatch):
-    """The per-window saved_usd is a pro-rata slice of the N-day ledger, not
-    window-realized savings. period_days must be exposed so the surface can
-    label it honestly ('pro-rata of 30d ledger')."""
+def test_period_days_exposed_for_the_multiplier_scope(m, tmp_path, monkeypatch):
+    """period_days scopes the throughput multipliers (context/routing), not the
+    per-window dollars (which now price each window over its OWN span). It must
+    still be exposed so the surface can label the multiplier's window."""
     _temp_trends(m, tmp_path, monkeypatch)
     monkeypatch.setattr(m, "_keepwarm_read_meters", lambda **k: {
         "available": True, "stale": False, "five_hour_pct": 12.0,
         "seven_day_pct": 10.0, "age_s": 3.0, "ts": time.time() - 3})
     r = m.runway_snapshot(days=30)
     assert r is not None
-    assert r.get("period_days") == 30, "period_days must be exposed for honest labeling"
+    assert r.get("period_days") == 30, "period_days must be exposed for the multiplier scope"
 
 
-def test_window_saved_usd_capped_when_days_lt_span(m, tmp_path, monkeypatch):
-    """When days < span_h/24 (e.g. days=1 for the 7d window), the pro-rata
-    apportionment must be capped at 1.0 so a window never reports more than
-    the cumulative ledger total. Without the guard days=1 gives the 7d window
-    168/24 = 7x the ledger."""
+def test_weekly_dollar_is_span_based_not_outer_days(m, tmp_path, monkeypatch):
+    """The weekly window prices overage over its OWN 7d span, so the outer `days`
+    argument must NOT distort it, and the weekly dollar must equal the top-level
+    7d spine (both read the same 7d ledger). No proration, no over-report."""
     _temp_trends(m, tmp_path, monkeypatch)
     monkeypatch.setattr(m, "_keepwarm_read_meters", lambda **k: {
         "available": True, "stale": False, "five_hour_pct": 12.0,
         "seven_day_pct": 10.0, "age_s": 3.0, "ts": time.time() - 3})
+    # Even with a tiny outer days=1, the weekly window still reads its 7d span.
     r = m.runway_snapshot(days=1)
     assert r is not None
-    # The 7d window's saved_usd must not exceed the cumulative ledger total.
-    total = r.get("saved_usd_context", 0) + r.get("saved_usd_routing", 0)
-    for w in r["windows"]:
-        if w.get("saved_usd") is not None and total > 0:
-            assert w["saved_usd"] <= total + 0.01, (
-                f"{w['key']} window saved_usd ({w['saved_usd']}) exceeds the "
-                f"cumulative ledger total ({total}) -- F6 guard missing"
-            )
+    spine = round(r.get("saved_usd_context", 0) + r.get("saved_usd_routing", 0), 2)
+    by_key = {w["key"]: w for w in r["windows"]}
+    wk = by_key.get("seven_day", {}).get("saved_usd")
+    if wk is not None:
+        assert wk == spine, (
+            f"weekly window dollar ({wk}) must equal the 7d spine ({spine}); a "
+            "mismatch means the window is prorated or scoped by the outer days"
+        )

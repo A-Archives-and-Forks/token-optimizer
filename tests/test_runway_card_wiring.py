@@ -97,22 +97,27 @@ def test_runway_card_validates_numbers_before_rendering():
         assert raw not in body, f"raw interpolation of {raw!r} bypasses validation"
 
 
-def test_runway_usd_label_is_honest_pro_rata():
-    """The per-window USD label must NOT say 'freed this 5h' / 'freed weekly'
-    (that implies window-realized savings). It must say it is a pro-rata slice of
-    the N-day ledger at the recent rate."""
+def test_runway_usd_label_is_honest_overage():
+    """The per-window USD label must frame the dollar as the API-credit OVERAGE the
+    same work would have cost WITHOUT Token Optimizer, over the window's own real
+    span -- NOT a pro-rata slice of a longer ledger, and NOT 'freed within this
+    window' (which would overclaim window-realized savings)."""
     html = (ASSETS / "dashboard.html").read_text(encoding="utf-8")
     start = html.index("function runwayCardHtml(")
     body = html[start:start + 12000]
     assert "freed this " not in body, (
-        "runway card still says 'freed this 5h' -- implies window-realized savings (F4)"
+        "runway card still says 'freed this 5h' -- implies window-realized savings"
     )
     assert "freed weekly" not in body, (
-        "runway card still says 'freed weekly' -- implies window-realized savings (F4)"
+        "runway card still says 'freed weekly' -- implies window-realized savings"
     )
-    assert "pro-rata" in body, (
-        "runway card must label the per-window USD as a pro-rata slice (F4)"
+    # The dishonest time-slice framing is gone.
+    assert "pro-rata" not in body, (
+        "runway card still labels the per-window USD as a pro-rata slice -- the "
+        "time-slice proration was replaced by a real-span overage figure"
     )
-    assert "period_days" in body, (
-        "runway card must reference period_days for the honest label (F4)"
+    # The honest overage framing is present.
+    assert "in API credits" in body and "without Token Optimizer" in body, (
+        "runway card must frame the per-window USD as API-credit overage to do the "
+        "same work without Token Optimizer"
     )

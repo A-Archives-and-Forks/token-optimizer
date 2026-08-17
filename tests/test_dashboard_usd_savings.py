@@ -92,24 +92,34 @@ def _ledger(context_usd, routing_usd):
     }
 
 
-# ----- per-window saved_usd equals the apportioned metered sum -----
+# ----- per-window saved_usd is the real-span overage, not a slice -----
 
-def test_saved_usd_equals_apportioned_metered_sum(m, tmp_path, monkeypatch):
-    """5h and 7d saved_usd = (context_usd + routing_usd) * span_h / (days*24)."""
+def test_saved_usd_is_real_window_overage(m, tmp_path, monkeypatch):
+    """The weekly window's saved_usd = the FULL ledger over its own 7d span
+    (context_usd + routing_usd), NOT a time-slice of a longer ledger. The 5h
+    window has no honest sub-day figure at the day-granular ledger, so it is None.
+    """
     _temp_trends(m, tmp_path, monkeypatch)
     monkeypatch.setattr(m, "_input_rate_mix_ratio", lambda days=30: 1.4)
     monkeypatch.setattr(m, "_keepwarm_read_meters", _fresh_meters())
+    # days-agnostic ledger: _get_merged_savings(days=7) returns the same 100/50.
     monkeypatch.setattr(m, "_get_merged_savings", _ledger(context_usd=100.0, routing_usd=50.0))
 
     r = m.runway_snapshot(days=30)
     assert r is not None, "card must render with a fresh meter and non-trivial levers"
 
-    saved_total = 150.0
-    ledger_span_h = 30 * 24  # 720
     by_key = {w["key"]: w for w in r["windows"]}
-    assert by_key["five_hour"]["saved_usd"] == round(saved_total * 5 / ledger_span_h, 2)
-    assert by_key["seven_day"]["saved_usd"] == round(saved_total * 168 / ledger_span_h, 2)
-    # Top-level spine fields trace to the ledger, not the multipliers.
+    # 5h: sub-day, no honest dollar.
+    assert by_key["five_hour"]["saved_usd"] is None, (
+        "5h window must carry no dollar (day-granular ledger cannot price 5h)"
+    )
+    # 7d: the full overage over the last 7 days, NOT 168/720 of a 30d ledger.
+    assert by_key["seven_day"]["saved_usd"] == 150.0, (
+        "weekly saved_usd must be the real 7d ledger sum, not a time-slice"
+    )
+    # It is explicitly NOT the old proration ($150 * 168/720 = $35).
+    assert by_key["seven_day"]["saved_usd"] != round(150.0 * 168 / (30 * 24), 2)
+    # Top-level spine fields trace to the 7d ledger.
     assert r["saved_usd_context"] == 100.0
     assert r["saved_usd_routing"] == 50.0
 
@@ -186,8 +196,10 @@ def test_saved_usd_tier_estimated_when_routing_contributes(m, tmp_path, monkeypa
     r = m.runway_snapshot(days=30)
     assert r is not None
     assert r["saved_usd_tier"] == "estimated"
+    # Only windows that carry a dollar carry a tier; the 5h window has neither.
     for w in r["windows"]:
-        assert w["saved_usd_tier"] == "estimated"
+        if w["saved_usd"] is not None:
+            assert w["saved_usd_tier"] == "estimated"
 
 
 def test_saved_usd_tier_measured_when_only_context(m, tmp_path, monkeypatch):
@@ -200,8 +212,10 @@ def test_saved_usd_tier_measured_when_only_context(m, tmp_path, monkeypatch):
     r = m.runway_snapshot(days=30)
     assert r is not None
     assert r["saved_usd_tier"] == "measured"
+    # Only windows that carry a dollar carry a tier; the 5h window has neither.
     for w in r["windows"]:
-        assert w["saved_usd_tier"] == "measured"
+        if w["saved_usd"] is not None:
+            assert w["saved_usd_tier"] == "measured"
 
 
 def test_saved_usd_survives_a_dead_ledger(m, tmp_path, monkeypatch):
@@ -291,9 +305,12 @@ def test_dashboard_per_window_card_shows_usd():
     end = html.index("}).join('');", start)
     body = html[start:end]
     assert "w.saved_usd" in body
-    # The per-window USD is labeled as a pro-rata slice at the recent rate,
-    # NOT "freed this window" (which overstated it as window-realized savings).
-    assert "recent rate" in body, "per-window card does not render the honest USD rate line"
+    # The per-window USD is framed as API-credit overage over the window's real
+    # span, NOT "freed this window" and NOT a pro-rata slice of a longer ledger.
+    assert "in API credits" in body and "without Token Optimizer" in body, (
+        "per-window card does not render the honest overage USD line"
+    )
+    assert "pro-rata" not in body, "per-window card still uses the old time-slice label"
     # Graceful: when saved_usd is absent/None, no line is rendered (no $-0/NaN).
     assert "hasUsd" in body, "per-window card does not gate the USD line on presence"
 

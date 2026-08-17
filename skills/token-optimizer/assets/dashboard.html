@@ -3820,15 +3820,20 @@ var DB = (function() {
         var savedUsd = Number(w.saved_usd);
         var hasUsd = isFinite(savedUsd) && savedUsd > 0;
         var spanWord = w.key === 'five_hour' ? '5h' : 'week';
-        // The per-window USD is a pro-rata slice of the N-day savings ledger
-        // at the recent rate, NOT savings realized within this window. Label it
-        // honestly so the headline dollar figure never overclaims.
-        var periodDays = Number(rw.period_days) || 30;
-        var usdCaption = 'saved at your recent rate (pro-rata of ' + periodDays + 'd ledger)';
+        // The per-window USD is the EXTRA you'd have paid in API credits to match
+        // this window's work WITHOUT Token Optimizer, priced over the window's OWN
+        // real span (the weekly card = the last 7 days, not a slice of a longer
+        // ledger). It is the API-equivalent savings delta, NOT total weekly cost
+        // and NOT strict post-cap overage; the explainer line + ESTIMATED $ chip
+        // carry that honesty. A big "$N more" number, a tiny "in API credits"
+        // caption, then a plain sentence that spells out the meaning.
+        var usdExplainer = 'Matching this ' + spanWord + '&rsquo;s work without Token Optimizer ' +
+          'would have pushed you onto paid API credits. That&rsquo;s the extra you&rsquo;d pay.';
         return '<div style="background:rgba(255,255,255,.02);border:1px solid var(--c-border);border-radius:8px;padding:var(--s-3);">' +
           '<div class="label" style="display:block;margin-bottom:var(--s-3);">' + name + '</div>' +
           (hasUsd
-            ? '<div style="margin-bottom:var(--s-3);font-size:22px;font-weight:500;color:var(--c-savings-alt, #10b981);line-height:1.2;">&asymp;' + rwMoney(savedUsd) + ' <span style="font-size:13px;color:var(--c-text-dim);font-weight:400;">' + usdCaption + '</span></div>'
+            ? '<div style="margin-bottom:6px;font-size:22px;font-weight:500;color:var(--c-savings-alt, #10b981);line-height:1.2;">&asymp;' + rwMoney(savedUsd) + ' more <span style="font-size:13px;color:var(--c-text-dim);font-weight:400;">in API credits</span></div>' +
+              '<div style="margin-bottom:var(--s-3);font-size:13px;color:var(--c-text-dim);line-height:1.5;text-wrap:pretty;">' + usdExplainer + '</div>'
             : '') +
           '<div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:var(--s-3);">' +
             '<div>' +
@@ -3861,10 +3866,10 @@ var DB = (function() {
       (rw.windows || []).forEach(function (w) {
         var v = Number(w.saved_usd);
         if (!isFinite(v) || v <= 0) return;
-        // Honest label -- pro-rata slice of the N-day ledger, not window-
-        // realized savings. The old per-window wording implied the dollars
-        // were actually saved within that window.
-        var span = w.key === 'five_hour' ? '5h slice' : 'weekly slice';
+        // Honest label -- API-credit overage over the window's own real span, not
+        // a slice of a longer ledger. Sub-day windows carry no dollar, so in
+        // practice only the weekly figure appears here.
+        var span = w.key === 'five_hour' ? 'past 5h' : 'this week';
         usdParts.push('<em style="font-style:normal;color:var(--c-accent-cyan);">' + rwMoney(v) + '</em> ' + span);
       });
       var usdHeadline = usdParts.join(' &middot; ');

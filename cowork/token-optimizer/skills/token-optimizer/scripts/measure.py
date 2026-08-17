@@ -35138,36 +35138,53 @@ def runway_snapshot(days=30, now=None):
         if mult < 1.02:
             return None
 
-        # --- USD-per-window: reuse the metered savings ledger ---
-        # The dollar figure reuses the savings surface that already exists
-        # (_get_merged_savings): context tokens_saved priced at the input rate
-        # (total_cost_usd, metered) + realized model-routing savings
-        # (model_routing.realized_cost_usd, estimated counterfactual). We do NOT
-        # invent a window-%->USD conversion and do NOT re-derive USD from the
-        # runway multipliers (context_mult/routing_mult) -- that would re-multiply
-        # savings already counted in the ledger and double-count the same dollars.
-        # Apportion by span: the ledger is cumulative over `days`, so the share
-        # attributable to a window is its span as a fraction of the ledger window.
-        # The two pools are disjoint (tokens never sent vs cheaper model for the
-        # same tokens), so summing them is not a double-count -- this mirrors
-        # _savings_since_install's measured = total_cost_usd + realized_cost_usd.
-        saved_context_usd = 0.0
-        saved_routing_usd = 0.0
-        try:
-            merged = _get_merged_savings(days=days)
-            saved_context_usd = float(merged.get("total_cost_usd", 0.0) or 0.0)
-            mr = merged.get("model_routing") or {}
-            saved_routing_usd = float(mr.get("realized_cost_usd", 0.0) or 0.0)
-        except Exception:
-            pass
-        saved_total_usd = saved_context_usd + saved_routing_usd
-        ledger_span_h = max(days, 1) * 24.0
-        # Measured-vs-estimated boundary: context $ is metered from actual
-        # tokens_saved; routing $ is an estimated counterfactual (baseline mix
-        # vs current). The proxy disclosure below carries this through to the
-        # surface so a bare number is never printed without its honesty label.
-        saved_usd_tier = ("estimated" if saved_routing_usd > 0
-                          else ("measured" if saved_context_usd > 0 else None))
+        # --- USD-per-window: API-credit OVERAGE over each window's OWN real span ---
+        # The dollar answers the user's question directly: "if I had kept working
+        # WITHOUT Token Optimizer and hit my limits, what would the SAME work cost
+        # me in API-credit overage?" So each window is priced over ITS OWN span --
+        # the weekly window over the last 7 days, not a time-slice of a longer
+        # ledger. The old code prorated a 30-day ledger by span (168/720), which is
+        # not "what you saved this week", just 7/30 of a month. Now we ask the
+        # metered savings ledger for exactly the window's span.
+        #
+        # The figure reuses _get_merged_savings for that span: context tokens_saved
+        # priced at input rate (total_cost_usd, metered) + realized model-routing
+        # savings (model_routing.realized_cost_usd, an estimated counterfactual that
+        # ALREADY blends output rates, so the expensive output-token delta is
+        # counted). The two pools are disjoint (tokens never sent vs cheaper model
+        # for the same tokens), so summing is not a double-count. Never re-derived
+        # from context_mult/routing_mult -- that would double-count the ledger.
+        #
+        # Sub-day windows (5h) have NO honest figure: the savings ledger is
+        # day-granular, so "dollars saved in the last 5 hours" cannot be computed
+        # without inventing a proration. Those windows carry no dollar line (None)
+        # and show only their headroom bars.
+        _overage_cache = {}
+
+        def _window_overage_usd(span_h):
+            """(usd, tier) of API-credit overage avoided over this window's span,
+            or (None, None) when the span is sub-day or the ledger is empty."""
+            if span_h < 24:
+                return None, None
+            wdays = max(1, int(round(span_h / 24.0)))
+            if wdays not in _overage_cache:
+                ctx = rt = 0.0
+                try:
+                    wm = _get_merged_savings(days=wdays)
+                    ctx = float(wm.get("total_cost_usd", 0.0) or 0.0)
+                    rt = float((wm.get("model_routing") or {}).get("realized_cost_usd", 0.0) or 0.0)
+                except Exception:
+                    pass
+                _overage_cache[wdays] = (ctx, rt)
+            ctx, rt = _overage_cache[wdays]
+            total = ctx + rt
+            if total <= 0:
+                return None, None
+            # Measured-vs-estimated boundary: context $ is metered from actual
+            # tokens_saved; routing $ is an estimated counterfactual. Estimated
+            # wins the label whenever routing contributes.
+            tier = "estimated" if rt > 0 else "measured"
+            return round(total, 2), tier
 
         windows = []
         meter_age_s = meters.get("age_s")
@@ -35185,17 +35202,7 @@ def runway_snapshot(days=30, now=None):
             counterfactual = min(100.0, used * mult)
             head_now = max(0.0, 100.0 - used)
             head_cf = max(0.0, 100.0 - counterfactual)
-            # USD attributable to this window's span, from the metered savings
-            # ledger. None when there is nothing to show so the panel
-            # degrades gracefully (no $-0 / NaN). Derived from the ledger, NOT
-            # from context_mult/routing_mult -- the no-double-count invariant.
-            # Cap the apportionment fraction at 1.0 so a caller passing
-            # days < span_h/24 (e.g. days=1 for the 7d window) cannot produce a
-            # window_saved_usd larger than the cumulative ledger. Without this
-            # guard days=1 would give the 7d window 168/24 = 7x the ledger total.
-            effective_span_h = min(span_h, ledger_span_h)
-            window_saved_usd = (round(saved_total_usd * effective_span_h / ledger_span_h, 2)
-                                if saved_total_usd > 0 else None)
+            window_saved_usd, window_usd_tier = _window_overage_usd(span_h)
             windows.append({
                 "key": key, "label": label, "span_hours": span_h,
                 "used_pct": round(used, 1),
@@ -35207,10 +35214,19 @@ def runway_snapshot(days=30, now=None):
                 "headroom_multiple": round(head_now / head_cf, 1) if head_cf > 0.5 else None,
                 "would_be_capped": head_cf <= 0.5,
                 "saved_usd": window_saved_usd,
-                "saved_usd_tier": saved_usd_tier,
+                "saved_usd_tier": window_usd_tier,
             })
         if not windows:
             return None
+
+        # Top-level spine reflects the WEEKLY (7d) ledger -- the dollar the card
+        # actually shows -- so the tier chip matches the number beside it. The 7d
+        # merged call is already cached above; re-read the same components.
+        _wk_ctx, _wk_rt = _overage_cache.get(7, (0.0, 0.0))
+        saved_context_usd = _wk_ctx
+        saved_routing_usd = _wk_rt
+        saved_usd_tier = ("estimated" if saved_routing_usd > 0
+                          else ("measured" if saved_context_usd > 0 else None))
 
         return {
             "available": True,
@@ -35222,16 +35238,16 @@ def runway_snapshot(days=30, now=None):
             "tokens_consumed": int(consumed),
             "tokens_saved": int(saved),
             "windows": windows,
-            # USD spine: metered context $ + estimated routing $, reused
-            # from the savings ledger. Apportioned per window above. Exposed at
-            # the top level so the surface and tests can assert the no-double-
-            # count invariant (USD traces to these, not to the multipliers).
+            # USD spine: metered context $ + estimated routing $ over the WEEKLY
+            # (7d) ledger -- the same span the weekly card shows. Exposed at the top
+            # level so the surface and tests can assert the no-double-count invariant
+            # (USD traces to the ledger, not to the throughput multipliers).
             "saved_usd_context": round(saved_context_usd, 2),
             "saved_usd_routing": round(saved_routing_usd, 2),
             "saved_usd_tier": saved_usd_tier,
-            # The per-window saved_usd is a pro-rata slice of the N-day
-            # ledger at the recent rate, NOT savings realized within that
-            # window. Expose period_days so the surface can label it honestly.
+            # period_days scopes the throughput MULTIPLIERS (context/routing), not
+            # the per-window dollars: each window now prices overage over its OWN
+            # span (weekly = 7d), so the dollars are window-real, not a slice.
             "period_days": days,
             "meter_age_s": meters.get("age_s"),
             "meter_ts": meters.get("ts"),
