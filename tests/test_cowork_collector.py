@@ -220,6 +220,13 @@ def test_quality_average_fold_is_not_nulled(tmp_path):
     assert avg[0] == pytest.approx((82 + 0) / 2)   # cowork folds in as 0, not NULL
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="needs time.tzset() to force a non-UTC local tz so the instant crosses "
+    "local midnight; tzset is POSIX-only, so on Windows LOCAL_DAY==UTC_DAY and the "
+    "cross-midnight scenario can't be constructed. Local-day bucketing itself is "
+    "exercised on POSIX CI + a real Windows user's own tz.",
+)
 def test_local_day_bucketing(tmp_path):
     dd = tmp_path / "cap"
     _write_capture(dd, [_api_record("sess-tz", EVENING_NANOS)])

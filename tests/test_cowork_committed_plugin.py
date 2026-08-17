@@ -171,6 +171,13 @@ def _git(*args: str) -> subprocess.CompletedProcess:
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the emit-committed rebuild is a bash release-gate step run on POSIX CI + "
+    "dev machines; under Windows git-bash it emits UTF-16/exits non-zero. Windows "
+    "users consume the pre-built committed Cowork plugin, they never regenerate it, "
+    "so reproducibility is verified on POSIX, not here.",
+)
 def test_rebuild_emit_committed_leaves_git_clean():
     if _git("rev-parse", "--is-inside-work-tree").returncode != 0:
         pytest.skip("not a git work tree; cannot check for committed-plugin drift")

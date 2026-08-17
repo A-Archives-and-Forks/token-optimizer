@@ -279,6 +279,11 @@ def test_run_py_consent_rejects_foreign_claude_plugin_data(monkeypatch, tmp_path
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
+    # Windows resolves home via USERPROFILE (+ HOMEDRIVE/HOMEPATH), not HOME,
+    # so the legacy ~/.claude fallback would otherwise land on the real profile.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOMEDRIVE", tmp_path.drive or "")
+    monkeypatch.setenv("HOMEPATH", str(tmp_path)[len(tmp_path.drive):] if tmp_path.drive else str(tmp_path))
 
     # Legacy path (what a rejected/absent CLAUDE_PLUGIN_DATA falls through to)
     # has NO consent flags -- the real, honest answer is "no consent yet".
@@ -315,6 +320,11 @@ def test_run_py_consent_accepts_registered_claude_plugin_data(monkeypatch, tmp_p
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(ours))
     monkeypatch.delenv("TOKEN_OPTIMIZER_PLUGIN_DATA", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
+    # Windows resolves home via USERPROFILE (+ HOMEDRIVE/HOMEPATH), not HOME,
+    # so the legacy ~/.claude fallback would otherwise land on the real profile.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOMEDRIVE", tmp_path.drive or "")
+    monkeypatch.setenv("HOMEPATH", str(tmp_path)[len(tmp_path.drive):] if tmp_path.drive else str(tmp_path))
 
     run_mod = _load_run_py()
     result = run_mod._check_consent(tmp_path / "plugin-root")
@@ -347,6 +357,11 @@ def test_cache_instability_state_dir_rejects_foreign_claude_plugin_data(monkeypa
     monkeypatch.delenv("TOKEN_OPTIMIZER_PLUGIN_DATA", raising=False)
     monkeypatch.delenv("TOKEN_OPTIMIZER_SNAPSHOT_DIR", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
+    # Windows resolves home via USERPROFILE (+ HOMEDRIVE/HOMEPATH), not HOME,
+    # so the legacy ~/.claude fallback would otherwise land on the real profile.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOMEDRIVE", tmp_path.drive or "")
+    monkeypatch.setenv("HOMEPATH", str(tmp_path)[len(tmp_path.drive):] if tmp_path.drive else str(tmp_path))
 
     monkeypatch.syspath_prepend(str(SCRIPTS))
     ci = importlib.import_module("detectors.cache_instability")

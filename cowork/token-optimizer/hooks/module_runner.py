@@ -80,7 +80,38 @@ def main() -> int:
     sys.path.insert(0, scripts_dir)
     sys.argv = [module_name, *script_args]
 
-    runpy.run_module(module_name, run_name="__main__", alter_sys=True)
+    # Generic Windows orphan-grandchild backstop, NOT a #114 fossil bound.
+    #
+    # When the host TerminateProcess-es run.py on Windows it bypasses run.py's
+    # SIGTERM handler, orphaning this in-process grandchild while it still
+    # holds the hook stdout pipe. HookDeadline's daemon thread calls
+    # os._exit(0) so the pipe EOFs even when no parent is left to reap us.
+    # The 110s sits a few seconds under run.py's 120s wait so a normally
+    # reaped hook never trips it.
+    #
+    # This does NOT bound the #114 collect/dashboard fossil: that fossil is a
+    # raw `measure.py collect && dashboard` in settings.json that invokes
+    # measure.py directly via the launcher, never through run.py/module_runner,
+    # so this layer never sees it. The fossil is bounded by the 20s dispatch
+    # budget in measure.py._dispatch_collect/_dispatch_dashboard (#114 Fix 4),
+    # armed only on the hook path. The session-end-flush path this DOES wrap
+    # already self-bounds at 60s, so 110s is a last-resort backstop for any
+    # OTHER hook that runs past run.py's wait while orphaned on Windows.
+    # Fail-open if hook_runtime is missing (unit-test dummy plugin trees).
+    deadline = None
+    try:
+        from hook_runtime import HookDeadline
+        deadline = HookDeadline(110).start()
+    except Exception:
+        deadline = None
+    try:
+        runpy.run_module(module_name, run_name="__main__", alter_sys=True)
+    finally:
+        if deadline is not None:
+            try:
+                deadline.cancel()
+            except Exception:
+                pass
     return 0
 
 
