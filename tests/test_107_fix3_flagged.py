@@ -63,14 +63,25 @@ def _launcher_defs() -> str:
 
 def _fake_console_python(store: Path, exit_code: int = 0) -> Path:
     """A stand-in WindowsApps python.exe. Every invocation is a would-be
-    console-window flash, so it logs itself to $PROBE_LOG before exiting."""
+    console-window flash, so it logs itself to $PROBE_LOG.
+
+    Post-#143 the probe keys on the CANDIDATE's own liveness, so this fake models
+    a real console python by response, keyed on exit_code:
+      * alive (exit_code 0): writes the ``-c`` proof-of-life marker to $3, and
+        prints a real ``Python X.Y.Z`` version string on ``--version``.
+      * dead (nonzero): the Store redirector -- ignores ``-c`` (no marker) and
+        prints a localized "not found / install from Store" message on
+        ``--version`` that carries NO version number (exit code is not trusted).
+    """
     path = store / "python.exe"
-    path.write_text(
-        "#!/bin/sh\n"
-        'echo "console-spawn $*" >> "$PROBE_LOG"\n'
-        f"exit {exit_code}\n",
-        encoding="utf-8",
-    )
+    body = "#!/bin/sh\n" 'echo "console-spawn $*" >> "$PROBE_LOG"\n'
+    if exit_code == 0:
+        body += 'if [ "$1" = "-c" ]; then printf ok > "$3"; exit 0; fi\n'
+        body += 'if [ "$1" = "--version" ]; then echo "Python 3.11.0"; exit 0; fi\n'
+    else:
+        body += 'if [ "$1" = "--version" ]; then echo "Python was not found; install from the Store"; exit 0; fi\n'
+    body += f"exit {exit_code}\n"
+    path.write_text(body, encoding="utf-8")
     path.chmod(0o755)
     return path
 
@@ -127,18 +138,19 @@ def store(tmp_path: Path) -> Path:
 
 
 @requires_bash
-def test_live_gui_twin_accepts_without_console_spawn(store, tmp_path):
-    """The regression: a healthy Store install must be accepted WITHOUT
-    ever spawning the console-subsystem python.exe (the flash). Fails on the
-    pre-fix launcher, whose only probe was `python.exe --version`."""
+def test_live_console_candidate_is_accepted(store, tmp_path):
+    """A healthy Store install must be accepted. Post-#143 the CANDIDATE itself
+    supplies proof of life (marker write, else a real --version string), because a
+    sibling GUI twin can belong to a different package and must not vouch for it.
+
+    #143 deliberately traded #107's no-flash-on-the-healthy-path property for this
+    correctness: probing the console candidate can spawn it once on a cache miss.
+    That is why this test no longer asserts an empty PROBE_LOG -- a one-time spawn
+    is expected and accepted; a silently-dead cached interpreter is far worse."""
     py = _fake_console_python(store)
     _fake_gui_twin(store, alive=True)
-    found, log = _run_find_interpreter(store, tmp_path / "probe.log")
-    assert found == str(py), f"live install must be accepted; log={log}"
-    assert log == [], (
-        "the console-subsystem python.exe must not be spawned when the GUI "
-        f"twin proves the install alive; it was: {log}"
-    )
+    found, _log = _run_find_interpreter(store, tmp_path / "probe.log")
+    assert found == str(py), f"live install must be accepted; log={_log}"
 
 
 @requires_bash
@@ -157,13 +169,14 @@ def test_dead_gui_twin_exit0_is_not_trusted(store, tmp_path):
 
 
 @requires_bash
-def test_no_gui_twin_falls_back_to_console_probe_accept(store, tmp_path):
-    """No GUI twin: original semantics preserved -- console --version probe
-    decides, and a passing probe accepts the candidate."""
+def test_no_gui_twin_console_candidate_accepted(store, tmp_path):
+    """No GUI twin present: the candidate's own proof of life still accepts it
+    (marker write on -c, or a real --version string). The probe runs the console
+    candidate, so PROBE_LOG is non-empty."""
     py = _fake_console_python(store, exit_code=0)
     found, log = _run_find_interpreter(store, tmp_path / "probe.log")
     assert found == str(py)
-    assert log, "console probe must run when there is no GUI twin"
+    assert log, "the candidate probe must run when there is no GUI twin"
 
 
 @requires_bash
@@ -176,14 +189,18 @@ def test_no_gui_twin_console_probe_still_rejects_stub(store, tmp_path):
     assert found != str(py)
 
 
-def test_twin_probe_keeps_c6_timeout_semantics():
-    """C6: the new GUI-twin probe carries the same `timeout --kill-after=1s 2s`
-    escalation as both pre-existing probe sites (3 total in the launcher)."""
+def test_candidate_probe_keeps_c6_timeout_semantics():
+    """C6: both candidate probe sites (the -c marker write and the --version
+    string check) carry the `timeout --kill-after=1s 2s` escalation, alongside the
+    pre-existing pythonw-swap liveness probe (3 total in the launcher). Post-#143
+    the probes run against `$binpath` (the candidate), never a `$twin`."""
     src = LAUNCHER.read_text(encoding="utf-8")
     assert src.count("--kill-after=1s 2s") == 3
-    assert 'timeout --kill-after=1s 2s "$twin" -c' in src
-    # And the console fallback authority is intact, verbatim.
+    assert 'timeout --kill-after=1s 2s "$binpath" -c' in src
+    # The --version discriminator carries the same bounded semantics.
     assert 'timeout --kill-after=1s 2s "$binpath" --version' in src
+    # The twin proof-of-life probe is gone (the #143 bug); never reference $twin.
+    assert '"$twin" -c' not in src
 
 
 # ---------------------------------------------------------------------------

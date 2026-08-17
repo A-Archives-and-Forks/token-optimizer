@@ -6106,7 +6106,7 @@ def generate_standalone_dashboard(days=30, quiet=False, force=False):
             # sibling then os.replace so every reader sees one complete generation.
             tmp_fd, tmp_name = tempfile.mkstemp(dir=str(wp.parent), prefix=".dash-", suffix=".tmp")
             try:
-                if hasattr(os, "fchmod"):  # POSIX only; mkstemp is already 0600
+                if hasattr(os, "fchmod"):  # POSIX only (os.fchmod is absent on Windows)
                     os.fchmod(tmp_fd, 0o600)
                 with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                     f.write(injected)
@@ -12500,7 +12500,7 @@ def _keepwarm_write_scheduler_marker(bootstrap_rc="__unset__"):
         SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
         tmp_fd, tmp_path = tempfile.mkstemp(
             dir=str(SNAPSHOT_DIR), prefix=".keepwarm-marker-", suffix=".tmp")
-        if hasattr(os, "fchmod"):  # POSIX only; mkstemp is already 0600
+        if hasattr(os, "fchmod"):  # POSIX only (os.fchmod is absent on Windows)
             os.fchmod(tmp_fd, 0o600)
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             json.dump(payload, f)

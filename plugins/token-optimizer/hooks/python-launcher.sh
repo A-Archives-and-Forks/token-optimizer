@@ -356,69 +356,97 @@ _exec_cached_interpreter "$@" || :
 # --version` on every cache miss, which is exactly the flash this launcher
 # exists to prevent.
 #
-# Design: a Store package registers its execution aliases (python.exe,
-# python3.exe, pythonw.exe) together, so the GUI-subsystem twin's liveness
-# proves the install is real, and a GUI binary allocates no console -- no
-# flash. A GUI binary's bare exit code is NOT trusted (a dead alias can exit
-# 0 silently outside an interactive token, see measure.py):
-# the twin must supply POSITIVE PROOF OF LIFE by writing a marker to a temp
-# file whose content we then require. A dead alias exits without writing.
+# Design (revised for #143): the CANDIDATE ITSELF must supply POSITIVE PROOF
+# OF LIFE by writing a marker to a temp file whose content we then require. A
+# dead AppExecutionAlias stub exits without writing it. We do NOT trust a bare
+# exit code (a dead alias can exit 0 silently, see measure.py), and we do NOT
+# trust a sibling "twin" (pythonw.exe): #143 proved that in WindowsApps each
+# alias name is claimed independently, so a LIVE pythonw twin can sit beside a
+# DEAD python3.exe from a different package -- the old twin probe then cached
+# and exec'd the dead stub on every hook. Only the candidate's own liveness
+# decides now.
 #
-# Fallback ladder: on ANY doubt (no GUI twin beside the candidate, twin
-# fails metadata checks, no temp file could be created, or the twin ran but
-# wrote no marker) the original console `--version` probe runs and remains
-# the correctness authority. So the acceptance set only ever narrows to
-# {twin proved alive} OR {old console probe passed} -- a dead interpreter is
-# never accepted, and the console flash survives only for broken or degraded
-# installs, never on the healthy-install cache-miss path. When no GUI twin
-# exists there is also nothing to flash-avoid at exec time (the exec-time
-# swap in _maybe_swap_to_pythonw needs the same twin), so the fallback costs
-# nothing extra there.
+# Flash tradeoff (was #107's concern): the twin was GUI-subsystem, so probing
+# it never flashed a console; probing the console candidate directly can flash
+# a window ONCE on a cache miss. That regression is accepted deliberately -- a
+# silently-dead cached interpreter breaks EVERY hook for affected users, which
+# is far worse than a one-time flash that only occurs on the rare cache-miss
+# path (the result is cached immediately after). The old code already ran the
+# console candidate directly in its `--version` fallback, so invoking the
+# candidate here is not a new class of behavior.
 #
-# The temp path is handed to the twin as a native Windows path via cygpath
-# when available, so the probe is immune to MSYS argv path-conversion
-# settings (MSYS_NO_PATHCONV). Probe stdin comes from /dev/null so the
-# hook's real stdin is never consumed. C6 timeout semantics (2s budget,
-# SIGKILL escalation 1s after SIGTERM) apply to the twin probe and fallback.
-# Strict POSIX no-op is preserved: this function is only reached for paths
-# matching _path_contains_windowsapps, exactly like the old inline probe.
+# Two-tier ladder (both key on the CANDIDATE, never a twin):
+#   Tier 1 -- write-marker: candidate writes "ok" via -c -> alive (fast positive).
+#   Tier 2 -- --version OUTPUT (not exit code): a live interpreter prints
+#     "Python X.Y.Z"; a dead redirector exits 0 but prints a localized "not found /
+#     install from Store" message with no version number. Matching the version
+#     STRING is what makes this safe -- trusting the bare exit code was the original
+#     false-pass. Tier 2 both (a) rescues a live interpreter that could not write the
+#     marker (AV-blocked or unwritable temp, cold start, cygpath path mismatch) and
+#     (b) rejects a dead stub that reached here because Tier 1 could not run. There
+#     is no remaining exit-code-only fallback, so no surviving Store-stub false-pass.
+#
+# The temp path is handed to the candidate as a native Windows path via cygpath
+# when available, so the probe is immune to MSYS argv path-conversion settings
+# (MSYS_NO_PATHCONV). Probe stdin comes from /dev/null so the hook's real stdin
+# is never consumed. C6 timeout semantics (2s budget, SIGKILL escalation 1s
+# after SIGTERM) apply to the probe and the fallback. Strict POSIX no-op is
+# preserved: this function is only reached for paths matching
+# _path_contains_windowsapps, exactly like the old inline probe.
 _probe_windowsapps_candidate() {
-    local binpath="$1" dir twin probe_tmp probe_arg out
-    dir=${binpath%/*}
-    twin=""
-    case "$binpath" in
-        */python.exe|*/python3.exe|*/python|*/python3) twin="${dir}/pythonw.exe" ;;
-        */py.exe|*/py)                                 twin="${dir}/pyw.exe" ;;
-    esac
-    if [ -n "$twin" ] && [ -f "$twin" ] && [ -x "$twin" ] && [ -s "$twin" ] \
-        && _is_safe_prefix "$twin"; then
+    local binpath="$1" probe_tmp probe_arg out ver
+    # #143: probe the CANDIDATE ITSELF, never a sibling "twin". In WindowsApps each
+    # App Execution Alias name is claimed independently, so pythonw.exe can resolve
+    # to a DIFFERENT, live package (e.g. the Python Install Manager) while this
+    # candidate (python3.exe) is a dead Microsoft Store redirector. The old code
+    # proof-of-life-probed the twin, so a live twin masked a dead candidate and the
+    # dead stub got cached and exec'd on every hook. Only the candidate's own
+    # liveness may decide.
+    #
+    # Tier 1 (fast positive): the candidate writes a proof-of-life marker via -c. A
+    # live interpreter writes "ok"; a dead redirector ignores -c and writes nothing.
+    if _is_safe_prefix "$binpath"; then
         probe_tmp=$(mktemp "${TMPDIR:-/tmp}/token-optimizer-pyprobe.XXXXXX" 2>/dev/null) || probe_tmp=""
         if [ -n "$probe_tmp" ]; then
             probe_arg=$(cygpath -w "$probe_tmp" 2>/dev/null) || probe_arg=""
             [ -n "$probe_arg" ] || probe_arg="$probe_tmp"
+            : > "$probe_tmp" 2>/dev/null || :   # start empty so a stale/leftover marker can't false-pass
             if command -v timeout >/dev/null 2>&1; then
-                timeout --kill-after=1s 2s "$twin" -c \
+                timeout --kill-after=1s 2s "$binpath" -c \
                     'import sys; open(sys.argv[1], "w").write("ok")' \
                     "$probe_arg" </dev/null >/dev/null 2>&1 || :
             else
-                "$twin" -c 'import sys; open(sys.argv[1], "w").write("ok")' \
+                "$binpath" -c 'import sys; open(sys.argv[1], "w").write("ok")' \
                     "$probe_arg" </dev/null >/dev/null 2>&1 || :
             fi
             out=$(cat "$probe_tmp" 2>/dev/null) || out=""
             rm -f "$probe_tmp" 2>/dev/null || :
             if [ "$out" = "ok" ]; then
-                return 0
+                return 0   # definitive: the candidate itself is a live interpreter
             fi
         fi
     fi
-    # Fallback: the original console-subsystem probe, unchanged semantics
-    # (2s budget, --kill-after escalation). Stdin from /dev/null so a stub
-    # that reads stdin can never consume the hook's real input.
+    # Tier 2 (discriminating fallback): trust the candidate's --version OUTPUT, never
+    # its exit code. A dead Store redirector exits 0 (the old false pass) but prints a
+    # localized "not found / install from Store" message with NO version number; a
+    # live interpreter prints "Python X.Y.Z". Matching the version string -- not the
+    # exit code -- closes BOTH failure modes the marker probe alone left open:
+    #   * a LIVE interpreter that merely could not write the marker (AV/DLP-blocked
+    #     temp, cold start over budget, cygpath path mismatch, no writable temp) is
+    #     still accepted here instead of being wrongly rejected; and
+    #   * a DEAD stub reached because Tier 1 could not run (no writable temp) is
+    #     rejected here instead of false-passing on a bare exit-0.
+    # Bounded identically to Tier 1 (2s budget, --kill-after escalation, stdin from
+    # /dev/null). 2>&1 because CPython has historically printed --version to stderr.
     if command -v timeout >/dev/null 2>&1; then
-        timeout --kill-after=1s 2s "$binpath" --version </dev/null >/dev/null 2>&1
+        ver=$(timeout --kill-after=1s 2s "$binpath" --version </dev/null 2>&1) || :
     else
-        "$binpath" --version </dev/null >/dev/null 2>&1
+        ver=$("$binpath" --version </dev/null 2>&1) || :
     fi
+    case "$ver" in
+        *[Pp]ython\ [0-9]*) return 0 ;;   # a real "Python X.Y" version string
+        *) return 1 ;;
+    esac
 }
 
 find_interpreter() {
