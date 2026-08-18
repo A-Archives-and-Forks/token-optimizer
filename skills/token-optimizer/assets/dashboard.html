@@ -3785,7 +3785,15 @@ var DB = (function() {
     // cap (a 7% move in the multiplier swings it 3.4x -> 16.3x), so the stable
     // "extra work" figure leads and the raw window states are shown as-is.
     var rw = data.runway;
-    if (rw && rw.available && rw.windows && rw.windows.length) {
+    // Render when there are live windows OR a valid throughput multiplier. The
+    // multiplier and the weekly savings come from the ledger, not the live meter,
+    // so a stale meter (empty windows) must NOT vanish the whole card -- it shows
+    // the headline + savings with a "meter refreshing" note in place of the bars.
+    // (Regression: after a quiet week the meter aged past every window and the card
+    // disappeared entirely.)
+    var rwHasWindows = rw && rw.windows && rw.windows.length;
+    var rwHasMultiplier = rw && isFinite(Number(rw.extra_work_pct)) && Number(rw.extra_work_pct) > 0;
+    if (rw && rw.available && (rwHasWindows || rwHasMultiplier)) {
       // Both sides are stated in the SAME unit (percent LEFT). An earlier revision
       // paired "89% left" against "16.6% used", which reads as a contradiction and
       // forces the reader to do the subtraction. The with/without pair is also the
@@ -3906,7 +3914,12 @@ var DB = (function() {
         // fragment once it wraps to its own line, and the limit panels below
         // already establish which limits are meant.
         '<p style="margin:0 0 var(--s-4);color:var(--c-text-dim);font-size:17px;line-height:1.6;text-wrap:pretty;">Token Optimizer keeps junk out of context and runs routine turns on lighter models, so more of your plan goes to real work instead of waste.</p>' +
-        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:var(--s-3);">' + rwCards + '</div>' +
+        // Per-window bars when the meter is fresh enough; otherwise a note so the
+        // card degrades instead of vanishing (the multiplier + savings above still
+        // stand without the live meter).
+        (rwCards
+          ? '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:var(--s-3);">' + rwCards + '</div>'
+          : '<div style="padding:var(--s-3);border:1px dashed var(--c-border);border-radius:8px;color:var(--c-text-dim);font-size:15px;line-height:1.5;text-wrap:pretty;">Your live 5-hour and weekly limit view refreshes while you are actively working &mdash; it reappears here on your next session.</div>') +
         // Freshness of the WINDOW reading itself (not the dashboard build). The
         // meter only refreshes while Claude Code is actively running, so a
         // dashboard opened later shows the last real reading -- label it with its

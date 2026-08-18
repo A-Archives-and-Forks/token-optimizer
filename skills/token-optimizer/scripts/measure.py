@@ -35218,8 +35218,19 @@ def runway_snapshot(days=30, now=None):
                 "saved_usd": window_saved_usd,
                 "saved_usd_tier": window_usd_tier,
             })
-        if not windows:
-            return None
+        # REGRESSION FIX (the "Your plan goes further" card vanished after a quiet
+        # week): the per-window guard above drops the 5h window once the meter is
+        # >5h old and the 7d window once it is >7d old, so a keep-warm meter that
+        # has not refreshed for over a week empties `windows`. The old
+        # `if not windows: return None` then dropped the ENTIRE card -- yet the
+        # throughput multiplier (extra_work_pct) and the weekly savings do NOT
+        # depend on the live meter; they come from the 30d/7d savings ledger. Keep
+        # the card alive with empty windows so the headline + savings still show;
+        # the renderer omits the per-window bars and shows a "meter refreshing"
+        # note. Populate the weekly $ spine directly since the 7d window that
+        # normally fills _overage_cache[7] may have been dropped above.
+        if not windows and 7 not in _overage_cache:
+            _window_overage_usd(168)
 
         # Top-level spine reflects the WEEKLY (7d) ledger -- the dollar the card
         # actually shows -- so the tier chip matches the number beside it. The 7d

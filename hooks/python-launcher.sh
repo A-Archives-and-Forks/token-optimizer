@@ -355,6 +355,31 @@ _exec_discovered_interpreter() {
     exec "$interp" "$@"
 }
 
+# Explicit user override. pyenv / asdf / conda / venv interpreters, and Codex
+# Desktop's bundled runtime, live outside the PATH-hijack safe-prefix allow-list
+# and are otherwise rejected. Naming one in TOKEN_OPTIMIZER_PYTHON is an explicit
+# trust decision by the user, so it bypasses the allow-list, but we still verify
+# it is genuinely a Python 3 before exec so a stale/broken/wrong override degrades
+# instead of wedging. The compound `if` keeps set -e from aborting when the probe
+# fails.
+#
+# The probe MUST be Python-specific. A bare `-c ''` is not: POSIX shells
+# (/bin/sh, bash, dash, ksh) also accept `-c ''` and exit 0, so a probe of `''`
+# would pass for a shell, then `exec /bin/sh run.py` parses run.py as shell and
+# exits non-zero (2) -- a BLOCKING hook, the exact wedge this file exists to
+# prevent. `import sys; ...` fails on any shell (`import: not found`) and only a
+# real Python 3 (version_info[0] >= 3) exits 0, so only Python is ever exec'd.
+if [ -n "${TOKEN_OPTIMIZER_PYTHON:-}" ]; then
+    _ov="$TOKEN_OPTIMIZER_PYTHON"
+    if [ -x "$_ov" ] && [ -s "$_ov" ] && \
+       "$_ov" -c 'import sys; sys.exit(0 if sys.version_info[0] >= 3 else 1)' >/dev/null 2>&1; then
+        exec "$_ov" "$@"
+    fi
+    # `|| :` so a failed write (stderr closed) cannot abort under `set -e` before
+    # we fall through to normal discovery.
+    echo "token-optimizer: TOKEN_OPTIMIZER_PYTHON=$_ov is not a working Python 3; ignoring it" >&2 || :
+fi
+
 _setup_interpreter_cache
 _exec_cached_interpreter "$@" || :
 
@@ -507,7 +532,21 @@ for _direct in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3
     fi
 done
 
+# HOOK-SAFETY: we are now on the terminal degradation path and WILL `exit 0`.
+# Disable `set -e` first so NOTHING below can abort non-zero before that exit --
+# in particular a diagnostic `echo >&2` when the harness invoked the hook with
+# stderr closed: under `set -e` the failed write aborts with a non-zero status,
+# which is a blocking hook. `set +e` makes the whole exit path unconditional.
+set +e
 echo "token-optimizer: no usable Python 3 interpreter found" >&2
-echo "  tried: python3, python, py -3, direct paths" >&2
-echo "  on Windows: install Python from https://python.org/ and restart Claude Code" >&2
-exit 127
+echo "  tried: python3, python, py -3, direct paths, TOKEN_OPTIMIZER_PYTHON" >&2
+echo "  fix: set TOKEN_OPTIMIZER_PYTHON=/path/to/python3 (pyenv/asdf/conda/venv are fine)," >&2
+echo "       or install Python 3 from https://python.org/ , then restart your agent" >&2
+# HOOK-SAFETY (never remove): this launcher is invoked ONLY from hook wrappers in
+# hooks/hooks.json. A hook MUST NOT exit non-zero. Codex and Claude Code treat a
+# non-zero PreToolUse hook as a tool-blocking failure, so a missing interpreter
+# here would fail on EVERY Read and Bash and freeze the session ("shell runner
+# unavailable"). The `; exit 0` in the wrapper is dead code once `exec` replaces
+# the shell, so the guarantee has to live here. Degrade cleanly instead: skip the
+# optimization and let the tool proceed. Diagnostics above went to stderr.
+exit 0

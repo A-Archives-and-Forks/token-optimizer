@@ -108,14 +108,21 @@ def test_window_older_than_its_span_is_dropped(m, tmp_path, monkeypatch):
     assert {w["key"] for w in r["windows"]} == {"seven_day"}
 
 
-def test_none_when_reading_older_than_all_windows(m, tmp_path, monkeypatch):
-    """Older than a week: both limits have reset, so the card falls away entirely
-    rather than printing reset-era numbers as if current."""
+def test_card_survives_when_reading_older_than_all_windows(m, tmp_path, monkeypatch):
+    """Older than a week: both per-window limits have reset, so the live 5h/7d bars
+    drop (their reset-era numbers would be a lie). But the throughput multiplier and
+    weekly savings do NOT depend on the live meter, so the card must NOT vanish
+    (regression: it used to return None and the whole "plan goes further" surface
+    disappeared after a quiet week). It returns with empty windows; the renderer
+    shows the headline + a "meter refreshing" note instead of the bars."""
     _temp_trends(m, tmp_path, monkeypatch)
     monkeypatch.setattr(m, "_keepwarm_read_meters", lambda **k: {
         "available": True, "stale": True, "five_hour_pct": 60.0,
         "seven_day_pct": 80.0, "age_s": 8 * 24 * 3600, "ts": time.time() - 8 * 24 * 3600})
-    assert m.runway_snapshot(days=30) is None
+    r = m.runway_snapshot(days=30)
+    assert r is not None, "stale-meter card must not vanish; the multiplier + savings survive"
+    assert r.get("windows") == [], "both windows drop once the reading is older than the 7d span"
+    assert isinstance(r.get("extra_work_pct"), (int, float)), "headline multiplier must survive"
 
 
 def test_period_days_exposed_for_the_multiplier_scope(m, tmp_path, monkeypatch):

@@ -72,6 +72,39 @@ jobs:
       - name: Verify Codex marketplace mirror is in sync
         run: bash scripts/check-mirror-sync.sh
 
+  # Runtime proof of the hook non-blocking invariant on a machine with NO Python.
+  # Every other CI leg installs Python, so the no-interpreter path (the exact
+  # condition that froze a user's Codex shell runner via `exit 127`) is never
+  # exercised at runtime there. A bash-only container (no python3) runs every
+  # launcher copy and asserts it exits 0 — degrade, never block.
+  no-python-hook-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Every launcher exits 0 with no Python present
+        run: |
+          docker run --rm -v "$PWD":/w -w /w bash:5 bash -euc '
+            if command -v python3 >/dev/null 2>&1; then echo "python3 unexpectedly present; test invalid"; exit 1; fi
+            for L in hooks/python-launcher.sh \
+                     plugins/token-optimizer/hooks/python-launcher.sh \
+                     cowork/token-optimizer/hooks/python-launcher.sh; do
+              # (a) plain no-Python
+              bash "$L" hooks/run.py skills/token-optimizer/scripts/read_cache.py --quiet
+              rc=$?; echo "$L (no-python) -> exit $rc"
+              [ "$rc" -eq 0 ] || { echo "BLOCKING: $L exited $rc with no Python"; exit 1; }
+              # (b) no-Python + a shell override (must reject, not exec sh on run.py)
+              TOKEN_OPTIMIZER_PYTHON=/bin/sh bash "$L" hooks/run.py skills/token-optimizer/scripts/read_cache.py --quiet
+              rc=$?; echo "$L (shell override) -> exit $rc"
+              [ "$rc" -eq 0 ] || { echo "BLOCKING: $L exited $rc with a shell override"; exit 1; }
+              # (c) no-Python + closed stderr (set -e must not abort the diagnostic path)
+              bash "$L" hooks/run.py skills/token-optimizer/scripts/read_cache.py --quiet 2>&-
+              rc=$?; echo "$L (closed stderr) -> exit $rc"
+              [ "$rc" -eq 0 ] || { echo "BLOCKING: $L exited $rc with closed stderr"; exit 1; }
+            done
+            echo "PASS: all launcher copies exit 0 (no-python / shell-override / closed-stderr)"
+          '
+
   # Windows leg: runs the same suite plus a real-spawn smoke test that
   # exercises spawn_utils.spawn_detached against an actual child process.
   # Catches console-flash regressions and CREATE_BREAKAWAY_FROM_JOB failures
