@@ -67,17 +67,30 @@ def _hooks_dir(root: Path) -> Path:
     return root / "hooks"
 
 
+# System install dirs: root-owned and not user-writable, so trusted by prefix --
+# exactly the launcher's _SAFE_PREFIXES. Without this, a root-owned
+# /usr/bin/python3 (or a CI hostedtoolcache Python) would fail the owned-by-euid
+# check below, which is wrong -- those are legitimate, non-hijackable installs.
+_TRUSTED_PY_PREFIXES = (
+    "/usr/bin/", "/usr/local/bin/", "/opt/homebrew/bin/", "/opt/homebrew/opt/",
+    "/home/linuxbrew/.linuxbrew/bin/", "/opt/hostedtoolcache/",
+)
+
+
 def _py_path_is_trusted(p: str) -> bool:
-    """Owned by us and not group/other-writable, on the resolved interpreter AND
-    its dir -- the same trust boundary python-launcher.sh uses (ssh/sudo/git).
-    Pure stat, never runs the target. On Windows, stat ownership is unreliable
-    under Git-Bash, so require only that the path is a real file (matching the
-    launcher, which relies on hardcoded allowlists there rather than stat)."""
+    """Trusted iff the resolved interpreter is under a system prefix, OR it and
+    its dir are owned by us and not group/other-writable -- the launcher's hybrid
+    allowlist+ownership boundary (ssh/sudo/git), in Python. Pure stat, never runs
+    the target. On Windows, stat ownership is unreliable under Git-Bash, so
+    require only that the path is a real file (the launcher leans on hardcoded
+    allowlists there too)."""
     try:
         real = os.path.realpath(p)
         if not os.path.isfile(real):
             return False
         if os.name == "nt" or not hasattr(os, "geteuid"):
+            return True
+        if real.startswith(_TRUSTED_PY_PREFIXES):
             return True
         euid = os.geteuid()
         for target in (real, os.path.dirname(real)):
