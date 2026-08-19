@@ -27,6 +27,61 @@ shopt -s extglob
 # like `brew --prefix`, which would be circular trust).
 _SAFE_PREFIXES="/usr/bin /usr/local/bin /opt/homebrew/bin /opt/homebrew/opt /home/linuxbrew/.linuxbrew/bin"
 
+# Canonicalize a file path (resolve symlinks). exec follows symlinks, so a
+# user-owned symlink pointing at a hostile target must be judged by the TARGET.
+# realpath/`readlink -f` are absent on older macOS; fall back to a `pwd -P` walk
+# of the parent (the leaf's own ownership is still checked via `-O`, which
+# dereferences symlinks). Prints the resolved path, or fails.
+_to_realpath() {
+    local p="$1" d b
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$p" 2>/dev/null && return 0
+    fi
+    if readlink -f "$p" >/dev/null 2>&1; then
+        readlink -f "$p" 2>/dev/null && return 0
+    fi
+    d=$(dirname "$p") || return 1
+    b=$(basename "$p") || return 1
+    ( cd "$d" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$b" ) || return 1
+}
+
+# Print a path's permission bits as octal (e.g. 755, 2755). GNU stat first,
+# then BSD/macOS stat. Fails if neither works (then the caller refuses trust).
+_to_mode() {
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+
+# True IFF the interpreter (after symlink resolution) AND its containing dir are
+# both owned by the effective uid and writable by NOBODY else (not group, not
+# other) -- the trust boundary ssh/sudo/git(safe.directory) use. This is a pure
+# stat check; it never runs the target (deciding trust by executing the binary
+# would mean running attacker code to find out whether it is safe). It lets any
+# version-manager shim (mise/pyenv/asdf/rbenv/custom dir, under any home root)
+# be trusted generically, while a hijack `python3` in a world-writable or
+# foreign-owned dir stays refused. POSIX only -- the caller gates out Windows,
+# where stat ownership/mode is faked under Git-Bash/MSYS.
+_to_owned_unwritable() {
+    local p="$1" real dir mode g o
+    real=$(_to_realpath "$p") || return 1
+    [ -n "$real" ] || return 1
+    dir=$(dirname "$real") || return 1
+    # Ownership: `-O` == owned by the effective uid (portable, no stat parse;
+    # dereferences symlinks so the resolved target's owner is what's checked).
+    [ -O "$real" ] || return 1
+    [ -O "$dir" ]  || return 1
+    # Not group- or other-writable, on BOTH the file and its dir. The low 3
+    # octal digits are user/group/other; a set write bit makes the digit 2,3,6,7.
+    mode=$(_to_mode "$real") || return 1
+    mode=${mode: -3}; g=${mode:1:1}; o=${mode:2:1}
+    case "$g" in 2|3|6|7) return 1 ;; esac
+    case "$o" in 2|3|6|7) return 1 ;; esac
+    mode=$(_to_mode "$dir") || return 1
+    mode=${mode: -3}; g=${mode:1:1}; o=${mode:2:1}
+    case "$g" in 2|3|6|7) return 1 ;; esac
+    case "$o" in 2|3|6|7) return 1 ;; esac
+    return 0
+}
+
 _is_safe_prefix() {
     local IFS=$' \t\n'
     local binpath="$1" prefix
@@ -55,6 +110,13 @@ _is_safe_prefix() {
         /[a-zA-Z]/Python3+([0-9])/*)                                   return 0 ;;
         /[a-zA-Z]/Users/*/AppData/Local/Programs/Python/*)              return 0 ;;
         /[a-zA-Z]/Users/*/AppData/Local/Microsoft/WindowsApps/*)        return 0 ;;
+        # Version-manager shims, Windows default data dirs. Hardcoded default
+        # locations only -- never derived from MISE_DATA_DIR/PYENV_ROOT, which
+        # would reopen the PATH-hijack vector. POSIX shims are covered generically
+        # by the ownership fallback below; Windows has no reliable stat, so its
+        # managers are enumerated here. (mise pattern via #146, trekie86.)
+        /[a-zA-Z]/Users/*/AppData/Local/mise/shims/*)                   return 0 ;;
+        /[a-zA-Z]/Users/*/.pyenv/pyenv-win/shims/*)                     return 0 ;;
         # All-users `py` launcher lives in the (admin-only-writable) Windows dir.
         # Exact filename keeps the anti-hijack intent (no wildcard in that dir).
         /[a-zA-Z]/Windows/py.exe)                                      return 0 ;;
@@ -68,6 +130,20 @@ _is_safe_prefix() {
         /[a-zA-Z]/*)
             _path_contains_windowsapps "$binpath" && return 0
             ;;
+    esac
+    # HYBRID FALLBACK (POSIX only): the hardcoded allowlist above cannot
+    # enumerate every version manager (mise/pyenv/asdf/rbenv/...), every custom
+    # data dir (MISE_DATA_DIR, PYENV_ROOT), or every home root (/home/*, /root,
+    # NFS). Rather than a manager-by-manager treadmill, bless an interpreter the
+    # allowlist missed by an ownership/permission gate: it and its dir must be
+    # owned by us and writable by nobody else (see _to_owned_unwritable). This is
+    # strictly narrower than "any shim dir" -- a hijack python3 in /tmp/evil or
+    # another user's tree is still refused -- and it never runs the target.
+    # Skipped on Windows: Git-Bash/MSYS stat ownership+mode is unreliable, and
+    # its managers are covered by the drive-letter patterns above.
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        *MINGW*|*MSYS*|*CYGWIN*) : ;;
+        *) _to_owned_unwritable "$binpath" && return 0 ;;
     esac
     return 1
 }
