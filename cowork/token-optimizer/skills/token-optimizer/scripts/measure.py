@@ -6406,13 +6406,13 @@ def _spawn_detached_dashboard_selfheal(days=30):
         env = dict(os.environ)
         env["TOKEN_OPTIMIZER_INTERACTIVE"] = "1"
         env.pop("TOKEN_OPTIMIZER_HOOK", None)
-        kwargs = {}
-        if os.name == "nt":
-            # DETACHED_PROCESS | CREATE_NO_WINDOW: no console flash, no orphan.
-            kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) \
-                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        else:
-            kwargs["start_new_session"] = True
+        # Detach so the child outlives the killed hook: POSIX new session, or
+        # (on Windows) DETACHED_PROCESS. start_new_session is POSIX-only.
+        popen_kw = {} if os.name == "nt" else {"start_new_session": True}
+        # creationflags MUST be inlined and mention _NO_WINDOW (CREATE_NO_WINDOW,
+        # 0 off-Windows) so a console-less Windows host never flashes a cmd window
+        # -- and so the spawn-site invariant test can see it. DETACHED_PROCESS is 0
+        # off-Windows, so this evaluates to 0 on POSIX (the only valid value there).
         subprocess.Popen(
             [sys.executable, os.path.abspath(__file__),
              "dashboard", "--quiet", "--days", str(int(days))],
@@ -6421,7 +6421,8 @@ def _spawn_detached_dashboard_selfheal(days=30):
             stderr=subprocess.DEVNULL,
             close_fds=True,
             env=env,
-            **kwargs,
+            creationflags=(getattr(subprocess, "DETACHED_PROCESS", 0) | _NO_WINDOW),
+            **popen_kw,
         )
     except Exception:
         pass

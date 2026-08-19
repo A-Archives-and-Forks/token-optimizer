@@ -569,10 +569,18 @@ _probe_windowsapps_candidate() {
 find_interpreter() {
     local name="$1"
     local IFS=:
-    local dir binpath ext
+    local dir binpath ext win_exts=""
+    # pyenv-win (and some scoop shims) ship `.bat`/`.cmd` wrappers with no bare
+    # or `.exe` twin on PATH, so they were never even discovered. MSYS can exec a
+    # .bat directly; a mis-exec is fail-safe here (falls through to the next
+    # candidate, then to the exit-0 no-block guarantee), never a wedge. Gated to
+    # Windows so a POSIX box never probes for a python3.bat. NOTE: the .bat exec
+    # path is only verifiable on a real Windows host (see #145) -- discovery is
+    # what this adds; exec is MSYS-native and may flash a console window.
+    _is_msys_platform 2>/dev/null && win_exts=".bat .cmd"
     for dir in $PATH; do
         [ -n "$dir" ] || dir="."
-        for ext in "" ".exe"; do
+        for ext in "" ".exe" $win_exts; do
             binpath="${dir}/${name}${ext}"
             [ -x "$binpath" ] || continue
             [ -s "$binpath" ] || continue
