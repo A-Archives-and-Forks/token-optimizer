@@ -35,7 +35,14 @@ def _run(home: Path, extra_env=None):
         "transcript_path": "",
         "cost": {"total_duration_ms": 1000},
     })
-    env = {**os.environ, "HOME": str(home)}
+    # Node's os.homedir() reads $HOME on POSIX but %USERPROFILE% on Windows, so
+    # override both (plus HOMEDRIVE/HOMEPATH) or the Windows runner ignores HOME
+    # and reads the real profile dir -> no cache -> false failure.
+    env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
+    drive, _, tail = str(home).partition(os.sep)
+    if os.name == "nt" and ":" in drive:
+        env["HOMEDRIVE"] = drive
+        env["HOMEPATH"] = os.sep + tail
     env.pop("CLAUDE_PLUGIN_DATA", None)
     if extra_env:
         env.update(extra_env)
