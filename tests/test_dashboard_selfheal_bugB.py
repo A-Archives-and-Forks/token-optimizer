@@ -80,3 +80,22 @@ def test_selfheal_never_raises(m, monkeypatch):
         raise OSError("no fork for you")
     monkeypatch.setattr(m.subprocess, "Popen", _boom)
     m._spawn_detached_dashboard_selfheal()  # must not raise
+
+
+def test_sessionend_flush_regen_wires_selfheal_on_timeout(m):
+    """Gap 4: the SessionEnd flush-worker regen is bounded by the 20s budget, so a
+    _HookTimeout there must also trigger the detached self-heal -- otherwise a big
+    history's SessionEnd rebuild truncates and the daemon can serve the truncated
+    file within its freshness window. Guard statically that the flush path both
+    calls generate_standalone_dashboard AND spawns the self-heal on _HookTimeout,
+    so the wiring can't silently regress (the same self-heal used by the open path
+    is unit-tested above)."""
+    import inspect
+    src = inspect.getsource(m)
+    # locate the flush-worker's standalone regen call and its enclosing try/except
+    idx = src.find("generate_standalone_dashboard(days=30, quiet=True)")
+    assert idx != -1, "flush-worker standalone regen call not found"
+    window = src[idx: idx + 1000]
+    assert "except _HookTimeout" in window, "flush regen must catch _HookTimeout"
+    assert "_spawn_detached_dashboard_selfheal" in window, \
+        "flush regen must spawn the detached self-heal on timeout (Gap 4)"

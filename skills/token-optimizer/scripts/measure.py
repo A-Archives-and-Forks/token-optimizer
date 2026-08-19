@@ -6254,6 +6254,18 @@ def _run_session_end_flush_worker(args):
                 pass
             try:
                 generate_standalone_dashboard(days=30, quiet=True)
+            except _HookTimeout:
+                # Gap 4: the bounded SessionEnd regen was killed by the 20s budget
+                # (a large history's 4 MB build does not fit), so it may have left
+                # a stale-or-degraded dashboard. Hand the rebuild to the same
+                # detached, unbounded self-heal the explicit-open path uses, so the
+                # file catches up off the hot path instead of waiting for the user
+                # to re-open. Re-raised so the outer handler still runs cleanup.
+                try:
+                    _spawn_detached_dashboard_selfheal(days=30)
+                except Exception:
+                    pass
+                raise
             except Exception:
                 pass
             try:
