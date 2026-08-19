@@ -40145,6 +40145,17 @@ if __name__ == "__main__":
         compare_snapshots()
     elif args[0] == "dashboard":
         _dispatch_dashboard(args)
+    elif args[0] == "runway-json":
+        # Machine-readable runway snapshot so a non-Python dashboard (the OpenClaw
+        # / OpenCode TypeScript surfaces) can render the "Your plan goes further"
+        # card WITHOUT reimplementing runway_snapshot's multiplier/savings logic --
+        # keeping this the single source of truth. Prints the dict as JSON, or {}
+        # when there is no story. Never raises -> prints {} on any error.
+        try:
+            _rj = runway_snapshot()
+            print(json.dumps(_rj if _rj else {}))
+        except Exception:
+            print("{}")
     elif args[0] == "conversation":
         # Per-turn token breakdown for a session
         output_json = "--json" in args

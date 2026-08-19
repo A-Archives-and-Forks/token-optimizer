@@ -265,7 +265,8 @@ def test_detached_sites_still_route_through_spawn_utils():
     Open-coding one as a raw Popen would silently reintroduce the flash; this
     asserts the helper is still the path (the scan above catches the raw Popen).
     """
-    expected = {"hermes_hook_bridge.py": 2, "copilot_hook_bridge.py": 1}
+    # +1 each for the Gap-2 session-end dashboard regen (also via spawn_detached).
+    expected = {"hermes_hook_bridge.py": 3, "copilot_hook_bridge.py": 2}
     for name, count in expected.items():
         tree = _parse(name)
         calls = [
