@@ -45,10 +45,18 @@ _to_realpath() {
     ( cd "$d" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$b" ) || return 1
 }
 
-# Print a path's permission bits as octal (e.g. 755, 2755). GNU stat first,
-# then BSD/macOS stat. Fails if neither works (then the caller refuses trust).
+# Print a path's permission bits as octal, ZERO-PADDED to at least 3 digits.
+# GNU stat first, then BSD/macOS stat. Fails if neither works (caller refuses
+# trust). The pad matters: GNU `stat -c %a` prints "2" for mode 0002, and the
+# caller's last-3-digit slice would then read EMPTY group/other digits -- a set
+# write bit reading as clean, a false-accept. Flooring to 3 digits makes the
+# group/other-writable check robust to stat's short formatting. (torture: batch 2)
 _to_mode() {
-    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+    local mode
+    mode=$(stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null) || return 1
+    [ -n "$mode" ] || return 1
+    while [ "${#mode}" -lt 3 ]; do mode="0$mode"; done
+    printf '%s\n' "$mode"
 }
 
 # True IFF the interpreter (after symlink resolution) AND its containing dir are
