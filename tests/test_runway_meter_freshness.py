@@ -89,11 +89,32 @@ def test_stale_meter_shows_last_reading_instead_of_vanishing(m, tmp_path, monkey
     assert {w["key"] for w in r["windows"]} == {"five_hour", "seven_day"}
 
 
-def test_none_when_no_meter_reading_at_all(m, tmp_path, monkeypatch):
+def test_card_survives_when_meter_unavailable(m, tmp_path, monkeypatch):
+    """Bug A: an UNAVAILABLE meter (missing/contentless rate-limits file) used to
+    vanish the whole card via `if not available: return None`. But the headline
+    throughput multiplier and the weekly savings come from the ledger, not the
+    meter, so the card must survive with empty windows (renderer shows a "meter
+    refreshing" note). Only the per-window bars need the live meter."""
     _temp_trends(m, tmp_path, monkeypatch)
     monkeypatch.setattr(m, "_keepwarm_read_meters", lambda **k: {
         "available": False, "stale": True, "five_hour_pct": None,
         "seven_day_pct": None, "age_s": None, "ts": None})
+    r = m.runway_snapshot(days=30)
+    assert r is not None, "an unavailable meter must NOT vanish the card; the multiplier + savings survive"
+    assert r.get("windows") == [], "no meter reading -> no per-window bars"
+    assert r.get("meter_available") is False, "meter_available reflects the real (missing) meter state"
+    assert isinstance(r.get("extra_work_pct"), (int, float)), "headline multiplier must survive"
+
+
+def test_none_when_no_meter_and_no_ledger_story(m, tmp_path, monkeypatch):
+    """The card is silent only when there is genuinely nothing to say. With the
+    meter unavailable AND no measurable throughput shift (no trends/savings), the
+    multiplier cannot be computed, so runway_snapshot returns None -- not because
+    of the meter, but because the ledger has no story."""
+    monkeypatch.setattr(m, "_keepwarm_read_meters", lambda **k: {
+        "available": False, "stale": True, "five_hour_pct": None,
+        "seven_day_pct": None, "age_s": None, "ts": None})
+    # no _temp_trends -> consumed <= 0 -> honest silence
     assert m.runway_snapshot(days=30) is None
 
 

@@ -6386,6 +6386,47 @@ def _dispatch_collect(args):
             pass
 
 
+def _spawn_detached_dashboard_selfheal(days=30):
+    """Rebuild the dashboard in a DETACHED, unbounded background process.
+
+    Bug B self-heal: when a bounded hook-path regen is killed by the 20s budget
+    (a large history whose 4 MB rebuild does not fit the window), the on-disk
+    dashboard used to stay stale forever -- the SessionEnd/Stop hook kept getting
+    killed and never caught up. Instead, on that timeout we hand the rebuild to a
+    child that:
+      * runs with TOKEN_OPTIMIZER_INTERACTIVE=1 so it is UNBOUNDED (it finishes
+        the rebuild however long it takes),
+      * is fully detached (start_new_session / DETACHED_PROCESS) so it outlives
+        the hook and never holds the hook's stdout pipe open,
+      * is quiet and never opens a browser.
+    The child is unbounded, so it cannot itself time out and re-spawn -- no loop.
+    Fire-and-forget; never raises (a failed self-heal must not break the hook).
+    """
+    try:
+        env = dict(os.environ)
+        env["TOKEN_OPTIMIZER_INTERACTIVE"] = "1"
+        env.pop("TOKEN_OPTIMIZER_HOOK", None)
+        kwargs = {}
+        if os.name == "nt":
+            # DETACHED_PROCESS | CREATE_NO_WINDOW: no console flash, no orphan.
+            kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) \
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__),
+             "dashboard", "--quiet", "--days", str(int(days))],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            env=env,
+            **kwargs,
+        )
+    except Exception:
+        pass
+
+
 def _dispatch_dashboard(args):
     """CLI ``dashboard`` entry. Bounded ONLY on the hook path (#114 Fix 3/4).
 
@@ -6428,12 +6469,19 @@ def _dispatch_dashboard(args):
         deadline = (
             None if (serve or not _running_under_hook()) else _install_hook_budget(20)
         )
+        timed_out = False
         try:
             out = generate_standalone_dashboard(days=days, quiet=quiet)
         except _HookTimeout:
             out = None
+            timed_out = True
         finally:
             _clear_hook_budget(deadline)
+        # Bug B self-heal: a bounded hook regen that the 20s budget killed leaves
+        # the on-disk dashboard stale. Finish it in a detached, unbounded child so
+        # the file catches up without ever blocking the session.
+        if timed_out:
+            _spawn_detached_dashboard_selfheal(days=days)
         if out and serve:
             _serve_dashboard(out, port=serve_port, host=serve_host)
         elif out and not quiet:
@@ -6442,12 +6490,17 @@ def _dispatch_dashboard(args):
     deadline = (
         None if (serve or not _running_under_hook()) else _install_hook_budget(20)
     )
+    timed_out = False
     try:
         out = generate_dashboard(cp)
     except _HookTimeout:
         out = None
+        timed_out = True
     finally:
         _clear_hook_budget(deadline)
+    # Bug B self-heal (coord-path regen): same as the standalone branch above.
+    if timed_out:
+        _spawn_detached_dashboard_selfheal()
     if serve and out:
         _serve_dashboard(out, port=serve_port, host=serve_host)
 
@@ -20848,6 +20901,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         [sys.executable, target, step, "--quiet"],
                         capture_output=True, text=True, timeout=REGEN_STEP_TIMEOUT,
                         creationflags=_NO_WINDOW,
+                        # A human pressed Regenerate and is waiting: mark it
+                        # INTERACTIVE so the child is not killed by the 20s hook
+                        # budget (Bug B). The daemon's own REGEN_STEP_TIMEOUT is
+                        # the real, saner cap here.
+                        env={{**os.environ, "TOKEN_OPTIMIZER_INTERACTIVE": "1"}},
                     )
                     if r.returncode != 0:
                         msg = (r.stderr or r.stdout or "").strip()[:300] or ("%s exited %d" % (step, r.returncode))
@@ -32307,6 +32365,19 @@ def _running_under_hook():
     holding a hook stdout pipe. An interactive terminal run keeps its tty and
     is left unbounded.
     """
+    # A user-initiated open (the token-dashboard skill, the daemon's manual
+    # "Regenerate" button, the detached self-heal below) sets this to declare an
+    # INTERACTIVE context. It wins over the non-tty heuristic, which otherwise
+    # misreads the skill's piped-stdin invocation as a hook and lets the 20s
+    # budget kill a heavy rebuild -- Bug B: the dashboard then never regenerates
+    # for a large history and never self-heals ("it didn't regenerate").
+    if os.environ.get("TOKEN_OPTIMIZER_INTERACTIVE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return False
     if "--hook" in sys.argv:
         return True
     if os.environ.get("TOKEN_OPTIMIZER_HOOK", "").strip().lower() in (
@@ -35099,9 +35170,17 @@ def runway_snapshot(days=30, now=None):
     """
     try:
         meters = _keepwarm_read_meters(now=now)
-        if not meters.get("available"):
-            return None
-        meter_stale = bool(meters.get("stale"))
+        # The live meter feeds ONLY the per-window bars. The headline throughput
+        # multiplier and the weekly savings come from the savings ledger, not the
+        # meter, so an UNAVAILABLE meter (missing/contentless rate-limits file)
+        # must NOT vanish the whole card. It drops to empty windows (the renderer
+        # shows a "meter refreshing" note), exactly like a stale meter. Bug A: the
+        # old `if not available: return None` killed the entire card -- multiplier
+        # and savings included -- the moment the meter file was gone, which is the
+        # "section disappeared and never came back" report. The window loop below
+        # already skips a None percentage, so an unavailable meter yields [].
+        meter_available = bool(meters.get("available"))
+        meter_stale = bool(meters.get("stale")) or not meter_available
 
         # --- context lever: measured, never estimated ---
         consumed = saved = 0
@@ -35265,6 +35344,11 @@ def runway_snapshot(days=30, now=None):
             "meter_age_s": meters.get("age_s"),
             "meter_ts": meters.get("ts"),
             "meter_stale": meter_stale,
+            # Meter's real availability (missing/contentless rate-limits file ->
+            # False). Distinct from top-level `available` (which means "the card
+            # has a story"): the card stands on the ledger-based multiplier even
+            # when meter_available is False -- only the per-window bars need it.
+            "meter_available": meter_available,
             # Single authoritative methodology note (GitHub: dashboard wall-of-text
             # fix). Folds the measured-vs-estimated boundary in here so the HTML no
             # longer repeats it. Keep the phrases "metered savings ledger" and "not

@@ -3793,7 +3793,12 @@ var DB = (function() {
     // disappeared entirely.)
     var rwHasWindows = rw && rw.windows && rw.windows.length;
     var rwHasMultiplier = rw && isFinite(Number(rw.extra_work_pct)) && Number(rw.extra_work_pct) > 0;
-    if (rw && rw.available && (rwHasWindows || rwHasMultiplier)) {
+    // NB: do NOT gate on rw.available. That is the live-meter's availability, and
+    // the headline multiplier + weekly savings do not need the meter (Bug A: an
+    // unavailable meter used to vanish the whole card). runway_snapshot already
+    // returns null when there is genuinely no story, so rw existing + a windows-
+    // or-multiplier payload is the real render condition.
+    if (rw && (rwHasWindows || rwHasMultiplier)) {
       // Both sides are stated in the SAME unit (percent LEFT). An earlier revision
       // paired "89% left" against "16.6% used", which reads as a contradiction and
       // forces the reader to do the subtraction. The with/without pair is also the

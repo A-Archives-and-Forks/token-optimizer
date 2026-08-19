@@ -52,7 +52,12 @@ export TOKEN_OPTIMIZER_RUNTIME="$RUNTIME"
 
 2. **Collect and open**:
 ```bash
-python3 "$MEASURE_PY" collect --quiet && python3 "$MEASURE_PY" dashboard
+# TOKEN_OPTIMIZER_INTERACTIVE=1 marks this as a user-initiated open so the 20s
+# hook budget does NOT kill a heavy rebuild (Bug B: on a large history the
+# dashboard would otherwise be skipped and served stale). The user is actively
+# waiting for this open, so it runs unbounded.
+TOKEN_OPTIMIZER_INTERACTIVE=1 python3 "$MEASURE_PY" collect --quiet && \
+  TOKEN_OPTIMIZER_INTERACTIVE=1 python3 "$MEASURE_PY" dashboard
 ```
 
 This collects the latest session data into the trends database, regenerates the dashboard HTML, and opens it in your default browser.
