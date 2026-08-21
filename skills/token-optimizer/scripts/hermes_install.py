@@ -55,6 +55,10 @@ _RUNTIME_MODULES = (
     "hermes_state.py",
     "hermes_session.py",
     "runtime_env.py",
+    # hermes_hook_bridge imports `from spawn_utils import spawn_detached` at load
+    # time. Omitting it made the plugin dir import-fail at runtime (#148) even
+    # though hermes-doctor's bridge smoke test caught it as ModuleNotFoundError.
+    "spawn_utils.py",
 )
 
 # Plain-text locator file written into the plugin dir: one line, the absolute
