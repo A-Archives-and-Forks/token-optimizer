@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import subprocess
@@ -221,6 +222,10 @@ def _load_pricing() -> dict[str, dict[str, float]]:
             for model, rates in user_pricing.items():
                 if not isinstance(rates, dict):
                     continue
+                # Normalize the user's key the same way lookups are normalized, so
+                # adding "MiniMax-M3" (the name the unpriced warning shows) actually
+                # prices the run keyed as "minimax-m3" (#150).
+                model = normalize_model_name(str(model)) or str(model).lower()
                 merged = {**pricing.get(model, {}), **rates}
                 if "cache_write_1h" not in rates and ("input" in rates or "cache_write" in rates):
                     if merged.get("input"):
@@ -258,6 +263,64 @@ def calculate_cost(tokens: "TokenBreakdown", model: str,
     else:
         cost += tokens.cache_write * rates.get("cache_write", 0)
     return cost
+
+
+def model_is_priced(model: str) -> bool:
+    """True when we have a pricing row for ``model``.
+
+    ``calculate_cost`` returns 0.0 both for genuinely-free usage and for models
+    with no pricing row (self-hosted, gateway aliases like ``MiniMax-M3``,
+    OpenRouter names). Callers use this to tell "$0 because free" apart from
+    "$0 because unpriced" and surface the gap instead of reporting fake $0 (#150).
+    Model is normalized (lowercased) before lookup so it matches pricing keys.
+    """
+    return _load_pricing().get(model) is not None
+
+
+def _recorded_cost(*values) -> float | None:
+    """Return the first value that is a REAL recorded cost, else None.
+
+    A source DB (e.g. Hermes) records its own cost for gateway models our
+    pricing table can't price. "Recorded" means present, numeric, finite, and
+    >= 0 — a recorded $0 is authoritative (free/comped), NOT an excuse to
+    re-price it (#150). Empty strings, None, NaN, inf, negatives, and garbage
+    all fall through so the caller can price or flag instead of fabricating or
+    crashing on a bad cell.
+    """
+    for v in values:
+        if v is None or v == "":
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f >= 0 and math.isfinite(f):
+            return f
+    return None
+
+
+def unpriced_summary(runs) -> dict[str, int]:
+    """{model: session_count} for runs whose $0 cost is unknown, not free (#150).
+
+    A run counts when it has real token usage but $0 cost on a model with no
+    pricing row — i.e. the $0 is a gap, not a fact. Shared by ``cmd_scan`` and
+    ``cmd_audit`` so both surfaces flag the same thing the same way.
+
+    Known limit: a run whose source DB *recorded* a genuine $0 (comped/free) on an
+    unpriced model is over-flagged here — we can't yet tell a recorded $0 from a
+    computed-because-unpriced $0 without a cost-source column. The over-warn is
+    safe (it points the user at pricing they can add or ignore), not a wrong total.
+    """
+    out: dict[str, int] = {}
+    for r in runs:
+        # Require a real model name: an empty/blank model can't be priced OR named
+        # in the warning, and the dashboard SQL excludes it (model != '') — skip it
+        # here too so all three surfaces agree.
+        if not r.model:
+            continue
+        if r.cost_usd == 0.0 and r.tokens.total > 0 and not model_is_priced(r.model):
+            out[r.model] = out.get(r.model, 0) + 1
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1030,6 +1093,15 @@ class HermesAdapter(BaseAdapter):
     name = "hermes"
     display_name = "Hermes"
 
+    # Columns we read if present. state.db schema drifts across Hermes versions,
+    # so scan() intersects this with the live table and never assumes a column.
+    _WANT_COLUMNS = (
+        "id", "model", "started_at", "ended_at", "end_reason",
+        "message_count", "tool_call_count", "input_tokens", "output_tokens",
+        "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
+        "estimated_cost_usd", "actual_cost_usd", "cost_status", "cwd", "source",
+    )
+
     def detect(self) -> tuple[bool, float, str]:
         state_db = HOME / ".hermes" / "state.db"
         if state_db.exists():
@@ -1038,6 +1110,145 @@ class HermesAdapter(BaseAdapter):
         if hermes_dir.exists():
             return True, 0.4, "Found ~/.hermes/ (no state.db)"
         return False, 0.0, "~/.hermes/ not found"
+
+    def scan(self, since: datetime, conn: sqlite3.Connection | None = None) -> tuple[list[AgentRun], list[str]]:
+        """Read runs from ~/.hermes/state.db (#149).
+
+        BaseAdapter.scan() returned ([], []) so Hermes silently reported zero even
+        under heavy use. We open the DB read-only (mode=ro): it can never write to
+        Hermes's own state, and unlike immutable=1 it still reads committed WAL
+        rows, so a scan run against a LIVE Hermes sees its most recent sessions
+        instead of silently dropping everything since the last checkpoint.
+        """
+        state_db = HOME / ".hermes" / "state.db"
+        if not state_db.exists():
+            return [], ["~/.hermes/state.db not found"]
+
+        runs: list[AgentRun] = []
+        errors: list[str] = []
+        db: sqlite3.Connection | None = None
+        try:
+            # as_uri() percent-encodes spaces / reserved chars in the path so a
+            # home dir like "/Users/Alex Green/" doesn't corrupt the URI.
+            db = sqlite3.connect(f"{state_db.as_uri()}?mode=ro", uri=True, timeout=5)
+            db.row_factory = sqlite3.Row
+            available = {r[1] for r in db.execute("PRAGMA table_info(sessions)").fetchall()}
+            if not available:
+                return [], ["~/.hermes/state.db has no 'sessions' table"]
+            cols = [c for c in self._WANT_COLUMNS if c in available]
+            if "id" not in cols or "started_at" not in available:
+                # Without an id / started_at we can't dedup or window; bail loudly
+                # rather than importing every row on every scan.
+                return [], ["~/.hermes/state.db 'sessions' missing id/started_at columns"]
+            since_ts = since.timestamp()
+            rows = db.execute(
+                f"SELECT {', '.join(cols)} FROM sessions WHERE started_at >= ?",
+                (since_ts,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            return [], [f"~/.hermes/state.db read failed: {exc}"]
+        finally:
+            if db is not None:
+                db.close()
+
+        for row in rows:
+            try:
+                run = self._row_to_run(row, row.keys())
+            except (ValueError, TypeError) as exc:
+                errors.append(f"hermes session {row['id'] if 'id' in row.keys() else '?'}: {exc}")
+                continue
+            if run is None:
+                continue
+            # Re-check the window in Python: a TEXT-stored started_at (older Hermes
+            # schemas) compares lexically against the float bind in the SQL WHERE,
+            # so old rows can leak past it. _row_to_run has already parsed the real
+            # timestamp — trust that, not the storage-class comparison.
+            if run.timestamp and run.timestamp < since:
+                continue
+            if conn and _is_run_collected(conn, "hermes", run.source_path, run.session_id):
+                continue
+            runs.append(run)
+        return runs, errors
+
+    @staticmethod
+    def _to_dt(value) -> datetime | None:
+        """Hermes stores started_at/ended_at as REAL epoch seconds, but older
+        rows or exports may carry an ISO string — accept both."""
+        if value is None or value == "":
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(value), timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
+        return parse_timestamp(str(value))
+
+    def _row_to_run(self, row: sqlite3.Row, keys) -> AgentRun | None:
+        def g(name, default=0):
+            return row[name] if name in keys and row[name] is not None else default
+
+        input_total = int(g("input_tokens"))
+        output = int(g("output_tokens"))
+        cache_read = int(g("cache_read_tokens"))
+        cache_write = int(g("cache_write_tokens"))
+        message_count = int(g("message_count"))
+        if input_total <= 0 and output <= 0 and cache_read <= 0 and message_count == 0:
+            return None
+
+        model_raw = str(g("model", "") or "")
+        model = normalize_model_name(model_raw) or model_raw or "unknown"
+        # Hermes stores input_tokens and cache_read_tokens as SEPARATE columns
+        # (a cache-heavy run has cache_read >> input_tokens), so input_tokens is
+        # already the fresh-input count. Do NOT subtract cache_read — that floored
+        # cache-heavy gateway runs to 0 input, corrupting the very numbers #149/#150
+        # exist to surface. (Codex's total_input_tokens IS inclusive, hence its
+        # subtraction; Hermes is not.)
+        tokens = TokenBreakdown(
+            input=max(0, input_total),
+            output=output,
+            cache_read=cache_read,
+            cache_write=cache_write,
+        )
+
+        # Prefer Hermes's own recorded cost — it prices gateway models (MiniMax,
+        # Kimi, DeepSeek...) our DEFAULT_PRICING can't, so they don't collapse to a
+        # fake $0 (#150). A recorded value (incl. $0) is authoritative; only a
+        # genuinely absent/garbage cost falls back to our table.
+        db_cost = _recorded_cost(g("actual_cost_usd", None), g("estimated_cost_usd", None))
+        cost = db_cost if db_cost is not None else calculate_cost(tokens, model)
+
+        started = self._to_dt(g("started_at", None))
+        ended = self._to_dt(g("ended_at", None))
+        duration = 0.0
+        if started and ended and ended >= started:
+            duration = (ended - started).total_seconds()
+
+        outcome = "success"
+        if message_count <= 2 and output < 200:
+            outcome = "abandoned"
+        elif output < 100 and input_total > 50_000:
+            outcome = "empty"
+
+        cwd = str(g("cwd", "") or "")
+        return AgentRun(
+            system="hermes",
+            session_id=str(g("id", "")),
+            # Keep Hermes's own source label (cli/api/subagent...) instead of
+            # flattening every run to "main" — audit detectors group by agent_name.
+            agent_name=str(g("source", "") or "") or "main",
+            # Full cwd, not just the basename: two projects can share a leaf name
+            # (~/work/foo vs ~/play/foo) and would otherwise merge in the dashboard.
+            project=cwd or "unknown",
+            timestamp=started or datetime.now(timezone.utc),
+            duration_seconds=duration,
+            tokens=tokens,
+            cost_usd=cost,
+            model=model,
+            run_type="manual",
+            outcome=outcome,
+            message_count=message_count,
+            source_path=f"hermes:state.db#{g('id', '')}",
+        )
 
 
 class OpenCodeAdapter(BaseAdapter):
@@ -1700,6 +1911,9 @@ def cmd_scan(args: list[str]):
     total_new = 0
     total_errors = []
     scan_results = []
+    # #150: collect every scanned run so we can flag models whose $0 is unknown
+    # (no pricing row), not free — computed once via unpriced_summary() below.
+    all_scanned_runs: list[AgentRun] = []
 
     for adapter_cls in ADAPTER_REGISTRY:
         adapter = adapter_cls()
@@ -1716,6 +1930,7 @@ def cmd_scan(args: list[str]):
 
         new_count = 0
         for run in runs:
+            all_scanned_runs.append(run)
             if not _is_run_collected(conn, run.system, run.source_path, run.session_id):
                 _insert_run(conn, run)
                 new_count += 1
@@ -1736,8 +1951,25 @@ def cmd_scan(args: list[str]):
     _update_daily_aggregates(conn)
     conn.close()
 
+    # #150: one warning naming every unpriced model, so a $0.00 total reads as
+    # "unknown, not free" and the user knows where to add rates.
+    unpriced_sessions = unpriced_summary(all_scanned_runs)
+    if unpriced_sessions:
+        names = ", ".join(sorted(unpriced_sessions))
+        n = sum(unpriced_sessions.values())
+        total_errors.append(
+            f"{n} session(s) on {len(unpriced_sessions)} unpriced model(s) ({names}): "
+            f"cost shown as $0.00 is UNKNOWN, not free. Add rates to "
+            f"{FLEET_DB_DIR / 'pricing.json'} to price them."
+        )
+
     if as_json:
-        print(json.dumps({"total_new": total_new, "systems": scan_results, "errors": total_errors}, indent=2))
+        print(json.dumps({
+            "total_new": total_new,
+            "systems": scan_results,
+            "errors": total_errors,
+            "unpriced_models": unpriced_sessions,
+        }, indent=2))
         return
 
     if not quiet:
@@ -1748,6 +1980,11 @@ def cmd_scan(args: list[str]):
             print(f"  Warnings: {len(total_errors)}")
             for e in total_errors[:5]:
                 print(f"    - {e}")
+        if unpriced_sessions:
+            names = ", ".join(sorted(unpriced_sessions))
+            n = sum(unpriced_sessions.values())
+            print(f"  ⚠ Unpriced: {n} session(s) on {names} priced at $0.00 (unknown, not free).")
+            print(f"    Add rates to {FLEET_DB_DIR / 'pricing.json'}.")
         print()
 
 
@@ -1816,6 +2053,10 @@ def cmd_audit(args: list[str]):
         )
         runs_by_system.setdefault(system, []).append(run)
 
+    # #150: the dashboard/audit repro from the issue — flag runs priced at $0 only
+    # because the model is unpriced, so the audit doesn't present a fake $0 total.
+    audit_unpriced = unpriced_summary([r for rs in runs_by_system.values() for r in rs])
+
     # Clear old waste findings
     conn.execute("DELETE FROM fleet_waste")
 
@@ -1857,12 +2098,19 @@ def cmd_audit(args: list[str]):
                 "fix_snippet": f.fix_snippet,
                 "evidence": f.evidence,
             })
+        # Keep the documented list contract; unpriced surfaces in the text report
+        # and in `scan --json` (machine-readable there).
         print(json.dumps(output, indent=2))
         return
 
     # Text report
     print("\n  Fleet Audit: Waste Pattern Analysis")
     print("  " + "=" * 50)
+    if audit_unpriced:
+        names = ", ".join(sorted(audit_unpriced))
+        n = sum(audit_unpriced.values())
+        print(f"  ⚠ Unpriced: {n} session(s) on {names} counted at $0.00 (unknown, not free).")
+        print(f"    Costs and waste figures below UNDERSTATE these. Add rates to {FLEET_DB_DIR / 'pricing.json'}.")
 
     if not all_findings:
         print("  No waste patterns detected. Your fleet looks clean!")
@@ -2070,10 +2318,29 @@ def cmd_dashboard(args: list[str]):
         GROUP BY project ORDER BY SUM(cost_usd) DESC LIMIT 10
     """).fetchall()
 
+    # #150: models with real tokens but $0 cost because they have no pricing row.
+    # Surface them so the dashboard's Total Cost reads as understated, not real.
+    # NULL-safe: `cost_usd = 0` alone would drop NULL-cost rows (SQL NULL equality),
+    # and a single NULL token column would NULL the whole row's `a+b+c+d` sum. Per-
+    # column SUM ignores NULLs, and OR-IS-NULL matches audit's `... or 0` coercion.
+    unpriced_rows = conn.execute("""
+        SELECT model, COUNT(*),
+               SUM(COALESCE(input_tokens, 0)) + SUM(COALESCE(output_tokens, 0))
+             + SUM(COALESCE(cache_read_tokens, 0)) + SUM(COALESCE(cache_write_tokens, 0))
+        FROM fleet_runs
+        WHERE (cost_usd = 0 OR cost_usd IS NULL) AND model IS NOT NULL AND model != ''
+        GROUP BY model
+    """).fetchall()
+    unpriced_models = {
+        r[0]: r[1] for r in unpriced_rows
+        if (r[2] or 0) > 0 and not model_is_priced(r[0])
+    }
+
     conn.close()
 
     # Generate dashboard HTML
-    dashboard_html = _generate_dashboard_html(daily_rows, waste_rows, system_stats, model_mix, top_projects)
+    dashboard_html = _generate_dashboard_html(
+        daily_rows, waste_rows, system_stats, model_mix, top_projects, unpriced_models)
 
     FLEET_DASHBOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
     # Atomic: write a sibling temp file and rename it onto the final path.
@@ -2104,9 +2371,11 @@ def cmd_dashboard(args: list[str]):
         _open_in_browser(FLEET_DASHBOARD_PATH)
 
 
-def _generate_dashboard_html(daily_rows, waste_rows, system_stats, model_mix, top_projects) -> str:
+def _generate_dashboard_html(daily_rows, waste_rows, system_stats, model_mix, top_projects,
+                             unpriced_models=None) -> str:
     """Generate standalone fleet dashboard HTML matching Token Optimizer design system."""
     import html as html_mod
+    unpriced_models = unpriced_models or {}
 
     # Prepare data
     daily_data = [{"date": r[0], "system": r[1], "runs": r[2], "input": r[3] or 0,
@@ -2204,6 +2473,22 @@ def _generate_dashboard_html(daily_rows, waste_rows, system_stats, model_mix, to
           <span class="proj-stat">{fmt_tokens(p["tokens"])} tok</span>
           <span class="proj-cost">{fmt_cost(p["cost"])}</span>
         </div>'''
+
+    # #150: banner + Total-Cost asterisk when unpriced models are present, so the
+    # dollar figure isn't read as complete/real.
+    unpriced_banner = ""
+    cost_asterisk = ""
+    if unpriced_models:
+        n_sessions = sum(unpriced_models.values())
+        names = ", ".join(esc(m) for m in sorted(unpriced_models))
+        cost_asterisk = "*"
+        unpriced_banner = f'''
+      <div class="unpriced-banner">
+        <strong>&#9888; Cost is understated.</strong>
+        {n_sessions} session(s) ran on {len(unpriced_models)} model(s) with no pricing data
+        ({names}), counted here as <strong>$0.00 &mdash; unknown, not free</strong>.
+        Add rates to <code>{esc(str(FLEET_DB_DIR / "pricing.json"))}</code> to price them.
+      </div>'''
 
     # Main dashboard link
     main_dash = FLEET_DB_DIR / "dashboard.html"
@@ -2667,6 +2952,22 @@ h1, h2, h3, h4 {{ font-weight: 400; }}
   .config-col {{ display: none; }}
   .stat-row {{ grid-template-columns: repeat(2, 1fr); }}
 }}
+.unpriced-banner {{
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid var(--c-warning);
+  border-radius: 8px;
+  padding: var(--s-3);
+  margin-bottom: var(--s-4);
+  font-size: 15px;
+  color: var(--c-text-main);
+  line-height: 1.6;
+}}
+.unpriced-banner code {{
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--c-warning);
+  word-break: break-all;
+}}
 </style>
 </head>
 <body>
@@ -2697,15 +2998,15 @@ h1, h2, h3, h4 {{ font-weight: 400; }}
         <h1>Overview</h1>
         <p>Cross-platform agent token usage and waste detection.</p>
       </div>
-
+{unpriced_banner}
       <div class="stat-row">
         <div class="stat-card">
           <div class="stat-card-value">{total_runs:,}</div>
           <div class="stat-card-label">Total Runs</div>
         </div>
         <div class="stat-card">
-          <div class="stat-card-value">{fmt_cost(total_cost)}</div>
-          <div class="stat-card-label">Total Cost</div>
+          <div class="stat-card-value">{fmt_cost(total_cost)}{cost_asterisk}</div>
+          <div class="stat-card-label">Total Cost{" (understated)" if unpriced_models else ""}</div>
         </div>
         <div class="stat-card">
           <div class="stat-card-value">{len(systems_data)}</div>
